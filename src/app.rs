@@ -147,7 +147,19 @@ impl App {
                 cell.flags.contains(Flags::ITALIC) || cell.flags.contains(Flags::BOLD_ITALIC);
 
             let ch = if hidden || cell.c == '\0' { ' ' } else { cell.c };
-            renderer.push_cell(col as usize, row as usize, ch, fg, bg, bold, italic);
+            // Combining marks / ZWJ-joined codepoints (compound emoji, accents)
+            // attached to this cell; shaped together so they form one glyph.
+            let combiners: &[char] = if hidden { &[] } else { cell.zerowidth().unwrap_or(&[]) };
+            renderer.push_cell(
+                col as usize,
+                row as usize,
+                ch,
+                combiners,
+                fg,
+                bg,
+                bold,
+                italic,
+            );
         }
 
         drop(term); // release before GPU submit / present

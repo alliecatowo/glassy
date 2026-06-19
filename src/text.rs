@@ -55,6 +55,8 @@ pub struct Text {
     /// `Family::Name` borrows; `attrs()` rebuilds the borrowing `Family` per call.
     family: FamilyOwned,
     cache: HashMap<(char, bool, bool), Vec<RasterizedGlyph>>,
+    /// Cache for multi-codepoint grapheme clusters (combining/ZWJ sequences).
+    cluster_cache: HashMap<(String, bool, bool), Vec<RasterizedGlyph>>,
 }
 
 /// Owned counterpart to `cosmic_text::Family`, holding the name string so we can
@@ -155,6 +157,7 @@ impl Text {
             buffer: Buffer::new_empty(metrics),
             family,
             cache: HashMap::new(),
+            cluster_cache: HashMap::new(),
         };
 
         let cell = text.measure_cell(line_height);
@@ -213,21 +216,35 @@ impl Text {
             // Compute into a local Vec first: this borrows `font_system`,
             // `swash_cache`, `buffer`, and `family` — all fields disjoint from
             // `cache` — so the later `cache.insert` does not conflict.
-            let glyphs = self.build_glyphs(ch, bold, italic);
+            let mut tmp = [0u8; 4];
+            let glyphs = self.build_glyphs(ch.encode_utf8(&mut tmp), bold, italic);
             self.cache.insert(key, glyphs);
         }
         &self.cache[&key]
     }
 
+    /// Rasterize a full grapheme cluster (a base character plus its combining
+    /// marks / ZWJ-joined codepoints) as a single shaped unit, so compound
+    /// emoji (flags, ZWJ sequences, skin-tone modifiers) and combining
+    /// sequences resolve to their single combined glyph. Cached by the cluster
+    /// string + style. Used only for cells that actually carry combiners; the
+    /// common single-character path stays on `rasterize`.
+    pub fn rasterize_cluster(&mut self, cluster: &str, bold: bool, italic: bool) -> &[RasterizedGlyph] {
+        let key = (cluster.to_string(), bold, italic);
+        if !self.cluster_cache.contains_key(&key) {
+            let glyphs = self.build_glyphs(cluster, bold, italic);
+            self.cluster_cache.insert(key.clone(), glyphs);
+        }
+        &self.cluster_cache[&key]
+    }
+
     /// Shape and rasterize a single character into owned RGBA bitmaps.
-    fn build_glyphs(&mut self, ch: char, bold: bool, italic: bool) -> Vec<RasterizedGlyph> {
+    fn build_glyphs(&mut self, text: &str, bold: bool, italic: bool) -> Vec<RasterizedGlyph> {
         // `family` borrows `self`, so capture the borrowed `Family` before the
         // `&mut self.font_system` borrows below; they touch disjoint fields.
         let attrs = build_attrs(self.family.as_family(), bold, italic);
-        let mut tmp = [0u8; 4];
-        let s = ch.encode_utf8(&mut tmp);
         self.buffer
-            .set_text(s, &attrs, Shaping::Advanced, None);
+            .set_text(text, &attrs, Shaping::Advanced, None);
         self.buffer
             .shape_until_scroll(&mut self.font_system, false);
 

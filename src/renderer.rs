@@ -90,6 +90,34 @@ struct AtlasGlyph {
     is_color: bool,
 }
 
+/// A rasterized glyph bitmap copied out of `Text` into owned storage, so the
+/// `self.text` borrow ends before we touch the atlas/packer/queue.
+struct Raster {
+    width: u32,
+    height: u32,
+    left: i32,
+    top: i32,
+    is_color: bool,
+    data: Vec<u8>,
+}
+
+/// Copy a slice of freshly-rasterized glyphs out of `Text` (dropping empties)
+/// into owned `Raster`s, releasing the `Text` borrow for atlas packing.
+fn collect_rasters(glyphs: &[crate::text::RasterizedGlyph]) -> Vec<Raster> {
+    glyphs
+        .iter()
+        .filter(|r| r.width != 0 && r.height != 0)
+        .map(|r| Raster {
+            width: r.width,
+            height: r.height,
+            left: r.left,
+            top: r.top,
+            is_color: r.is_color,
+            data: r.data.clone(),
+        })
+        .collect()
+}
+
 /// Simple shelf packer state for the atlas texture.
 struct Packer {
     cursor_x: u32,
@@ -156,6 +184,8 @@ pub struct Renderer {
 
     packer: Packer,
     glyph_cache: HashMap<(char, bool, bool), Vec<AtlasGlyph>>,
+    /// Atlas entries for multi-codepoint grapheme clusters (combining/ZWJ).
+    cluster_cache: HashMap<(String, bool, bool), Vec<AtlasGlyph>>,
 
     text: Text,
     metrics: CellMetrics,
@@ -468,6 +498,7 @@ impl Renderer {
             atlas_view,
             packer: Packer::new(),
             glyph_cache: HashMap::new(),
+            cluster_cache: HashMap::new(),
             text,
             metrics,
             pad: (metrics.height * 0.35).round().max(4.0),
@@ -523,6 +554,7 @@ impl Renderer {
         col: usize,
         row: usize,
         ch: char,
+        combiners: &[char],
         fg: [f32; 4],
         bg: [f32; 4],
         bold: bool,
@@ -542,6 +574,32 @@ impl Renderer {
             size: [cell_w, cell_h],
             color: bg,
         });
+
+        let baseline = origin_y + self.metrics.ascent;
+
+        // Grapheme cluster path: a base char with combining marks / ZWJ-joined
+        // codepoints (e.g. compound emoji like the trans flag). Shape the whole
+        // cluster as one unit so it resolves to its single combined glyph.
+        if !combiners.is_empty() {
+            let mut cluster = String::with_capacity(ch.len_utf8() + combiners.len() * 4);
+            cluster.push(ch);
+            cluster.extend(combiners.iter());
+            self.ensure_cluster_glyphs(&cluster, bold, italic);
+            if let Some(glyphs) = self.cluster_cache.get(&(cluster, bold, italic)) {
+                for g in glyphs {
+                    self.fg_instances.push(FgInstance {
+                        pos: [origin_x + g.left as f32, baseline - g.top as f32],
+                        size: [g.px_w, g.px_h],
+                        uv_min: g.uv_min,
+                        uv_max: g.uv_max,
+                        color: fg,
+                        flags: if g.is_color { 1 } else { 0 },
+                        _pad: [0; 3],
+                    });
+                }
+            }
+            return;
+        }
 
         if ch == ' ' || ch == '\0' {
             return;
@@ -568,7 +626,6 @@ impl Renderer {
             }
         }
 
-        let baseline = origin_y + self.metrics.ascent;
         self.ensure_glyphs(ch, bold, italic);
         if let Some(glyphs) = self.glyph_cache.get(&(ch, bold, italic)) {
             for g in glyphs {
@@ -1395,51 +1452,43 @@ impl Renderer {
         if self.glyph_cache.contains_key(&key) {
             return;
         }
+        let rasters = collect_rasters(self.text.rasterize(ch, bold, italic));
+        let packed = self.pack_rasters(&rasters);
+        self.glyph_cache.insert(key, packed);
+    }
 
-        // Copy the rasterized bitmaps into owned locals so the `self.text` borrow
-        // ends before we touch `self.packer` / `self.queue` / `self.atlas_texture`.
-        struct Raster {
-            width: u32,
-            height: u32,
-            left: i32,
-            top: i32,
-            is_color: bool,
-            data: Vec<u8>,
+    /// Like `ensure_glyphs`, but for a full grapheme cluster (combining/ZWJ
+    /// sequence) shaped as a single unit.
+    fn ensure_cluster_glyphs(&mut self, cluster: &str, bold: bool, italic: bool) {
+        let key = (cluster.to_string(), bold, italic);
+        if self.cluster_cache.contains_key(&key) {
+            return;
         }
-        let rasters: Vec<Raster> = self
-            .text
-            .rasterize(ch, bold, italic)
-            .iter()
-            .filter(|r| r.width != 0 && r.height != 0)
-            .map(|r| Raster {
-                width: r.width,
-                height: r.height,
-                left: r.left,
-                top: r.top,
-                is_color: r.is_color,
-                data: r.data.clone(),
-            })
-            .collect();
+        let rasters = collect_rasters(self.text.rasterize_cluster(cluster, bold, italic));
+        let packed = self.pack_rasters(&rasters);
+        self.cluster_cache.insert(key, packed);
+    }
 
-        let mut packed: Vec<AtlasGlyph> = Vec::new();
-        // First attempt; if the atlas fills up mid-pack we clear it and retry once.
+    /// Pack owned glyph bitmaps into the atlas, returning their placed entries.
+    /// If the atlas fills mid-pack, both glyph caches are cleared and we repack
+    /// once (entries are re-created lazily on demand thereafter).
+    fn pack_rasters(&mut self, rasters: &[Raster]) -> Vec<AtlasGlyph> {
+        let mut packed: Vec<AtlasGlyph> = Vec::with_capacity(rasters.len());
         let mut retried = false;
         let inv = 1.0 / ATLAS_SIZE as f32;
         'attempt: loop {
             packed.clear();
-            for r in &rasters {
+            for r in rasters {
                 let (x, y) = match self.packer.alloc(r.width, r.height) {
                     Some(o) => o,
                     None => {
                         if retried {
-                            log::warn!(
-                                "glyph atlas full; '{ch}' (bold={bold} italic={italic}) skipped"
-                            );
+                            log::warn!("glyph atlas full; a glyph was skipped");
                             break 'attempt;
                         }
-                        // Recycle the atlas: drop every cached entry and repack.
                         log::warn!("glyph atlas full; clearing cache and repacking");
                         self.glyph_cache.clear();
+                        self.cluster_cache.clear();
                         self.packer.reset();
                         retried = true;
                         continue 'attempt;
@@ -1476,7 +1525,6 @@ impl Renderer {
             }
             break;
         }
-
-        self.glyph_cache.insert(key, packed);
+        packed
     }
 }
