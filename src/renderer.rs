@@ -116,6 +116,21 @@ pub struct Decorations {
     pub color: [f32; 4],
 }
 
+/// Cursor overlay shapes painted as solid rectangles by the renderer. The filled
+/// block cursor is handled in the app by inverting the cell beneath it (so the
+/// glyph stays legible), so it is intentionally absent here; this enum only covers
+/// the shapes that draw on top of the cell as fg-colored bars or an outline.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum CursorOverlay {
+    /// Thin vertical bar at the cell's left edge.
+    Beam,
+    /// Short horizontal bar at the cell's bottom edge.
+    Underline,
+    /// Hollow outline box (four thin rails) around the cell. Used for the
+    /// `HollowBlock` shape and for any shape while the window is unfocused.
+    Hollow,
+}
+
 /// A rasterized glyph bitmap copied out of `Text` into owned storage, so the
 /// `self.text` borrow ends before we touch the atlas/packer/queue.
 struct Raster {
@@ -691,6 +706,32 @@ impl Renderer {
             size: [w, h],
             color,
         });
+    }
+
+    /// Paint a cursor overlay for the cell at `(col, row)` in the cursor color.
+    /// Pushed via `push_solid` (bg pass) after every cell, so the bars/outline
+    /// land on top of the cell background; glyphs still draw over them in the fg
+    /// pass, keeping the character under the cursor legible.
+    pub fn push_cursor(&mut self, col: usize, row: usize, overlay: CursorOverlay, color: [f32; 4]) {
+        let cell_w = self.metrics.width;
+        let cell_h = self.metrics.height;
+        let ox = (col as f32 * cell_w + self.pad).round();
+        let oy = (row as f32 * cell_h + self.pad).round();
+        let w = cell_w.round();
+        let h = cell_h.round();
+        // Bar thickness for beam/underline and the outline rails.
+        let th = (cell_h / 12.0).round().max(1.0);
+
+        match overlay {
+            CursorOverlay::Beam => self.push_solid(ox, oy, th, h, color),
+            CursorOverlay::Underline => self.push_solid(ox, oy + h - th, w, th, color),
+            CursorOverlay::Hollow => {
+                self.push_solid(ox, oy, w, th, color); // top
+                self.push_solid(ox, oy + h - th, w, th, color); // bottom
+                self.push_solid(ox, oy, th, h, color); // left
+                self.push_solid(ox + w - th, oy, th, h, color); // right
+            }
+        }
     }
 
     /// Paint a cell's underline + strikethrough strokes in the decoration color,

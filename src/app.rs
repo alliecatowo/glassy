@@ -15,7 +15,7 @@ use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::TermMode;
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::tty::Shell;
-use alacritty_terminal::vte::ansi::CursorShape;
+use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalSize};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
@@ -26,11 +26,15 @@ use winit::window::{Window, WindowId};
 use crate::color;
 use crate::input::{MouseReport, encode_key, encode_mouse};
 use crate::pty::{Pty, UserEvent};
-use crate::renderer::{Decorations, Renderer, UnderlineStyle};
+use crate::renderer::{CursorOverlay, Decorations, Renderer, UnderlineStyle};
 
 /// Lines of scrollback to move per wheel notch when reporting to a TUI or
 /// scrolling glassy's own scrollback buffer.
 const WHEEL_LINES: i32 = 3;
+
+/// Cursor blink half-period: the on/off phase length. ~530ms matches the de-facto
+/// terminal cadence (and the GTK/VTE default).
+const BLINK_INTERVAL: Duration = Duration::from_millis(530);
 
 /// Static configuration resolved at startup.
 pub struct Config {
@@ -77,6 +81,13 @@ pub struct App {
     next_frame: Instant,
     refresh: Duration,
 
+    // Cursor blink state. `blink_on` is the current visible phase; `blink_at` is
+    // when the next phase flip is due. Blinking only runs while focused and the
+    // child requested a blinking cursor; otherwise we stay on `ControlFlow::Wait`
+    // (0% idle) and keep the cursor solid.
+    blink_on: bool,
+    blink_at: Instant,
+
     // Headless capture: when `GLASSY_CAPTURE` is set, render after a short delay
     // (so the shell has produced output), write a PPM, and exit.
     capture: Option<std::path::PathBuf>,
@@ -104,6 +115,8 @@ impl App {
             dirty: false,
             next_frame: Instant::now(),
             refresh: Duration::from_micros(16_666), // 60 Hz default until queried
+            blink_on: true,
+            blink_at: Instant::now() + BLINK_INTERVAL,
             capture: std::env::var_os("GLASSY_CAPTURE").map(std::path::PathBuf::from),
             capture_deadline: None,
         }
@@ -118,6 +131,27 @@ impl App {
         let cols = ((usable_w / cell_w).floor() as usize).max(1);
         let rows = ((usable_h / cell_h).floor() as usize).max(1);
         (cols, rows)
+    }
+
+    /// Whether the cursor should currently blink: the child requested a blinking
+    /// style and the cursor is not hidden. Returns false before the PTY is up.
+    fn cursor_blinking(&self) -> bool {
+        match self.pty.as_ref() {
+            Some(pty) => {
+                let term = pty.term.lock();
+                term.cursor_style().blinking
+                    && term.renderable_content().cursor.shape != CursorShape::Hidden
+            }
+            None => false,
+        }
+    }
+
+    /// Reset the blink to its visible phase and restart the timer. Called on
+    /// keypress so the cursor is solid while actively typing, matching every
+    /// mainstream terminal.
+    fn reset_blink(&mut self) {
+        self.blink_on = true;
+        self.blink_at = Instant::now() + BLINK_INTERVAL;
     }
 
     /// Mark the screen dirty and schedule a redraw no sooner than `next_frame`.
@@ -274,15 +308,29 @@ impl App {
 
         // Hold the terminal lock only long enough to copy out renderable state.
         let term = pty.term.lock();
+        // The child's requested cursor style (shape is also mirrored in
+        // `content.cursor.shape`); `blinking` decides whether the blink timer runs.
+        // Read before `renderable_content()` so both immutable borrows of `term`
+        // can coexist with the content's `display_iter`.
+        let cursor_blinking = term.cursor_style().blinking;
         let content = term.renderable_content();
         let colors = content.colors;
         let display_offset = content.display_offset as i32;
         let cursor = content.cursor;
         let selection = content.selection;
+        let cursor_color = color::resolve(Color::Named(NamedColor::Cursor), colors);
 
-        let cursor_visible = self.focused && cursor.shape != CursorShape::Hidden;
+        // The cursor is suppressed only when Hidden, or mid-blink off-phase. It is
+        // still drawn (as a hollow outline) when the window is unfocused. The block
+        // shape inverts the cell beneath it; all other shapes are overlay rects.
+        let blink_off = self.focused && cursor_blinking && !self.blink_on;
+        let cursor_shown = cursor.shape != CursorShape::Hidden && !blink_off;
         let cursor_row = cursor.point.line.0 + display_offset;
         let cursor_col = cursor.point.column.0 as i32;
+        // A focused, on-phase block cursor inverts its cell in the loop below;
+        // every other drawn case is an overlay pushed after the cells.
+        let invert_block =
+            cursor_shown && self.focused && cursor.shape == CursorShape::Block;
 
         renderer.begin_frame(color::DEFAULT_BG);
 
@@ -315,7 +363,7 @@ impl App {
                 bg = color::SELECTION_BG;
             }
             // Block cursor: invert the cell beneath it.
-            if cursor_visible && row == cursor_row && col == cursor_col {
+            if invert_block && row == cursor_row && col == cursor_col {
                 std::mem::swap(&mut fg, &mut bg);
             }
             let hidden = cell.flags.contains(Flags::HIDDEN);
@@ -367,6 +415,41 @@ impl App {
                 italic,
                 decorations,
             );
+        }
+
+        // Cursor overlay. Drawn after the cells so the bars/outline land on top of
+        // the cell background (glyphs still paint over them in the fg pass). The
+        // overlay is in addition to — or instead of — the block invert above:
+        //   - focused Block: handled by the invert; no overlay.
+        //   - focused Beam/Underline: an fg-colored bar.
+        //   - focused HollowBlock: an outline box.
+        //   - unfocused (any non-hidden shape): an outline box, so an idle window
+        //     still shows where the cursor is.
+        if cursor_shown
+            && cursor_row >= 0
+            && cursor_row < self.rows as i32
+            && cursor_col >= 0
+            && cursor_col < self.cols as i32
+        {
+            let overlay = if !self.focused {
+                Some(CursorOverlay::Hollow)
+            } else {
+                match cursor.shape {
+                    CursorShape::Beam => Some(CursorOverlay::Beam),
+                    CursorShape::Underline => Some(CursorOverlay::Underline),
+                    CursorShape::HollowBlock => Some(CursorOverlay::Hollow),
+                    // Block is drawn by the cell invert; Hidden is unreachable here.
+                    CursorShape::Block | CursorShape::Hidden => None,
+                }
+            };
+            if let Some(overlay) = overlay {
+                renderer.push_cursor(
+                    cursor_col as usize,
+                    cursor_row as usize,
+                    overlay,
+                    cursor_color,
+                );
+            }
         }
 
         drop(term); // release before GPU submit / present
@@ -521,6 +604,9 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::Focused(focused) => {
                 self.focused = focused;
+                // Restart the blink solid-on so a freshly-focused window shows the
+                // cursor immediately; the cadence resumes from about_to_wait.
+                self.reset_blink();
                 self.mark_dirty(event_loop);
             }
             WindowEvent::ModifiersChanged(mods) => {
@@ -581,6 +667,9 @@ impl ApplicationHandler<UserEvent> for App {
                 }
 
                 if let Some(bytes) = encode_key(&event, self.mods) {
+                    // Typing resets the blink to solid-on so the cursor doesn't
+                    // wink out mid-keystroke, matching every mainstream terminal.
+                    self.reset_blink();
                     // Typing dismisses any active selection, matching the de-facto
                     // terminal convention.
                     self.clear_selection();
@@ -751,18 +840,47 @@ impl ApplicationHandler<UserEvent> for App {
             return;
         }
 
+        let now = Instant::now();
+
+        // Cursor blink: only runs while focused and the child asked for a blinking
+        // cursor. When that holds, advance the phase at each `blink_at` deadline and
+        // mark dirty so the cursor redraws; otherwise the cursor stays solid and we
+        // never schedule a wakeup for it (preserving the 0%-idle `Wait` path).
+        let blink_active = self.focused && self.cursor_blinking();
+        if blink_active {
+            if now >= self.blink_at {
+                self.blink_on = !self.blink_on;
+                self.blink_at = now + BLINK_INTERVAL;
+                self.dirty = true;
+            }
+        } else {
+            // Settle to the solid (visible) phase so re-focusing shows the cursor.
+            self.blink_on = true;
+        }
+
         if !self.dirty {
-            event_loop.set_control_flow(ControlFlow::Wait);
+            // Idle: stay parked on `Wait` (0% CPU) unless a blink flip is pending,
+            // in which case wake at the next phase boundary.
+            if blink_active {
+                event_loop.set_control_flow(ControlFlow::WaitUntil(self.blink_at));
+            } else {
+                event_loop.set_control_flow(ControlFlow::Wait);
+            }
             return;
         }
-        let now = Instant::now();
+
         if now >= self.next_frame {
             if let Some(w) = &self.window {
                 w.request_redraw();
             }
             self.next_frame = now + self.refresh;
-            // RedrawRequested will clear `dirty`; wait until then.
-            event_loop.set_control_flow(ControlFlow::Wait);
+            // RedrawRequested will clear `dirty`. While blinking, keep a wakeup
+            // scheduled for the next phase flip; otherwise wait for the next event.
+            if blink_active {
+                event_loop.set_control_flow(ControlFlow::WaitUntil(self.blink_at));
+            } else {
+                event_loop.set_control_flow(ControlFlow::Wait);
+            }
         } else {
             event_loop.set_control_flow(ControlFlow::WaitUntil(self.next_frame));
         }
