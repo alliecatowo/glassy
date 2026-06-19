@@ -9,20 +9,26 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use alacritty_terminal::grid::Scroll;
+use alacritty_terminal::term::TermMode;
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::tty::Shell;
 use alacritty_terminal::vte::ansi::CursorShape;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalSize};
-use winit::event::{MouseScrollDelta, WindowEvent};
+use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
-use winit::keyboard::ModifiersState;
+use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Window, WindowId};
 
 use crate::color;
-use crate::input::encode_key;
+use crate::input::{MouseReport, encode_key, encode_mouse};
 use crate::pty::{Pty, UserEvent};
 use crate::renderer::Renderer;
+
+/// Lines of scrollback to move per wheel notch when reporting to a TUI or
+/// scrolling glassy's own scrollback buffer.
+const WHEEL_LINES: i32 = 3;
 
 /// Static configuration resolved at startup.
 pub struct Config {
@@ -47,6 +53,12 @@ pub struct App {
     mods: ModifiersState,
     focused: bool,
 
+    // Mouse reporting state.
+    /// Last known cursor cell (col, row), clamped to the grid.
+    mouse_cell: (usize, usize),
+    /// Button currently held (for drag reports); base id 0=L/1=M/2=R.
+    held_button: Option<u8>,
+
     // Render-on-demand throttle state.
     dirty: bool,
     next_frame: Instant,
@@ -70,6 +82,8 @@ impl App {
             rows: 0,
             mods: ModifiersState::empty(),
             focused: true,
+            mouse_cell: (0, 0),
+            held_button: None,
             dirty: false,
             next_frame: Instant::now(),
             refresh: Duration::from_micros(16_666), // 60 Hz default until queried
@@ -93,6 +107,43 @@ impl App {
     fn mark_dirty(&mut self, event_loop: &ActiveEventLoop) {
         self.dirty = true;
         event_loop.set_control_flow(ControlFlow::WaitUntil(self.next_frame));
+    }
+
+    /// Translate a physical cursor position into a 0-based grid cell, clamped to
+    /// the visible grid. The renderer insets the grid by `pad` px on all sides.
+    fn px_to_cell(&self, x: f64, y: f64) -> (usize, usize) {
+        let Some(renderer) = self.renderer.as_ref() else {
+            return (0, 0);
+        };
+        let m = renderer.cell_metrics();
+        let pad = renderer.pad() as f64;
+        let col = ((x - pad) / m.width as f64).floor();
+        let row = ((y - pad) / m.height as f64).floor();
+        let col = (col.max(0.0) as usize).min(self.cols.saturating_sub(1));
+        let row = (row.max(0.0) as usize).min(self.rows.saturating_sub(1));
+        (col, row)
+    }
+
+    /// Snapshot of the terminal's current mode flags (mouse reporting, alt
+    /// screen, etc.). Returns an empty set before the PTY is up.
+    fn term_mode(&self) -> TermMode {
+        match self.pty.as_ref() {
+            Some(pty) => *pty.term.lock().mode(),
+            None => TermMode::empty(),
+        }
+    }
+
+    /// Encode and send a mouse report to the child, choosing SGR vs legacy form
+    /// based on the terminal's current mode.
+    fn report_mouse(&self, button: u8, pressed: bool, motion: bool, mode: TermMode) {
+        let Some(pty) = self.pty.as_ref() else { return };
+        let (col, row) = self.mouse_cell;
+        let bytes = encode_mouse(
+            MouseReport { button, col, row, pressed, motion },
+            self.mods,
+            mode.contains(TermMode::SGR_MOUSE),
+        );
+        pty.write(bytes);
     }
 
     fn render(&mut self) {
@@ -321,11 +372,41 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::KeyboardInput { event, is_synthetic, .. } => {
                 // Synthetic events are injected on focus change for held keys.
-                if !is_synthetic {
-                    if let Some(bytes) = encode_key(&event, self.mods) {
-                        if let Some(pty) = &self.pty {
-                            pty.write(bytes);
+                if is_synthetic {
+                    return;
+                }
+
+                // Shift + PageUp/PageDown/Home/End drives glassy's own scrollback
+                // (the primary screen only) and is consumed before the child sees
+                // it. This mirrors the de-facto terminal convention.
+                if event.state.is_pressed()
+                    && self.mods.shift_key()
+                    && !self.term_mode().contains(TermMode::ALT_SCREEN)
+                {
+                    if let Key::Named(named) = &event.logical_key {
+                        let scroll = match named {
+                            NamedKey::PageUp => Some(Scroll::PageUp),
+                            NamedKey::PageDown => Some(Scroll::PageDown),
+                            NamedKey::Home => Some(Scroll::Top),
+                            NamedKey::End => Some(Scroll::Bottom),
+                            _ => None,
+                        };
+                        if let Some(scroll) = scroll {
+                            if let Some(pty) = &self.pty {
+                                pty.term.lock().scroll_display(scroll);
+                            }
+                            self.mark_dirty(event_loop);
+                            return;
                         }
+                    }
+                }
+
+                if let Some(bytes) = encode_key(&event, self.mods) {
+                    if let Some(pty) = &self.pty {
+                        // A typed key snaps the view back to the prompt, matching
+                        // every mainstream terminal.
+                        pty.term.lock().scroll_display(Scroll::Bottom);
+                        pty.write(bytes);
                     }
                 }
             }
@@ -334,22 +415,79 @@ impl ApplicationHandler<UserEvent> for App {
                     pty.write(text.into_bytes());
                 }
             }
+            WindowEvent::CursorMoved { position, .. } => {
+                let cell = self.px_to_cell(position.x, position.y);
+                if cell != self.mouse_cell {
+                    self.mouse_cell = cell;
+                    // Drag/motion reports: only while a button is held and the
+                    // terminal asked for motion (DRAG) or any-motion (MOTION).
+                    let mode = self.term_mode();
+                    if let Some(button) = self.held_button {
+                        let wants = (mode.contains(TermMode::MOUSE_DRAG)
+                            || mode.contains(TermMode::MOUSE_MOTION))
+                            && mode.intersects(TermMode::MOUSE_MODE);
+                        if wants {
+                            self.report_mouse(button, true, true, mode);
+                        }
+                    }
+                }
+            }
+            WindowEvent::MouseInput { state, button, .. } => {
+                let base = match button {
+                    MouseButton::Left => 0u8,
+                    MouseButton::Middle => 1,
+                    MouseButton::Right => 2,
+                    _ => return,
+                };
+                let pressed = state == ElementState::Pressed;
+                // Track the held button for drag reports regardless of mode.
+                self.held_button = if pressed { Some(base) } else { None };
+
+                let mode = self.term_mode();
+                if mode.intersects(TermMode::MOUSE_MODE) {
+                    self.report_mouse(base, pressed, false, mode);
+                }
+            }
             WindowEvent::MouseWheel { delta, .. } => {
-                // Translate vertical scroll into arrow-key reports as a simple
-                // default (works in pagers / Claude Code's scroll regions).
                 let lines = match delta {
-                    MouseScrollDelta::LineDelta(_, y) => y as i32,
+                    MouseScrollDelta::LineDelta(_, y) => {
+                        if y == 0.0 { 0 } else { (y.abs().ceil() as i32) * y.signum() as i32 }
+                    }
                     MouseScrollDelta::PixelDelta(p) => (p.y / 20.0) as i32,
                 };
-                if lines != 0 {
+                if lines == 0 {
+                    return;
+                }
+                let mode = self.term_mode();
+                let up = lines > 0;
+                let count = lines.unsigned_abs() as usize;
+
+                if mode.intersects(TermMode::MOUSE_MODE) {
+                    // Wheel as button 64 (up) / 65 (down), one report per line.
+                    let button = if up { 64 } else { 65 };
+                    for _ in 0..count {
+                        self.report_mouse(button, true, false, mode);
+                    }
+                } else if mode.contains(TermMode::ALT_SCREEN)
+                    && mode.contains(TermMode::ALTERNATE_SCROLL)
+                {
+                    // Alt-screen apps without mouse reporting (e.g. less) expect
+                    // the wheel to emit arrow keys.
                     if let Some(pty) = &self.pty {
-                        let seq: &[u8] = if lines > 0 { b"\x1b[A" } else { b"\x1b[B" };
-                        let mut out = Vec::new();
-                        for _ in 0..lines.abs().min(5) {
+                        let seq: &[u8] = if up { b"\x1b[A" } else { b"\x1b[B" };
+                        let mut out = Vec::with_capacity(seq.len() * count);
+                        for _ in 0..count {
                             out.extend_from_slice(seq);
                         }
                         pty.write(out);
                     }
+                } else {
+                    // Default: scroll glassy's own scrollback buffer.
+                    let delta = if up { WHEEL_LINES } else { -WHEEL_LINES } * count as i32;
+                    if let Some(pty) = &self.pty {
+                        pty.term.lock().scroll_display(Scroll::Delta(delta));
+                    }
+                    self.mark_dirty(event_loop);
                 }
             }
             WindowEvent::Resized(size) => self.handle_resize(event_loop, size),
