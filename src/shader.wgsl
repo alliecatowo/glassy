@@ -80,17 +80,22 @@ fn undercurl_coverage(uv: vec2<f32>, quad_px: vec2<f32>) -> f32 {
     return 1.0 - smoothstep(half - 0.75, half + 0.75, d);
 }
 
+// The foreground pass uses premultiplied-alpha blending so glyphs composite
+// correctly over a translucent backdrop, so every branch below returns a
+// premultiplied color (rgb already scaled by the output alpha).
 @fragment fn fs_fg(in: FgOut) -> @location(0) vec4<f32> {
     if (in.flags == 2u) {
         // Undercurl: procedural sine-wave coverage tinted with the decoration color.
         let cov = undercurl_coverage(in.uv, in.quad_px);
-        return vec4<f32>(in.color.rgb, in.color.a * cov);
+        let a = in.color.a * cov;
+        return vec4<f32>(in.color.rgb * a, a);
     }
     let texel = textureSample(atlas_tex, atlas_samp, in.uv);
     if (in.flags == 1u) {
-        // Color glyph: the atlas already holds the glyph's own premultiplied-ish color.
+        // Color glyph: the atlas already holds the glyph's own premultiplied color.
         return texel;
     }
     // Coverage mask: tint with the cell foreground, alpha = sampled coverage.
-    return vec4<f32>(in.color.rgb, in.color.a * texel.a);
+    let a = in.color.a * texel.a;
+    return vec4<f32>(in.color.rgb * a, a);
 }

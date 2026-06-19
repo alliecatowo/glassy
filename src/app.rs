@@ -491,6 +491,11 @@ impl ApplicationHandler<UserEvent> for App {
         let attrs = Window::default_attributes()
             .with_title("glassy")
             .with_inner_size(LogicalSize::new(960.0, 600.0))
+            // Request a translucent window (the "glassy" namesake). The renderer
+            // drives the backdrop alpha from its OPACITY const when the compositor
+            // supports a transparent surface; on platforms that don't, this is a
+            // harmless no-op and the window stays opaque.
+            .with_transparent(true)
             .with_visible(false); // shown after the first frame to avoid a flash
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),

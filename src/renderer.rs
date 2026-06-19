@@ -25,6 +25,13 @@ const GLYPH_GAP: u32 = 1;
 /// is never empty and we rarely reallocate.
 const INITIAL_INSTANCES: usize = 4096;
 
+/// Window background opacity (the "glassy" namesake): the alpha applied to the
+/// terminal's cell backgrounds and clear color so the desktop shows through.
+/// 1.0 is fully opaque. Foreground content (glyphs, box drawing, cursor, rules)
+/// stays fully opaque so text reads crisply over the translucent backdrop.
+/// Exposed as a const for now; config wiring comes next.
+const OPACITY: f32 = 0.92;
+
 /// Transient surface-acquisition outcomes for a frame.
 ///
 /// wgpu 29 replaced the old `wgpu::SurfaceError` with the [`wgpu::CurrentSurfaceTexture`]
@@ -240,6 +247,11 @@ pub struct Renderer {
     fg_capacity: usize,
 
     clear_color: [f32; 4],
+
+    /// Whether the surface alpha mode actually composites alpha (a transparent
+    /// window). When false we keep backgrounds fully opaque so a compositor that
+    /// can't do translucency doesn't darken the window via premultiplied RGB.
+    transparent: bool,
 }
 
 impl Renderer {
@@ -288,6 +300,22 @@ impl Renderer {
             .into_iter()
             .find(|m| caps.present_modes.contains(m))
             .unwrap_or(wgpu::PresentMode::Fifo);
+
+        // Window translucency: prefer PreMultiplied so the surface's alpha is
+        // composited against the desktop. We emit premultiplied colors (RGB
+        // already scaled by alpha), which is exactly what PreMultiplied expects
+        // and also matches the foreground pass's premultiplied blending. If the
+        // compositor doesn't offer it (can't do translucency), fall back to its
+        // first mode and stay fully opaque.
+        let transparent = caps
+            .alpha_modes
+            .contains(&wgpu::CompositeAlphaMode::PreMultiplied);
+        let alpha_mode = if transparent {
+            wgpu::CompositeAlphaMode::PreMultiplied
+        } else {
+            caps.alpha_modes[0]
+        };
+
         // Surface stays unconfigured until `resize()`; start at 1x1 as a placeholder.
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
@@ -296,7 +324,7 @@ impl Renderer {
             height: 1,
             present_mode,
             desired_maximum_frame_latency: 1,
-            alpha_mode: caps.alpha_modes[0],
+            alpha_mode,
             view_formats: vec![],
         };
 
@@ -492,7 +520,12 @@ impl Renderer {
                 entry_point: Some("fs_fg"),
                 targets: &[Some(wgpu::ColorTargetState {
                     format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    // Premultiplied blending so glyphs composite correctly over a
+                    // translucent backdrop (and identically over an opaque one):
+                    // the shader emits premultiplied color, so dst is weighted by
+                    // (1 - src.a). With glyph alpha 1.0 the text stays fully opaque
+                    // and crisp regardless of the window opacity.
+                    blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
                 compilation_options: Default::default(),
@@ -550,6 +583,7 @@ impl Renderer {
             bg_capacity: INITIAL_INSTANCES,
             fg_capacity: INITIAL_INSTANCES,
             clear_color: [0.0, 0.0, 0.0, 1.0],
+            transparent,
         };
 
         // Pre-warm the atlas with printable ASCII so the first frame is rasterize-free.
@@ -587,7 +621,22 @@ impl Renderer {
     pub fn begin_frame(&mut self, default_bg: [f32; 4]) {
         self.bg_instances.clear();
         self.fg_instances.clear();
-        self.clear_color = default_bg;
+        // The clear color paints the (translucent) window backdrop, so it takes
+        // the window opacity just like the per-cell default-background quads.
+        self.clear_color = self.glass_bg(default_bg);
+    }
+
+    /// Apply the window opacity to a cell-background color and premultiply it.
+    /// Backgrounds become translucent (alpha = `OPACITY`) so the desktop shows
+    /// through; the RGB is premultiplied to match the PreMultiplied surface and
+    /// the foreground pass's premultiplied blending. A no-op (and fully opaque)
+    /// when the compositor can't do translucency.
+    fn glass_bg(&self, color: [f32; 4]) -> [f32; 4] {
+        if !self.transparent {
+            return color;
+        }
+        let a = color[3] * OPACITY;
+        [color[0] * a, color[1] * a, color[2] * a, a]
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -612,10 +661,12 @@ impl Renderer {
 
         // Always push the cell background; the clear color handles the common case
         // but per-cell quads keep the model simple and overdraw is cheap here.
+        // Backgrounds take the window opacity (premultiplied) so the desktop shows
+        // through uniformly; foreground solids pushed via `push_solid` stay opaque.
         self.bg_instances.push(BgInstance {
             pos: [origin_x, origin_y],
             size: [cell_w, cell_h],
-            color: bg,
+            color: self.glass_bg(bg),
         });
 
         // Underline / strikethrough strokes span the full cell width so they join
