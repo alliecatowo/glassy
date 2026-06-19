@@ -1,0 +1,1482 @@
+//! GPU-accelerated grid renderer: an instanced-quad pipeline pair with a glyph
+//! atlas, driven by `crate::app`.
+//!
+//! Each frame draws two passes over a single static unit-quad vertex buffer:
+//!   1. one solid-color background quad per visible cell, then
+//!   2. one textured quad per glyph (sampled from a shared atlas texture).
+//! All coordinates are physical pixels; the vertex shaders project to NDC using
+//! the surface size carried in the group(0) uniform.
+
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use anyhow::{Context, Result};
+use wgpu::util::DeviceExt;
+use winit::window::Window;
+
+use crate::text::{CellMetrics, Text};
+
+/// Atlas dimensions (square, RGBA8). Big enough for a full ASCII set plus a
+/// healthy amount of CJK/emoji before the shelf packer has to recycle.
+const ATLAS_SIZE: u32 = 1024;
+/// 1px gap between packed glyphs to avoid bilinear bleed across neighbours.
+const GLYPH_GAP: u32 = 1;
+/// Initial instance-buffer capacity (in instances) so the first `cast_slice`
+/// is never empty and we rarely reallocate.
+const INITIAL_INSTANCES: usize = 4096;
+
+/// Transient surface-acquisition outcomes for a frame.
+///
+/// wgpu 29 replaced the old `wgpu::SurfaceError` with the [`wgpu::CurrentSurfaceTexture`]
+/// enum and no longer exposes a `SurfaceError` type. We surface the non-success
+/// states through this small mirror so callers can decide whether to retry. The
+/// `Lost`/`Outdated` cases are already self-healed (the surface is reconfigured)
+/// before the error is returned.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SurfaceError {
+    /// Acquisition timed out; skip this frame and try again later.
+    Timeout,
+    /// The window is occluded (minimized / fully covered); skip the frame.
+    Occluded,
+    /// Surface was lost or its configuration went stale. Already reconfigured here.
+    Outdated,
+    /// A validation error was raised during acquisition; attend to it and retry.
+    Validation,
+}
+
+/// Result of [`Renderer::render`].
+pub type RenderResult = std::result::Result<(), SurfaceError>;
+
+/// group(0) uniform: surface size in physical px. `.zw` are unused padding so
+/// the struct is a clean 16 bytes.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct Uniform {
+    screen: [f32; 4],
+}
+
+/// Per-cell background instance (slot 1 of the bg pipeline).
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct BgInstance {
+    pos: [f32; 2],
+    size: [f32; 2],
+    color: [f32; 4],
+}
+
+/// Per-glyph foreground instance (slot 1 of the fg pipeline).
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct FgInstance {
+    pos: [f32; 2],
+    size: [f32; 2],
+    uv_min: [f32; 2],
+    uv_max: [f32; 2],
+    color: [f32; 4],
+    flags: u32,
+    _pad: [u32; 3],
+}
+
+/// A glyph that has been packed into the atlas: its uv rect plus the placement
+/// data needed to position the quad relative to the cell pen origin.
+#[derive(Clone, Copy)]
+struct AtlasGlyph {
+    uv_min: [f32; 2],
+    uv_max: [f32; 2],
+    px_w: f32,
+    px_h: f32,
+    left: i32,
+    top: i32,
+    is_color: bool,
+}
+
+/// Simple shelf packer state for the atlas texture.
+struct Packer {
+    cursor_x: u32,
+    cursor_y: u32,
+    shelf_height: u32,
+}
+
+impl Packer {
+    fn new() -> Self {
+        Self { cursor_x: 0, cursor_y: 0, shelf_height: 0 }
+    }
+
+    fn reset(&mut self) {
+        self.cursor_x = 0;
+        self.cursor_y = 0;
+        self.shelf_height = 0;
+    }
+
+    /// Reserve a `w`x`h` region. Returns its top-left origin, or `None` if the
+    /// atlas is full (caller should clear the cache and retry).
+    fn alloc(&mut self, w: u32, h: u32) -> Option<(u32, u32)> {
+        if w > ATLAS_SIZE || h > ATLAS_SIZE {
+            return None;
+        }
+        // Wrap to a new shelf if the glyph doesn't fit the current row.
+        if self.cursor_x + w > ATLAS_SIZE {
+            self.cursor_y += self.shelf_height + GLYPH_GAP;
+            self.cursor_x = 0;
+            self.shelf_height = 0;
+        }
+        if self.cursor_y + h > ATLAS_SIZE {
+            return None;
+        }
+        let origin = (self.cursor_x, self.cursor_y);
+        self.cursor_x += w + GLYPH_GAP;
+        self.shelf_height = self.shelf_height.max(h);
+        Some(origin)
+    }
+}
+
+pub struct Renderer {
+    // Keep the window alive for as long as the surface borrows it ('static surface).
+    _window: Arc<Window>,
+    surface: wgpu::Surface<'static>,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    config: wgpu::SurfaceConfiguration,
+
+    bg_pipeline: wgpu::RenderPipeline,
+    fg_pipeline: wgpu::RenderPipeline,
+
+    unit_quad: wgpu::Buffer,
+
+    uniform_buffer: wgpu::Buffer,
+    uniform_bind_group: wgpu::BindGroup,
+
+    atlas_texture: wgpu::Texture,
+    atlas_bind_group: wgpu::BindGroup,
+    // Kept alive for the lifetime of the renderer (their resources back the atlas
+    // bind group); listed as owned state per the contract.
+    atlas_bind_group_layout: wgpu::BindGroupLayout,
+    atlas_sampler: wgpu::Sampler,
+    atlas_view: wgpu::TextureView,
+
+    packer: Packer,
+    glyph_cache: HashMap<(char, bool, bool), Vec<AtlasGlyph>>,
+
+    text: Text,
+    metrics: CellMetrics,
+    pad: f32,
+
+    bg_instances: Vec<BgInstance>,
+    fg_instances: Vec<FgInstance>,
+    bg_buffer: wgpu::Buffer,
+    fg_buffer: wgpu::Buffer,
+    bg_capacity: usize,
+    fg_capacity: usize,
+
+    clear_color: [f32; 4],
+}
+
+impl Renderer {
+    pub fn new(window: Arc<Window>, font_px: f32) -> Result<Renderer> {
+        let (text, metrics) =
+            Text::load(font_px).context("loading font and cell metrics")?;
+
+        // --- wgpu init (synchronous via pollster). ---
+        // `InstanceDescriptor` has no `Default` in wgpu 29 (its `display` field is
+        // non-defaultable), so build it via the explicit constructor.
+        let instance =
+            wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let surface = instance
+            .create_surface(window.clone())
+            .context("creating wgpu surface")?;
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            force_fallback_adapter: false,
+            compatible_surface: Some(&surface),
+        }))
+        .context("requesting GPU adapter")?;
+        let (device, queue) =
+            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))
+                .context("requesting GPU device")?;
+
+        // --- Surface format / present-mode selection. ---
+        let caps = surface.get_capabilities(&adapter);
+        // Prefer a standard 8-bit UNORM format so the capture() PPM readback (which
+        // assumes 8-bit BGRA/RGBA) stays correct; some adapters offer a 10-bit packed
+        // format (e.g. Rgb10a2Unorm) as the first non-srgb option, which renders fine
+        // on screen but breaks the 8-bit readback.
+        let format = caps
+            .formats
+            .iter()
+            .copied()
+            .find(|f| *f == wgpu::TextureFormat::Bgra8Unorm)
+            .or_else(|| {
+                caps.formats
+                    .iter()
+                    .copied()
+                    .find(|f| *f == wgpu::TextureFormat::Rgba8Unorm)
+            })
+            .or_else(|| caps.formats.iter().copied().find(|f| !f.is_srgb()))
+            .unwrap_or(caps.formats[0]);
+        let present_mode = [wgpu::PresentMode::Mailbox, wgpu::PresentMode::Immediate]
+            .into_iter()
+            .find(|m| caps.present_modes.contains(m))
+            .unwrap_or(wgpu::PresentMode::Fifo);
+        // Surface stays unconfigured until `resize()`; start at 1x1 as a placeholder.
+        let config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format,
+            width: 1,
+            height: 1,
+            present_mode,
+            desired_maximum_frame_latency: 1,
+            alpha_mode: caps.alpha_modes[0],
+            view_formats: vec![],
+        };
+
+        // --- Static unit quad: triangle-strip order (0,0)(1,0)(0,1)(1,1). ---
+        let quad: [[f32; 2]; 4] = [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]];
+        let unit_quad = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("unit-quad"),
+            contents: bytemuck::cast_slice(&quad),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+
+        // --- group(0): screen-size uniform. ---
+        let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("uniform"),
+            contents: bytemuck::bytes_of(&Uniform { screen: [1.0, 1.0, 0.0, 0.0] }),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let uniform_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("uniform-bgl"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+            });
+        let uniform_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("uniform-bg"),
+            layout: &uniform_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: uniform_buffer.as_entire_binding(),
+            }],
+        });
+
+        // --- group(1): glyph atlas texture + sampler. ---
+        let atlas_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("glyph-atlas"),
+            size: wgpu::Extent3d {
+                width: ATLAS_SIZE,
+                height: ATLAS_SIZE,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let atlas_view = atlas_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let atlas_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("atlas-sampler"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
+            ..Default::default()
+        });
+        let atlas_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("atlas-bgl"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+            });
+        let atlas_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("atlas-bg"),
+            layout: &atlas_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&atlas_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&atlas_sampler),
+                },
+            ],
+        });
+
+        // --- Shader + pipelines. ---
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("glassy-shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
+        });
+
+        // Vertex layouts: slot 0 = unit quad (per-vertex), slot 1 = instances.
+        let quad_layout = wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<[f32; 2]>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &wgpu::vertex_attr_array![0 => Float32x2],
+        };
+        let bg_instance_attrs = wgpu::vertex_attr_array![
+            1 => Float32x2, // pos
+            2 => Float32x2, // size
+            3 => Float32x4, // color
+        ];
+        let bg_instance_layout = wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<BgInstance>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Instance,
+            attributes: &bg_instance_attrs,
+        };
+        let fg_instance_attrs = wgpu::vertex_attr_array![
+            1 => Float32x2, // pos
+            2 => Float32x2, // size
+            3 => Float32x2, // uv_min
+            4 => Float32x2, // uv_max
+            5 => Float32x4, // color
+            6 => Uint32,    // flags
+        ];
+        let fg_instance_layout = wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<FgInstance>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Instance,
+            attributes: &fg_instance_attrs,
+        };
+
+        let bg_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("bg-pl"),
+                bind_group_layouts: &[Some(&uniform_bind_group_layout)],
+                immediate_size: 0,
+            });
+        let fg_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("fg-pl"),
+                bind_group_layouts: &[
+                    Some(&uniform_bind_group_layout),
+                    Some(&atlas_bind_group_layout),
+                ],
+                immediate_size: 0,
+            });
+
+        let bg_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("bg-pipeline"),
+            layout: Some(&bg_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_bg"),
+                buffers: &[quad_layout.clone(), bg_instance_layout],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_bg"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: Default::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        let fg_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("fg-pipeline"),
+            layout: Some(&fg_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_fg"),
+                buffers: &[quad_layout, fg_instance_layout],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_fg"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: Default::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        // --- Instance buffers, created with a small nonzero capacity. ---
+        let bg_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("bg-instances"),
+            size: (INITIAL_INSTANCES * std::mem::size_of::<BgInstance>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let fg_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("fg-instances"),
+            size: (INITIAL_INSTANCES * std::mem::size_of::<FgInstance>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let mut renderer = Renderer {
+            _window: window,
+            surface,
+            device,
+            queue,
+            config,
+            bg_pipeline,
+            fg_pipeline,
+            unit_quad,
+            uniform_buffer,
+            uniform_bind_group,
+            atlas_texture,
+            atlas_bind_group,
+            atlas_bind_group_layout,
+            atlas_sampler,
+            atlas_view,
+            packer: Packer::new(),
+            glyph_cache: HashMap::new(),
+            text,
+            metrics,
+            pad: (metrics.height * 0.35).round().max(4.0),
+            bg_instances: Vec::with_capacity(INITIAL_INSTANCES),
+            fg_instances: Vec::with_capacity(INITIAL_INSTANCES),
+            bg_buffer,
+            fg_buffer,
+            bg_capacity: INITIAL_INSTANCES,
+            fg_capacity: INITIAL_INSTANCES,
+            clear_color: [0.0, 0.0, 0.0, 1.0],
+        };
+
+        // Pre-warm the atlas with printable ASCII so the first frame is rasterize-free.
+        for byte in 0x20u8..=0x7E {
+            renderer.ensure_glyphs(byte as char, false, false);
+        }
+
+        Ok(renderer)
+    }
+
+    pub fn resize(&mut self, width: u32, height: u32) {
+        if width == 0 || height == 0 {
+            return;
+        }
+        self.config.width = width;
+        self.config.height = height;
+        self.surface.configure(&self.device, &self.config);
+        self.queue.write_buffer(
+            &self.uniform_buffer,
+            0,
+            bytemuck::bytes_of(&Uniform { screen: [width as f32, height as f32, 0.0, 0.0] }),
+        );
+    }
+
+    pub fn cell_metrics(&self) -> CellMetrics {
+        self.metrics
+    }
+
+    /// Physical-pixel inset applied to the grid on all sides. The app must
+    /// account for this when computing how many cells fit in the surface.
+    pub fn pad(&self) -> f32 {
+        self.pad
+    }
+
+    pub fn begin_frame(&mut self, default_bg: [f32; 4]) {
+        self.bg_instances.clear();
+        self.fg_instances.clear();
+        self.clear_color = default_bg;
+    }
+
+    pub fn push_cell(
+        &mut self,
+        col: usize,
+        row: usize,
+        ch: char,
+        fg: [f32; 4],
+        bg: [f32; 4],
+        bold: bool,
+        italic: bool,
+    ) {
+        let cell_w = self.metrics.width;
+        let cell_h = self.metrics.height;
+        let pad = self.pad;
+        // Grid origin of this cell, offset by the window padding (inset).
+        let origin_x = col as f32 * cell_w + pad;
+        let origin_y = row as f32 * cell_h + pad;
+
+        // Always push the cell background; the clear color handles the common case
+        // but per-cell quads keep the model simple and overdraw is cheap here.
+        self.bg_instances.push(BgInstance {
+            pos: [origin_x, origin_y],
+            size: [cell_w, cell_h],
+            color: bg,
+        });
+
+        if ch == ' ' || ch == '\0' {
+            return;
+        }
+
+        // PROCEDURAL box-drawing / block elements. Drawing these as font glyphs
+        // leaves hairline gaps between adjacent cells (lines fail to connect), so
+        // we paint them as solid foreground rectangles that span the full cell.
+        // These quads are pushed AFTER this cell's background quad, so in the
+        // painter-order bg pass they draw on top of it in the foreground color.
+        let cp = ch as u32;
+        let is_box = (0x2500..=0x257F).contains(&cp);
+        let is_block = (0x2580..=0x259F).contains(&cp);
+        if is_block {
+            self.draw_block(ch, origin_x, origin_y, fg, bg);
+            return;
+        }
+        if is_box {
+            // `draw_box` returns false for code points it does not handle, in
+            // which case we fall through to the normal glyph path so nothing
+            // renders blank.
+            if self.draw_box(ch, origin_x, origin_y, fg) {
+                return;
+            }
+        }
+
+        let baseline = origin_y + self.metrics.ascent;
+        self.ensure_glyphs(ch, bold, italic);
+        if let Some(glyphs) = self.glyph_cache.get(&(ch, bold, italic)) {
+            for g in glyphs {
+                self.fg_instances.push(FgInstance {
+                    pos: [origin_x + g.left as f32, baseline - g.top as f32],
+                    size: [g.px_w, g.px_h],
+                    uv_min: g.uv_min,
+                    uv_max: g.uv_max,
+                    color: fg,
+                    flags: if g.is_color { 1 } else { 0 },
+                    _pad: [0; 3],
+                });
+            }
+        }
+    }
+
+    /// Push a single solid-color rectangle as a [`BgInstance`]. Coordinates are
+    /// physical pixels. Because the bg pass draws instances in insertion order
+    /// with no depth test, a quad pushed here after a cell's background quad
+    /// paints on top of it — that is how procedural box/block segments land in
+    /// the foreground color over the cell background.
+    fn push_solid(&mut self, x: f32, y: f32, w: f32, h: f32, color: [f32; 4]) {
+        if w <= 0.0 || h <= 0.0 {
+            return;
+        }
+        self.bg_instances.push(BgInstance {
+            pos: [x, y],
+            size: [w, h],
+            color,
+        });
+    }
+
+    /// Paint a block element (U+2580..=U+259F) as exact solid foreground
+    /// rectangles. All coordinates are rounded to whole pixels for crisp edges.
+    ///
+    /// `bg` is needed for the shade glyphs (U+2591..=U+2593): the background pass
+    /// is created with `blend: None`, so an instance's alpha channel is written
+    /// straight to the (opaque) surface and never composited. We therefore cannot
+    /// express a shade as "fg at reduced alpha"; instead we pre-blend fg over bg
+    /// by the shade coverage on the CPU and emit a fully-opaque solid color.
+    fn draw_block(&mut self, ch: char, ox: f32, oy: f32, fg: [f32; 4], bg: [f32; 4]) {
+        let cw = self.metrics.width;
+        let chh = self.metrics.height;
+        let l = ox.round();
+        let t = oy.round();
+        let r = (ox + cw).round();
+        let b = (oy + chh).round();
+        let w = r - l;
+        let h = b - t;
+        let cp = ch as u32;
+
+        // Pre-blend fg over bg by `cov` coverage, producing an opaque color.
+        // Used for the shade glyphs since the bg pass has blending disabled.
+        fn shade(fg: [f32; 4], bg: [f32; 4], cov: f32) -> [f32; 4] {
+            [
+                bg[0] + (fg[0] - bg[0]) * cov,
+                bg[1] + (fg[1] - bg[1]) * cov,
+                bg[2] + (fg[2] - bg[2]) * cov,
+                1.0,
+            ]
+        }
+
+        // Helper closures expressed inline (no borrow of self) to compute the
+        // fractional sub-rectangles, then pushed via push_solid.
+        match cp {
+            // Full block.
+            0x2588 => self.push_solid(l, t, w, h, fg),
+            // Upper half.
+            0x2580 => {
+                let mid = (oy + chh / 2.0).round();
+                self.push_solid(l, t, w, mid - t, fg);
+            }
+            // Lower half.
+            0x2584 => {
+                let mid = (oy + chh / 2.0).round();
+                self.push_solid(l, mid, w, b - mid, fg);
+            }
+            // Left half.
+            0x258C => {
+                let mid = (ox + cw / 2.0).round();
+                self.push_solid(l, t, mid - l, h, fg);
+            }
+            // Right half.
+            0x2590 => {
+                let mid = (ox + cw / 2.0).round();
+                self.push_solid(mid, t, r - mid, h, fg);
+            }
+            // Lower one-eighth through seven-eighths (U+2581..=U+2587).
+            0x2581..=0x2587 => {
+                let eighths = (cp - 0x2580) as f32; // 1..=7
+                let top = (oy + chh * (1.0 - eighths / 8.0)).round();
+                self.push_solid(l, top, w, b - top, fg);
+            }
+            // Left seven-eighths down to one-eighth (U+2589..=U+258F).
+            0x2589..=0x258F => {
+                // U+2589 = 7/8, U+258A = 6/8, ... U+258F = 1/8.
+                let eighths = (8 - (cp - 0x2588)) as f32; // 7..=1
+                let right = (ox + cw * (eighths / 8.0)).round();
+                self.push_solid(l, t, right - l, h, fg);
+            }
+            // Light/medium/dark shades. The bg pass does not blend, so we mix fg
+            // over bg by the shade coverage here and emit an opaque solid.
+            0x2591 => self.push_solid(l, t, w, h, shade(fg, bg, 0.25)),
+            0x2592 => self.push_solid(l, t, w, h, shade(fg, bg, 0.5)),
+            0x2593 => self.push_solid(l, t, w, h, shade(fg, bg, 0.75)),
+            // Quadrants (U+2596..=U+259F). Bit layout per quadrant:
+            //   TL, TR, BL, BR. Each code point selects a subset.
+            0x2596..=0x259F => {
+                let mx = (ox + cw / 2.0).round();
+                let my = (oy + chh / 2.0).round();
+                let (tl, tr, bl, br) = match cp {
+                    0x2596 => (false, false, true, false),  // lower left
+                    0x2597 => (false, false, false, true),  // lower right
+                    0x2598 => (true, false, false, false),  // upper left
+                    0x2599 => (true, false, true, true),    // UL+LL+LR
+                    0x259A => (true, false, false, true),    // UL + LR
+                    0x259B => (true, true, true, false),     // UL+UR+LL
+                    0x259C => (true, true, false, true),     // UL+UR+LR
+                    0x259D => (false, true, false, false),   // upper right
+                    0x259E => (false, true, true, false),    // UR + LL
+                    0x259F => (false, true, true, true),     // UR+LL+LR
+                    _ => (false, false, false, false),
+                };
+                if tl {
+                    self.push_solid(l, t, mx - l, my - t, fg);
+                }
+                if tr {
+                    self.push_solid(mx, t, r - mx, my - t, fg);
+                }
+                if bl {
+                    self.push_solid(l, my, mx - l, b - my, fg);
+                }
+                if br {
+                    self.push_solid(mx, my, r - mx, b - my, fg);
+                }
+            }
+            // Any unhandled block code point: fill the cell so nothing is blank.
+            _ => self.push_solid(l, t, w, h, fg),
+        }
+    }
+
+    /// Paint a box-drawing character (U+2500..=U+257F) as solid foreground
+    /// rectangles spanning the full cell so adjacent cells join seamlessly.
+    /// Returns `true` if the code point was handled procedurally; `false` if the
+    /// caller should fall back to the normal glyph path.
+    fn draw_box(&mut self, ch: char, ox: f32, oy: f32, fg: [f32; 4]) -> bool {
+        let cw = self.metrics.width;
+        let chh = self.metrics.height;
+        let thin = (chh / 14.0).round().max(1.0);
+        let heavy = (thin * 2.0).round().max(2.0);
+        // Center of the cell, rounded so the cross lands on whole pixels.
+        let cx = (ox + cw / 2.0).round();
+        let cy = (oy + chh / 2.0).round();
+        // Cell edges (rounded so neighboring cells share an exact boundary).
+        let left = ox.round();
+        let right = (ox + cw).round();
+        let top = oy.round();
+        let bot = (oy + chh).round();
+
+        // Arm weights: 0 = absent, 1 = light, 2 = heavy, 3 = double.
+        const A: u8 = 0; // absent
+        const L: u8 = 1; // light
+        const H: u8 = 2; // heavy
+        const D: u8 = 3; // double
+
+        // Double rails sit symmetrically about the center line, each rail offset
+        // by `rail` (= light thickness + 1px) from center, and each rail is
+        // `thin` thick. So the near rail center is at `c - rail` and the far rail
+        // center at `c + rail`. These coordinates are identical for horizontal
+        // and vertical doubling, so straight doubles (═ ║) connect across cells.
+        let rail = thin + 1.0;
+        // Top edges of the two horizontal rails (centered on cy) and left edges
+        // of the two vertical rails (centered on cx), rounded to whole pixels.
+        let hy_near = (cy - rail - thin / 2.0).round(); // upper rail top
+        let hy_far = (cy + rail - thin / 2.0).round(); // lower rail top
+        let vx_near = (cx - rail - thin / 2.0).round(); // left rail left
+        let vx_far = (cx + rail - thin / 2.0).round(); // right rail left
+        // The outer extents of the double band: where the far rail of the
+        // perpendicular axis ends. Used so double corners/junctions close.
+        let h_outer_lo = hy_near; // top of the horizontal band
+        let h_outer_hi = (hy_far + thin).round(); // bottom of the horizontal band
+        let v_outer_lo = vx_near; // left of the vertical band
+        let v_outer_hi = (vx_far + thin).round(); // right of the vertical band
+
+        // Single-line (light/heavy) arm helpers. A light/heavy arm spans the
+        // full half-cell from the edge to the center, centered on the cross, so
+        // neighbours join. Heavy is identical layout, only thicker. Each closure
+        // takes `this: &mut Self` explicitly so they don't borrow-conflict.
+        let harm = |this: &mut Self, dir_left: bool, weight: u8| {
+            if weight != L && weight != H {
+                return;
+            }
+            let th = if weight == H { heavy } else { thin };
+            let y = (cy - th / 2.0).round();
+            if dir_left {
+                this.push_solid(left, y, cx - left, th, fg);
+            } else {
+                this.push_solid(cx, y, right - cx, th, fg);
+            }
+        };
+        let varm = |this: &mut Self, dir_up: bool, weight: u8| {
+            if weight != L && weight != H {
+                return;
+            }
+            let th = if weight == H { heavy } else { thin };
+            let x = (cx - th / 2.0).round();
+            if dir_up {
+                this.push_solid(x, top, th, cy - top, fg);
+            } else {
+                this.push_solid(x, cy, th, bot - cy, fg);
+            }
+        };
+
+        // Decode the code point into four arm weights (left, right, up, down).
+        // `None` => not a simple-arm glyph; handled by the specials block below.
+        let cp = ch as u32;
+        let arms: Option<(u8, u8, u8, u8)> = match cp {
+            // Straight lines.
+            0x2500 => Some((L, L, A, A)), // light horizontal
+            0x2501 => Some((H, H, A, A)), // heavy horizontal
+            0x2502 => Some((A, A, L, L)), // light vertical
+            0x2503 => Some((A, A, H, H)), // heavy vertical
+
+            // Corners (light). U+250C down+right, etc.
+            0x250C => Some((A, L, A, L)), // down and right
+            0x250D => Some((A, H, A, L)),
+            0x250E => Some((A, L, A, H)),
+            0x250F => Some((A, H, A, H)), // heavy down and right
+            0x2510 => Some((L, A, A, L)), // down and left
+            0x2511 => Some((H, A, A, L)),
+            0x2512 => Some((L, A, A, H)),
+            0x2513 => Some((H, A, A, H)),
+            0x2514 => Some((A, L, L, A)), // up and right
+            0x2515 => Some((A, H, L, A)),
+            0x2516 => Some((A, L, H, A)),
+            0x2517 => Some((A, H, H, A)),
+            0x2518 => Some((L, A, L, A)), // up and left
+            0x2519 => Some((H, A, L, A)),
+            0x251A => Some((L, A, H, A)),
+            0x251B => Some((H, A, H, A)),
+
+            // Vertical + right (T pointing right) U+251C..U+2523.
+            0x251C => Some((A, L, L, L)),
+            0x251D => Some((A, H, L, L)),
+            0x251E => Some((A, L, H, L)),
+            0x251F => Some((A, L, L, H)),
+            0x2520 => Some((A, L, H, H)),
+            0x2521 => Some((A, H, H, L)),
+            0x2522 => Some((A, H, L, H)),
+            0x2523 => Some((A, H, H, H)),
+
+            // Vertical + left (T pointing left) U+2524..U+252B.
+            0x2524 => Some((L, A, L, L)),
+            0x2525 => Some((H, A, L, L)),
+            0x2526 => Some((L, A, H, L)),
+            0x2527 => Some((L, A, L, H)),
+            0x2528 => Some((L, A, H, H)),
+            0x2529 => Some((H, A, H, L)),
+            0x252A => Some((H, A, L, H)),
+            0x252B => Some((H, A, H, H)),
+
+            // Horizontal + down (T pointing down) U+252C..U+2533.
+            0x252C => Some((L, L, A, L)),
+            0x252D => Some((H, L, A, L)),
+            0x252E => Some((L, H, A, L)),
+            0x252F => Some((H, H, A, L)),
+            0x2530 => Some((L, L, A, H)),
+            0x2531 => Some((H, L, A, H)),
+            0x2532 => Some((L, H, A, H)),
+            0x2533 => Some((H, H, A, H)),
+
+            // Horizontal + up (T pointing up) U+2534..U+253B.
+            0x2534 => Some((L, L, L, A)),
+            0x2535 => Some((H, L, L, A)),
+            0x2536 => Some((L, H, L, A)),
+            0x2537 => Some((H, H, L, A)),
+            0x2538 => Some((L, L, H, A)),
+            0x2539 => Some((H, L, H, A)),
+            0x253A => Some((L, H, H, A)),
+            0x253B => Some((H, H, H, A)),
+
+            // Crosses U+253C..U+254B.
+            0x253C => Some((L, L, L, L)),
+            0x253D => Some((H, L, L, L)),
+            0x253E => Some((L, H, L, L)),
+            0x253F => Some((H, H, L, L)),
+            0x2540 => Some((L, L, H, L)),
+            0x2541 => Some((L, L, L, H)),
+            0x2542 => Some((L, L, H, H)),
+            0x2543 => Some((H, L, H, L)),
+            0x2544 => Some((L, H, H, L)),
+            0x2545 => Some((H, L, L, H)),
+            0x2546 => Some((L, H, L, H)),
+            0x2547 => Some((H, H, H, L)),
+            0x2548 => Some((H, H, L, H)),
+            0x2549 => Some((H, L, H, H)),
+            0x254A => Some((L, H, H, H)),
+            0x254B => Some((H, H, H, H)),
+
+            // Rounded corners — same arms as the sharp corners; we approximate
+            // the curve with square joins (visually fine at terminal sizes).
+            0x256D => Some((A, L, A, L)), // arc down and right
+            0x256E => Some((L, A, A, L)), // arc down and left
+            0x256F => Some((L, A, L, A)), // arc up and left
+            0x2570 => Some((A, L, L, A)), // arc up and right
+
+            // Half lines (single weight). U+2574 left, U+2575 up, U+2576 right,
+            // U+2577 down (light); U+2578..U+257B the same, heavy.
+            0x2574 => Some((L, A, A, A)),
+            0x2575 => Some((A, A, L, A)),
+            0x2576 => Some((A, L, A, A)),
+            0x2577 => Some((A, A, A, L)),
+            0x2578 => Some((H, A, A, A)),
+            0x2579 => Some((A, A, H, A)),
+            0x257A => Some((A, H, A, A)),
+            0x257B => Some((A, A, A, H)),
+
+            // Mixed-weight straight lines.
+            0x257C => Some((L, H, A, A)), // left light, right heavy
+            0x257D => Some((A, A, L, H)), // up light, down heavy
+            0x257E => Some((H, L, A, A)), // left heavy, right light
+            0x257F => Some((A, A, H, L)), // up heavy, down light
+
+            _ => None,
+        };
+
+        if let Some((al, ar, au, ad)) = arms {
+            harm(self, true, al);
+            harm(self, false, ar);
+            varm(self, true, au);
+            varm(self, false, ad);
+            return true;
+        }
+
+        // --- Doubles --------------------------------------------------------
+        // Decode the double-line set (U+2550..U+256C) into the same four-arm
+        // model, where each arm is Absent / Light (single) / Double. Every
+        // double arm is rendered as two thin rails at the fixed `vx_*`/`hy_*`
+        // offsets, so straight doubles connect across cells and corners close.
+        let darms: Option<(u8, u8, u8, u8)> = match cp {
+            0x2550 => Some((D, D, A, A)), // ═ double horizontal
+            0x2551 => Some((A, A, D, D)), // ║ double vertical
+            0x2552 => Some((A, D, A, L)), // ╒ right double, down single
+            0x2553 => Some((A, L, A, D)), // ╓ right single, down double
+            0x2554 => Some((A, D, A, D)), // ╔ double down and right
+            0x2555 => Some((D, A, A, L)), // ╕ left double, down single
+            0x2556 => Some((L, A, A, D)), // ╖ left single, down double
+            0x2557 => Some((D, A, A, D)), // ╗ double down and left
+            0x2558 => Some((A, D, L, A)), // ╘ right double, up single
+            0x2559 => Some((A, L, D, A)), // ╙ right single, up double
+            0x255A => Some((A, D, D, A)), // ╚ double up and right
+            0x255B => Some((D, A, L, A)), // ╛ left double, up single
+            0x255C => Some((L, A, D, A)), // ╜ left single, up double
+            0x255D => Some((D, A, D, A)), // ╝ double up and left
+            0x255E => Some((A, D, L, L)), // ╞ vertical single, right double
+            0x255F => Some((A, L, D, D)), // ╟ vertical double, right single
+            0x2560 => Some((A, D, D, D)), // ╠ vertical double, right double
+            0x2561 => Some((D, A, L, L)), // ╡ vertical single, left double
+            0x2562 => Some((L, A, D, D)), // ╢ vertical double, left single
+            0x2563 => Some((D, A, D, D)), // ╣ vertical double, left double
+            0x2564 => Some((D, D, A, L)), // ╤ horizontal double, down single
+            0x2565 => Some((L, L, A, D)), // ╥ horizontal single, down double
+            0x2566 => Some((D, D, A, D)), // ╦ double down and horizontal
+            0x2567 => Some((D, D, L, A)), // ╧ horizontal double, up single
+            0x2568 => Some((L, L, D, A)), // ╨ horizontal single, up double
+            0x2569 => Some((D, D, D, A)), // ╩ double up and horizontal
+            0x256A => Some((D, D, L, L)), // ╪ vertical single, horizontal double
+            0x256B => Some((L, L, D, D)), // ╫ vertical double, horizontal single
+            0x256C => Some((D, D, D, D)), // ╬ double vertical and horizontal
+            _ => None,
+        };
+
+        if let Some((al, ar, au, ad)) = darms {
+            let h_double = al == D || ar == D;
+            let v_double = au == D || ad == D;
+            // Inner edges of the perpendicular band's rails (used to mitre).
+            let vx_near_in = (vx_near + thin).round(); // right edge of left rail
+            let hy_near_in = (hy_near + thin).round(); // bottom edge of top rail
+            // The four pure double corners are drawn explicitly below as clean
+            // outer/inner L-joins; skip the generic rail spans for them so the
+            // inner notch stays open (the canonical ╔ ╗ ╚ ╝ look).
+            let pure_corner = matches!(cp, 0x2554 | 0x2557 | 0x255A | 0x255D);
+
+            // Each doubled axis is rendered as two parallel `thin` rails at the
+            // fixed `hy_*`/`vx_*` offsets. The rail ENDPOINTS toward the center
+            // are mitred so the band corners close: an "outer" rail wraps around
+            // to its perpendicular outer rail, the "inner" rail makes the small
+            // inner corner. Endpoints are chosen so straight doubles span the
+            // full cell (connecting across cells) and corners/junctions close.
+
+            // --- Horizontal rails (upper = hy_near, lower = hy_far). ---
+            // Upper rail x-extent.
+            let up_lo = if al == D {
+                left
+            } else if v_double {
+                // No left arm: upper rail starts at the left vertical rail. It is
+                // the outer rail for an up-and-right opening (╚/╠ etc.), inner for
+                // a down-and-right opening (╔). Meet the near (left) vertical rail.
+                vx_near
+            } else {
+                cx
+            };
+            let up_hi = if ar == D {
+                right
+            } else if v_double {
+                vx_near_in
+            } else {
+                cx
+            };
+            // Lower rail x-extent.
+            let lo_lo = if al == D {
+                left
+            } else if v_double {
+                vx_near
+            } else {
+                cx
+            };
+            let lo_hi = if ar == D {
+                right
+            } else if v_double {
+                vx_near_in
+            } else {
+                cx
+            };
+            if h_double && !pure_corner {
+                self.push_solid(up_lo, hy_near, up_hi - up_lo, thin, fg);
+                self.push_solid(lo_lo, hy_far, lo_hi - lo_lo, thin, fg);
+            }
+
+            // --- Vertical rails (left = vx_near, right = vx_far). ---
+            let lf_lo = if au == D {
+                top
+            } else if h_double {
+                hy_near
+            } else {
+                cy
+            };
+            let lf_hi = if ad == D {
+                bot
+            } else if h_double {
+                hy_near_in
+            } else {
+                cy
+            };
+            let rt_lo = if au == D {
+                top
+            } else if h_double {
+                hy_near
+            } else {
+                cy
+            };
+            let rt_hi = if ad == D {
+                bot
+            } else if h_double {
+                hy_near_in
+            } else {
+                cy
+            };
+            if v_double && !pure_corner {
+                self.push_solid(vx_near, lf_lo, thin, lf_hi - lf_lo, fg);
+                self.push_solid(vx_far, rt_lo, thin, rt_hi - rt_lo, fg);
+            }
+
+            // --- Pure double corners: redraw the two rails as clean L-joins so
+            // the outer/inner mitre is exact (overrides the generic spans above
+            // only where it improves the join; the extra solids are harmless). ---
+            match cp {
+                0x2554 => {
+                    // ╔ down+right: outer = top rail + left vrail; inner = bottom
+                    // rail + right vrail.
+                    self.push_solid(vx_near, hy_near, right - vx_near, thin, fg);
+                    self.push_solid(vx_near, hy_near, thin, bot - hy_near, fg);
+                    self.push_solid(vx_far, hy_far, right - vx_far, thin, fg);
+                    self.push_solid(vx_far, hy_far, thin, bot - hy_far, fg);
+                }
+                0x2557 => {
+                    // ╗ down+left.
+                    self.push_solid(left, hy_near, vx_far + thin - left, thin, fg);
+                    self.push_solid(vx_far, hy_near, thin, bot - hy_near, fg);
+                    self.push_solid(left, hy_far, vx_near + thin - left, thin, fg);
+                    self.push_solid(vx_near, hy_far, thin, bot - hy_far, fg);
+                }
+                0x255A => {
+                    // ╚ up+right.
+                    self.push_solid(vx_near, hy_far, right - vx_near, thin, fg);
+                    self.push_solid(vx_near, top, thin, hy_far + thin - top, fg);
+                    self.push_solid(vx_far, hy_near, right - vx_far, thin, fg);
+                    self.push_solid(vx_far, top, thin, hy_near + thin - top, fg);
+                }
+                0x255D => {
+                    // ╝ up+left.
+                    self.push_solid(left, hy_far, vx_far + thin - left, thin, fg);
+                    self.push_solid(vx_far, top, thin, hy_far + thin - top, fg);
+                    self.push_solid(left, hy_near, vx_near + thin - left, thin, fg);
+                    self.push_solid(vx_near, top, thin, hy_near + thin - top, fg);
+                }
+                _ => {}
+            }
+
+            // --- Single (light) arms crossing a doubled perpendicular band.
+            // Draw a centered thin line that bridges the band so the single arm
+            // connects to neighbours. ---
+            if al == L {
+                let y = (cy - thin / 2.0).round();
+                let end = if v_double { v_outer_hi } else { cx };
+                self.push_solid(left, y, end - left, thin, fg);
+            }
+            if ar == L {
+                let y = (cy - thin / 2.0).round();
+                let start = if v_double { v_outer_lo } else { cx };
+                self.push_solid(start, y, right - start, thin, fg);
+            }
+            if au == L {
+                let x = (cx - thin / 2.0).round();
+                let end = if h_double { h_outer_hi } else { cy };
+                self.push_solid(x, top, thin, end - top, fg);
+            }
+            if ad == L {
+                let x = (cx - thin / 2.0).round();
+                let start = if h_double { h_outer_lo } else { cy };
+                self.push_solid(x, start, thin, bot - start, fg);
+            }
+            return true;
+        }
+
+        // --- Specials -------------------------------------------------------
+        match cp {
+            // Dashed horizontals: light/heavy double/triple/quadruple dash.
+            // U+2504/2505 triple-dash, U+2508/2509 quadruple-dash (horizontal).
+            0x2504 | 0x2508 => {
+                self.draw_dashed_h(ox, cy, fg, thin, if cp == 0x2504 { 3 } else { 4 });
+                true
+            }
+            0x2505 | 0x2509 => {
+                self.draw_dashed_h(ox, cy, fg, heavy, if cp == 0x2505 { 3 } else { 4 });
+                true
+            }
+            // U+2506/2507 triple-dash, U+250A/250B quadruple-dash (vertical).
+            0x2506 | 0x250A => {
+                self.draw_dashed_v(oy, cx, fg, thin, if cp == 0x2506 { 3 } else { 4 });
+                true
+            }
+            0x2507 | 0x250B => {
+                self.draw_dashed_v(oy, cx, fg, heavy, if cp == 0x2507 { 3 } else { 4 });
+                true
+            }
+            // Diagonals U+2571..U+2573: hard to do well with axis-aligned
+            // rectangles; fall back to the glyph path.
+            0x2571..=0x2573 => false,
+            // Anything else in the box range we don't explicitly handle: fall
+            // back to the glyph so it never renders blank.
+            _ => false,
+        }
+    }
+
+    /// Draw a dashed horizontal line of the given thickness centered on `cy`,
+    /// broken into `segments` dashes with gaps.
+    fn draw_dashed_h(&mut self, ox: f32, cy: f32, fg: [f32; 4], th: f32, segments: u32) {
+        let cw = self.metrics.width;
+        let left = ox.round();
+        let y = (cy - th / 2.0).round();
+        let n = segments as f32;
+        // Dash occupies ~70% of each slot, gap the rest.
+        let slot = cw / n;
+        let dash = (slot * 0.7).round().max(1.0);
+        for i in 0..segments {
+            let x = (left + slot * i as f32).round();
+            self.push_solid(x, y, dash, th, fg);
+        }
+    }
+
+    /// Draw a dashed vertical line of the given thickness centered on `cx`.
+    fn draw_dashed_v(&mut self, oy: f32, cx: f32, fg: [f32; 4], th: f32, segments: u32) {
+        let chh = self.metrics.height;
+        let top = oy.round();
+        let x = (cx - th / 2.0).round();
+        let n = segments as f32;
+        let slot = chh / n;
+        let dash = (slot * 0.7).round().max(1.0);
+        for i in 0..segments {
+            let y = (top + slot * i as f32).round();
+            self.push_solid(x, y, th, dash, fg);
+        }
+    }
+
+    pub fn render(&mut self) -> RenderResult {
+        // wgpu 29 returns a `CurrentSurfaceTexture` enum (there is no `SurfaceError`
+        // in this version). `Success`/`Suboptimal` give us a frame; the remaining
+        // variants are transient acquisition failures. We self-heal `Lost`/`Outdated`
+        // by reconfiguring with the stored size and skip the frame; other states are
+        // skipped silently and retried next redraw.
+        let frame = match self.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f) => {
+                f
+            }
+            wgpu::CurrentSurfaceTexture::Lost | wgpu::CurrentSurfaceTexture::Outdated => {
+                let (w, h) = (self.config.width, self.config.height);
+                self.resize(w, h);
+                return Err(SurfaceError::Outdated);
+            }
+            wgpu::CurrentSurfaceTexture::Timeout => return Err(SurfaceError::Timeout),
+            wgpu::CurrentSurfaceTexture::Occluded => return Err(SurfaceError::Occluded),
+            wgpu::CurrentSurfaceTexture::Validation => return Err(SurfaceError::Validation),
+        };
+        let view = frame
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+
+        // Grow + upload instance buffers (write_buffer when capacity suffices).
+        self.upload_bg();
+        self.upload_fg();
+        let bg_count = self.bg_instances.len() as u32;
+        let fg_count = self.fg_instances.len() as u32;
+
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("frame-encoder"),
+            });
+        self.record_passes(&view, &mut encoder, bg_count, fg_count);
+
+        self.queue.submit(std::iter::once(encoder.finish()));
+        frame.present();
+        Ok(())
+    }
+
+    /// Record the bg + fg instanced draws into `view`. Shared by the on-screen
+    /// `render()` path and the offscreen `capture()` path.
+    fn record_passes(
+        &self,
+        view: &wgpu::TextureView,
+        encoder: &mut wgpu::CommandEncoder,
+        bg_count: u32,
+        fg_count: u32,
+    ) {
+        let [r, g, b, a] = self.clear_color;
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("grid-pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color {
+                        r: r as f64,
+                        g: g as f64,
+                        b: b as f64,
+                        a: a as f64,
+                    }),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+
+        if bg_count > 0 {
+            pass.set_pipeline(&self.bg_pipeline);
+            pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+            pass.set_vertex_buffer(0, self.unit_quad.slice(..));
+            pass.set_vertex_buffer(1, self.bg_buffer.slice(..));
+            pass.draw(0..4, 0..bg_count);
+        }
+        if fg_count > 0 {
+            pass.set_pipeline(&self.fg_pipeline);
+            pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+            pass.set_bind_group(1, &self.atlas_bind_group, &[]);
+            pass.set_vertex_buffer(0, self.unit_quad.slice(..));
+            pass.set_vertex_buffer(1, self.fg_buffer.slice(..));
+            pass.draw(0..4, 0..fg_count);
+        }
+    }
+
+    /// Render the current frame to an offscreen texture and write it to `path`
+    /// as a binary PPM (P6). Used for headless screenshot verification.
+    pub fn capture(&mut self, path: &std::path::Path) -> Result<()> {
+        let width = self.config.width.max(1);
+        let height = self.config.height.max(1);
+
+        let target = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("capture-target"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: self.config.format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = target.create_view(&wgpu::TextureViewDescriptor::default());
+
+        self.upload_bg();
+        self.upload_fg();
+        let bg_count = self.bg_instances.len() as u32;
+        let fg_count = self.fg_instances.len() as u32;
+
+        // Readback rows must be padded to COPY_BYTES_PER_ROW_ALIGNMENT.
+        let unpadded = width * 4;
+        let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let padded = unpadded.div_ceil(align) * align;
+        let readback = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("capture-readback"),
+            size: padded as u64 * height as u64,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("capture-encoder"),
+            });
+        self.record_passes(&view, &mut encoder, bg_count, fg_count);
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &target,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &readback,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        self.queue.submit(std::iter::once(encoder.finish()));
+
+        let slice = readback.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |res| {
+            let _ = tx.send(res);
+        });
+        self.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .map_err(|e| anyhow::anyhow!("device poll failed: {e:?}"))?;
+        match rx.recv() {
+            Ok(Ok(())) => {}
+            other => anyhow::bail!("buffer map failed: {other:?}"),
+        }
+
+        let data = slice.get_mapped_range();
+        let bgra = matches!(
+            self.config.format,
+            wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
+        );
+        let mut out = Vec::with_capacity((width * height * 3) as usize + 32);
+        out.extend_from_slice(format!("P6\n{width} {height}\n255\n").as_bytes());
+        for y in 0..height {
+            let start = (y * padded) as usize;
+            let row = &data[start..start + unpadded as usize];
+            for px in row.chunks_exact(4) {
+                if bgra {
+                    out.extend_from_slice(&[px[2], px[1], px[0]]);
+                } else {
+                    out.extend_from_slice(&[px[0], px[1], px[2]]);
+                }
+            }
+        }
+        drop(data);
+        readback.unmap();
+        std::fs::write(path, out)?;
+        Ok(())
+    }
+
+    // --- internals ---------------------------------------------------------
+
+    /// Upload bg instances, recreating the buffer if it must grow.
+    fn upload_bg(&mut self) {
+        if self.bg_instances.is_empty() {
+            return;
+        }
+        if self.bg_instances.len() > self.bg_capacity {
+            let cap = self.bg_instances.len().next_power_of_two();
+            self.bg_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("bg-instances"),
+                size: (cap * std::mem::size_of::<BgInstance>()) as u64,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            self.bg_capacity = cap;
+        }
+        self.queue
+            .write_buffer(&self.bg_buffer, 0, bytemuck::cast_slice(&self.bg_instances));
+    }
+
+    /// Upload fg instances, recreating the buffer if it must grow.
+    fn upload_fg(&mut self) {
+        if self.fg_instances.is_empty() {
+            return;
+        }
+        if self.fg_instances.len() > self.fg_capacity {
+            let cap = self.fg_instances.len().next_power_of_two();
+            self.fg_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("fg-instances"),
+                size: (cap * std::mem::size_of::<FgInstance>()) as u64,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            self.fg_capacity = cap;
+        }
+        self.queue
+            .write_buffer(&self.fg_buffer, 0, bytemuck::cast_slice(&self.fg_instances));
+    }
+
+    /// Ensure the glyph(s) for `(ch, bold, italic)` are rasterized and packed
+    /// into the atlas, recording their `AtlasGlyph` entries in the cache.
+    fn ensure_glyphs(&mut self, ch: char, bold: bool, italic: bool) {
+        let key = (ch, bold, italic);
+        if self.glyph_cache.contains_key(&key) {
+            return;
+        }
+
+        // Copy the rasterized bitmaps into owned locals so the `self.text` borrow
+        // ends before we touch `self.packer` / `self.queue` / `self.atlas_texture`.
+        struct Raster {
+            width: u32,
+            height: u32,
+            left: i32,
+            top: i32,
+            is_color: bool,
+            data: Vec<u8>,
+        }
+        let rasters: Vec<Raster> = self
+            .text
+            .rasterize(ch, bold, italic)
+            .iter()
+            .filter(|r| r.width != 0 && r.height != 0)
+            .map(|r| Raster {
+                width: r.width,
+                height: r.height,
+                left: r.left,
+                top: r.top,
+                is_color: r.is_color,
+                data: r.data.clone(),
+            })
+            .collect();
+
+        let mut packed: Vec<AtlasGlyph> = Vec::new();
+        // First attempt; if the atlas fills up mid-pack we clear it and retry once.
+        let mut retried = false;
+        let inv = 1.0 / ATLAS_SIZE as f32;
+        'attempt: loop {
+            packed.clear();
+            for r in &rasters {
+                let (x, y) = match self.packer.alloc(r.width, r.height) {
+                    Some(o) => o,
+                    None => {
+                        if retried {
+                            log::warn!(
+                                "glyph atlas full; '{ch}' (bold={bold} italic={italic}) skipped"
+                            );
+                            break 'attempt;
+                        }
+                        // Recycle the atlas: drop every cached entry and repack.
+                        log::warn!("glyph atlas full; clearing cache and repacking");
+                        self.glyph_cache.clear();
+                        self.packer.reset();
+                        retried = true;
+                        continue 'attempt;
+                    }
+                };
+                self.queue.write_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &self.atlas_texture,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d { x, y, z: 0 },
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    &r.data,
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(r.width * 4),
+                        rows_per_image: Some(r.height),
+                    },
+                    wgpu::Extent3d {
+                        width: r.width,
+                        height: r.height,
+                        depth_or_array_layers: 1,
+                    },
+                );
+                packed.push(AtlasGlyph {
+                    uv_min: [x as f32 * inv, y as f32 * inv],
+                    uv_max: [(x + r.width) as f32 * inv, (y + r.height) as f32 * inv],
+                    px_w: r.width as f32,
+                    px_h: r.height as f32,
+                    left: r.left,
+                    top: r.top,
+                    is_color: r.is_color,
+                });
+            }
+            break;
+        }
+
+        self.glyph_cache.insert(key, packed);
+    }
+}

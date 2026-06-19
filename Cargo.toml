@@ -1,0 +1,31 @@
+[package]
+name = "glassy"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+alacritty_terminal = "0.26.0"
+anyhow = "1.0.102"
+bytemuck = { version = "1.25.0", features = ["derive"] }
+cosmic-text = "0.19.0"
+env_logger = "0.11.10"
+log = "0.4.32"
+pollster = "0.4.0"
+rustix = "1.1.4"
+wgpu = "29.0.3"
+winit = "0.30.13"
+
+# Ultra-lean release build: this is core to the "faster/lighter than ghostty" goal.
+# fat LTO + single codegen unit maximize inlining across crates; abort-on-panic
+# drops the unwinding machinery; strip shrinks the binary.
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+# A faster-iterating profile for dev that still optimizes deps (wgpu/cosmic-text
+# are painfully slow unoptimized) but keeps our own crate quick to recompile.
+[profile.dev.package."*"]
+opt-level = 3

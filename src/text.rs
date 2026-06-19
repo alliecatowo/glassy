@@ -1,0 +1,661 @@
+//! Font loading, cell metrics, and on-demand glyph rasterization.
+//!
+//! This module is deliberately free of any GPU/windowing dependency: it shapes
+//! single characters with `cosmic-text` and rasterizes them to RGBA8 bitmaps via
+//! the bundled `swash` cache. The renderer uploads the resulting bitmaps into a
+//! glyph atlas; everything here is pure CPU work and is fully cached per
+//! `(char, bold, italic)` so repeated cells are a cheap `HashMap` lookup.
+
+use std::collections::HashMap;
+#[cfg(unix)]
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::process::Command;
+use std::sync::Arc;
+
+use anyhow::Result;
+use cosmic_text::{
+    Attrs, Buffer, Family, FontSystem, Metrics, Shaping, Style, SwashCache, SwashContent, Weight,
+    fontdb,
+};
+
+/// Per-cell layout metrics, all in physical pixels.
+#[derive(Clone, Copy, Debug)]
+pub struct CellMetrics {
+    pub width: f32,
+    pub height: f32,
+    pub ascent: f32,
+}
+
+/// A single rasterized glyph bitmap plus its placement relative to the pen.
+pub struct RasterizedGlyph {
+    /// Bitmap size in pixels (both 0 for blank cells with nothing to draw).
+    pub width: u32,
+    pub height: u32,
+    /// Horizontal offset from the pen origin to the bitmap's left edge.
+    pub left: i32,
+    /// Vertical offset from the baseline UP to the bitmap's top edge
+    /// (positive = above the baseline), per swash's placement convention.
+    pub top: i32,
+    /// `true` when `data` is the glyph's own color (e.g. emoji); `false` when it
+    /// is white RGBA with the alpha channel carrying the coverage mask.
+    pub is_color: bool,
+    /// RGBA8 pixels, length == `width * height * 4` (empty when either dim is 0).
+    pub data: Vec<u8>,
+}
+
+/// Owns the shaping/rasterization state and the glyph cache.
+pub struct Text {
+    font_system: FontSystem,
+    swash_cache: SwashCache,
+    /// Reused for every shaping call to avoid reallocating line buffers.
+    buffer: Buffer,
+    /// The resolved font family. We store the name as an owned `String` because
+    /// `Family::Name` borrows; `attrs()` rebuilds the borrowing `Family` per call.
+    family: FamilyOwned,
+    cache: HashMap<(char, bool, bool), Vec<RasterizedGlyph>>,
+}
+
+/// Owned counterpart to `cosmic_text::Family`, holding the name string so we can
+/// hand out a freshly-borrowed `Family<'_>` whenever we build `Attrs`.
+enum FamilyOwned {
+    Monospace,
+    Named(String),
+}
+
+impl FamilyOwned {
+    fn as_family(&self) -> Family<'_> {
+        match self {
+            FamilyOwned::Monospace => Family::Monospace,
+            FamilyOwned::Named(name) => Family::Name(name),
+        }
+    }
+}
+
+/// Build shaping attributes for the given style against the resolved family.
+fn build_attrs<'a>(family: Family<'a>, bold: bool, italic: bool) -> Attrs<'a> {
+    let mut attrs = Attrs::new();
+    attrs.family = family;
+    attrs.weight = if bold { Weight::BOLD } else { Weight::NORMAL };
+    attrs.style = if italic { Style::Italic } else { Style::Normal };
+    attrs
+}
+
+/// A font candidate produced by discovery: the raw file bytes, the resolved file
+/// path it came from (when it originated from a concrete file, used to de-dup the
+/// primary against the fallback chain), and a short label describing its origin
+/// (used only for logging/diagnostics).
+struct FontCandidate {
+    bytes: Vec<u8>,
+    /// Absolute file path the bytes were read from, if known. `None` only when a
+    /// candidate's bytes did not come from a single on-disk file.
+    path: Option<PathBuf>,
+    source_label: String,
+}
+
+/// The outcome of building a `FontSystem` from a single candidate's bytes: the
+/// constructed system, the owned family to shape with, and whether the face we
+/// loaded actually reports itself as monospaced.
+struct LoadedFont {
+    font_system: FontSystem,
+    family: FamilyOwned,
+    is_monospaced: bool,
+}
+
+impl Text {
+    /// Discover a monospace font, load it, and measure the cell box for `font_px`.
+    pub fn load(font_px: f32) -> Result<(Text, CellMetrics)> {
+        // Gather candidates in priority order (explicit override, curated
+        // families verified via fontconfig, generic monospace, known paths).
+        let candidates = discover_font_candidates();
+
+        // Build a `FontSystem` from the first candidate that yields a usable
+        // face. If a candidate's loaded face is *not* monospaced and more
+        // candidates remain, reject it and try the next; otherwise accept it.
+        let mut loaded: Option<LoadedFont> = None;
+        let total = candidates.len();
+        for (idx, candidate) in candidates.into_iter().enumerate() {
+            let is_last = idx + 1 == total;
+            match build_font_system(candidate.bytes, candidate.path) {
+                Some(found) => {
+                    if found.is_monospaced || is_last {
+                        loaded = Some(found);
+                        break;
+                    }
+                    log::debug!(
+                        "glassy: rejecting non-monospaced candidate '{}', trying next",
+                        candidate.source_label
+                    );
+                }
+                None => {
+                    log::debug!(
+                        "glassy: candidate '{}' had no usable face, trying next",
+                        candidate.source_label
+                    );
+                }
+            }
+        }
+
+        // If nothing loaded, scan the system and rely on the generic monospace
+        // family resolution.
+        let (font_system, family) = match loaded {
+            Some(found) => (found.font_system, found.family),
+            None => (FontSystem::new(), FamilyOwned::Monospace),
+        };
+
+        // Line height is the cell height; round so cells land on pixel
+        // boundaries. 1.30x the em gives comfortable vertical spacing.
+        let line_height = (font_px * 1.30).round();
+        let metrics = Metrics::new(font_px, line_height);
+
+        let mut text = Text {
+            font_system,
+            swash_cache: SwashCache::new(),
+            buffer: Buffer::new_empty(metrics),
+            family,
+            cache: HashMap::new(),
+        };
+
+        let cell = text.measure_cell(line_height);
+        let family_name = match &text.family {
+            FamilyOwned::Named(n) => n.as_str(),
+            FamilyOwned::Monospace => "<system monospace>",
+        };
+        log::info!(
+            "font='{}' font_px={:.1} cell={}x{} ascent={}",
+            family_name,
+            font_px,
+            cell.width,
+            cell.height,
+            cell.ascent
+        );
+        Ok((text, cell))
+    }
+
+    /// Shape a representative string to derive the monospace advance width and
+    /// the baseline (ascent) for one line.
+    fn measure_cell(&mut self, line_height: f32) -> CellMetrics {
+        let attrs = build_attrs(self.family.as_family(), false, false);
+        self.buffer
+            .set_text("MM", &attrs, Shaping::Advanced, None);
+        self.buffer
+            .shape_until_scroll(&mut self.font_system, false);
+
+        let mut cell_w = font_fallback_width(line_height);
+        let mut ascent = line_height.round();
+
+        if let Some(run) = self.buffer.layout_runs().next() {
+            ascent = run.line_y.round();
+            // Two identical glyphs let us read the pen advance directly as the
+            // gap between their origins; for a single glyph fall back to its width.
+            if run.glyphs.len() >= 2 {
+                cell_w = (run.glyphs[1].x - run.glyphs[0].x).round().max(1.0);
+            } else if let Some(g) = run.glyphs.first() {
+                cell_w = g.w.ceil().max(1.0);
+            }
+        }
+
+        CellMetrics {
+            width: cell_w,
+            height: line_height,
+            ascent,
+        }
+    }
+
+    /// Return the glyph bitmap(s) needed to draw `ch` in the given style.
+    ///
+    /// Results are cached per `(char, bold, italic)`. Blank cells (spaces and
+    /// anything with no drawable coverage) yield an empty slice.
+    pub fn rasterize(&mut self, ch: char, bold: bool, italic: bool) -> &[RasterizedGlyph] {
+        let key = (ch, bold, italic);
+        if !self.cache.contains_key(&key) {
+            // Compute into a local Vec first: this borrows `font_system`,
+            // `swash_cache`, `buffer`, and `family` — all fields disjoint from
+            // `cache` — so the later `cache.insert` does not conflict.
+            let glyphs = self.build_glyphs(ch, bold, italic);
+            self.cache.insert(key, glyphs);
+        }
+        &self.cache[&key]
+    }
+
+    /// Shape and rasterize a single character into owned RGBA bitmaps.
+    fn build_glyphs(&mut self, ch: char, bold: bool, italic: bool) -> Vec<RasterizedGlyph> {
+        // `family` borrows `self`, so capture the borrowed `Family` before the
+        // `&mut self.font_system` borrows below; they touch disjoint fields.
+        let attrs = build_attrs(self.family.as_family(), bold, italic);
+        let mut tmp = [0u8; 4];
+        let s = ch.encode_utf8(&mut tmp);
+        self.buffer
+            .set_text(s, &attrs, Shaping::Advanced, None);
+        self.buffer
+            .shape_until_scroll(&mut self.font_system, false);
+
+        let mut out = Vec::new();
+        for run in self.buffer.layout_runs() {
+            for glyph in run.glyphs.iter() {
+                let pg = glyph.physical((0.0, 0.0), 1.0);
+                // Clone the Option so the FontSystem borrow ends before we read
+                // the image and build the glyph below.
+                let img_opt = self
+                    .swash_cache
+                    .get_image(&mut self.font_system, pg.cache_key)
+                    .clone();
+                let Some(img) = img_opt else { continue };
+
+                let (w, h) = (img.placement.width, img.placement.height);
+                if w == 0 || h == 0 {
+                    continue;
+                }
+                let pixels = (w * h) as usize;
+
+                let (data, is_color) = match img.content {
+                    // 1 byte/px coverage -> opaque white with alpha = coverage.
+                    SwashContent::Mask => {
+                        let mut d = Vec::with_capacity(pixels * 4);
+                        for &a in &img.data {
+                            d.extend_from_slice(&[255, 255, 255, a]);
+                        }
+                        (d, false)
+                    }
+                    // 3 bytes/px subpixel coverage; collapse to a single alpha.
+                    SwashContent::SubpixelMask => {
+                        let mut d = Vec::with_capacity(pixels * 4);
+                        for px in img.data.chunks_exact(3) {
+                            let a = px[0].max(px[1]).max(px[2]);
+                            d.extend_from_slice(&[255, 255, 255, a]);
+                        }
+                        (d, false)
+                    }
+                    // Already RGBA (color emoji): keep as-is.
+                    SwashContent::Color => (img.data.clone(), true),
+                };
+
+                out.push(RasterizedGlyph {
+                    width: w,
+                    height: h,
+                    left: img.placement.left,
+                    top: img.placement.top,
+                    is_color,
+                    data,
+                });
+            }
+        }
+        out
+    }
+}
+
+/// Best-effort fallback advance when shaping yields no measurable glyph.
+fn font_fallback_width(line_height: f32) -> f32 {
+    (line_height * 0.5).round().max(1.0)
+}
+
+/// Build a `FontSystem` from a single primary font's raw bytes, then enrich the
+/// same database with a small fallback chain so cosmic-text's per-glyph fallback
+/// can resolve code points the primary font lacks (CJK, emoji, misc symbols).
+///
+/// Crucially, the *primary* face is the first source loaded, and it is the only
+/// font we point the generic monospace family at and shape with (`Family::Named`
+/// of its family), so ASCII/Latin always shapes with the primary font. The
+/// fallback fonts are merely additional sources in the same `fontdb::Database`;
+/// because we shape with `Shaping::Advanced`, cosmic-text walks the database for
+/// faces covering missing glyphs and renders them instead of tofu.
+///
+/// `primary_path` is the file the primary bytes were read from, if known; it
+/// seeds the de-dup set so the fallback chain never reloads the primary file.
+///
+/// We deliberately avoid `FontSystem::new()` (a full system scan) here — only a
+/// handful of fontconfig-resolved fallback files are loaded.
+///
+/// Returns `None` if the primary bytes contained no usable face.
+fn build_font_system(bytes: Vec<u8>, primary_path: Option<PathBuf>) -> Option<LoadedFont> {
+    let mut db = fontdb::Database::new();
+    let ids = db.load_font_source(fontdb::Source::Binary(Arc::new(bytes)));
+
+    // The first face among the ids we just loaded is *our* face.
+    let face = ids.iter().filter_map(|id| db.face(*id)).next();
+    let family_name = face.and_then(|f| f.families.first().map(|(n, _)| n.clone()));
+    let is_monospaced = face.map(|f| f.monospaced).unwrap_or(false);
+
+    let family_name = family_name?;
+
+    // Map the generic `monospace` family onto our font as well, so any fallback
+    // path through `Family::Monospace` still resolves to the font we loaded.
+    db.set_monospace_family(family_name.clone());
+
+    // Load the bold/italic faces of the same family so styled text shapes with
+    // the real monospace face rather than falling back to a proportional font.
+    #[cfg(unix)]
+    load_primary_styles(&mut db, &family_name, primary_path.as_deref());
+
+    // Enrich the database with fallback faces (best-effort; failures are skipped).
+    #[cfg(unix)]
+    load_fallback_fonts(&mut db, primary_path.as_deref());
+    #[cfg(not(unix))]
+    let _ = primary_path;
+
+    let font_system = FontSystem::new_with_locale_and_db("en-US".to_string(), db);
+    Some(LoadedFont {
+        font_system,
+        family: FamilyOwned::Named(family_name),
+        is_monospaced,
+    })
+}
+
+/// Fallback families to resolve via fontconfig and add to the database, in order.
+/// Each entry is an `fc-match` pattern; we resolve it to a concrete file with
+/// `fc-match -f %{file} "<pattern>"`. Multiple patterns cover the same script so
+/// that whichever the host actually has installed gets pulled in.
+// Emoji is handled separately (see `load_emoji_fallback`): we load a bundled
+// CBDT color-bitmap face by path, because swash cannot rasterize the COLRv1
+// "Noto Color Emoji" that fontconfig resolves to on most hosts.
+#[cfg(unix)]
+const FALLBACK_PATTERNS: &[&str] = &[
+    // CJK coverage.
+    "Noto Sans CJK",
+    "sans-serif:lang=ja",
+    // Miscellaneous symbols.
+    "Noto Sans Symbols2",
+    "sans-serif",
+];
+
+/// Resolve the fallback patterns via fontconfig and load each distinct file into
+/// `db`. De-duplicates by resolved file path and never reloads the primary file.
+#[cfg(unix)]
+fn load_fallback_fonts(db: &mut fontdb::Database, primary_path: Option<&Path>) {
+    // Seed the seen set with the primary file (canonicalized when possible) so we
+    // never load it a second time as a fallback.
+    let mut seen: HashSet<PathBuf> = HashSet::new();
+    if let Some(p) = primary_path {
+        seen.insert(canonical_or_owned(p));
+    }
+
+    load_emoji_fallback(db, &mut seen);
+
+    for pattern in FALLBACK_PATTERNS {
+        let Some(path) = fc_match_file(pattern) else {
+            continue;
+        };
+        let key = canonical_or_owned(Path::new(&path));
+        if !seen.insert(key) {
+            // Already loaded (primary or an earlier fallback resolved here).
+            continue;
+        }
+        match read_font(&path) {
+            Some(bytes) => {
+                db.load_font_source(fontdb::Source::Binary(Arc::new(bytes)));
+                log::debug!("glassy: loaded fallback font for '{pattern}': {path}");
+            }
+            None => {
+                log::debug!("glassy: fallback '{pattern}' resolved to unreadable {path}");
+            }
+        }
+    }
+}
+
+/// Load the bold, italic, and bold-italic faces of the primary `family` into
+/// `db`, so styled text shapes with the real (monospace) face instead of
+/// falling back to a proportional font for those styles. Best-effort: a style
+/// that fontconfig resolves back to the already-loaded regular file (e.g. a
+/// font with no italic, like FiraCode) is de-duplicated and skipped.
+#[cfg(unix)]
+fn load_primary_styles(db: &mut fontdb::Database, family: &str, primary_path: Option<&Path>) {
+    let mut seen: HashSet<PathBuf> = HashSet::new();
+    if let Some(p) = primary_path {
+        seen.insert(canonical_or_owned(p));
+    }
+    let patterns = [
+        format!("{family}:weight=bold"),
+        format!("{family}:slant=italic"),
+        format!("{family}:weight=bold:slant=italic"),
+    ];
+    for pattern in patterns {
+        let Some(path) = fc_match_file(&pattern) else {
+            continue;
+        };
+        let key = canonical_or_owned(Path::new(&path));
+        if !seen.insert(key) {
+            continue;
+        }
+        if let Some(bytes) = read_font(&path) {
+            db.load_font_source(fontdb::Source::Binary(Arc::new(bytes)));
+            log::debug!("glassy: loaded style face '{pattern}': {path}");
+        }
+    }
+}
+
+/// Load the emoji fallback face.
+///
+/// We prefer a bundled **CBDT color-bitmap** Noto Color Emoji (loaded by an
+/// explicit path), because swash can rasterize CBDT/sbix bitmaps into full-color
+/// glyphs — whereas the COLRv1 "Noto Color Emoji" that fontconfig resolves to on
+/// most modern hosts is unrenderable by swash and comes out blank. Only if no
+/// bundled color face is present do we fall back to a monochrome emoji face.
+#[cfg(unix)]
+fn load_emoji_fallback(db: &mut fontdb::Database, seen: &mut HashSet<PathBuf>) {
+    if let Some(path) = color_emoji_path() {
+        let key = canonical_or_owned(&path);
+        if seen.insert(key) {
+            if let Some(bytes) = read_font(&path) {
+                db.load_font_source(fontdb::Source::Binary(Arc::new(bytes)));
+                log::debug!("glassy: loaded color emoji: {}", path.display());
+                return;
+            }
+        }
+    }
+
+    // No bundled color emoji: fall back to a monochrome face (drawn in the fg
+    // color). `:color=false` forces fontconfig away from an unrenderable COLRv1
+    // face toward the monochrome NotoEmoji outline font.
+    for pattern in ["Noto Emoji:color=false", "emoji"] {
+        if let Some(path) = fc_match_file(pattern) {
+            let key = canonical_or_owned(Path::new(&path));
+            if seen.insert(key) {
+                if let Some(bytes) = read_font(&path) {
+                    db.load_font_source(fontdb::Source::Binary(Arc::new(bytes)));
+                    log::debug!("glassy: loaded monochrome emoji for '{pattern}': {path}");
+                    return;
+                }
+            }
+        }
+    }
+}
+
+/// Locate the bundled CBDT color emoji font, searching the XDG data dir.
+#[cfg(unix)]
+fn color_emoji_path() -> Option<PathBuf> {
+    let mut roots: Vec<PathBuf> = Vec::new();
+    if let Some(xdg) = std::env::var_os("XDG_DATA_HOME") {
+        roots.push(PathBuf::from(xdg));
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        roots.push(PathBuf::from(home).join(".local/share"));
+    }
+    roots
+        .into_iter()
+        .map(|r| r.join("glassy/fonts/NotoColorEmoji.ttf"))
+        .find(|p| p.is_file())
+}
+
+/// Canonicalize a path for de-dup purposes, falling back to the path as-is when
+/// canonicalization fails (e.g. the file is gone between resolve and read).
+#[cfg(unix)]
+fn canonical_or_owned(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// Resolve an arbitrary `fc-match` pattern to a single concrete file path.
+///
+/// Unlike `fc_match_family`, we do *not* verify the resolved family — these are
+/// fallback fonts, so whatever file fontconfig returns for the pattern is
+/// acceptable (fontconfig always returns *some* installed file).
+#[cfg(unix)]
+fn fc_match_file(pattern: &str) -> Option<String> {
+    let output = Command::new("fc-match")
+        .args(["-f", "%{file}", pattern])
+        .output()
+        .map_err(|err| log::debug!("glassy: fc-match unavailable: {err}"))
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if path.is_empty() { None } else { Some(path) }
+}
+
+/// Resolve an ordered list of font candidates via the discovery chain. Each
+/// candidate carries the raw bytes plus a short label identifying its origin.
+/// An empty list signals that the caller should fall back to a full system
+/// scan.
+fn discover_font_candidates() -> Vec<FontCandidate> {
+    let mut candidates = Vec::new();
+
+    // 1. Explicit override: an absolute path to a font file.
+    if let Ok(path) = std::env::var("GLASSY_FONT") {
+        if let Some(bytes) = read_font(&path) {
+            candidates.push(FontCandidate {
+                bytes,
+                path: Some(PathBuf::from(&path)),
+                source_label: format!("GLASSY_FONT={path}"),
+            });
+        }
+    }
+
+    // 2. A curated list of good monospace families, each resolved to a concrete
+    //    file via fontconfig and verified to actually *be* that family (fc-match
+    //    returns a nearest fallback even when the family is absent).
+    #[cfg(unix)]
+    for family in CURATED_FAMILIES {
+        if let Some(path) = fc_match_family(family) {
+            if let Some(bytes) = read_font(&path) {
+                candidates.push(FontCandidate {
+                    bytes,
+                    path: Some(PathBuf::from(&path)),
+                    source_label: format!("{family} ({path})"),
+                });
+            }
+        }
+    }
+
+    // 3. Generic monospace via fontconfig; always a real monospace face.
+    #[cfg(unix)]
+    if let Some(path) = fc_match_monospace() {
+        if let Some(bytes) = read_font(&path) {
+            candidates.push(FontCandidate {
+                bytes,
+                path: Some(PathBuf::from(&path)),
+                source_label: format!("fc-match monospace ({path})"),
+            });
+        }
+    }
+
+    // 4. Probe well-known install locations as a last resort.
+    for path in PROBE_PATHS {
+        if let Some(bytes) = read_font(path) {
+            candidates.push(FontCandidate {
+                bytes,
+                path: Some(PathBuf::from(path)),
+                source_label: format!("probe ({path})"),
+            });
+        }
+    }
+
+    candidates
+}
+
+/// Read a font file, logging and skipping on any I/O error. Paths may contain
+/// `[`/`]` (variable fonts, e.g. `NotoSansMono[wght].ttf`); `std::fs::read`
+/// treats the path verbatim, so no glob/escaping handling is needed.
+fn read_font(path: impl AsRef<Path>) -> Option<Vec<u8>> {
+    let path = path.as_ref();
+    match std::fs::read(path) {
+        Ok(bytes) => Some(bytes),
+        Err(err) => {
+            log::debug!("glassy: skipping font {}: {err}", path.display());
+            None
+        }
+    }
+}
+
+/// Curated, high-quality monospace families to try first, in priority order.
+/// `FiraCode Nerd Font Mono` is the ideal default when present.
+#[cfg(unix)]
+const CURATED_FAMILIES: &[&str] = &[
+    "FiraCode Nerd Font Mono",
+    "JetBrains Mono",
+    "JetBrainsMono Nerd Font",
+    "Cascadia Code",
+    "Hack",
+    "Iosevka",
+    "DejaVu Sans Mono",
+    "Liberation Mono",
+];
+
+/// Query fontconfig for a specific family, returning its file path only if the
+/// match is genuinely that family. `fc-match` always returns *some* font (a
+/// nearest fallback), so we must confirm the resolved family name contains the
+/// requested family (case-insensitive) before trusting the file.
+#[cfg(unix)]
+fn fc_match_family(family: &str) -> Option<String> {
+    let output = Command::new("fc-match")
+        .args(["-f", "%{family}\t%{file}", family])
+        .output()
+        .map_err(|err| log::debug!("glassy: fc-match unavailable: {err}"))
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let line = String::from_utf8_lossy(&output.stdout);
+    let (matched_family, file) = line.split_once('\t')?;
+    let file = file.trim();
+    if file.is_empty() {
+        return None;
+    }
+    // `%{family}` may be a comma-separated list of alias names; accept the file
+    // if any of them contains the requested family name, case-insensitively.
+    let wanted = family.to_lowercase();
+    let is_match = matched_family
+        .split(',')
+        .any(|name| name.trim().to_lowercase().contains(&wanted));
+    if is_match {
+        Some(file.to_string())
+    } else {
+        log::debug!(
+            "glassy: fc-match for '{family}' returned fallback '{}', skipping",
+            matched_family.trim()
+        );
+        None
+    }
+}
+
+/// Query fontconfig for the resolved monospace font file path.
+#[cfg(unix)]
+fn fc_match_monospace() -> Option<String> {
+    let output = Command::new("fc-match")
+        .args(["-f", "%{file}", "monospace"])
+        .output()
+        .map_err(|err| log::debug!("glassy: fc-match unavailable: {err}"))
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if path.is_empty() { None } else { Some(path) }
+}
+
+/// Known monospace font locations, probed in order as a last resort.
+#[cfg(target_os = "macos")]
+const PROBE_PATHS: &[&str] = &[
+    "/System/Library/Fonts/SFNSMono.ttf",
+    "/System/Library/Fonts/Menlo.ttc",
+    "/System/Library/Fonts/Monaco.ttf",
+    "/Library/Fonts/Menlo.ttc",
+];
+
+#[cfg(not(target_os = "macos"))]
+const PROBE_PATHS: &[&str] = &[
+    "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+    "/usr/share/fonts/dejavu-sans-mono-fonts/DejaVuSansMono.ttf",
+    "/usr/share/fonts/TTF/DejaVuSansMono.ttf",
+    "/usr/share/fonts/liberation/LiberationMono-Regular.ttf",
+];
