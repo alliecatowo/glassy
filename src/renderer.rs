@@ -230,12 +230,10 @@ pub struct Renderer {
     uniform_bind_group: wgpu::BindGroup,
 
     atlas_texture: wgpu::Texture,
+    // The bind group internally retains the texture view, sampler, and layout it
+    // was built from, so we only need to keep the texture (for atlas writes) and
+    // the bind group itself.
     atlas_bind_group: wgpu::BindGroup,
-    // Kept alive for the lifetime of the renderer (their resources back the atlas
-    // bind group); listed as owned state per the contract.
-    atlas_bind_group_layout: wgpu::BindGroupLayout,
-    atlas_sampler: wgpu::Sampler,
-    atlas_view: wgpu::TextureView,
 
     packer: Packer,
     glyph_cache: HashMap<(char, bool, bool), Vec<AtlasGlyph>>,
@@ -593,9 +591,6 @@ impl Renderer {
             uniform_bind_group,
             atlas_texture,
             atlas_bind_group,
-            atlas_bind_group_layout,
-            atlas_sampler,
-            atlas_view,
             packer: Packer::new(),
             glyph_cache: HashMap::new(),
             cluster_cache: HashMap::new(),
