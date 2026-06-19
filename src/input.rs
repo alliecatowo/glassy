@@ -97,6 +97,52 @@ pub fn encode_key(event: &KeyEvent, mods: ModifiersState) -> Option<Vec<u8>> {
     None
 }
 
+/// A mouse event to report to the terminal application.
+pub struct MouseReport {
+    /// Base button id: 0=left, 1=middle, 2=right, 64=wheel-up, 65=wheel-down.
+    pub button: u8,
+    /// 0-based grid column and row.
+    pub col: usize,
+    pub row: usize,
+    /// True for press / wheel; false for release.
+    pub pressed: bool,
+    /// True when this is a motion (drag) event.
+    pub motion: bool,
+}
+
+/// Encode a mouse event as a terminal report. Uses SGR (1006) form when `sgr`
+/// is set (no coordinate limit), otherwise the legacy X10 (1000) form.
+pub fn encode_mouse(report: MouseReport, mods: ModifiersState, sgr: bool) -> Vec<u8> {
+    let mut cb = report.button as u32;
+    if report.motion {
+        cb += 32;
+    }
+    if mods.shift_key() {
+        cb += 4;
+    }
+    if mods.alt_key() {
+        cb += 8;
+    }
+    if mods.control_key() {
+        cb += 16;
+    }
+
+    if sgr {
+        let kind = if report.pressed { 'M' } else { 'm' };
+        return format!("\x1b[<{};{};{}{}", cb, report.col + 1, report.row + 1, kind).into_bytes();
+    }
+
+    // Legacy X10: ESC [ M  Cb  Cx  Cy, each offset by 32. Release reports the
+    // low two button bits as 0b11. Coordinates are clamped to a single byte.
+    let cb_legacy = if report.pressed || report.button >= 64 {
+        cb
+    } else {
+        (cb & !0b11) | 0b11
+    };
+    let enc = |v: usize| -> u8 { (32 + (v + 1).min(223)) as u8 };
+    vec![0x1b, b'[', b'M', (32 + cb_legacy).min(255) as u8, enc(report.col), enc(report.row)]
+}
+
 /// Map a character to its C0 control byte for Ctrl-<char>, if one exists.
 fn control_byte(c: char) -> Option<u8> {
     let upper = c.to_ascii_uppercase();
