@@ -36,10 +36,30 @@ const WHEEL_LINES: i32 = 3;
 /// terminal cadence (and the GTK/VTE default).
 const BLINK_INTERVAL: Duration = Duration::from_millis(530);
 
-/// Static configuration resolved at startup.
+/// Physical-pixel step per Ctrl +/- font-size adjustment.
+const FONT_STEP_PX: f32 = 2.0;
+
+/// A runtime font-size adjustment requested via Ctrl +/-/0.
+#[derive(Clone, Copy)]
+enum FontStep {
+    Inc,
+    Dec,
+    Reset,
+}
+
+/// Static configuration resolved at startup (config file + CLI overrides).
 pub struct Config {
+    /// Preferred font family name; `None` uses the discovery default (FiraCode…).
+    pub font_family: Option<String>,
     /// Logical font size in points (scaled by the monitor's DPI factor).
     pub font_size: f32,
+    /// Window background opacity in [0, 1]. 1.0 is fully opaque.
+    pub opacity: f32,
+    /// Padding (grid inset) override in logical px; `None` derives it from the
+    /// cell height.
+    pub padding: Option<f32>,
+    /// Lines of scrollback history to retain.
+    pub scrollback: usize,
     /// Shell program + args; `None` uses the user's default shell.
     pub shell: Option<Shell>,
 }
@@ -55,6 +75,10 @@ pub struct App {
 
     cols: usize,
     rows: usize,
+
+    /// The configured font size in physical px, captured at startup; Ctrl 0 resets
+    /// the runtime size to this. `None` until the window/renderer exist.
+    base_font_px: Option<f32>,
 
     mods: ModifiersState,
     focused: bool,
@@ -104,6 +128,7 @@ impl App {
             pty: None,
             cols: 0,
             rows: 0,
+            base_font_px: None,
             mods: ModifiersState::empty(),
             focused: true,
             mouse_cell: (0, 0),
@@ -332,7 +357,7 @@ impl App {
         let invert_block =
             cursor_shown && self.focused && cursor.shape == CursorShape::Block;
 
-        renderer.begin_frame(color::DEFAULT_BG);
+        renderer.begin_frame(color::default_bg());
 
         for indexed in content.display_iter {
             let cell = indexed.cell;
@@ -360,7 +385,7 @@ impl App {
             // Tint selected cells. Done before the cursor inversion so the cursor
             // still reads clearly when it sits inside the selection.
             if selection.is_some_and(|range| range.contains(indexed.point)) {
-                bg = color::SELECTION_BG;
+                bg = color::selection_bg();
             }
             // Block cursor: invert the cell beneath it.
             if invert_block && row == cursor_row && col == cursor_col {
@@ -463,6 +488,32 @@ impl App {
         self.dirty = false;
     }
 
+    /// Apply a runtime font-size change (Ctrl +/-/0): reload the font in the
+    /// renderer, recompute the grid for the new cell box + padding, and resize the
+    /// PTY. A no-op before the renderer/PTY exist.
+    fn resize_font(&mut self, step: FontStep) {
+        let (Some(renderer), Some(pty)) = (self.renderer.as_mut(), self.pty.as_ref()) else {
+            return;
+        };
+        let target = match step {
+            FontStep::Inc => renderer.font_px() + FONT_STEP_PX,
+            FontStep::Dec => renderer.font_px() - FONT_STEP_PX,
+            FontStep::Reset => self.base_font_px.unwrap_or_else(|| renderer.font_px()),
+        };
+        renderer.set_font_size(target);
+
+        // Recompute the grid for the new cell metrics + padding against the
+        // current surface, and inform the PTY.
+        if let Some(window) = self.window.as_ref() {
+            let size = window.inner_size();
+            let m = renderer.cell_metrics();
+            let (cols, rows) = Self::grid_for(size, m.width, m.height, renderer.pad());
+            self.cols = cols;
+            self.rows = rows;
+            pty.resize(cols, rows, m.width.round() as u16, m.height.round() as u16);
+        }
+    }
+
     fn handle_resize(&mut self, event_loop: &ActiveEventLoop, size: PhysicalSize<u32>) {
         if size.width == 0 || size.height == 0 {
             return;
@@ -492,9 +543,9 @@ impl ApplicationHandler<UserEvent> for App {
             .with_title("glassy")
             .with_inner_size(LogicalSize::new(960.0, 600.0))
             // Request a translucent window (the "glassy" namesake). The renderer
-            // drives the backdrop alpha from its OPACITY const when the compositor
-            // supports a transparent surface; on platforms that don't, this is a
-            // harmless no-op and the window stays opaque.
+            // drives the backdrop alpha from its configured opacity when the
+            // compositor supports a transparent surface; on platforms that don't,
+            // this is a harmless no-op and the window stays opaque.
             .with_transparent(true)
             .with_visible(false); // shown after the first frame to avoid a flash
         let window = match event_loop.create_window(attrs) {
@@ -519,8 +570,14 @@ impl ApplicationHandler<UserEvent> for App {
 
         let scale = window.scale_factor() as f32;
         let font_px = self.config.font_size * scale;
+        self.base_font_px = Some(font_px);
 
-        let mut renderer = match Renderer::new(window.clone(), font_px) {
+        let mut renderer = match Renderer::new(
+            window.clone(),
+            self.config.font_family.clone(),
+            font_px,
+            self.config.opacity,
+        ) {
             Ok(r) => r,
             Err(e) => {
                 log::error!("failed to initialize renderer: {e:#}");
@@ -528,6 +585,10 @@ impl ApplicationHandler<UserEvent> for App {
                 return;
             }
         };
+        // Apply an explicit padding override (logical px scaled to physical).
+        if let Some(pad) = self.config.padding {
+            renderer.set_pad(pad * scale);
+        }
 
         let size = window.inner_size();
         renderer.resize(size.width, size.height);
@@ -544,6 +605,7 @@ impl ApplicationHandler<UserEvent> for App {
             m.height.round() as u16,
             self.config.shell.clone(),
             None,
+            self.config.scrollback,
         ) {
             Ok(p) => p,
             Err(e) => {
@@ -642,6 +704,30 @@ impl ApplicationHandler<UserEvent> for App {
                                 return;
                             }
                             _ => {}
+                        }
+                    }
+                }
+
+                // Ctrl +/-/0 adjusts the font size at runtime (and Ctrl 0 resets
+                // to the configured size). Intercepted before `encode_key` so the
+                // control bytes for these keys never reach the child. Matches the
+                // de-facto terminal/browser zoom convention. Shift is allowed (so
+                // Ctrl+Shift+'=' i.e. Ctrl+'+' works) but not required.
+                if event.state.is_pressed()
+                    && self.mods.control_key()
+                    && !self.mods.alt_key()
+                {
+                    if let Key::Character(s) = &event.logical_key {
+                        let step = match s.as_str() {
+                            "+" | "=" => Some(FontStep::Inc),
+                            "-" | "_" => Some(FontStep::Dec),
+                            "0" => Some(FontStep::Reset),
+                            _ => None,
+                        };
+                        if let Some(step) = step {
+                            self.resize_font(step);
+                            self.mark_dirty(event_loop);
+                            return;
                         }
                     }
                 }

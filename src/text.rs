@@ -114,10 +114,16 @@ struct LoadedFont {
 
 impl Text {
     /// Discover a monospace font, load it, and measure the cell box for `font_px`.
-    pub fn load(font_px: f32) -> Result<(Text, CellMetrics)> {
-        // Gather candidates in priority order (explicit override, curated
-        // families verified via fontconfig, generic monospace, known paths).
-        let candidates = discover_font_candidates();
+    ///
+    /// `family` is an optional preferred family name (from config/CLI). When set
+    /// it is tried first (resolved via fontconfig, verified to actually be that
+    /// family); discovery then falls back to the curated list and the rest of the
+    /// chain so a typo'd or absent family still yields a usable monospace font.
+    pub fn load(family: Option<&str>, font_px: f32) -> Result<(Text, CellMetrics)> {
+        // Gather candidates in priority order (explicit override, requested
+        // family, curated families verified via fontconfig, generic monospace,
+        // known paths).
+        let candidates = discover_font_candidates(family);
 
         // Build a `FontSystem` from the first candidate that yields a usable
         // face. If a candidate's loaded face is *not* monospaced and more
@@ -602,7 +608,7 @@ fn fc_match_file(pattern: &str) -> Option<String> {
 /// candidate carries the raw bytes plus a short label identifying its origin.
 /// An empty list signals that the caller should fall back to a full system
 /// scan.
-fn discover_font_candidates() -> Vec<FontCandidate> {
+fn discover_font_candidates(requested: Option<&str>) -> Vec<FontCandidate> {
     let mut candidates = Vec::new();
 
     // 1. Explicit override: an absolute path to a font file.
@@ -615,6 +621,39 @@ fn discover_font_candidates() -> Vec<FontCandidate> {
             });
         }
     }
+
+    // 1b. Config/CLI-requested family: resolve via fontconfig and verify it is
+    //     genuinely that family (fc-match returns a fallback otherwise). An
+    //     absolute path is also accepted directly as a font file.
+    #[cfg(unix)]
+    if let Some(name) = requested {
+        let name = name.trim();
+        if !name.is_empty() {
+            // Allow `font_family` to be an explicit file path.
+            let as_path = Path::new(name);
+            if as_path.is_file() {
+                if let Some(bytes) = read_font(name) {
+                    candidates.push(FontCandidate {
+                        bytes,
+                        path: Some(PathBuf::from(name)),
+                        source_label: format!("font_family path ({name})"),
+                    });
+                }
+            } else if let Some(path) = fc_match_family(name) {
+                if let Some(bytes) = read_font(&path) {
+                    candidates.push(FontCandidate {
+                        bytes,
+                        path: Some(PathBuf::from(&path)),
+                        source_label: format!("font_family {name} ({path})"),
+                    });
+                }
+            } else {
+                log::warn!("glassy: requested font_family '{name}' not found; using default");
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = requested;
 
     // 2. A curated list of good monospace families, each resolved to a concrete
     //    file via fontconfig and verified to actually *be* that family (fc-match

@@ -25,12 +25,13 @@ const GLYPH_GAP: u32 = 1;
 /// is never empty and we rarely reallocate.
 const INITIAL_INSTANCES: usize = 4096;
 
-/// Window background opacity (the "glassy" namesake): the alpha applied to the
-/// terminal's cell backgrounds and clear color so the desktop shows through.
-/// 1.0 is fully opaque. Foreground content (glyphs, box drawing, cursor, rules)
-/// stays fully opaque so text reads crisply over the translucent backdrop.
-/// Exposed as a const for now; config wiring comes next.
-const OPACITY: f32 = 0.92;
+/// Default window background opacity (the "glassy" namesake) when config/CLI do
+/// not specify one: the alpha applied to the terminal's cell backgrounds and
+/// clear color so the desktop shows through. 1.0 is fully opaque. Foreground
+/// content (glyphs, box drawing, cursor, rules) stays fully opaque so text reads
+/// crisply over the translucent backdrop. The effective value is configurable
+/// and stored per-`Renderer` (`opacity`).
+pub const DEFAULT_OPACITY: f32 = 0.92;
 
 /// Transient surface-acquisition outcomes for a frame.
 ///
@@ -166,6 +167,12 @@ fn collect_rasters(glyphs: &[crate::text::RasterizedGlyph]) -> Vec<Raster> {
         .collect()
 }
 
+/// The window padding (grid inset) for a given cell height, in physical pixels.
+/// Scales with the cell so a larger font keeps proportional breathing room.
+fn pad_for(cell_height: f32) -> f32 {
+    (cell_height * 0.35).round().max(4.0)
+}
+
 /// Simple shelf packer state for the atlas texture.
 struct Packer {
     cursor_x: u32,
@@ -238,6 +245,16 @@ pub struct Renderer {
     text: Text,
     metrics: CellMetrics,
     pad: f32,
+    /// Explicit padding override in physical px (from config). When `Some`, it is
+    /// used verbatim instead of the cell-derived `pad_for`, and is preserved
+    /// across runtime font resizes.
+    pad_override: Option<f32>,
+    /// The current font size in physical pixels (tracked so runtime resize can
+    /// step it up/down and reload the font).
+    font_px: f32,
+    /// The resolved/requested font family name, kept so a runtime font resize can
+    /// reload the same family at the new size. `None` uses the discovery default.
+    font_family: Option<String>,
 
     bg_instances: Vec<BgInstance>,
     fg_instances: Vec<FgInstance>,
@@ -248,6 +265,10 @@ pub struct Renderer {
 
     clear_color: [f32; 4],
 
+    /// Window background opacity in [0, 1]; applied to cell backgrounds and the
+    /// clear color (premultiplied) when the surface is transparent.
+    opacity: f32,
+
     /// Whether the surface alpha mode actually composites alpha (a transparent
     /// window). When false we keep backgrounds fully opaque so a compositor that
     /// can't do translucency doesn't darken the window via premultiplied RGB.
@@ -255,9 +276,14 @@ pub struct Renderer {
 }
 
 impl Renderer {
-    pub fn new(window: Arc<Window>, font_px: f32) -> Result<Renderer> {
+    pub fn new(
+        window: Arc<Window>,
+        font_family: Option<String>,
+        font_px: f32,
+        opacity: f32,
+    ) -> Result<Renderer> {
         let (text, metrics) =
-            Text::load(font_px).context("loading font and cell metrics")?;
+            Text::load(font_family.as_deref(), font_px).context("loading font and cell metrics")?;
 
         // --- wgpu init (synchronous via pollster). ---
         // `InstanceDescriptor` has no `Default` in wgpu 29 (its `display` field is
@@ -575,7 +601,10 @@ impl Renderer {
             cluster_cache: HashMap::new(),
             text,
             metrics,
-            pad: (metrics.height * 0.35).round().max(4.0),
+            pad: pad_for(metrics.height),
+            pad_override: None,
+            font_px,
+            font_family,
             bg_instances: Vec::with_capacity(INITIAL_INSTANCES),
             fg_instances: Vec::with_capacity(INITIAL_INSTANCES),
             bg_buffer,
@@ -583,6 +612,7 @@ impl Renderer {
             bg_capacity: INITIAL_INSTANCES,
             fg_capacity: INITIAL_INSTANCES,
             clear_color: [0.0, 0.0, 0.0, 1.0],
+            opacity: opacity.clamp(0.0, 1.0),
             transparent,
         };
 
@@ -618,6 +648,54 @@ impl Renderer {
         self.pad
     }
 
+    /// The current font size in physical pixels.
+    pub fn font_px(&self) -> f32 {
+        self.font_px
+    }
+
+    /// Override the grid padding (inset) with an explicit physical-pixel value,
+    /// preserved across runtime font resizes. The caller must recompute the grid.
+    pub fn set_pad(&mut self, pad: f32) {
+        let pad = pad.max(0.0);
+        self.pad_override = Some(pad);
+        self.pad = pad;
+    }
+
+    /// Reload the font at a new physical pixel size, recomputing the cell metrics
+    /// and padding and rebuilding the glyph atlas. On failure the previous font
+    /// is retained (the error is logged) so a bad size never breaks rendering.
+    ///
+    /// The caller is responsible for re-querying `cell_metrics()`/`pad()` and
+    /// resizing the PTY grid afterward (the renderer does not know the grid).
+    pub fn set_font_size(&mut self, font_px: f32) {
+        let font_px = font_px.clamp(4.0, 300.0);
+        if (font_px - self.font_px).abs() < 0.01 {
+            return;
+        }
+        let (text, metrics) = match Text::load(self.font_family.as_deref(), font_px) {
+            Ok(loaded) => loaded,
+            Err(e) => {
+                log::warn!("glassy: font resize to {font_px:.1}px failed: {e:#}");
+                return;
+            }
+        };
+        self.text = text;
+        self.metrics = metrics;
+        self.pad = self.pad_override.unwrap_or_else(|| pad_for(metrics.height));
+        self.font_px = font_px;
+
+        // The atlas holds glyphs rasterized at the old size; reset the packer and
+        // both caches so glyphs are re-rasterized at the new size on demand.
+        self.packer.reset();
+        self.glyph_cache.clear();
+        self.cluster_cache.clear();
+
+        // Pre-warm printable ASCII at the new size for a rasterize-free first frame.
+        for byte in 0x20u8..=0x7E {
+            self.ensure_glyphs(byte as char, false, false);
+        }
+    }
+
     pub fn begin_frame(&mut self, default_bg: [f32; 4]) {
         self.bg_instances.clear();
         self.fg_instances.clear();
@@ -627,7 +705,7 @@ impl Renderer {
     }
 
     /// Apply the window opacity to a cell-background color and premultiply it.
-    /// Backgrounds become translucent (alpha = `OPACITY`) so the desktop shows
+    /// Backgrounds become translucent (alpha = `self.opacity`) so the desktop shows
     /// through; the RGB is premultiplied to match the PreMultiplied surface and
     /// the foreground pass's premultiplied blending. A no-op (and fully opaque)
     /// when the compositor can't do translucency.
@@ -635,7 +713,7 @@ impl Renderer {
         if !self.transparent {
             return color;
         }
-        let a = color[3] * OPACITY;
+        let a = color[3] * self.opacity;
         [color[0] * a, color[1] * a, color[2] * a, a]
     }
 

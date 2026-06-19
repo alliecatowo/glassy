@@ -100,6 +100,7 @@ impl Pty {
         cell_height: u16,
         shell: Option<Shell>,
         working_directory: Option<PathBuf>,
+        scrollback: usize,
     ) -> anyhow::Result<Pty> {
         // Sets COLORTERM=truecolor and a base TERM on glassy's own environment,
         // which the child inherits.
@@ -121,7 +122,7 @@ impl Pty {
         let grid = GridSize { cols, rows };
 
         let config = Config {
-            scrolling_history: 10_000,
+            scrolling_history: scrollback,
             ..Config::default()
         };
         let term = Arc::new(FairMutex::new(Term::new(
