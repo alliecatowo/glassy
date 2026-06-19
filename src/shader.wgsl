@@ -80,24 +80,57 @@ fn undercurl_coverage(uv: vec2<f32>, quad_px: vec2<f32>) -> f32 {
     return 1.0 - smoothstep(half - 0.75, half + 0.75, d);
 }
 
+// sRGB transfer functions (IEC 61966-2-1). The surface is a plain UNORM (non-
+// sRGB) format, so values written to it are interpreted literally as gamma-
+// encoded sRGB and the fixed-function blend composites in that gamma space. To
+// apply glyph coverage in LINEAR light we decode the text color to linear here,
+// weight it by coverage, then re-encode to sRGB before returning. This keeps the
+// thin-stroke edge weighting perceptually correct (no over-thin / over-heavy
+// fringes) without changing the hue of the (fully covered) interior pixels.
+fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
+    let lo = c / 12.92;
+    let hi = pow((c + 0.055) / 1.055, vec3<f32>(2.4));
+    return select(hi, lo, c <= vec3<f32>(0.04045));
+}
+fn linear_to_srgb(c: vec3<f32>) -> vec3<f32> {
+    let lo = c * 12.92;
+    let hi = 1.055 * pow(c, vec3<f32>(1.0 / 2.4)) - 0.055;
+    return select(hi, lo, c <= vec3<f32>(0.0031308));
+}
+
+// Apply `cov` glyph coverage to an sRGB foreground color in linear space and
+// return a PREMULTIPLIED sRGB result for the premultiplied-alpha blend. The
+// linear color is scaled by coverage (the physically correct partial-pixel
+// weighting) and re-encoded; the returned alpha is the coverage itself so the
+// destination is weighted by (1 - cov) as before. At cov == 1 this is an exact
+// round-trip (interior hue unchanged); at the edges the coverage now darkens the
+// stroke along the linear ramp, matching high-quality renderers.
+fn coverage_blend(color: vec3<f32>, cov: f32) -> vec4<f32> {
+    let lin = srgb_to_linear(color) * cov;
+    return vec4<f32>(linear_to_srgb(lin), cov);
+}
+
 // The foreground pass uses premultiplied-alpha blending so glyphs composite
 // correctly over a translucent backdrop, so every branch below returns a
 // premultiplied color (rgb already scaled by the output alpha).
 @fragment fn fs_fg(in: FgOut) -> @location(0) vec4<f32> {
     if (in.flags == 2u) {
-        // Undercurl: procedural sine-wave coverage tinted with the decoration color.
-        let cov = undercurl_coverage(in.uv, in.quad_px);
-        let a = in.color.a * cov;
-        return vec4<f32>(in.color.rgb * a, a);
+        // Undercurl: procedural sine-wave coverage tinted with the decoration
+        // color, blended in linear space like the coverage-mask glyph path.
+        let cov = undercurl_coverage(in.uv, in.quad_px) * in.color.a;
+        return coverage_blend(in.color.rgb, cov);
     }
     let texel = textureSample(atlas_tex, atlas_samp, in.uv);
     if (in.flags == 1u) {
         // Color glyph: the atlas holds straight-alpha RGBA, so premultiply it here
         // for the premultiplied-alpha blend (otherwise the edges fringe dark).
+        // Color emoji carry their own (already gamma-encoded) RGB, so we leave
+        // them untouched and only premultiply — no linear re-tinting.
         let a = texel.a;
         return vec4<f32>(texel.rgb * a, a);
     }
-    // Coverage mask: tint with the cell foreground, alpha = sampled coverage.
-    let a = in.color.a * texel.a;
-    return vec4<f32>(in.color.rgb * a, a);
+    // Coverage mask: tint with the cell foreground, coverage applied in linear
+    // space for gamma-correct antialiasing of the glyph edges.
+    let cov = in.color.a * texel.a;
+    return coverage_blend(in.color.rgb, cov);
 }
