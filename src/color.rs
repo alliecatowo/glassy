@@ -15,6 +15,9 @@ use alacritty_terminal::vte::ansi::{Color, NamedColor, Rgb};
 pub const DEFAULT_FG: [f32; 4] = [0.752_941_2, 0.792_156_9, 0.960_784_3, 1.0];
 /// Default background (deep, cool near-black ~#1a1b26).
 pub const DEFAULT_BG: [f32; 4] = [0.101_960_786, 0.105_882_354, 0.149_019_61, 1.0];
+/// Selection background (muted Tokyo Night blue-gray ~#283457). Used to tint the
+/// background of cells covered by the active text selection.
+pub const SELECTION_BG: [f32; 4] = [0.156_862_75, 0.203_921_57, 0.341_176_48, 1.0];
 
 const FG: Rgb = Rgb { r: 0xC0, g: 0xCA, b: 0xF5 };
 const BG: Rgb = Rgb { r: 0x1A, g: 0x1B, b: 0x26 };

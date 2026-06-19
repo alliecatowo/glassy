@@ -163,6 +163,28 @@ impl Pty {
         self.notifier.notify(bytes);
     }
 
+    /// Paste clipboard text into the child.
+    ///
+    /// When the application has enabled bracketed paste (DECSET 2004), the text
+    /// is wrapped in `ESC[200~` .. `ESC[201~` so the program can distinguish
+    /// pasted content from typed input. Any embedded `ESC[201~` is stripped so a
+    /// hostile clipboard cannot break out of the paste and inject commands.
+    pub fn paste(&self, text: &str, bracketed: bool) {
+        if text.is_empty() {
+            return;
+        }
+        if bracketed {
+            let sanitized = text.replace("\x1b[201~", "");
+            let mut out = Vec::with_capacity(sanitized.len() + 12);
+            out.extend_from_slice(b"\x1b[200~");
+            out.extend_from_slice(sanitized.as_bytes());
+            out.extend_from_slice(b"\x1b[201~");
+            self.write(out);
+        } else {
+            self.write(text.as_bytes().to_vec());
+        }
+    }
+
     /// Inform the PTY + terminal of a new grid size.
     pub fn resize(&self, cols: usize, rows: usize, cell_width: u16, cell_height: u16) {
         let window_size = WindowSize {

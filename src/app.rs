@@ -10,6 +10,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use alacritty_terminal::grid::Scroll;
+use alacritty_terminal::index::{Column, Line, Point, Side};
+use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::TermMode;
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::tty::Shell;
@@ -56,8 +58,19 @@ pub struct App {
     // Mouse reporting state.
     /// Last known cursor cell (col, row), clamped to the grid.
     mouse_cell: (usize, usize),
+    /// Last raw cursor position in physical pixels (for sub-cell side tests).
+    mouse_px: (f64, f64),
     /// Button currently held (for drag reports); base id 0=L/1=M/2=R.
     held_button: Option<u8>,
+    /// True while the left button drives a glassy-side text selection (i.e. a
+    /// press that started while NOT in mouse-reporting mode).
+    selecting: bool,
+    /// Click-chain state for double/triple click detection: (cell, count, time).
+    last_click: Option<((usize, usize), u32, Instant)>,
+
+    /// Lazily-created OS clipboard handle (arboard). `None` until first use, and
+    /// stays `None` if the platform clipboard is unavailable.
+    clipboard: Option<arboard::Clipboard>,
 
     // Render-on-demand throttle state.
     dirty: bool,
@@ -83,7 +96,11 @@ impl App {
             mods: ModifiersState::empty(),
             focused: true,
             mouse_cell: (0, 0),
+            mouse_px: (0.0, 0.0),
             held_button: None,
+            selecting: false,
+            last_click: None,
+            clipboard: None,
             dirty: false,
             next_frame: Instant::now(),
             refresh: Duration::from_micros(16_666), // 60 Hz default until queried
@@ -146,6 +163,110 @@ impl App {
         pty.write(bytes);
     }
 
+    /// Which side (left/right half) of its cell a physical x-coordinate falls on.
+    /// Selection uses this so the boundary cell is included or excluded based on
+    /// where exactly the pointer is, matching every other terminal.
+    fn cell_side(&self, x: f64) -> Side {
+        let Some(renderer) = self.renderer.as_ref() else {
+            return Side::Left;
+        };
+        let m = renderer.cell_metrics();
+        let pad = renderer.pad() as f64;
+        let rel = (x - pad) / m.width as f64;
+        let frac = rel - rel.floor();
+        if frac < 0.5 { Side::Left } else { Side::Right }
+    }
+
+    /// Convert a visible screen cell (col, row) to a grid `Point`. Screen rows
+    /// map to grid lines by subtracting the scrollback display offset, the
+    /// inverse of the `+ display_offset` used when rendering.
+    fn grid_point(&self, col: usize, row: usize) -> Point {
+        let display_offset = match self.pty.as_ref() {
+            Some(pty) => pty.term.lock().grid().display_offset() as i32,
+            None => 0,
+        };
+        Point::new(Line(row as i32 - display_offset), Column(col))
+    }
+
+    /// Begin a text selection at the current pointer location. `ty` selects the
+    /// granularity (Simple for a single click, Semantic for double, Lines for
+    /// triple).
+    fn start_selection(&mut self, ty: SelectionType) {
+        let Some(pty) = self.pty.as_ref() else { return };
+        let (col, row) = self.mouse_cell;
+        let point = self.grid_point(col, row);
+        let side = self.cell_side(self.mouse_px.0);
+        pty.term.lock().selection = Some(Selection::new(ty, point, side));
+        self.selecting = true;
+    }
+
+    /// Extend the in-progress selection to the current pointer location.
+    fn update_selection(&mut self) {
+        let Some(pty) = self.pty.as_ref() else { return };
+        let (col, row) = self.mouse_cell;
+        let point = self.grid_point(col, row);
+        let side = self.cell_side(self.mouse_px.0);
+        let mut term = pty.term.lock();
+        if let Some(sel) = term.selection.as_mut() {
+            sel.update(point, side);
+        }
+    }
+
+    /// Clear any active selection (e.g. a plain click away from it).
+    fn clear_selection(&mut self) {
+        if let Some(pty) = self.pty.as_ref() {
+            pty.term.lock().selection = None;
+        }
+    }
+
+    /// Copy the current selection to the OS clipboard.
+    fn copy_selection(&mut self) {
+        let text = match self.pty.as_ref() {
+            Some(pty) => pty.term.lock().selection_to_string(),
+            None => None,
+        };
+        let Some(text) = text else { return };
+        if text.is_empty() {
+            return;
+        }
+        let cb = self.clipboard();
+        if let Some(cb) = cb {
+            if let Err(e) = cb.set_text(text) {
+                log::debug!("clipboard copy failed: {e}");
+            }
+        }
+    }
+
+    /// Paste the OS clipboard contents into the child, honoring bracketed paste.
+    fn paste_clipboard(&mut self) {
+        let bracketed = self.term_mode().contains(TermMode::BRACKETED_PASTE);
+        let text = self.clipboard().and_then(|cb| match cb.get_text() {
+            Ok(t) => Some(t),
+            Err(e) => {
+                log::debug!("clipboard paste failed: {e}");
+                None
+            }
+        });
+        if let (Some(text), Some(pty)) = (text, self.pty.as_ref()) {
+            pty.term.lock().scroll_display(Scroll::Bottom);
+            pty.paste(&text, bracketed);
+        }
+    }
+
+    /// Lazily open the OS clipboard. Returns `None` if it is unavailable.
+    fn clipboard(&mut self) -> Option<&mut arboard::Clipboard> {
+        if self.clipboard.is_none() {
+            match arboard::Clipboard::new() {
+                Ok(cb) => self.clipboard = Some(cb),
+                Err(e) => {
+                    log::debug!("clipboard unavailable: {e}");
+                    return None;
+                }
+            }
+        }
+        self.clipboard.as_mut()
+    }
+
     fn render(&mut self) {
         let (Some(renderer), Some(pty)) = (self.renderer.as_mut(), self.pty.as_ref()) else {
             return;
@@ -157,6 +278,7 @@ impl App {
         let colors = content.colors;
         let display_offset = content.display_offset as i32;
         let cursor = content.cursor;
+        let selection = content.selection;
 
         let cursor_visible = self.focused && cursor.shape != CursorShape::Hidden;
         let cursor_row = cursor.point.line.0 + display_offset;
@@ -186,6 +308,11 @@ impl App {
             }
             if cell.flags.contains(Flags::DIM) {
                 fg = [fg[0] * 0.66, fg[1] * 0.66, fg[2] * 0.66, fg[3]];
+            }
+            // Tint selected cells. Done before the cursor inversion so the cursor
+            // still reads clearly when it sits inside the selection.
+            if selection.is_some_and(|range| range.contains(indexed.point)) {
+                bg = color::SELECTION_BG;
             }
             // Block cursor: invert the cell beneath it.
             if cursor_visible && row == cursor_row && col == cursor_col {
@@ -376,6 +503,29 @@ impl ApplicationHandler<UserEvent> for App {
                     return;
                 }
 
+                // Ctrl+Shift clipboard combos are consumed by glassy and never
+                // reach the child. Intercepted before `encode_key` so the control
+                // byte for C/V isn't sent to the PTY.
+                if event.state.is_pressed()
+                    && self.mods.control_key()
+                    && self.mods.shift_key()
+                {
+                    if let Key::Character(s) = &event.logical_key {
+                        match s.as_str() {
+                            "C" | "c" => {
+                                self.copy_selection();
+                                return;
+                            }
+                            "V" | "v" => {
+                                self.paste_clipboard();
+                                self.mark_dirty(event_loop);
+                                return;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+
                 // Shift + PageUp/PageDown/Home/End drives glassy's own scrollback
                 // (the primary screen only) and is consumed before the child sees
                 // it. This mirrors the de-facto terminal convention.
@@ -402,6 +552,9 @@ impl ApplicationHandler<UserEvent> for App {
                 }
 
                 if let Some(bytes) = encode_key(&event, self.mods) {
+                    // Typing dismisses any active selection, matching the de-facto
+                    // terminal convention.
+                    self.clear_selection();
                     if let Some(pty) = &self.pty {
                         // A typed key snaps the view back to the prompt, matching
                         // every mainstream terminal.
@@ -416,9 +569,16 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
+                self.mouse_px = (position.x, position.y);
                 let cell = self.px_to_cell(position.x, position.y);
-                if cell != self.mouse_cell {
-                    self.mouse_cell = cell;
+                let moved = cell != self.mouse_cell;
+                self.mouse_cell = cell;
+
+                // Extend an in-progress glassy text selection while dragging.
+                if self.selecting {
+                    self.update_selection();
+                    self.mark_dirty(event_loop);
+                } else if moved {
                     // Drag/motion reports: only while a button is held and the
                     // terminal asked for motion (DRAG) or any-motion (MOTION).
                     let mode = self.term_mode();
@@ -445,7 +605,47 @@ impl ApplicationHandler<UserEvent> for App {
 
                 let mode = self.term_mode();
                 if mode.intersects(TermMode::MOUSE_MODE) {
+                    // The application owns the mouse; never start a glassy
+                    // selection or paste underneath it.
                     self.report_mouse(base, pressed, false, mode);
+                    return;
+                }
+
+                match (button, pressed) {
+                    // Left press: start (or extend the granularity of) a glassy
+                    // text selection. Double/triple clicks within the same cell
+                    // and a short window escalate to Semantic (word) then Lines.
+                    (MouseButton::Left, true) => {
+                        const MULTI_CLICK: Duration = Duration::from_millis(300);
+                        let now = Instant::now();
+                        let count = match self.last_click {
+                            Some((cell, n, t))
+                                if cell == self.mouse_cell && now.duration_since(t) < MULTI_CLICK =>
+                            {
+                                (n % 3) + 1
+                            }
+                            _ => 1,
+                        };
+                        self.last_click = Some((self.mouse_cell, count, now));
+                        let ty = match count {
+                            2 => SelectionType::Semantic,
+                            3 => SelectionType::Lines,
+                            _ => SelectionType::Simple,
+                        };
+                        self.start_selection(ty);
+                        self.mark_dirty(event_loop);
+                    }
+                    // Left release: finish the drag; the selection persists for copy.
+                    (MouseButton::Left, false) => {
+                        self.selecting = false;
+                    }
+                    // Middle click pastes the clipboard (primary on X11 would be
+                    // ideal, but arboard exposes only the standard clipboard).
+                    (MouseButton::Middle, true) => {
+                        self.paste_clipboard();
+                        self.mark_dirty(event_loop);
+                    }
+                    _ => {}
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
