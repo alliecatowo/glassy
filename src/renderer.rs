@@ -90,6 +90,16 @@ struct AtlasGlyph {
     is_color: bool,
 }
 
+/// Text decorations (underline / strikethrough) requested for a cell. Painted
+/// as solid foreground rectangles via `push_solid` at the font's recommended
+/// stroke positions, independent of which glyph path the cell takes.
+#[derive(Clone, Copy, Default)]
+pub struct Decorations {
+    pub underline: bool,
+    pub double_underline: bool,
+    pub strikeout: bool,
+}
+
 /// A rasterized glyph bitmap copied out of `Text` into owned storage, so the
 /// `self.text` borrow ends before we touch the atlas/packer/queue.
 struct Raster {
@@ -549,6 +559,7 @@ impl Renderer {
         self.clear_color = default_bg;
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn push_cell(
         &mut self,
         col: usize,
@@ -559,6 +570,7 @@ impl Renderer {
         bg: [f32; 4],
         bold: bool,
         italic: bool,
+        decorations: Decorations,
     ) {
         let cell_w = self.metrics.width;
         let cell_h = self.metrics.height;
@@ -574,6 +586,12 @@ impl Renderer {
             size: [cell_w, cell_h],
             color: bg,
         });
+
+        // Underline / strikethrough strokes span the full cell width so they join
+        // seamlessly across adjacent decorated cells. Pushed here (after the cell
+        // background, in the bg pass) so they paint over the background in the
+        // foreground color; glyphs draw on top in the later fg pass.
+        self.draw_decorations(origin_x, origin_y, fg, decorations);
 
         let baseline = origin_y + self.metrics.ascent;
 
@@ -656,6 +674,38 @@ impl Renderer {
             size: [w, h],
             color,
         });
+    }
+
+    /// Paint a cell's underline / double-underline / strikethrough strokes as
+    /// solid foreground rectangles spanning the full cell width, using the
+    /// font's recommended stroke positions and thickness from `CellMetrics`.
+    fn draw_decorations(&mut self, ox: f32, oy: f32, fg: [f32; 4], dec: Decorations) {
+        if !(dec.underline || dec.double_underline || dec.strikeout) {
+            return;
+        }
+        let w = self.metrics.width;
+        let th = self.metrics.decoration_thickness;
+        let x = ox.round();
+        let cell_h = self.metrics.height;
+
+        if dec.strikeout {
+            let y = (oy + self.metrics.strikeout_y).round();
+            self.push_solid(x, y, w, th, fg);
+        }
+        if dec.double_underline {
+            // Two thin rails: the lower at the single-underline position, the
+            // upper one stroke + gap above it, both kept inside the cell.
+            let gap = th.max(1.0);
+            let lower = (oy + self.metrics.underline_y).round();
+            let lower = lower.min(oy + cell_h - th).max(oy);
+            let upper = (lower - th - gap).max(oy);
+            self.push_solid(x, upper, w, th, fg);
+            self.push_solid(x, lower, w, th, fg);
+        } else if dec.underline {
+            let y = (oy + self.metrics.underline_y).round();
+            let y = y.min(oy + cell_h - th).max(oy);
+            self.push_solid(x, y, w, th, fg);
+        }
     }
 
     /// Paint a block element (U+2580..=U+259F) as exact solid foreground

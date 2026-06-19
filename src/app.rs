@@ -26,7 +26,7 @@ use winit::window::{Window, WindowId};
 use crate::color;
 use crate::input::{MouseReport, encode_key, encode_mouse};
 use crate::pty::{Pty, UserEvent};
-use crate::renderer::Renderer;
+use crate::renderer::{Decorations, Renderer};
 
 /// Lines of scrollback to move per wheel notch when reporting to a TUI or
 /// scrolling glassy's own scrollback buffer.
@@ -324,6 +324,18 @@ impl App {
             let italic =
                 cell.flags.contains(Flags::ITALIC) || cell.flags.contains(Flags::BOLD_ITALIC);
 
+            // Text decorations. Hidden cells draw nothing, so suppress strokes
+            // too. A double underline takes precedence over a single one.
+            let decorations = if hidden {
+                Decorations::default()
+            } else {
+                Decorations {
+                    underline: cell.flags.contains(Flags::UNDERLINE),
+                    double_underline: cell.flags.contains(Flags::DOUBLE_UNDERLINE),
+                    strikeout: cell.flags.contains(Flags::STRIKEOUT),
+                }
+            };
+
             let ch = if hidden || cell.c == '\0' { ' ' } else { cell.c };
             // Combining marks / ZWJ-joined codepoints (compound emoji, accents)
             // attached to this cell; shaped together so they form one glyph.
@@ -337,6 +349,7 @@ impl App {
                 bg,
                 bold,
                 italic,
+                decorations,
             );
         }
 

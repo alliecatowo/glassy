@@ -26,6 +26,13 @@ pub struct CellMetrics {
     pub width: f32,
     pub height: f32,
     pub ascent: f32,
+    /// Y of the underline stroke's top edge, measured DOWN from the cell top
+    /// (so the renderer can draw it directly at `origin_y + underline_y`).
+    pub underline_y: f32,
+    /// Y of the strikethrough stroke's top edge, measured down from the cell top.
+    pub strikeout_y: f32,
+    /// Thickness of decoration strokes (underline / strikeout), in pixels.
+    pub decoration_thickness: f32,
 }
 
 /// A single rasterized glyph bitmap plus its placement relative to the pen.
@@ -160,7 +167,7 @@ impl Text {
             cluster_cache: HashMap::new(),
         };
 
-        let cell = text.measure_cell(line_height);
+        let cell = text.measure_cell(font_px, line_height);
         let family_name = match &text.family {
             FamilyOwned::Named(n) => n.as_str(),
             FamilyOwned::Monospace => "<system monospace>",
@@ -177,8 +184,9 @@ impl Text {
     }
 
     /// Shape a representative string to derive the monospace advance width and
-    /// the baseline (ascent) for one line.
-    fn measure_cell(&mut self, line_height: f32) -> CellMetrics {
+    /// the baseline (ascent) for one line, plus the decoration (underline /
+    /// strikeout) stroke positions read from the primary font's metrics.
+    fn measure_cell(&mut self, font_px: f32, line_height: f32) -> CellMetrics {
         let attrs = build_attrs(self.family.as_family(), false, false);
         self.buffer
             .set_text("MM", &attrs, Shaping::Advanced, None);
@@ -187,6 +195,8 @@ impl Text {
 
         let mut cell_w = font_fallback_width(line_height);
         let mut ascent = line_height.round();
+        // The font id of the shaped face, so we can read its decoration metrics.
+        let mut font_id = None;
 
         if let Some(run) = self.buffer.layout_runs().next() {
             ascent = run.line_y.round();
@@ -197,13 +207,81 @@ impl Text {
             } else if let Some(g) = run.glyphs.first() {
                 cell_w = g.w.ceil().max(1.0);
             }
+            font_id = run.glyphs.first().map(|g| (g.font_id, g.font_weight));
         }
+
+        let (underline_y, strikeout_y, decoration_thickness) =
+            self.decoration_metrics(font_id, font_px, ascent, line_height);
 
         CellMetrics {
             width: cell_w,
             height: line_height,
             ascent,
+            underline_y,
+            strikeout_y,
+            decoration_thickness,
         }
+    }
+
+    /// Read the underline/strikeout stroke positions and thickness from the
+    /// shaped face's swash metrics, falling back to sensible em-relative values
+    /// when the font reports nothing usable.
+    ///
+    /// swash reports `underline_offset` / `strikeout_offset` as the distance
+    /// from the baseline UP to the top of the stroke (positive = above the
+    /// baseline). Underlines sit below the baseline, so that offset is normally
+    /// negative; we convert to a top-of-cell-relative Y with `ascent - offset`.
+    /// Returned Ys are the stroke's top edge, measured down from the cell top.
+    fn decoration_metrics(
+        &mut self,
+        font_id: Option<(fontdb::ID, Weight)>,
+        font_px: f32,
+        ascent: f32,
+        line_height: f32,
+    ) -> (f32, f32, f32) {
+        // Em-relative fallbacks used when the font lacks usable metrics.
+        let fallback_thickness = (line_height / 16.0).round().max(1.0);
+        let fallback_underline = (ascent + fallback_thickness * 2.0).round();
+        let fallback_strikeout = (ascent - (ascent * 0.30)).round();
+
+        let Some((id, weight)) = font_id else {
+            return (fallback_underline, fallback_strikeout, fallback_thickness);
+        };
+        let Some(font) = self.font_system.get_font(id, weight) else {
+            return (fallback_underline, fallback_strikeout, fallback_thickness);
+        };
+
+        // `metrics(&[])` yields the unscaled (font-unit) metrics; `scale(px)`
+        // converts to pixels for our em size (`font_px`).
+        let m = font.as_swash().metrics(&[]).scale(font_px);
+
+        let thickness = if m.stroke_size > 0.0 {
+            m.stroke_size.round().max(1.0)
+        } else {
+            fallback_thickness
+        };
+
+        // Underline: top edge = ascent - underline_offset (offset is negative).
+        let underline_y = if m.underline_offset != 0.0 {
+            (ascent - m.underline_offset).round()
+        } else {
+            fallback_underline
+        };
+        // Strikeout: offset is positive (above baseline). Its value is the
+        // CENTER/top per the OS/2 table; we treat it as the stroke top.
+        let strikeout_y = if m.strikeout_offset != 0.0 {
+            (ascent - m.strikeout_offset).round()
+        } else {
+            fallback_strikeout
+        };
+
+        // Clamp the underline so it stays inside the cell (some faces report an
+        // offset that would push the stroke past the descender region).
+        let max_y = (line_height - thickness).max(0.0);
+        let underline_y = underline_y.min(max_y).max(0.0);
+        let strikeout_y = strikeout_y.min(max_y).max(0.0);
+
+        (underline_y, strikeout_y, thickness)
     }
 
     /// Return the glyph bitmap(s) needed to draw `ch` in the given style.
