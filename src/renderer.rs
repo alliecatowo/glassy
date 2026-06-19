@@ -723,6 +723,7 @@ impl Renderer {
         bg: [f32; 4],
         bold: bool,
         italic: bool,
+        wide: bool,
         decorations: Decorations,
     ) {
         let cell_w = self.metrics.width;
@@ -732,13 +733,21 @@ impl Renderer {
         let origin_x = col as f32 * cell_w + pad;
         let origin_y = row as f32 * cell_h + pad;
 
+        // A double-width (CJK / wide-emoji) cell occupies two columns: its advance
+        // box spans `2 * cell_w`. The grid skips the trailing spacer cell, so we
+        // lay the glyph out across the full two-cell box here. Single-width cells
+        // keep the ordinary one-cell box.
+        let box_w = if wide { cell_w * 2.0 } else { cell_w };
+
         // Always push the cell background; the clear color handles the common case
         // but per-cell quads keep the model simple and overdraw is cheap here.
-        // Backgrounds take the window opacity (premultiplied) so the desktop shows
-        // through uniformly; foreground solids pushed via `push_solid` stay opaque.
+        // A wide cell's background spans both columns so the spacer column (which
+        // we never visit) is still painted. Backgrounds take the window opacity
+        // (premultiplied) so the desktop shows through uniformly; foreground solids
+        // pushed via `push_solid` stay opaque.
         self.bg_instances.push(BgInstance {
             pos: [origin_x, origin_y],
-            size: [cell_w, cell_h],
+            size: [box_w, cell_h],
             color: self.glass_bg(bg),
         });
 
@@ -760,17 +769,18 @@ impl Renderer {
             cluster.extend(combiners.iter());
             self.ensure_cluster_glyphs(&cluster, bold, italic);
             if let Some(glyphs) = self.cluster_cache.get(&(cluster, bold, italic)) {
-                for g in glyphs {
-                    self.fg_instances.push(FgInstance {
-                        pos: [origin_x + g.left as f32, baseline - g.top as f32],
-                        size: [g.px_w, g.px_h],
+                let placed = Self::place_glyphs(glyphs, origin_x, baseline, cell_w, box_w, cell_h);
+                self.fg_instances.extend(placed.into_iter().map(
+                    |(pos, size, g): (_, _, &AtlasGlyph)| FgInstance {
+                        pos,
+                        size,
                         uv_min: g.uv_min,
                         uv_max: g.uv_max,
                         color: fg,
                         flags: if g.is_color { 1 } else { 0 },
                         _pad: [0; 3],
-                    });
-                }
+                    },
+                ));
             }
             return;
         }
@@ -802,18 +812,82 @@ impl Renderer {
 
         self.ensure_glyphs(ch, bold, italic);
         if let Some(glyphs) = self.glyph_cache.get(&(ch, bold, italic)) {
-            for g in glyphs {
-                self.fg_instances.push(FgInstance {
-                    pos: [origin_x + g.left as f32, baseline - g.top as f32],
-                    size: [g.px_w, g.px_h],
+            let placed = Self::place_glyphs(glyphs, origin_x, baseline, cell_w, box_w, cell_h);
+            self.fg_instances.extend(placed.into_iter().map(
+                |(pos, size, g): (_, _, &AtlasGlyph)| FgInstance {
+                    pos,
+                    size,
                     uv_min: g.uv_min,
                     uv_max: g.uv_max,
                     color: fg,
                     flags: if g.is_color { 1 } else { 0 },
                     _pad: [0; 3],
-                });
-            }
+                },
+            ));
         }
+    }
+
+    /// Compute the on-screen quad placement (`pos`, `size`) for each atlas glyph
+    /// of a cell, given the cell's pen `origin_x`, text `baseline`, the advance
+    /// box width `box_w` (one cell, or two for a double-width cell), and the cell
+    /// height `cell_h`.
+    ///
+    /// The natural placement anchors a glyph at the single cell origin via its
+    /// left/top bearings (`origin_x + left`, `baseline - top`). That is correct
+    /// for a one-cell box. For a double-width box (`box_w == 2 * cell_w`) the
+    /// glyph should instead sit centered across both cells:
+    ///
+    ///   * Mask glyphs (CJK text, monochrome emoji) keep their rasterized size and
+    ///     their font bearings, plus a horizontal shift of `(box_w - cell_w) / 2`
+    ///     that recenters the single-cell-anchored glyph in the two-cell box. For
+    ///     a single-width cell that shift is zero, so ordinary text is unchanged.
+    ///   * Color emoji are scaled to fit the box height (preserving aspect, capped
+    ///     to the box width) and then centered both horizontally and vertically in
+    ///     the box, so a square emoji bitmap fills its box without overflowing a
+    ///     neighbour or clipping at the top/bottom.
+    ///
+    /// `cell_w` is the single-cell advance; `box_w` is this cell's advance box.
+    /// Returns one `(pos, size, glyph)` triple per input glyph, in order.
+    fn place_glyphs<'g>(
+        glyphs: &'g [AtlasGlyph],
+        origin_x: f32,
+        baseline: f32,
+        cell_w: f32,
+        box_w: f32,
+        cell_h: f32,
+    ) -> Vec<([f32; 2], [f32; 2], &'g AtlasGlyph)> {
+        // Horizontal recentering for a wide box (0 for a single-width cell).
+        let center_dx = (box_w - cell_w) * 0.5;
+        glyphs
+            .iter()
+            .map(|g| {
+                if g.is_color {
+                    // Color emoji: scale to fit the box height-first (preserving
+                    // aspect), capped to the box width, then center in the box.
+                    let scale = if g.px_h > 0.0 {
+                        let s = cell_h / g.px_h;
+                        if g.px_w * s > box_w && g.px_w > 0.0 {
+                            box_w / g.px_w
+                        } else {
+                            s
+                        }
+                    } else {
+                        1.0
+                    };
+                    let w = g.px_w * scale;
+                    let h = g.px_h * scale;
+                    let x = origin_x + (box_w - w) * 0.5;
+                    let y = baseline - cell_h + (cell_h - h) * 0.5;
+                    ([x, y], [w, h], g)
+                } else {
+                    // Mask glyph: keep its size and bearings; shift right to
+                    // recenter the single-cell-anchored glyph in the box.
+                    let x = origin_x + g.left as f32 + center_dx;
+                    let y = baseline - g.top as f32;
+                    ([x, y], [g.px_w, g.px_h], g)
+                }
+            })
+            .collect()
     }
 
     /// Push a single solid-color rectangle as a [`BgInstance`]. Coordinates are

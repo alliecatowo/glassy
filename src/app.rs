@@ -439,6 +439,10 @@ impl App {
             let bold = cell.flags.contains(Flags::BOLD) || cell.flags.contains(Flags::BOLD_ITALIC);
             let italic =
                 cell.flags.contains(Flags::ITALIC) || cell.flags.contains(Flags::BOLD_ITALIC);
+            // A double-width (CJK / wide-emoji) cell spans two columns; the
+            // trailing spacer column is skipped above. The renderer lays the
+            // glyph out across the full two-cell box when this is set.
+            let wide = cell.flags.contains(Flags::WIDE_CHAR);
 
             // Text decorations. Hidden cells draw nothing, so suppress strokes
             // too. Underline styles are mutually exclusive (latest SGR wins);
@@ -481,6 +485,7 @@ impl App {
                 bg,
                 bold,
                 italic,
+                wide,
                 decorations,
             );
         }
