@@ -32,6 +32,49 @@ use crate::renderer::{CursorOverlay, Decorations, Renderer, UnderlineStyle};
 /// scrolling glassy's own scrollback buffer.
 const WHEEL_LINES: i32 = 3;
 
+/// What a wheel notch should do, given the terminal's current mode. Pure so it
+/// can be unit-tested without a window or PTY.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WheelAction {
+    /// Report the wheel to the application as a mouse event (button 64/65).
+    Report,
+    /// Emit arrow keys (alt-screen apps: pagers, vim, bat).
+    Arrows,
+    /// Scroll glassy's own scrollback buffer.
+    Scrollback,
+}
+
+/// Decide how the mouse wheel behaves for the given mode: applications that
+/// requested mouse reporting get wheel events; other alt-screen apps get arrow
+/// keys (xterm alternateScroll default); the normal screen scrolls scrollback.
+fn wheel_action(mode: TermMode) -> WheelAction {
+    if mode.intersects(TermMode::MOUSE_MODE) {
+        WheelAction::Report
+    } else if mode.contains(TermMode::ALT_SCREEN) {
+        WheelAction::Arrows
+    } else {
+        WheelAction::Scrollback
+    }
+}
+
+/// Which mouse-button id to report for a pointer-motion event, or `None` to stay
+/// silent. `held` is the currently pressed button (0/1/2) or `None`. Mirrors
+/// xterm: any-motion mode (1003) reports even with no button (id 3); button-only
+/// motion (1002) reports just while a button is held; click-only (1000) never
+/// reports motion. Pure for unit testing.
+fn motion_button(mode: TermMode, held: Option<u8>) -> Option<u8> {
+    match held {
+        Some(b)
+            if mode.contains(TermMode::MOUSE_DRAG)
+                || mode.contains(TermMode::MOUSE_MOTION) =>
+        {
+            Some(b)
+        }
+        None if mode.contains(TermMode::MOUSE_MOTION) => Some(3),
+        _ => None,
+    }
+}
+
 /// Cursor blink half-period: the on/off phase length. ~530ms matches the de-facto
 /// terminal cadence (and the GTK/VTE default).
 const BLINK_INTERVAL: Duration = Duration::from_millis(530);
@@ -788,16 +831,12 @@ impl ApplicationHandler<UserEvent> for App {
                     self.update_selection();
                     self.mark_dirty(event_loop);
                 } else if moved {
-                    // Drag/motion reports: only while a button is held and the
-                    // terminal asked for motion (DRAG) or any-motion (MOTION).
+                    // Motion reports drive hover highlighting (e.g. the Claude
+                    // Code TUI highlights the element under the pointer, which
+                    // needs any-motion mode 1003 with no button held).
                     let mode = self.term_mode();
-                    if let Some(button) = self.held_button {
-                        let wants = (mode.contains(TermMode::MOUSE_DRAG)
-                            || mode.contains(TermMode::MOUSE_MOTION))
-                            && mode.intersects(TermMode::MOUSE_MODE);
-                        if wants {
-                            self.report_mouse(button, true, true, mode);
-                        }
+                    if let Some(button) = motion_button(mode, self.held_button) {
+                        self.report_mouse(button, true, true, mode);
                     }
                 }
             }
@@ -871,32 +910,36 @@ impl ApplicationHandler<UserEvent> for App {
                 let up = lines > 0;
                 let count = lines.unsigned_abs() as usize;
 
-                if mode.intersects(TermMode::MOUSE_MODE) {
-                    // Wheel as button 64 (up) / 65 (down), one report per line.
-                    let button = if up { 64 } else { 65 };
-                    for _ in 0..count {
-                        self.report_mouse(button, true, false, mode);
-                    }
-                } else if mode.contains(TermMode::ALT_SCREEN)
-                    && mode.contains(TermMode::ALTERNATE_SCROLL)
-                {
-                    // Alt-screen apps without mouse reporting (e.g. less) expect
-                    // the wheel to emit arrow keys.
-                    if let Some(pty) = &self.pty {
-                        let seq: &[u8] = if up { b"\x1b[A" } else { b"\x1b[B" };
-                        let mut out = Vec::with_capacity(seq.len() * count);
+                match wheel_action(mode) {
+                    WheelAction::Report => {
+                        // Wheel as button 64 (up) / 65 (down), one report per line.
+                        let button = if up { 64 } else { 65 };
                         for _ in 0..count {
-                            out.extend_from_slice(seq);
+                            self.report_mouse(button, true, false, mode);
                         }
-                        pty.write(out);
                     }
-                } else {
-                    // Default: scroll glassy's own scrollback buffer.
-                    let delta = if up { WHEEL_LINES } else { -WHEEL_LINES } * count as i32;
-                    if let Some(pty) = &self.pty {
-                        pty.term.lock().scroll_display(Scroll::Delta(delta));
+                    WheelAction::Arrows => {
+                        // Alt-screen apps (pagers, bat, vim without `mouse=`) expect
+                        // the wheel to emit arrow keys — xterm's alternateScroll is
+                        // on by default and the alt screen has no scrollback of its
+                        // own. ~3 lines per notch.
+                        if let Some(pty) = &self.pty {
+                            let seq: &[u8] = if up { b"\x1b[A" } else { b"\x1b[B" };
+                            let n = count * 3;
+                            let mut out = Vec::with_capacity(seq.len() * n);
+                            for _ in 0..n {
+                                out.extend_from_slice(seq);
+                            }
+                            pty.write(out);
+                        }
                     }
-                    self.mark_dirty(event_loop);
+                    WheelAction::Scrollback => {
+                        let delta = if up { WHEEL_LINES } else { -WHEEL_LINES } * count as i32;
+                        if let Some(pty) = &self.pty {
+                            pty.term.lock().scroll_display(Scroll::Delta(delta));
+                        }
+                        self.mark_dirty(event_loop);
+                    }
                 }
             }
             WindowEvent::Resized(size) => self.handle_resize(event_loop, size),
@@ -975,5 +1018,51 @@ impl ApplicationHandler<UserEvent> for App {
         } else {
             event_loop.set_control_flow(ControlFlow::WaitUntil(self.next_frame));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{WheelAction, motion_button, wheel_action};
+    use alacritty_terminal::term::TermMode;
+
+    #[test]
+    fn wheel_normal_screen_scrolls_scrollback() {
+        assert_eq!(wheel_action(TermMode::empty()), WheelAction::Scrollback);
+    }
+
+    #[test]
+    fn wheel_alt_screen_emits_arrows() {
+        // bat/less/vim without mouse: alt screen, no mouse reporting.
+        assert_eq!(wheel_action(TermMode::ALT_SCREEN), WheelAction::Arrows);
+    }
+
+    #[test]
+    fn wheel_mouse_mode_reports_to_app() {
+        // vim with `mouse=a`, htop, claude: app owns the wheel.
+        assert_eq!(wheel_action(TermMode::MOUSE_REPORT_CLICK), WheelAction::Report);
+        assert_eq!(
+            wheel_action(TermMode::ALT_SCREEN | TermMode::MOUSE_MOTION),
+            WheelAction::Report
+        );
+    }
+
+    #[test]
+    fn hover_reports_only_under_any_motion() {
+        // Any-motion (1003) reports bare moves (id 3) -> drives hover highlight.
+        assert_eq!(motion_button(TermMode::MOUSE_MOTION, None), Some(3));
+        // Button-motion (1002) stays silent without a held button.
+        assert_eq!(motion_button(TermMode::MOUSE_DRAG, None), None);
+        // Click-only (1000) never reports motion.
+        assert_eq!(motion_button(TermMode::MOUSE_REPORT_CLICK, None), None);
+        assert_eq!(motion_button(TermMode::empty(), None), None);
+    }
+
+    #[test]
+    fn drag_reports_held_button_under_motion_modes() {
+        assert_eq!(motion_button(TermMode::MOUSE_DRAG, Some(0)), Some(0));
+        assert_eq!(motion_button(TermMode::MOUSE_MOTION, Some(2)), Some(2));
+        // Click-only mode does not report drags.
+        assert_eq!(motion_button(TermMode::MOUSE_REPORT_CLICK, Some(0)), None);
     }
 }

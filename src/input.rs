@@ -153,3 +153,51 @@ fn control_byte(c: char) -> Option<u8> {
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{MouseReport, encode_mouse};
+    use winit::keyboard::ModifiersState;
+
+    fn rep(button: u8, col: usize, row: usize, pressed: bool, motion: bool) -> MouseReport {
+        MouseReport { button, col, row, pressed, motion }
+    }
+
+    #[test]
+    fn sgr_left_press_and_release() {
+        let m = ModifiersState::empty();
+        assert_eq!(encode_mouse(rep(0, 0, 0, true, false), m, true), b"\x1b[<0;1;1M");
+        assert_eq!(encode_mouse(rep(0, 4, 2, false, false), m, true), b"\x1b[<0;5;3m");
+    }
+
+    #[test]
+    fn sgr_wheel_up_down() {
+        let m = ModifiersState::empty();
+        assert_eq!(encode_mouse(rep(64, 0, 0, true, false), m, true), b"\x1b[<64;1;1M");
+        assert_eq!(encode_mouse(rep(65, 9, 9, true, false), m, true), b"\x1b[<65;10;10M");
+    }
+
+    #[test]
+    fn sgr_bare_motion_uses_no_button_code() {
+        // button 3 ("no button") + 32 (motion) = 35; drives hover reporting.
+        let m = ModifiersState::empty();
+        assert_eq!(encode_mouse(rep(3, 0, 0, true, true), m, true), b"\x1b[<35;1;1M");
+    }
+
+    #[test]
+    fn sgr_ctrl_modifier_sets_bit() {
+        // Ctrl adds 16 to the button code.
+        let m = ModifiersState::CONTROL;
+        assert_eq!(encode_mouse(rep(0, 0, 0, true, false), m, true), b"\x1b[<16;1;1M");
+    }
+
+    #[test]
+    fn legacy_x10_form() {
+        let m = ModifiersState::empty();
+        // ESC [ M  Cb(32)  Cx(32+1)  Cy(32+1)
+        assert_eq!(
+            encode_mouse(rep(0, 0, 0, true, false), m, false),
+            vec![0x1b, b'[', b'M', 32, 33, 33]
+        );
+    }
+}

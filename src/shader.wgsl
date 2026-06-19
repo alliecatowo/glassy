@@ -92,8 +92,10 @@ fn undercurl_coverage(uv: vec2<f32>, quad_px: vec2<f32>) -> f32 {
     }
     let texel = textureSample(atlas_tex, atlas_samp, in.uv);
     if (in.flags == 1u) {
-        // Color glyph: the atlas already holds the glyph's own premultiplied color.
-        return texel;
+        // Color glyph: the atlas holds straight-alpha RGBA, so premultiply it here
+        // for the premultiplied-alpha blend (otherwise the edges fringe dark).
+        let a = texel.a;
+        return vec4<f32>(texel.rgb * a, a);
     }
     // Coverage mask: tint with the cell foreground, alpha = sampled coverage.
     let a = in.color.a * texel.a;
