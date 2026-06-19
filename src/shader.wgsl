@@ -35,14 +35,17 @@ struct FgIn {
     @location(2) size: vec2<f32>,   // glyph quad size in px
     @location(3) uv_min: vec2<f32>, // atlas uv rect (0..1)
     @location(4) uv_max: vec2<f32>,
-    @location(5) color: vec4<f32>,  // text color (used when not a color glyph)
-    @location(6) flags: u32,        // 1 = color glyph (emoji), 0 = coverage mask
+    @location(5) color: vec4<f32>,  // text/decoration color
+    @location(6) flags: u32,        // 0 = coverage mask, 1 = color glyph, 2 = undercurl
 };
 struct FgOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) uv: vec2<f32>,
     @location(1) color: vec4<f32>,
     @location(2) @interpolate(flat) flags: u32,
+    // For the undercurl path: the local quad size in px (for x-period + stroke
+    // width) carried via uv_min/uv_max repurposed below; see vs_fg.
+    @location(3) @interpolate(flat) quad_px: vec2<f32>,
 };
 @vertex fn vs_fg(in: FgIn) -> FgOut {
     let px = in.pos + in.unit * in.size;
@@ -52,9 +55,37 @@ struct FgOut {
     o.uv = mix(in.uv_min, in.uv_max, in.unit);
     o.color = in.color;
     o.flags = in.flags;
+    o.quad_px = in.size;
     return o;
 }
+
+// Antialiased coverage of a curly (sine-wave) underline inside its decoration
+// quad. The quad spans one cell width and a few pixels tall; the wave amplitude
+// fills the quad with a margin for the stroke half-thickness so it never clips.
+fn undercurl_coverage(uv: vec2<f32>, quad_px: vec2<f32>) -> f32 {
+    let w = max(quad_px.x, 1.0);
+    let h = max(quad_px.y, 1.0);
+    // Stroke half-thickness in px (thinner relative to a thick quad reads best).
+    let half = max(h * 0.18, 0.75);
+    // One full sine period roughly every ~h*2 px gives a pleasant curl density;
+    // clamp so very wide cells still get at least one visible wave.
+    let period = clamp(h * 2.0, 6.0, w);
+    let x = uv.x * w;
+    let y = uv.y * h;
+    let cy = h * 0.5;
+    let amp = (h * 0.5) - half;
+    let wave = cy + sin(x / period * 6.2831853) * amp;
+    // Distance from this fragment to the wave centerline, softened to ~1px for AA.
+    let d = abs(y - wave);
+    return 1.0 - smoothstep(half - 0.75, half + 0.75, d);
+}
+
 @fragment fn fs_fg(in: FgOut) -> @location(0) vec4<f32> {
+    if (in.flags == 2u) {
+        // Undercurl: procedural sine-wave coverage tinted with the decoration color.
+        let cov = undercurl_coverage(in.uv, in.quad_px);
+        return vec4<f32>(in.color.rgb, in.color.a * cov);
+    }
     let texel = textureSample(atlas_tex, atlas_samp, in.uv);
     if (in.flags == 1u) {
         // Color glyph: the atlas already holds the glyph's own premultiplied-ish color.

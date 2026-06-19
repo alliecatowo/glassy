@@ -26,7 +26,7 @@ use winit::window::{Window, WindowId};
 use crate::color;
 use crate::input::{MouseReport, encode_key, encode_mouse};
 use crate::pty::{Pty, UserEvent};
-use crate::renderer::{Decorations, Renderer};
+use crate::renderer::{Decorations, Renderer, UnderlineStyle};
 
 /// Lines of scrollback to move per wheel notch when reporting to a TUI or
 /// scrolling glassy's own scrollback buffer.
@@ -325,15 +325,31 @@ impl App {
                 cell.flags.contains(Flags::ITALIC) || cell.flags.contains(Flags::BOLD_ITALIC);
 
             // Text decorations. Hidden cells draw nothing, so suppress strokes
-            // too. A double underline takes precedence over a single one.
+            // too. Underline styles are mutually exclusive (latest SGR wins);
+            // map the cell flags to a single style. The decoration color is the
+            // SGR 58 underline color when set, else the cell foreground, so e.g.
+            // a red LSP curl sits under default-fg text.
             let decorations = if hidden {
                 Decorations::default()
             } else {
-                Decorations {
-                    underline: cell.flags.contains(Flags::UNDERLINE),
-                    double_underline: cell.flags.contains(Flags::DOUBLE_UNDERLINE),
-                    strikeout: cell.flags.contains(Flags::STRIKEOUT),
-                }
+                let underline = if cell.flags.contains(Flags::UNDERCURL) {
+                    UnderlineStyle::Curl
+                } else if cell.flags.contains(Flags::DOTTED_UNDERLINE) {
+                    UnderlineStyle::Dotted
+                } else if cell.flags.contains(Flags::DASHED_UNDERLINE) {
+                    UnderlineStyle::Dashed
+                } else if cell.flags.contains(Flags::DOUBLE_UNDERLINE) {
+                    UnderlineStyle::Double
+                } else if cell.flags.contains(Flags::UNDERLINE) {
+                    UnderlineStyle::Single
+                } else {
+                    UnderlineStyle::None
+                };
+                let color = cell
+                    .underline_color()
+                    .map(|c| color::resolve(c, colors))
+                    .unwrap_or(fg);
+                Decorations { underline, strikeout: cell.flags.contains(Flags::STRIKEOUT), color }
             };
 
             let ch = if hidden || cell.c == '\0' { ' ' } else { cell.c };

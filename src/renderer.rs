@@ -90,14 +90,30 @@ struct AtlasGlyph {
     is_color: bool,
 }
 
-/// Text decorations (underline / strikethrough) requested for a cell. Painted
-/// as solid foreground rectangles via `push_solid` at the font's recommended
-/// stroke positions, independent of which glyph path the cell takes.
+/// The active underline style for a cell. Alacritty treats these as mutually
+/// exclusive (the latest SGR wins), so we carry a single enum rather than a set
+/// of booleans. `strikeout` is orthogonal and lives alongside in `Decorations`.
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+pub enum UnderlineStyle {
+    #[default]
+    None,
+    Single,
+    Double,
+    Curl,
+    Dotted,
+    Dashed,
+}
+
+/// Text decorations (underline / strikethrough) requested for a cell. Straight
+/// strokes are painted as solid rectangles via `push_solid`; the curly underline
+/// is a dedicated foreground decoration instance with procedural coverage. The
+/// `color` is the decoration color (SGR 58 underline color, or the cell fg when
+/// no separate color is set) so e.g. a red LSP curl sits under default-fg text.
 #[derive(Clone, Copy, Default)]
 pub struct Decorations {
-    pub underline: bool,
-    pub double_underline: bool,
+    pub underline: UnderlineStyle,
     pub strikeout: bool,
+    pub color: [f32; 4],
 }
 
 /// A rasterized glyph bitmap copied out of `Text` into owned storage, so the
@@ -590,8 +606,9 @@ impl Renderer {
         // Underline / strikethrough strokes span the full cell width so they join
         // seamlessly across adjacent decorated cells. Pushed here (after the cell
         // background, in the bg pass) so they paint over the background in the
-        // foreground color; glyphs draw on top in the later fg pass.
-        self.draw_decorations(origin_x, origin_y, fg, decorations);
+        // decoration color; glyphs draw on top in the later fg pass. The curly
+        // underline is emitted as a foreground decoration instance instead.
+        self.draw_decorations(origin_x, origin_y, decorations);
 
         let baseline = origin_y + self.metrics.ascent;
 
@@ -676,13 +693,15 @@ impl Renderer {
         });
     }
 
-    /// Paint a cell's underline / double-underline / strikethrough strokes as
-    /// solid foreground rectangles spanning the full cell width, using the
-    /// font's recommended stroke positions and thickness from `CellMetrics`.
-    fn draw_decorations(&mut self, ox: f32, oy: f32, fg: [f32; 4], dec: Decorations) {
-        if !(dec.underline || dec.double_underline || dec.strikeout) {
+    /// Paint a cell's underline + strikethrough strokes in the decoration color,
+    /// using the font's recommended stroke positions and thickness from
+    /// `CellMetrics`. Straight strokes are solid rectangles in the bg pass; the
+    /// curly underline is a foreground decoration instance (procedural coverage).
+    fn draw_decorations(&mut self, ox: f32, oy: f32, dec: Decorations) {
+        if dec.underline == UnderlineStyle::None && !dec.strikeout {
             return;
         }
+        let c = dec.color;
         let w = self.metrics.width;
         let th = self.metrics.decoration_thickness;
         let x = ox.round();
@@ -690,22 +709,74 @@ impl Renderer {
 
         if dec.strikeout {
             let y = (oy + self.metrics.strikeout_y).round();
-            self.push_solid(x, y, w, th, fg);
+            self.push_solid(x, y, w, th, c);
         }
-        if dec.double_underline {
-            // Two thin rails: the lower at the single-underline position, the
-            // upper one stroke + gap above it, both kept inside the cell.
-            let gap = th.max(1.0);
-            let lower = (oy + self.metrics.underline_y).round();
-            let lower = lower.min(oy + cell_h - th).max(oy);
-            let upper = (lower - th - gap).max(oy);
-            self.push_solid(x, upper, w, th, fg);
-            self.push_solid(x, lower, w, th, fg);
-        } else if dec.underline {
-            let y = (oy + self.metrics.underline_y).round();
-            let y = y.min(oy + cell_h - th).max(oy);
-            self.push_solid(x, y, w, th, fg);
+
+        // Underline baseline y, clamped to stay inside the cell.
+        let uy = ((oy + self.metrics.underline_y).round())
+            .min(oy + cell_h - th)
+            .max(oy);
+        match dec.underline {
+            UnderlineStyle::None => {}
+            UnderlineStyle::Single => self.push_solid(x, uy, w, th, c),
+            UnderlineStyle::Double => {
+                // Two thin rails: the lower at the single-underline position, the
+                // upper one stroke + gap above it, both kept inside the cell.
+                let gap = th.max(1.0);
+                let lower = uy;
+                let upper = (lower - th - gap).max(oy);
+                self.push_solid(x, upper, w, th, c);
+                self.push_solid(x, lower, w, th, c);
+            }
+            UnderlineStyle::Dotted => {
+                // ~2px dots with ~2px gaps along the underline row.
+                let dot = th.max(1.0);
+                let step = (dot * 2.0).max(2.0);
+                let mut dx = x;
+                while dx < x + w {
+                    self.push_solid(dx, uy, dot, th, c);
+                    dx += step;
+                }
+            }
+            UnderlineStyle::Dashed => {
+                // Three dashes per cell, ~70% on / 30% off, joining across cells.
+                let slot = w / 3.0;
+                let dash = (slot * 0.7).round().max(1.0);
+                for i in 0..3 {
+                    let dx = (x + slot * i as f32).round();
+                    self.push_solid(dx, uy, dash, th, c);
+                }
+            }
+            UnderlineStyle::Curl => {
+                // A foreground decoration quad spanning the cell width, tall
+                // enough for a visible wave; the fragment shader computes the
+                // sine coverage. Center the band on the single-underline row.
+                let band_h = (th * 3.0).max(4.0).min(cell_h - 1.0);
+                let cy = uy + th * 0.5;
+                let top = (cy - band_h * 0.5).max(oy).min(oy + cell_h - band_h);
+                self.push_undercurl(x, top, w, band_h, c);
+            }
         }
+    }
+
+    /// Push a foreground decoration instance for the curly underline. It carries
+    /// no atlas glyph (uv is unused on the `flags == 2` path); the shader derives
+    /// the wave from the quad's interpolated UV and pixel size.
+    fn push_undercurl(&mut self, x: f32, y: f32, w: f32, h: f32, color: [f32; 4]) {
+        if w <= 0.0 || h <= 0.0 {
+            return;
+        }
+        // UV spans the full 0..1 quad so the shader can derive the local position
+        // (and thus the sine wave) from the interpolated `uv` on the curl path.
+        self.fg_instances.push(FgInstance {
+            pos: [x, y],
+            size: [w, h],
+            uv_min: [0.0, 0.0],
+            uv_max: [1.0, 1.0],
+            color,
+            flags: 2,
+            _pad: [0; 3],
+        });
     }
 
     /// Paint a block element (U+2580..=U+259F) as exact solid foreground
