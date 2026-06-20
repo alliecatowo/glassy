@@ -30,7 +30,7 @@ jobs:
             libwayland-dev \
             libvulkan-dev \
             libasound2-dev \
-            libfontconfig-1-dev \
+            libfontconfig-dev \
             pkg-config
 
       - name: Install Rust toolchain
