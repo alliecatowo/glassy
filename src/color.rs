@@ -391,8 +391,30 @@ fn dim(rgb: Rgb) -> Rgb {
 }
 
 fn default_named(named: NamedColor) -> Rgb {
+    default_named_index(named as usize)
+}
+
+/// Resolve a raw color-query index to an `Rgb` from the active theme.
+///
+/// `alacritty_terminal`'s `Event::ColorRequest` carries a `usize` index that is
+/// either an 8-bit palette slot (`0..=255`, OSC 4) or a `NamedColor` discriminant
+/// (`256` Foreground / `257` Background / `258` Cursor, …; OSC 10/11/12). We
+/// mirror the same defaults the renderer draws with so a query answer matches the
+/// glyphs on screen. (The dynamic OSC-override palette isn't reachable from the
+/// `EventProxy`, so overridden entries report the theme default — the common,
+/// un-overridden case is exact.)
+pub fn query_index(index: usize) -> Rgb {
+    match index {
+        0..=255 => default_indexed(index as u8),
+        _ => default_named_index(index),
+    }
+}
+
+/// Theme default for a `NamedColor` discriminant given as a raw `usize`, sharing
+/// the mapping used by [`default_named`].
+fn default_named_index(index: usize) -> Rgb {
     let theme = active();
-    match named as usize {
+    match index {
         i @ 0..=15 => theme.ansi16[i],
         256 | 267 => theme.fg, // Foreground, BrightForeground
         257 => theme.bg,       // Background
@@ -426,5 +448,23 @@ fn default_indexed(idx: u8) -> Rgb {
             let v = 8 + (idx - 232) * 10;
             Rgb { r: v, g: v, b: v }
         }
+    }
+}
+
+#[cfg(test)]
+mod query_index_tests {
+    use super::*;
+    #[test]
+    fn named_and_palette_resolve_to_active_theme() {
+        let bg = query_index(257);
+        assert_eq!((bg.r, bg.g, bg.b), (0x1A, 0x1B, 0x26));
+        let fg = query_index(256);
+        assert_eq!((fg.r, fg.g, fg.b), (0xC0, 0xCA, 0xF5));
+        let cur = query_index(258);
+        assert_eq!((cur.r, cur.g, cur.b), (0x7D, 0xCF, 0xFF));
+        let red = query_index(1);
+        assert_eq!((red.r, red.g, red.b), (0xF7, 0x76, 0x8E));
+        let cube = query_index(196); // pure red in 6x6x6 cube
+        assert_eq!((cube.r, cube.g, cube.b), (255, 0, 0));
     }
 }

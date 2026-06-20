@@ -69,6 +69,18 @@ impl EventListener for EventProxy {
             // VT replies (DA / DSR / DECRQM / kitty-keyboard query) must be
             // written back to the child so capability negotiation completes.
             Event::PtyWrite(text) => Some(UserEvent::PtyWrite(self.id, text)),
+            // OSC 4 / 10 / 11 / 12 color queries. The child blocks waiting for a
+            // reply (hyfetch etc. stall ~1s per query otherwise), so resolve the
+            // requested palette/named index against the active theme — the same
+            // index→RGB mapping the renderer draws cells with — and write the
+            // caller-supplied reply (`formatter`) back over the PtyWrite path.
+            Event::ColorRequest(index, formatter) => {
+                let rgb = crate::color::query_index(index);
+                Some(UserEvent::PtyWrite(self.id, formatter(rgb)))
+            }
+            // TextAreaSizeRequest needs the cell-pixel + grid geometry, which the
+            // EventProxy doesn't carry; left unanswered (not needed for the color
+            // queries this fixes).
             _ => None,
         };
         if let Some(user_event) = mapped {
