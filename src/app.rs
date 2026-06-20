@@ -513,6 +513,9 @@ pub struct App {
     dragging_tab: Option<usize>,
     /// The toolbar item currently under the pointer, for hover highlighting.
     hovered_strip_item: Option<StripItem>,
+    /// Accumulated scroll/swipe delta while the pointer is over the tab strip,
+    /// so a touchpad 2-finger swipe (many small deltas) cycles tabs smoothly.
+    tab_scroll_accum: f32,
     /// Wall-clock at App construction + whether the first frame has been timed,
     /// so we can log time-to-first-frame once (a startup benchmark).
     started: Instant,
@@ -611,6 +614,7 @@ impl App {
             first_frame_done: false,
             dragging_tab: None,
             hovered_strip_item: None,
+            tab_scroll_accum: 0.0,
             help_open: false,
             settings_open: false,
             settings_sel: 0,
@@ -1569,10 +1573,17 @@ impl App {
         self.prev_has_selection = has_selection;
         self.force_full_redraw = false;
 
-        // The renderer self-heals lost/outdated surfaces internally; a transient
-        // skip just waits for the next wakeup or resize to repaint.
+        // The renderer self-heals lost/outdated surfaces internally. If a frame is
+        // dropped (e.g. transient surface loss), the damage we consumed + the rows
+        // we built may not have reached the GPU, so re-arm a full rebuild and ask
+        // for another frame — otherwise that content stays missing until the next
+        // resize. (Root cause of the "blank until you resize" reports.)
         if let Err(err) = renderer.render() {
-            log::debug!("frame skipped: {err:?}");
+            log::debug!("frame dropped, forcing full repaint next frame: {err:?}");
+            self.force_full_redraw = true;
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
         }
 
         // Startup benchmark: log time-to-first-frame once.
@@ -1964,6 +1975,13 @@ impl ApplicationHandler<UserEvent> for App {
                 self.reset_blink();
                 self.mark_dirty(event_loop);
             }
+            WindowEvent::ThemeChanged(_) => {
+                // The system light/dark color-scheme changed at runtime. Repaint so
+                // winit's client-side decorations (sctk-adwaita titlebar) re-theme to
+                // match — previously glassy only picked it up at launch.
+                self.force_full_redraw = true;
+                self.mark_dirty(event_loop);
+            }
             WindowEvent::ModifiersChanged(mods) => {
                 self.mods = mods.state();
             }
@@ -2265,6 +2283,42 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
+                // Over the tab strip: scroll / 2-finger swipe cycles tabs. Wheel
+                // notches step one tab each; touchpad pixel deltas accumulate to a
+                // threshold (so a swipe is smooth, not hyper-sensitive). Horizontal
+                // motion is preferred (the natural swipe-to-switch gesture).
+                let in_strip = {
+                    let (pad, ch_h) = self
+                        .renderer
+                        .as_ref()
+                        .map(|r| (r.pad() as f64, r.cell_metrics().height as f64))
+                        .unwrap_or((0.0, 1.0));
+                    let row = ((self.mouse_px.1 - pad) / ch_h).floor();
+                    (0.0..TAB_STRIP_ROWS as f64).contains(&row)
+                };
+                if in_strip {
+                    const STEP: f32 = 30.0; // px (touchpad) / scaled notch per tab
+                    let primary = match delta {
+                        MouseScrollDelta::LineDelta(x, y) => {
+                            (if x.abs() > y.abs() { x } else { y }) * STEP
+                        }
+                        MouseScrollDelta::PixelDelta(p) => {
+                            if p.x.abs() > p.y.abs() { p.x as f32 } else { p.y as f32 }
+                        }
+                    };
+                    self.tab_scroll_accum += primary;
+                    while self.tab_scroll_accum >= STEP {
+                        self.tab_scroll_accum -= STEP;
+                        self.cycle_tab(1, event_loop);
+                    }
+                    while self.tab_scroll_accum <= -STEP {
+                        self.tab_scroll_accum += STEP;
+                        self.cycle_tab(-1, event_loop);
+                    }
+                    return;
+                }
+                self.tab_scroll_accum = 0.0;
+
                 let lines = match delta {
                     MouseScrollDelta::LineDelta(_, y) => {
                         if y == 0.0 {
