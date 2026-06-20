@@ -1242,6 +1242,31 @@ impl ApplicationHandler<UserEvent> for App {
         self.renderer = Some(renderer);
         self.pty = Some(pty);
 
+        // Headless input/resize harness (used with GLASSY_CAPTURE for autonomous
+        // verification of the custom PTY loop's write + resize paths):
+        //   GLASSY_INPUT  - bytes to write through the real input channel; `\n`
+        //                   and `\t` escapes are honored. Exercises the loop's
+        //                   `write_all` on the blocking master fd round-trip.
+        //   GLASSY_RESIZE - "COLSxROWS" to drive a grid resize (LoopMsg::Resize
+        //                   -> on_resize) before the capture deadline.
+        if let Some(pty) = &self.pty {
+            if let Ok(spec) = std::env::var("GLASSY_RESIZE") {
+                if let Some((c, r)) = spec.split_once('x') {
+                    if let (Ok(cols), Ok(rows)) = (c.parse::<usize>(), r.parse::<usize>()) {
+                        let m = self.renderer.as_ref().unwrap().cell_metrics();
+                        pty.resize(cols, rows, m.width as u16, m.height as u16);
+                        self.cols = cols;
+                        self.rows = rows;
+                        self.force_full_redraw = true;
+                    }
+                }
+            }
+            if let Ok(input) = std::env::var("GLASSY_INPUT") {
+                let bytes = input.replace("\\n", "\n").replace("\\t", "\t").into_bytes();
+                pty.write(bytes);
+            }
+        }
+
         // Draw the first frame, then reveal the window (avoids a white flash).
         self.next_frame = Instant::now();
         self.render();
