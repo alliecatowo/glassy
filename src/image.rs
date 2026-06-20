@@ -211,7 +211,10 @@ fn decode_payload(controls: &Controls, payload: &[u8]) -> Option<DecodedImage> {
 
 /// Decode a PNG into tightly-packed RGBA8 via the `png` crate.
 fn decode_png(bytes: &[u8]) -> Option<DecodedImage> {
-    let decoder = png::Decoder::new(bytes);
+    let mut decoder = png::Decoder::new(bytes);
+    // Normalize to 8-bit channels: expand palette/low-bit-depth and tRNS, and
+    // strip 16-bit down to 8 so the color-type match below always sees 8bpp.
+    decoder.set_transformations(png::Transformations::normalize_to_color8());
     let mut reader = decoder.read_info().ok()?;
     let mut buf = vec![0u8; reader.output_buffer_size()];
     let info = reader.next_frame(&mut buf).ok()?;
@@ -529,6 +532,28 @@ mod tests {
         let img = cmd.image.expect("decoded image");
         assert_eq!((img.width, img.height), (1, 1));
         assert_eq!(img.rgba, vec![255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn decodes_16bit_png_to_8bit() {
+        // Encode a 2x1 16-bit RGBA PNG (red, then green) and confirm decode_png
+        // normalizes it to 8-bit RGBA (regression: 16-bit was read as noise).
+        let mut png_bytes = Vec::new();
+        {
+            let mut enc = png::Encoder::new(&mut png_bytes, 2, 1);
+            enc.set_color(png::ColorType::Rgba);
+            enc.set_depth(png::BitDepth::Sixteen);
+            let mut w = enc.write_header().unwrap();
+            // Big-endian 16-bit samples: red opaque, green opaque.
+            let data: [u8; 16] = [
+                0xFF, 0xFF, 0, 0, 0, 0, 0xFF, 0xFF, // red
+                0, 0, 0xFF, 0xFF, 0, 0, 0xFF, 0xFF, // green
+            ];
+            w.write_image_data(&data).unwrap();
+        }
+        let img = decode_png(&png_bytes).expect("decoded");
+        assert_eq!((img.width, img.height), (2, 1));
+        assert_eq!(img.rgba, vec![255, 0, 0, 255, 0, 255, 0, 255]);
     }
 
     #[test]
