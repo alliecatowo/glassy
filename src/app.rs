@@ -168,7 +168,8 @@ fn strip_layout(tabs: &[TabDesc], cols: usize) -> Vec<StripSeg> {
         for (i, (title, _active, _activity)) in tabs.iter().enumerate() {
             let body = format!(" {} {} ", i + 1, fit_label(title, 14));
             let bw = body.chars().count();
-            if col + bw + 2 > right_start {
+            // chip body + ✕ + a 1-col gap so chips read as distinct pills.
+            if col + bw + 3 > right_start {
                 break; // out of room before the controls
             }
             segs.push(StripSeg { item: StripItem::Tab(i), label: body, start: col, end: col + bw });
@@ -179,7 +180,7 @@ fn strip_layout(tabs: &[TabDesc], cols: usize) -> Vec<StripSeg> {
                 start: col,
                 end: col + 2,
             });
-            col += 2;
+            col += 2 + 1; // ✕ (2) + inter-chip gap (1)
         }
     }
     if col + STRIP_BTN_W <= right_start {
@@ -510,6 +511,8 @@ pub struct App {
     /// updated as the pointer drags it over other slots (reorders `tab_order`),
     /// cleared on release. `None` when not dragging a tab.
     dragging_tab: Option<usize>,
+    /// The toolbar item currently under the pointer, for hover highlighting.
+    hovered_strip_item: Option<StripItem>,
     /// Wall-clock at App construction + whether the first frame has been timed,
     /// so we can log time-to-first-frame once (a startup benchmark).
     started: Instant,
@@ -607,6 +610,7 @@ impl App {
             started: Instant::now(),
             first_frame_done: false,
             dragging_tab: None,
+            hovered_strip_item: None,
             help_open: false,
             settings_open: false,
             settings_sel: 0,
@@ -1388,17 +1392,19 @@ impl App {
         {
             let bar_bg = color::selection_bg();
             let base_fg = color::default_fg();
-            let active_bg = base_fg;
-            let active_fg = color::default_bg();
-            let dim_fg = [
-                base_fg[0] * 0.6,
-                base_fg[1] * 0.6,
-                base_fg[2] * 0.6,
-                base_fg[3],
-            ];
+            let base_bg = color::default_bg();
+            let dim_fg = [base_fg[0] * 0.55, base_fg[1] * 0.55, base_fg[2] * 0.55, base_fg[3]];
             let accent = [0.45, 0.68, 1.0, 1.0];
+            // Raised chip surfaces: idle chips sit slightly above the bar, the
+            // active chip is an accent fill, hovered chips brighten — giving the
+            // inline strip tactile "chips" instead of a flat run of text.
+            let chip_idle = lighten(bar_bg, 0.05);
+            let chip_hover = lighten(bar_bg, 0.13);
+            let active_bg = accent;
+            let active_fg = base_bg; // dark text on the accent chip
 
-            // Whole-row tint, then paint items at their layout columns.
+            // The toolbar's own backdrop is the terminal bg (so the chips read as
+            // raised surfaces against it), with a 1px-feel accent on the mark.
             let mut bar: Vec<(char, [f32; 4], [f32; 4])> = vec![(' ', base_fg, bar_bg); self.cols];
             let put = |bar: &mut Vec<(char, [f32; 4], [f32; 4])>, start: usize, s: &str, fg, bg| {
                 for (k, ch) in s.chars().enumerate() {
@@ -1428,17 +1434,27 @@ impl App {
                 })
                 .collect();
             let multi = descs.len() > 1;
+            let hov = self.hovered_strip_item;
             for seg in strip_layout(&descs, self.cols) {
+                let is_active = matches!(seg.item, StripItem::Tab(i) | StripItem::TabClose(i) if descs.get(i).is_some_and(|d| d.1));
+                let is_busy = matches!(seg.item, StripItem::Tab(i) if descs.get(i).is_some_and(|d| d.2));
+                let hovered = hov == Some(seg.item);
                 let (fg, sbg) = match seg.item {
-                    // Active tab: inverted highlight. Busy bg tab: bright. Else dim.
-                    StripItem::Tab(i) if descs.get(i).is_some_and(|d| d.1) => (active_fg, active_bg),
-                    StripItem::Tab(_) if !multi => (base_fg, bar_bg), // single-tab title
-                    StripItem::Tab(i) if descs.get(i).is_some_and(|d| d.2) => (base_fg, bar_bg),
-                    StripItem::Tab(_) => (dim_fg, bar_bg),
-                    StripItem::TabClose(i) if descs.get(i).is_some_and(|d| d.1) => (active_fg, active_bg),
-                    StripItem::TabClose(_) => (dim_fg, bar_bg),
-                    StripItem::NewTab => (accent, bar_bg),
-                    _ => (dim_fg, bar_bg),
+                    _ if is_active => (active_fg, active_bg), // accent-filled active chip
+                    StripItem::Tab(_) if !multi => (base_fg, bar_bg), // single-tab title (no chip)
+                    StripItem::Tab(_) => (
+                        if is_busy { accent } else { base_fg },
+                        if hovered { chip_hover } else { chip_idle },
+                    ),
+                    StripItem::TabClose(_) => (
+                        if hovered { [0.95, 0.45, 0.45, 1.0] } else { dim_fg },
+                        if hovered { chip_hover } else { chip_idle },
+                    ),
+                    StripItem::NewTab => (accent, if hovered { chip_hover } else { bar_bg }),
+                    StripItem::Help | StripItem::Menu => (
+                        if hovered { base_fg } else { dim_fg },
+                        if hovered { chip_hover } else { bar_bg },
+                    ),
                 };
                 put(&mut bar, seg.start, &seg.label, fg, sbg);
             }
@@ -2130,6 +2146,27 @@ impl ApplicationHandler<UserEvent> for App {
                     return;
                 }
 
+                // Tab-strip hover highlighting: track the toolbar item under the
+                // pointer (only while over row 0), repaint when it changes.
+                {
+                    let (pad, ch_w, ch_h) = self
+                        .renderer
+                        .as_ref()
+                        .map(|r| (r.pad() as f64, r.cell_metrics().width as f64, r.cell_metrics().height as f64))
+                        .unwrap_or((0.0, 1.0, 1.0));
+                    let screen_row = ((position.y - pad) / ch_h).floor();
+                    let new_hover = if (0.0..TAB_STRIP_ROWS as f64).contains(&screen_row) {
+                        let col = ((position.x - pad) / ch_w).floor().max(0.0) as usize;
+                        self.strip_item_at_col(col)
+                    } else {
+                        None
+                    };
+                    if new_hover != self.hovered_strip_item {
+                        self.hovered_strip_item = new_hover;
+                        self.mark_dirty(event_loop);
+                    }
+                }
+
                 // Extend an in-progress glassy text selection while dragging.
                 if self.selecting {
                     self.update_selection();
@@ -2395,13 +2432,14 @@ mod tests {
     fn strip_hit_test_matches_layout() {
         // Two tabs (tab 1 active) + their ✕ + a + button + right-hand ? / ≡.
         let segs = strip_layout(&[("zsh", true, false), ("vim", false, false)], 120);
-        // Chip 0 body = " 1 zsh " (7) at 3..10, then "✕ " (2) at 10..12;
-        // chip 1 body = " 2 vim " at 12..19, "✕ " at 19..21.
+        // Chip 0 body " 1 zsh " 3..10, "✕ " 10..12, gap@12; chip 1 " 2 vim " 13..20,
+        // "✕ " 20..22, gap@22; then " + " at 23..26.
         assert_eq!(strip_item_at(&segs, 4), Some(StripItem::Tab(0)));
         assert_eq!(strip_item_at(&segs, 11), Some(StripItem::TabClose(0)));
+        assert_eq!(strip_item_at(&segs, 12), None); // inter-chip gap
         assert_eq!(strip_item_at(&segs, 14), Some(StripItem::Tab(1)));
         assert_eq!(strip_item_at(&segs, 20), Some(StripItem::TabClose(1)));
-        assert_eq!(strip_item_at(&segs, 22), Some(StripItem::NewTab)); // " + " 21..24
+        assert_eq!(strip_item_at(&segs, 24), Some(StripItem::NewTab));
         // Right buttons are the last 6 cols (114..120): " ? " then " ≡ ".
         assert_eq!(strip_item_at(&segs, 115), Some(StripItem::Help));
         assert_eq!(strip_item_at(&segs, 118), Some(StripItem::Menu));
