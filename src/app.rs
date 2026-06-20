@@ -1175,7 +1175,11 @@ impl App {
             if total <= 1 {
                 // Single tab: the strip is a title bar — show the active title
                 // (cwd / running program) instead of a useless "1 shell" chip.
-                push(&mut bar, &fit_label(&self.active_title, 72), base_fg, bar_bg);
+                // Fit the title to the available width (cols minus the left mark
+                // and the right-side status region) so a long title is ellipsized
+                // cleanly instead of being clipped mid-word by the help hint.
+                let title_max = self.cols.saturating_sub(16).max(8);
+                push(&mut bar, &fit_label(&self.active_title, title_max), base_fg, bar_bg);
             } else {
                 // Multiple tabs: chips, active highlighted. Active tab first.
                 push(
