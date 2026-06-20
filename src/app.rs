@@ -1136,13 +1136,22 @@ impl App {
             while bar.len() < self.cols {
                 bar.push((' ', base_fg, bar_bg));
             }
-            // Right-aligned help hint, overwriting the tail when there is room.
-            let hint = "F1 help ";
-            let hint_len = hint.chars().count();
-            if self.cols > hint_len + 8 {
-                let start = self.cols - hint_len;
-                for (k, ch) in hint.chars().enumerate() {
-                    bar[start + k] = (ch, dim_fg, bar_bg);
+            // Right-aligned status: a scrollback-position indicator while scrolled
+            // up (in the accent color), then the help hint (dim). Overwrites the
+            // tail when there is room.
+            let mut right: Vec<(char, [f32; 4])> = Vec::new();
+            if display_offset > 0 {
+                for ch in format!("⇡ {display_offset}  ").chars() {
+                    right.push((ch, accent));
+                }
+            }
+            for ch in "F1 help ".chars() {
+                right.push((ch, dim_fg));
+            }
+            if self.cols > right.len() + 8 {
+                let start = self.cols - right.len();
+                for (k, (ch, fg)) in right.iter().enumerate() {
+                    bar[start + k] = (*ch, *fg, bar_bg);
                 }
             }
             bar.truncate(self.cols);
