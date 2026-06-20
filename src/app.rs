@@ -360,6 +360,9 @@ struct Session {
     id: usize,
     pty: Pty,
     title: String,
+    /// Set when this background tab produces output; shown as a dot on its chip
+    /// and cleared when the tab is activated. Lets you see which tab is busy.
+    activity: bool,
 }
 
 pub struct App {
@@ -628,6 +631,7 @@ impl App {
                 id: self.active_id,
                 pty: old,
                 title: std::mem::take(&mut self.active_title),
+                activity: false,
             });
         }
         self.pty = Some(pty);
@@ -662,6 +666,7 @@ impl App {
             id: self.active_id,
             pty: cur,
             title: std::mem::take(&mut self.active_title),
+            activity: false,
         };
         let target = std::mem::replace(&mut self.background[idx], parked);
         self.pty = Some(target.pty);
@@ -1176,12 +1181,14 @@ impl App {
                     active_bg,
                 );
                 for (i, s) in self.background.iter().enumerate() {
-                    push(
-                        &mut bar,
-                        &format!(" {} {} ", i + 2, fit_label(&s.title, 16)),
-                        dim_fg,
-                        bar_bg,
-                    );
+                    // A background tab with unseen output gets a ● dot and a
+                    // brighter label so it stands out.
+                    let (cfg, label) = if s.activity {
+                        (base_fg, format!(" {} {} ● ", i + 2, fit_label(&s.title, 16)))
+                    } else {
+                        (dim_fg, format!(" {} {} ", i + 2, fit_label(&s.title, 16)))
+                    };
+                    push(&mut bar, &label, cfg, bar_bg);
                 }
             }
             while bar.len() < self.cols {
@@ -1621,6 +1628,15 @@ impl ApplicationHandler<UserEvent> for App {
             // silently; no redraw needed until it becomes active.
             UserEvent::Wakeup(id) => {
                 if id != self.active_id {
+                    // A background tab produced output: flag it for the header
+                    // activity dot. Only repaint on the false->true edge so a busy
+                    // background tab (e.g. a build) doesn't spam redraws.
+                    if let Some(s) = self.background.iter_mut().find(|s| s.id == id)
+                        && !s.activity
+                    {
+                        s.activity = true;
+                        self.mark_dirty(event_loop);
+                    }
                     return;
                 }
             }
