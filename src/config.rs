@@ -114,6 +114,61 @@ impl RawConfig {
 }
 
 /// The resolved config file path, honoring `$XDG_CONFIG_HOME` then `$HOME`.
+/// Public so the in-app settings overlay can show + write it.
+pub fn path() -> Option<PathBuf> {
+    config_path()
+}
+
+/// Persist `updates` (`(key, value)` pairs) into the config file, preserving all
+/// other lines, comments, and ordering. A key already present is updated in place;
+/// a missing key is appended. Creates the parent directory and file if needed.
+/// Used by the live settings overlay so changes survive a restart.
+pub fn save(updates: &[(&str, String)]) -> Result<()> {
+    let path = config_path().context("no config path (HOME/XDG unset)")?;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)
+            .with_context(|| format!("creating config dir {}", dir.display()))?;
+    }
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    let out = merge_config(&existing, updates);
+    std::fs::write(&path, out).with_context(|| format!("writing config {}", path.display()))?;
+    Ok(())
+}
+
+/// Merge `updates` into the text of a config file: a present key is updated in
+/// place (preserving its position), a missing one is appended; comments, blank
+/// lines, unmanaged keys, and ordering are preserved. Pure for unit testing.
+fn merge_config(existing: &str, updates: &[(&str, String)]) -> String {
+    let mut lines: Vec<String> = existing.lines().map(str::to_string).collect();
+    let mut written = vec![false; updates.len()];
+
+    for line in lines.iter_mut() {
+        let trimmed = line.trim_start();
+        if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with(';') {
+            continue;
+        }
+        let Some((key, _)) = trimmed.split_once('=') else {
+            continue;
+        };
+        let key = key.trim().to_ascii_lowercase();
+        for (i, (k, v)) in updates.iter().enumerate() {
+            if !written[i] && key == *k {
+                *line = format!("{k} = {v}");
+                written[i] = true;
+            }
+        }
+    }
+    for (i, (k, v)) in updates.iter().enumerate() {
+        if !written[i] {
+            lines.push(format!("{k} = {v}"));
+        }
+    }
+    let mut out = lines.join("\n");
+    out.push('\n');
+    out
+}
+
+/// The resolved config file path, honoring `$XDG_CONFIG_HOME` then `$HOME`.
 fn config_path() -> Option<PathBuf> {
     if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME")
         && !xdg.is_empty()
@@ -357,7 +412,39 @@ CONFIG FILE:
 
 #[cfg(test)]
 mod tests {
-    use super::{RawConfig, parse_bool, parse_config_file};
+    use super::{RawConfig, merge_config, parse_bool, parse_config_file};
+
+    #[test]
+    fn merge_updates_in_place_and_appends() {
+        let existing = "\
+# my config
+theme = dracula
+font_size = 14
+opacity = 0.80
+";
+        let updates = [
+            ("font_size", "20".to_string()),
+            ("opacity", "0.95".to_string()),
+            ("bell_visual", "false".to_string()),
+        ];
+        let out = merge_config(existing, &updates);
+        // Comment + unmanaged key preserved.
+        assert!(out.contains("# my config"));
+        assert!(out.contains("theme = dracula"));
+        // Present keys updated in place (not duplicated).
+        assert!(out.contains("font_size = 20"));
+        assert_eq!(out.matches("font_size").count(), 1);
+        assert!(out.contains("opacity = 0.95"));
+        assert_eq!(out.matches("opacity").count(), 1);
+        // Missing key appended.
+        assert!(out.contains("bell_visual = false"));
+    }
+
+    #[test]
+    fn merge_into_empty_creates_keys() {
+        let out = merge_config("", &[("opacity", "0.9".to_string())]);
+        assert_eq!(out, "opacity = 0.9\n");
+    }
 
     #[test]
     fn bool_spellings() {

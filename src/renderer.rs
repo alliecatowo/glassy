@@ -832,6 +832,13 @@ impl Renderer {
         self.pad = pad;
     }
 
+    /// Set the window background opacity at runtime. Only has a visible effect on
+    /// a transparent surface (the compositor must composite alpha); the caller
+    /// should trigger a full redraw afterward so every cell background repaints.
+    pub fn set_opacity(&mut self, opacity: f32) {
+        self.opacity = opacity.clamp(0.0, 1.0);
+    }
+
     /// Reload the font at a new physical pixel size, recomputing the cell metrics
     /// and padding and rebuilding the glyph atlas. On failure the previous font
     /// is retained (the error is logged) so a bad size never breaks rendering.

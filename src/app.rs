@@ -134,35 +134,39 @@ const HELP_LINES: &[&str] = &[
 /// the renderer's current physical font size. Read-only for now: it surfaces the
 /// effective settings + where to change them. `&Config` is taken by reference so
 /// the caller can pass `&self.config` alongside a live `&mut Renderer` borrow.
-fn settings_lines(config: &Config, font_px: f32) -> Vec<String> {
+fn settings_lines(config: &Config, font_px: f32, sel: usize, saved: bool) -> Vec<String> {
     let family = config
         .font_family
         .as_deref()
         .unwrap_or("FiraCode Nerd Font (default)");
-    let bell = match (config.bell_visual, config.bell_audible) {
-        (true, true) => "visual + audible",
-        (true, false) => "visual",
-        (false, true) => "audible",
-        (false, false) => "off",
-    };
-    let padding = match config.padding {
-        Some(p) => format!("{p:.0} px"),
-        None => "auto".to_string(),
+    let bell = if config.bell_visual { "visual" } else { "off" };
+    // The three adjustable rows; the selected one gets a ▸ cursor.
+    let mark = |row: usize| if row == sel { "▸" } else { " " };
+    let saved_line = if saved {
+        "  ✓ saved to config"
+    } else {
+        "  ↑↓ select · ←→ change · Enter save · Esc close"
     };
     vec![
         "  glassy — settings".to_string(),
         String::new(),
-        format!("  Font         {family}"),
-        format!("  Size         {:.0} pt  ({font_px:.0} px)", config.font_size),
-        format!("  Opacity      {:.2}", config.opacity),
-        format!("  Padding      {padding}"),
-        format!("  Scrollback   {} lines", config.scrollback),
-        format!("  Bell         {bell}"),
+        format!("{} Font size    {font_px:.0} px", mark(0)),
+        format!("{} Opacity      {:.2}", mark(1), config.opacity),
+        format!("{} Bell         {bell}", mark(2)),
         String::new(),
-        "  Live: Ctrl +/-/0 resize font".to_string(),
-        "  Config  ~/.config/glassy/glassy.conf".to_string(),
-        "  (edit + restart to apply · Ctrl+, or Esc to close)".to_string(),
+        format!("  Font         {family}"),
+        format!("  Scrollback   {} lines", config.scrollback),
+        format!("  Config       {}", config_display_path()),
+        String::new(),
+        saved_line.to_string(),
     ]
+}
+
+/// Display path of the config file for the settings overlay.
+fn config_display_path() -> String {
+    crate::config::path()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "~/.config/glassy/glassy.conf".to_string())
 }
 
 /// Darken an RGB color toward black by `f` (0 = black, 1 = unchanged), keeping
@@ -389,6 +393,10 @@ pub struct App {
     help_open: bool,
     /// Whether the Ctrl+, settings overlay is currently shown.
     settings_open: bool,
+    /// Selected adjustable row in the settings overlay (0=font, 1=opacity, 2=bell).
+    settings_sel: usize,
+    /// True briefly after a successful settings save, for the overlay's status line.
+    settings_saved: bool,
 
     // Mouse reporting state.
     /// Last known cursor cell (col, row), clamped to the grid.
@@ -472,6 +480,8 @@ impl App {
             focused: true,
             help_open: false,
             settings_open: false,
+            settings_sel: 0,
+            settings_saved: false,
             mouse_cell: (0, 0),
             mouse_px: (0.0, 0.0),
             held_button: None,
@@ -1281,7 +1291,8 @@ impl App {
         if self.settings_open {
             // `&self.config` is a disjoint field borrow, so it coexists with the
             // live `renderer` (self.renderer) mutable borrow.
-            let lines = settings_lines(&self.config, renderer.font_px());
+            let lines =
+                settings_lines(&self.config, renderer.font_px(), self.settings_sel, self.settings_saved);
             let refs: Vec<&str> = lines.iter().map(|s| s.as_str()).collect();
             draw_modal(renderer, self.rows, self.cols, &refs);
         } else if self.help_open {
@@ -1302,6 +1313,76 @@ impl App {
         }
 
         self.dirty = false;
+    }
+
+    /// Handle a keypress while the settings overlay is open: arrow-key navigation
+    /// + adjustment, Enter/`s` to save. Other keys are consumed (ignored).
+    fn handle_settings_key(&mut self, key: Key, event_loop: &ActiveEventLoop) {
+        const ROWS: usize = 3; // font, opacity, bell
+        match key {
+            Key::Named(NamedKey::ArrowUp) => {
+                self.settings_sel = (self.settings_sel + ROWS - 1) % ROWS;
+                self.settings_saved = false;
+            }
+            Key::Named(NamedKey::ArrowDown) => {
+                self.settings_sel = (self.settings_sel + 1) % ROWS;
+                self.settings_saved = false;
+            }
+            Key::Named(NamedKey::ArrowLeft) => self.adjust_setting(-1),
+            Key::Named(NamedKey::ArrowRight) => self.adjust_setting(1),
+            Key::Named(NamedKey::Enter) => self.save_settings(),
+            Key::Character(ref s) if s.as_str() == "s" => self.save_settings(),
+            _ => return,
+        }
+        self.force_full_redraw = true;
+        self.mark_dirty(event_loop);
+    }
+
+    /// Adjust the selected setting by `dir` (-1/+1). Font + opacity apply live;
+    /// bell toggles. None persist until [`App::save_settings`].
+    fn adjust_setting(&mut self, dir: i32) {
+        self.settings_saved = false;
+        match self.settings_sel {
+            0 => self.resize_font(if dir > 0 { FontStep::Inc } else { FontStep::Dec }),
+            1 => {
+                let o = (self.config.opacity + dir as f32 * 0.05).clamp(0.0, 1.0);
+                self.config.opacity = o;
+                if let Some(r) = self.renderer.as_mut() {
+                    r.set_opacity(o);
+                }
+            }
+            2 => self.config.bell_visual = !self.config.bell_visual,
+            _ => {}
+        }
+    }
+
+    /// Persist the live-adjustable settings (font size in pt, opacity, bell) to
+    /// the config file, preserving every other key/comment.
+    fn save_settings(&mut self) {
+        let scale = self
+            .window
+            .as_ref()
+            .map(|w| w.scale_factor() as f32)
+            .unwrap_or(1.0)
+            .max(0.1);
+        let px = self
+            .renderer
+            .as_ref()
+            .map(|r| r.font_px())
+            .unwrap_or(self.config.font_size);
+        let pt = (px / scale).max(1.0);
+        let updates = [
+            ("font_size", format!("{pt:.0}")),
+            ("opacity", format!("{:.2}", self.config.opacity)),
+            ("bell_visual", self.config.bell_visual.to_string()),
+        ];
+        match crate::config::save(&updates) {
+            Ok(()) => {
+                self.settings_saved = true;
+                log::info!("settings saved to config");
+            }
+            Err(e) => log::error!("settings save failed: {e:#}"),
+        }
     }
 
     /// Apply a runtime font-size change (Ctrl +/-/0): reload the font in the
@@ -1662,13 +1743,31 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                 }
 
-                // Overlays: F1 toggles help, Ctrl+, toggles settings, Esc closes
-                // whichever is open. All consumed here (Esc still reaches the child
-                // when no overlay is open).
+                // While an overlay is open it owns the keyboard — nothing reaches
+                // the child. Esc / F1 / Ctrl+, close it; settings handles nav/edit.
+                if event.state.is_pressed() && (self.help_open || self.settings_open) {
+                    let key = &event.logical_key;
+                    let toggle_settings = self.mods.control_key()
+                        && matches!(key, Key::Character(s) if s.as_str() == ",");
+                    if matches!(key, Key::Named(NamedKey::Escape | NamedKey::F1))
+                        || toggle_settings
+                    {
+                        self.help_open = false;
+                        self.settings_open = false;
+                        self.force_full_redraw = true;
+                        self.mark_dirty(event_loop);
+                        return;
+                    }
+                    if self.settings_open {
+                        self.handle_settings_key(key.clone(), event_loop);
+                    }
+                    return; // consume all other keys while an overlay is up
+                }
+
+                // Open an overlay (only when none is up).
                 if event.state.is_pressed() {
                     if let Key::Named(NamedKey::F1) = &event.logical_key {
-                        self.help_open = !self.help_open;
-                        self.settings_open = false;
+                        self.help_open = true;
                         self.force_full_redraw = true;
                         self.mark_dirty(event_loop);
                         return;
@@ -1676,17 +1775,9 @@ impl ApplicationHandler<UserEvent> for App {
                     if self.mods.control_key()
                         && matches!(&event.logical_key, Key::Character(s) if s.as_str() == ",")
                     {
-                        self.settings_open = !self.settings_open;
-                        self.help_open = false;
-                        self.force_full_redraw = true;
-                        self.mark_dirty(event_loop);
-                        return;
-                    }
-                    if (self.help_open || self.settings_open)
-                        && matches!(&event.logical_key, Key::Named(NamedKey::Escape))
-                    {
-                        self.help_open = false;
-                        self.settings_open = false;
+                        self.settings_open = true;
+                        self.settings_sel = 0;
+                        self.settings_saved = false;
                         self.force_full_redraw = true;
                         self.mark_dirty(event_loop);
                         return;
