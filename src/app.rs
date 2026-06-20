@@ -1067,6 +1067,12 @@ impl App {
             } else {
                 build_grapheme(&cells, ci, indexed.point.line.0)
             };
+            // A cluster that spans 2+ grid cells (a wide CJK char, but also an
+            // emoji whose base code point is *narrow* yet joins following cells —
+            // e.g. the trans flag 🏳️‍⚧️ = narrow white-flag + ZWJ + symbol) must get
+            // a 2-cell box so its color glyph fills the space instead of being
+            // squished into one cell.
+            let wide = wide || consumed >= 2;
             renderer.push_cell(
                 col as usize,
                 srow,
