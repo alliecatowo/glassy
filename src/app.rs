@@ -125,9 +125,45 @@ const HELP_LINES: &[&str] = &[
     "  Shift+PgUp/PgDn   Scroll history",
     "  Shift+Home/End    Scroll top / bottom",
     "  Ctrl+Click        Open hyperlink",
+    "  Ctrl+,            Settings",
     "",
     "  F1 or Esc         Close this help",
 ];
+
+/// Build the lines shown in the Ctrl+, settings overlay from the live config and
+/// the renderer's current physical font size. Read-only for now: it surfaces the
+/// effective settings + where to change them. `&Config` is taken by reference so
+/// the caller can pass `&self.config` alongside a live `&mut Renderer` borrow.
+fn settings_lines(config: &Config, font_px: f32) -> Vec<String> {
+    let family = config
+        .font_family
+        .as_deref()
+        .unwrap_or("FiraCode Nerd Font (default)");
+    let bell = match (config.bell_visual, config.bell_audible) {
+        (true, true) => "visual + audible",
+        (true, false) => "visual",
+        (false, true) => "audible",
+        (false, false) => "off",
+    };
+    let padding = match config.padding {
+        Some(p) => format!("{p:.0} px"),
+        None => "auto".to_string(),
+    };
+    vec![
+        "  glassy — settings".to_string(),
+        String::new(),
+        format!("  Font         {family}"),
+        format!("  Size         {:.0} pt  ({font_px:.0} px)", config.font_size),
+        format!("  Opacity      {:.2}", config.opacity),
+        format!("  Padding      {padding}"),
+        format!("  Scrollback   {} lines", config.scrollback),
+        format!("  Bell         {bell}"),
+        String::new(),
+        "  Live: Ctrl +/-/0 resize font".to_string(),
+        "  Config  ~/.config/glassy/glassy.conf".to_string(),
+        "  (edit + restart to apply · Ctrl+, or Esc to close)".to_string(),
+    ]
+}
 
 /// Darken an RGB color toward black by `f` (0 = black, 1 = unchanged), keeping
 /// alpha. Used for the help-overlay backdrop.
@@ -146,11 +182,13 @@ fn lighten(c: [f32; 4], amount: f32) -> [f32; 4] {
     ]
 }
 
-/// Draw the F1 help overlay: a dimmed full-screen backdrop with a centered panel
-/// of keybindings. Rebuilds every screen row (`rows` terminal rows + the strip)
-/// so terminal content underneath is fully replaced. Associated (not `&self`) so
-/// it composes with the active `&mut Renderer` borrow in `render`.
-fn draw_help_overlay(renderer: &mut Renderer, rows: usize, cols: usize) {
+/// Draw a centered modal overlay (`lines`) over a dimmed full-screen backdrop.
+/// The first line is rendered in the accent color as a title. Rebuilds every
+/// screen row (`rows` terminal rows + the strip) so terminal content underneath
+/// is fully replaced. Associated (not `&self`) so it composes with the active
+/// `&mut Renderer` borrow in `render`. Used by the F1 help and Ctrl+, settings
+/// overlays.
+fn draw_modal(renderer: &mut Renderer, rows: usize, cols: usize, lines: &[&str]) {
     let total_rows = rows + TAB_STRIP_ROWS;
     let backdrop = darken(color::default_bg(), 0.45);
     let panel_bg = lighten(color::default_bg(), 0.07);
@@ -158,9 +196,9 @@ fn draw_help_overlay(renderer: &mut Renderer, rows: usize, cols: usize) {
     let text_fg = color::default_fg();
     let title_fg = [0.55, 0.75, 1.0, 1.0];
 
-    let content_w = HELP_LINES.iter().map(|l| l.chars().count()).max().unwrap_or(0);
+    let content_w = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0);
     let panel_w = (content_w + 4).min(cols.max(1));
-    let panel_h = (HELP_LINES.len() + 2).min(total_rows.max(1));
+    let panel_h = (lines.len() + 2).min(total_rows.max(1));
     let left = (cols.saturating_sub(panel_w)) / 2;
     let top = (total_rows.saturating_sub(panel_h)) / 2;
 
@@ -176,7 +214,7 @@ fn draw_help_overlay(renderer: &mut Renderer, rows: usize, cols: usize) {
                     (' ', text_fg, border_bg) // 1-cell accent border
                 } else {
                     let li = prow - 1;
-                    let line = HELP_LINES.get(li).copied().unwrap_or("");
+                    let line = lines.get(li).copied().unwrap_or("");
                     let tcol = pcol - 1; // 1-cell interior pad
                     let c = line.chars().nth(tcol).unwrap_or(' ');
                     let fg = if li == 0 { title_fg } else { text_fg };
@@ -349,6 +387,8 @@ pub struct App {
     focused: bool,
     /// Whether the F1 help overlay is currently shown.
     help_open: bool,
+    /// Whether the Ctrl+, settings overlay is currently shown.
+    settings_open: bool,
 
     // Mouse reporting state.
     /// Last known cursor cell (col, row), clamped to the grid.
@@ -431,6 +471,7 @@ impl App {
             mods: ModifiersState::empty(),
             focused: true,
             help_open: false,
+            settings_open: false,
             mouse_cell: (0, 0),
             mouse_px: (0.0, 0.0),
             held_button: None,
@@ -1209,8 +1250,8 @@ impl App {
         // live placement list, anchored to the cell they were displayed at. The
         // stored row is viewport-relative at display time; translate by the current
         // scroll offset so images move with the buffer as the user scrolls.
-        // Suppressed while the help modal is up so images don't punch through it.
-        if !self.help_open {
+        // Suppressed while a modal is up so images don't punch through it.
+        if !self.help_open && !self.settings_open {
             let store = pty.images.lock();
             if !store.placements().is_empty() {
                 let m = renderer.cell_metrics();
@@ -1233,11 +1274,18 @@ impl App {
             }
         }
 
-        // F1 help overlay: a centered modal over a dimmed backdrop. Rebuilds every
-        // screen row (cheap — only while open, and the screen is static), replacing
-        // terminal content so nothing bleeds through.
-        if self.help_open {
-            draw_help_overlay(renderer, self.rows, self.cols);
+        // Modal overlays (help / settings): centered panels over a dimmed backdrop.
+        // Rebuild every screen row (cheap — only while open, and the screen is
+        // static), replacing terminal content so nothing bleeds through. Settings
+        // wins if both are somehow set.
+        if self.settings_open {
+            // `&self.config` is a disjoint field borrow, so it coexists with the
+            // live `renderer` (self.renderer) mutable borrow.
+            let lines = settings_lines(&self.config, renderer.font_px());
+            let refs: Vec<&str> = lines.iter().map(|s| s.as_str()).collect();
+            draw_modal(renderer, self.rows, self.cols, &refs);
+        } else if self.help_open {
+            draw_modal(renderer, self.rows, self.cols, HELP_LINES);
         }
 
         // Record the state this frame drew from, so the next frame can repaint only
@@ -1434,9 +1482,13 @@ impl ApplicationHandler<UserEvent> for App {
                 pty.write(bytes);
             }
         }
-        // Headless: open the help overlay at startup for capture verification.
+        // Headless: open an overlay at startup for capture verification.
         if std::env::var_os("GLASSY_HELP").is_some() {
             self.help_open = true;
+            self.force_full_redraw = true;
+        }
+        if std::env::var_os("GLASSY_SETTINGS").is_some() {
+            self.settings_open = true;
             self.force_full_redraw = true;
         }
 
@@ -1610,19 +1662,31 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                 }
 
-                // F1 toggles the help overlay; Esc closes it when open. Both are
-                // consumed (Esc still reaches the child when help is closed).
+                // Overlays: F1 toggles help, Ctrl+, toggles settings, Esc closes
+                // whichever is open. All consumed here (Esc still reaches the child
+                // when no overlay is open).
                 if event.state.is_pressed() {
                     if let Key::Named(NamedKey::F1) = &event.logical_key {
                         self.help_open = !self.help_open;
+                        self.settings_open = false;
                         self.force_full_redraw = true;
                         self.mark_dirty(event_loop);
                         return;
                     }
-                    if self.help_open
+                    if self.mods.control_key()
+                        && matches!(&event.logical_key, Key::Character(s) if s.as_str() == ",")
+                    {
+                        self.settings_open = !self.settings_open;
+                        self.help_open = false;
+                        self.force_full_redraw = true;
+                        self.mark_dirty(event_loop);
+                        return;
+                    }
+                    if (self.help_open || self.settings_open)
                         && matches!(&event.logical_key, Key::Named(NamedKey::Escape))
                     {
                         self.help_open = false;
+                        self.settings_open = false;
                         self.force_full_redraw = true;
                         self.mark_dirty(event_loop);
                         return;
