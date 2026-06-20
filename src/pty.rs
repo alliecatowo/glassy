@@ -14,8 +14,8 @@ use std::sync::Arc;
 
 use alacritty_terminal::event::{Event, EventListener, Notify, WindowSize};
 use alacritty_terminal::event_loop::{EventLoop as PtyEventLoop, Msg, Notifier};
-use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::grid::Dimensions;
+use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::{Config, Term};
 use alacritty_terminal::tty::{self, Options as PtyOptions, Shell};
 use winit::event_loop::EventLoopProxy;
@@ -97,6 +97,7 @@ impl Pty {
     ///
     /// `cell_width`/`cell_height` are in physical pixels (used by programs that
     /// query pixel dimensions, e.g. for sixel/image protocols).
+    #[allow(clippy::too_many_arguments)]
     pub fn spawn(
         proxy: EventLoopProxy<UserEvent>,
         id: usize,
@@ -149,7 +150,8 @@ impl Pty {
             working_directory,
             drain_on_exit: false,
             env,
-            ..PtyOptions::default()
+            #[cfg(windows)]
+            escape_args: false,
         };
 
         // `window_id` is only used to set $WINDOWID; 0 is fine for a single window.

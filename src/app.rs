@@ -65,10 +65,7 @@ fn wheel_action(mode: TermMode) -> WheelAction {
 /// reports motion. Pure for unit testing.
 fn motion_button(mode: TermMode, held: Option<u8>) -> Option<u8> {
     match held {
-        Some(b)
-            if mode.contains(TermMode::MOUSE_DRAG)
-                || mode.contains(TermMode::MOUSE_MOTION) =>
-        {
+        Some(b) if mode.contains(TermMode::MOUSE_DRAG) || mode.contains(TermMode::MOUSE_MOTION) => {
             Some(b)
         }
         None if mode.contains(TermMode::MOUSE_MOTION) => Some(3),
@@ -347,11 +344,10 @@ impl App {
     /// Open a URL with the system handler, detached. Restricted to web/file
     /// schemes so terminal output can't launch arbitrary URI handlers.
     fn open_url(url: &str) {
-        if url.starts_with("http://") || url.starts_with("https://") || url.starts_with("file://")
+        if (url.starts_with("http://") || url.starts_with("https://") || url.starts_with("file://"))
+            && let Err(e) = std::process::Command::new("xdg-open").arg(url).spawn()
         {
-            if let Err(e) = std::process::Command::new("xdg-open").arg(url).spawn() {
-                log::warn!("failed to open {url}: {e}");
-            }
+            log::warn!("failed to open {url}: {e}");
         }
     }
 
@@ -362,7 +358,9 @@ impl App {
 
     /// Reflect the active tab + tab count in the window title.
     fn update_window_title(&self) {
-        let Some(window) = self.window.as_ref() else { return };
+        let Some(window) = self.window.as_ref() else {
+            return;
+        };
         let base = if self.active_title.is_empty() {
             "glassy"
         } else {
@@ -539,7 +537,13 @@ impl App {
         let Some(pty) = self.pty.as_ref() else { return };
         let (col, row) = self.mouse_cell;
         let bytes = encode_mouse(
-            MouseReport { button, col, row, pressed, motion },
+            MouseReport {
+                button,
+                col,
+                row,
+                pressed,
+                motion,
+            },
             self.mods,
             mode.contains(TermMode::SGR_MOUSE),
         );
@@ -613,10 +617,10 @@ impl App {
             return;
         }
         let cb = self.clipboard();
-        if let Some(cb) = cb {
-            if let Err(e) = cb.set_text(text) {
-                log::debug!("clipboard copy failed: {e}");
-            }
+        if let Some(cb) = cb
+            && let Err(e) = cb.set_text(text)
+        {
+            log::debug!("clipboard copy failed: {e}");
         }
     }
 
@@ -715,8 +719,7 @@ impl App {
         let cursor_col = cursor.point.column.0 as i32;
         // A focused, on-phase block cursor inverts its cell in the loop below;
         // every other drawn case is an overlay pushed after the cells.
-        let invert_block =
-            cursor_shown && self.focused && cursor.shape == CursorShape::Block;
+        let invert_block = cursor_shown && self.focused && cursor.shape == CursorShape::Block;
 
         // --- Decide what to rebuild this frame. ---
         // A scrollback scroll moves every row; alacritty reports Full for it, but
@@ -851,20 +854,28 @@ impl App {
                     .underline_color()
                     .map(|c| color::resolve(c, colors))
                     .unwrap_or(fg);
-                Decorations { underline, strikeout: cell.flags.contains(Flags::STRIKEOUT), color }
+                Decorations {
+                    underline,
+                    strikeout: cell.flags.contains(Flags::STRIKEOUT),
+                    color,
+                }
             };
 
             // Underline the hovered hyperlink's cells (only when not already
             // underlined by the app), as a click affordance.
-            if !hidden && matches!(decorations.underline, UnderlineStyle::None) {
-                if let Some(ref hov) = hovered_link {
-                    if cell.hyperlink().is_some_and(|h| h.uri() == hov) {
-                        decorations.underline = UnderlineStyle::Single;
-                    }
-                }
+            if !hidden
+                && matches!(decorations.underline, UnderlineStyle::None)
+                && let Some(ref hov) = hovered_link
+                && cell.hyperlink().is_some_and(|h| h.uri() == hov)
+            {
+                decorations.underline = UnderlineStyle::Single;
             }
 
-            let ch = if hidden || cell.c == '\0' { ' ' } else { cell.c };
+            let ch = if hidden || cell.c == '\0' {
+                ' '
+            } else {
+                cell.c
+            };
             // Reconstruct the grapheme cluster, merging this cell's combining /
             // ZWJ code points with any following cells joined by ZWJ, a skin-tone
             // modifier, a regional-indicator pair, or a variation selector — so
@@ -1035,10 +1046,9 @@ impl ApplicationHandler<UserEvent> for App {
         if let Some(hz) = window
             .current_monitor()
             .and_then(|m| m.refresh_rate_millihertz())
+            && hz > 0
         {
-            if hz > 0 {
-                self.refresh = Duration::from_secs_f64(1000.0 / hz as f64);
-            }
+            self.refresh = Duration::from_secs_f64(1000.0 / hz as f64);
         }
 
         let scale = window.scale_factor() as f32;
@@ -1148,12 +1158,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.mark_dirty(event_loop);
     }
 
-    fn window_event(
-        &mut self,
-        event_loop: &ActiveEventLoop,
-        _id: WindowId,
-        event: WindowEvent,
-    ) {
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => {
                 if let Some(pty) = &self.pty {
@@ -1171,7 +1176,11 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::ModifiersChanged(mods) => {
                 self.mods = mods.state();
             }
-            WindowEvent::KeyboardInput { event, is_synthetic, .. } => {
+            WindowEvent::KeyboardInput {
+                event,
+                is_synthetic,
+                ..
+            } => {
                 // Synthetic events are injected on focus change for held keys.
                 if is_synthetic {
                     return;
@@ -1183,38 +1192,38 @@ impl ApplicationHandler<UserEvent> for App {
                 if event.state.is_pressed()
                     && self.mods.control_key()
                     && self.mods.shift_key()
+                    && let Key::Character(s) = &event.logical_key
                 {
-                    if let Key::Character(s) = &event.logical_key {
-                        match s.as_str() {
-                            "C" | "c" => {
-                                self.copy_selection();
-                                return;
-                            }
-                            "V" | "v" => {
-                                self.paste_clipboard();
-                                self.mark_dirty(event_loop);
-                                return;
-                            }
-                            "T" | "t" => {
-                                self.new_tab(event_loop);
-                                return;
-                            }
-                            "W" | "w" => {
-                                self.close_active_tab(event_loop);
-                                return;
-                            }
-                            _ => {}
+                    match s.as_str() {
+                        "C" | "c" => {
+                            self.copy_selection();
+                            return;
                         }
+                        "V" | "v" => {
+                            self.paste_clipboard();
+                            self.mark_dirty(event_loop);
+                            return;
+                        }
+                        "T" | "t" => {
+                            self.new_tab(event_loop);
+                            return;
+                        }
+                        "W" | "w" => {
+                            self.close_active_tab(event_loop);
+                            return;
+                        }
+                        _ => {}
                     }
                 }
 
                 // Ctrl+Tab / Ctrl+Shift+Tab cycle between tabs.
-                if event.state.is_pressed() && self.mods.control_key() {
-                    if let Key::Named(NamedKey::Tab) = &event.logical_key {
-                        let delta = if self.mods.shift_key() { -1 } else { 1 };
-                        self.cycle_tab(delta, event_loop);
-                        return;
-                    }
+                if event.state.is_pressed()
+                    && self.mods.control_key()
+                    && let Key::Named(NamedKey::Tab) = &event.logical_key
+                {
+                    let delta = if self.mods.shift_key() { -1 } else { 1 };
+                    self.cycle_tab(delta, event_loop);
+                    return;
                 }
 
                 // Ctrl +/-/0 adjusts the font size at runtime (and Ctrl 0 resets
@@ -1225,19 +1234,18 @@ impl ApplicationHandler<UserEvent> for App {
                 if event.state.is_pressed()
                     && self.mods.control_key()
                     && !self.mods.alt_key()
+                    && let Key::Character(s) = &event.logical_key
                 {
-                    if let Key::Character(s) = &event.logical_key {
-                        let step = match s.as_str() {
-                            "+" | "=" => Some(FontStep::Inc),
-                            "-" | "_" => Some(FontStep::Dec),
-                            "0" => Some(FontStep::Reset),
-                            _ => None,
-                        };
-                        if let Some(step) = step {
-                            self.resize_font(step);
-                            self.mark_dirty(event_loop);
-                            return;
-                        }
+                    let step = match s.as_str() {
+                        "+" | "=" => Some(FontStep::Inc),
+                        "-" | "_" => Some(FontStep::Dec),
+                        "0" => Some(FontStep::Reset),
+                        _ => None,
+                    };
+                    if let Some(step) = step {
+                        self.resize_font(step);
+                        self.mark_dirty(event_loop);
+                        return;
                     }
                 }
 
@@ -1247,22 +1255,21 @@ impl ApplicationHandler<UserEvent> for App {
                 if event.state.is_pressed()
                     && self.mods.shift_key()
                     && !self.term_mode().contains(TermMode::ALT_SCREEN)
+                    && let Key::Named(named) = &event.logical_key
                 {
-                    if let Key::Named(named) = &event.logical_key {
-                        let scroll = match named {
-                            NamedKey::PageUp => Some(Scroll::PageUp),
-                            NamedKey::PageDown => Some(Scroll::PageDown),
-                            NamedKey::Home => Some(Scroll::Top),
-                            NamedKey::End => Some(Scroll::Bottom),
-                            _ => None,
-                        };
-                        if let Some(scroll) = scroll {
-                            if let Some(pty) = &self.pty {
-                                pty.term.lock().scroll_display(scroll);
-                            }
-                            self.mark_dirty(event_loop);
-                            return;
+                    let scroll = match named {
+                        NamedKey::PageUp => Some(Scroll::PageUp),
+                        NamedKey::PageDown => Some(Scroll::PageDown),
+                        NamedKey::Home => Some(Scroll::Top),
+                        NamedKey::End => Some(Scroll::Bottom),
+                        _ => None,
+                    };
+                    if let Some(scroll) = scroll {
+                        if let Some(pty) = &self.pty {
+                            pty.term.lock().scroll_display(scroll);
                         }
+                        self.mark_dirty(event_loop);
+                        return;
                     }
                 }
 
@@ -1351,7 +1358,8 @@ impl ApplicationHandler<UserEvent> for App {
                         let now = Instant::now();
                         let count = match self.last_click {
                             Some((cell, n, t))
-                                if cell == self.mouse_cell && now.duration_since(t) < MULTI_CLICK =>
+                                if cell == self.mouse_cell
+                                    && now.duration_since(t) < MULTI_CLICK =>
                             {
                                 (n % 3) + 1
                             }
@@ -1382,7 +1390,11 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::MouseWheel { delta, .. } => {
                 let lines = match delta {
                     MouseScrollDelta::LineDelta(_, y) => {
-                        if y == 0.0 { 0 } else { (y.abs().ceil() as i32) * y.signum() as i32 }
+                        if y == 0.0 {
+                            0
+                        } else {
+                            (y.abs().ceil() as i32) * y.signum() as i32
+                        }
                     }
                     MouseScrollDelta::PixelDelta(p) => (p.y / 20.0) as i32,
                 };
@@ -1537,7 +1549,10 @@ mod tests {
     #[test]
     fn wheel_mouse_mode_reports_to_app() {
         // vim with `mouse=a`, htop, claude: app owns the wheel.
-        assert_eq!(wheel_action(TermMode::MOUSE_REPORT_CLICK), WheelAction::Report);
+        assert_eq!(
+            wheel_action(TermMode::MOUSE_REPORT_CLICK),
+            WheelAction::Report
+        );
         assert_eq!(
             wheel_action(TermMode::ALT_SCREEN | TermMode::MOUSE_MOTION),
             WheelAction::Report

@@ -206,10 +206,8 @@ impl Text {
     /// strikeout) stroke positions read from the primary font's metrics.
     fn measure_cell(&mut self, font_px: f32, line_height: f32) -> CellMetrics {
         let attrs = build_attrs(self.family.as_family(), false, false);
-        self.buffer
-            .set_text("MM", &attrs, Shaping::Advanced, None);
-        self.buffer
-            .shape_until_scroll(&mut self.font_system, false);
+        self.buffer.set_text("MM", &attrs, Shaping::Advanced, None);
+        self.buffer.shape_until_scroll(&mut self.font_system, false);
 
         let mut cell_w = font_fallback_width(line_height);
         let mut ascent = line_height.round();
@@ -325,7 +323,12 @@ impl Text {
     /// sequences resolve to their single combined glyph. Cached by the cluster
     /// string + style. Used only for cells that actually carry combiners; the
     /// common single-character path stays on `rasterize`.
-    pub fn rasterize_cluster(&mut self, cluster: &str, bold: bool, italic: bool) -> &[RasterizedGlyph] {
+    pub fn rasterize_cluster(
+        &mut self,
+        cluster: &str,
+        bold: bool,
+        italic: bool,
+    ) -> &[RasterizedGlyph] {
         let key = (cluster.to_string(), bold, italic);
         if !self.cluster_cache.contains_key(&key) {
             let glyphs = self.build_glyphs(cluster, bold, italic);
@@ -339,10 +342,8 @@ impl Text {
         // `family` borrows `self`, so capture the borrowed `Family` before the
         // `&mut self.font_system` borrows below; they touch disjoint fields.
         let attrs = build_attrs(self.family.as_family(), bold, italic);
-        self.buffer
-            .set_text(text, &attrs, Shaping::Advanced, None);
-        self.buffer
-            .shape_until_scroll(&mut self.font_system, false);
+        self.buffer.set_text(text, &attrs, Shaping::Advanced, None);
+        self.buffer.shape_until_scroll(&mut self.font_system, false);
 
         let mut out = Vec::new();
         for run in self.buffer.layout_runs() {
@@ -557,11 +558,9 @@ fn load_emoji_fallback(db: &mut fontdb::Database, seen: &mut HashSet<PathBuf>) {
     for pattern in ["Noto Emoji:color=false", "emoji"] {
         if let Some(path) = fc_match_file(pattern) {
             let key = canonical_or_owned(Path::new(&path));
-            if seen.insert(key) {
-                if load_font_file(db, &path) {
-                    log::debug!("glassy: loaded monochrome emoji for '{pattern}': {path}");
-                    return;
-                }
+            if seen.insert(key) && load_font_file(db, &path) {
+                log::debug!("glassy: loaded monochrome emoji for '{pattern}': {path}");
+                return;
             }
         }
     }

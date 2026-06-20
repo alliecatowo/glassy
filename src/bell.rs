@@ -57,7 +57,9 @@ impl AudioBell {
                 }
             }
         }
-        let Some(sink) = self.sink.as_ref() else { return };
+        let Some(sink) = self.sink.as_ref() else {
+            return;
+        };
 
         // A short, gentle beep: a mid tone, quiet, with a quick fade-in to avoid a
         // click on attack. The mixer plays it asynchronously and the source ends

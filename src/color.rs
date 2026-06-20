@@ -134,9 +134,7 @@ pub fn resolve(color: Color, colors: &Colors) -> [f32; 4] {
     let rgb = match color {
         Color::Spec(rgb) => rgb,
         Color::Named(named) => colors[named].unwrap_or_else(|| default_named(named)),
-        Color::Indexed(idx) => {
-            colors[idx as usize].unwrap_or_else(|| default_indexed(idx))
-        }
+        Color::Indexed(idx) => colors[idx as usize].unwrap_or_else(|| default_indexed(idx)),
     };
     to_f32(rgb)
 }
@@ -162,11 +160,11 @@ fn default_named(named: NamedColor) -> Rgb {
     let theme = active();
     match named as usize {
         i @ 0..=15 => theme.ansi16[i],
-        256 | 267 => theme.fg,                         // Foreground, BrightForeground
-        257 => theme.bg,                               // Background
-        258 => theme.cursor,                           // Cursor
-        i @ 259..=266 => dim(theme.ansi16[i - 259]),   // DimBlack..DimWhite
-        268 => dim(theme.fg),                          // DimForeground
+        256 | 267 => theme.fg, // Foreground, BrightForeground
+        257 => theme.bg,       // Background
+        258 => theme.cursor,   // Cursor
+        i @ 259..=266 => dim(theme.ansi16[i - 259]), // DimBlack..DimWhite
+        268 => dim(theme.fg),  // DimForeground
         _ => theme.fg,
     }
 }
@@ -183,7 +181,11 @@ fn default_indexed(idx: u8) -> Rgb {
             let g = (i % 36) / 6;
             let b = i % 6;
             let level = |v: u8| if v == 0 { 0 } else { v * 40 + 55 };
-            Rgb { r: level(r), g: level(g), b: level(b) }
+            Rgb {
+                r: level(r),
+                g: level(g),
+                b: level(b),
+            }
         }
         232..=255 => {
             // 24-step grayscale ramp.

@@ -4,6 +4,7 @@
 //! Each frame draws two passes over a single static unit-quad vertex buffer:
 //!   1. one solid-color background quad per visible cell, then
 //!   2. one textured quad per glyph (sampled from a shared atlas texture).
+//!
 //! All coordinates are physical pixels; the vertex shaders project to NDC using
 //! the surface size carried in the group(0) uniform.
 
@@ -199,7 +200,12 @@ struct Packer {
 
 impl Packer {
     fn new(size: u32) -> Self {
-        Self { size, cursor_x: 0, cursor_y: 0, shelf_height: 0 }
+        Self {
+            size,
+            cursor_x: 0,
+            cursor_y: 0,
+            shelf_height: 0,
+        }
     }
 
     fn reset(&mut self) {
@@ -336,8 +342,7 @@ impl Renderer {
         // --- wgpu init (synchronous via pollster). ---
         // `InstanceDescriptor` has no `Default` in wgpu 29 (its `display` field is
         // non-defaultable), so build it via the explicit constructor.
-        let instance =
-            wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let surface = instance
             .create_surface(window.clone())
             .context("creating wgpu surface")?;
@@ -413,7 +418,9 @@ impl Renderer {
         // --- group(0): screen-size uniform. ---
         let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("uniform"),
-            contents: bytemuck::bytes_of(&Uniform { screen: [1.0, 1.0, 0.0, 0.0] }),
+            contents: bytemuck::bytes_of(&Uniform {
+                screen: [1.0, 1.0, 0.0, 0.0],
+            }),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
         let uniform_bind_group_layout =
@@ -569,21 +576,19 @@ impl Renderer {
             attributes: &fg_instance_attrs,
         };
 
-        let bg_pipeline_layout =
-            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("bg-pl"),
-                bind_group_layouts: &[Some(&uniform_bind_group_layout)],
-                immediate_size: 0,
-            });
-        let fg_pipeline_layout =
-            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("fg-pl"),
-                bind_group_layouts: &[
-                    Some(&uniform_bind_group_layout),
-                    Some(&atlas_bind_group_layout),
-                ],
-                immediate_size: 0,
-            });
+        let bg_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("bg-pl"),
+            bind_group_layouts: &[Some(&uniform_bind_group_layout)],
+            immediate_size: 0,
+        });
+        let fg_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("fg-pl"),
+            bind_group_layouts: &[
+                Some(&uniform_bind_group_layout),
+                Some(&atlas_bind_group_layout),
+            ],
+            immediate_size: 0,
+        });
 
         let bg_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("bg-pipeline"),
@@ -723,7 +728,9 @@ impl Renderer {
         self.queue.write_buffer(
             &self.uniform_buffer,
             0,
-            bytemuck::bytes_of(&Uniform { screen: [width as f32, height as f32, 0.0, 0.0] }),
+            bytemuck::bytes_of(&Uniform {
+                screen: [width as f32, height as f32, 0.0, 0.0],
+            }),
         );
     }
 
@@ -1016,14 +1023,14 @@ impl Renderer {
     ///
     /// `cell_w` is the single-cell advance; `box_w` is this cell's advance box.
     /// Returns one `(pos, size, glyph)` triple per input glyph, in order.
-    fn place_glyphs<'g>(
-        glyphs: &'g [AtlasGlyph],
+    fn place_glyphs(
+        glyphs: &[AtlasGlyph],
         origin_x: f32,
         baseline: f32,
         cell_w: f32,
         box_w: f32,
         cell_h: f32,
-    ) -> Vec<([f32; 2], [f32; 2], &'g AtlasGlyph)> {
+    ) -> Vec<([f32; 2], [f32; 2], &AtlasGlyph)> {
         // Horizontal recentering for a wide box (0 for a single-width cell).
         let center_dx = (box_w - cell_w) * 0.5;
         glyphs
@@ -1265,16 +1272,16 @@ impl Renderer {
                 let mx = (ox + cw / 2.0).round();
                 let my = (oy + chh / 2.0).round();
                 let (tl, tr, bl, br) = match cp {
-                    0x2596 => (false, false, true, false),  // lower left
-                    0x2597 => (false, false, false, true),  // lower right
-                    0x2598 => (true, false, false, false),  // upper left
-                    0x2599 => (true, false, true, true),    // UL+LL+LR
-                    0x259A => (true, false, false, true),    // UL + LR
-                    0x259B => (true, true, true, false),     // UL+UR+LL
-                    0x259C => (true, true, false, true),     // UL+UR+LR
-                    0x259D => (false, true, false, false),   // upper right
-                    0x259E => (false, true, true, false),    // UR + LL
-                    0x259F => (false, true, true, true),     // UR+LL+LR
+                    0x2596 => (false, false, true, false), // lower left
+                    0x2597 => (false, false, false, true), // lower right
+                    0x2598 => (true, false, false, false), // upper left
+                    0x2599 => (true, false, true, true),   // UL+LL+LR
+                    0x259A => (true, false, false, true),  // UL + LR
+                    0x259B => (true, true, true, false),   // UL+UR+LL
+                    0x259C => (true, true, false, true),   // UL+UR+LR
+                    0x259D => (false, true, false, false), // upper right
+                    0x259E => (false, true, true, false),  // UR + LL
+                    0x259F => (false, true, true, true),   // UR+LL+LR
                     _ => (false, false, false, false),
                 };
                 if tl {
@@ -1746,9 +1753,8 @@ impl Renderer {
         // by reconfiguring with the stored size and skip the frame; other states are
         // skipped silently and retried next redraw.
         let frame = match self.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f) => {
-                f
-            }
+            wgpu::CurrentSurfaceTexture::Success(f)
+            | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
             wgpu::CurrentSurfaceTexture::Lost | wgpu::CurrentSurfaceTexture::Outdated => {
                 let (w, h) = (self.config.width, self.config.height);
                 self.resize(w, h);
@@ -2061,14 +2067,23 @@ impl Renderer {
                 .min(n);
             // Earliest row rebuilt this frame (content may differ even at the same
             // offset), if any.
-            let min_dirty = dirty_rows.iter().copied().filter(|&r| r < n).min().unwrap_or(n);
+            let min_dirty = dirty_rows
+                .iter()
+                .copied()
+                .filter(|&r| r < n)
+                .min()
+                .unwrap_or(n);
             let first_row = pos_div.min(min_dirty);
             start_instance = new_offsets[first_row] as usize;
         }
 
         if total > start_instance {
             let byte_off = (start_instance * stride) as u64;
-            queue.write_buffer(buffer, byte_off, bytemuck::cast_slice(&flat[start_instance..]));
+            queue.write_buffer(
+                buffer,
+                byte_off,
+                bytemuck::cast_slice(&flat[start_instance..]),
+            );
         }
 
         *offsets = new_offsets;
@@ -2115,7 +2130,12 @@ impl Renderer {
                 // Select the destination atlas, its packer, its uv scale, and the
                 // source bytes-per-pixel for the upload.
                 let (packer, texture, inv, bpp) = if r.is_color {
-                    (&mut self.color_packer, &self.color_atlas_texture, inv_color, 4)
+                    (
+                        &mut self.color_packer,
+                        &self.color_atlas_texture,
+                        inv_color,
+                        4,
+                    )
                 } else {
                     (&mut self.packer, &self.mask_atlas_texture, inv_mask, 1)
                 };

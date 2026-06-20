@@ -115,10 +115,10 @@ impl RawConfig {
 
 /// The resolved config file path, honoring `$XDG_CONFIG_HOME` then `$HOME`.
 fn config_path() -> Option<PathBuf> {
-    if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
-        if !xdg.is_empty() {
-            return Some(PathBuf::from(xdg).join("glassy/glassy.conf"));
-        }
+    if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME")
+        && !xdg.is_empty()
+    {
+        return Some(PathBuf::from(xdg).join("glassy/glassy.conf"));
     }
     let home = std::env::var_os("HOME")?;
     Some(PathBuf::from(home).join(".config/glassy/glassy.conf"))

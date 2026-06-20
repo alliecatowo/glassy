@@ -73,17 +73,16 @@ pub fn encode_key(event: &KeyEvent, mods: ModifiersState) -> Option<Vec<u8>> {
 
         // Ctrl-<key> -> control byte (Ctrl-A = 0x01 .. Ctrl-Z = 0x1a, and the
         // C0 controls for @ [ \ ] ^ _ and space).
-        if ctrl {
-            if let Some(c) = text.chars().next() {
-                if let Some(byte) = control_byte(c) {
-                    let mut out = Vec::with_capacity(2);
-                    if alt {
-                        out.push(0x1b);
-                    }
-                    out.push(byte);
-                    return Some(out);
-                }
+        if ctrl
+            && let Some(c) = text.chars().next()
+            && let Some(byte) = control_byte(c)
+        {
+            let mut out = Vec::with_capacity(2);
+            if alt {
+                out.push(0x1b);
             }
+            out.push(byte);
+            return Some(out);
         }
 
         let mut out = Vec::with_capacity(text.len() + 1);
@@ -140,7 +139,14 @@ pub fn encode_mouse(report: MouseReport, mods: ModifiersState, sgr: bool) -> Vec
         (cb & !0b11) | 0b11
     };
     let enc = |v: usize| -> u8 { (32 + (v + 1).min(223)) as u8 };
-    vec![0x1b, b'[', b'M', (32 + cb_legacy).min(255) as u8, enc(report.col), enc(report.row)]
+    vec![
+        0x1b,
+        b'[',
+        b'M',
+        (32 + cb_legacy).min(255) as u8,
+        enc(report.col),
+        enc(report.row),
+    ]
 }
 
 /// Map a character to its C0 control byte for Ctrl-<char>, if one exists.
@@ -148,8 +154,8 @@ fn control_byte(c: char) -> Option<u8> {
     let upper = c.to_ascii_uppercase();
     match upper {
         '@'..='_' => Some((upper as u8) & 0x1f), // @ A..Z [ \ ] ^ _  ->  0x00..0x1f
-        ' ' => Some(0x00),                        // Ctrl-Space -> NUL
-        '?' => Some(0x7f),                        // Ctrl-? -> DEL
+        ' ' => Some(0x00),                       // Ctrl-Space -> NUL
+        '?' => Some(0x7f),                       // Ctrl-? -> DEL
         _ => None,
     }
 }
@@ -160,35 +166,59 @@ mod tests {
     use winit::keyboard::ModifiersState;
 
     fn rep(button: u8, col: usize, row: usize, pressed: bool, motion: bool) -> MouseReport {
-        MouseReport { button, col, row, pressed, motion }
+        MouseReport {
+            button,
+            col,
+            row,
+            pressed,
+            motion,
+        }
     }
 
     #[test]
     fn sgr_left_press_and_release() {
         let m = ModifiersState::empty();
-        assert_eq!(encode_mouse(rep(0, 0, 0, true, false), m, true), b"\x1b[<0;1;1M");
-        assert_eq!(encode_mouse(rep(0, 4, 2, false, false), m, true), b"\x1b[<0;5;3m");
+        assert_eq!(
+            encode_mouse(rep(0, 0, 0, true, false), m, true),
+            b"\x1b[<0;1;1M"
+        );
+        assert_eq!(
+            encode_mouse(rep(0, 4, 2, false, false), m, true),
+            b"\x1b[<0;5;3m"
+        );
     }
 
     #[test]
     fn sgr_wheel_up_down() {
         let m = ModifiersState::empty();
-        assert_eq!(encode_mouse(rep(64, 0, 0, true, false), m, true), b"\x1b[<64;1;1M");
-        assert_eq!(encode_mouse(rep(65, 9, 9, true, false), m, true), b"\x1b[<65;10;10M");
+        assert_eq!(
+            encode_mouse(rep(64, 0, 0, true, false), m, true),
+            b"\x1b[<64;1;1M"
+        );
+        assert_eq!(
+            encode_mouse(rep(65, 9, 9, true, false), m, true),
+            b"\x1b[<65;10;10M"
+        );
     }
 
     #[test]
     fn sgr_bare_motion_uses_no_button_code() {
         // button 3 ("no button") + 32 (motion) = 35; drives hover reporting.
         let m = ModifiersState::empty();
-        assert_eq!(encode_mouse(rep(3, 0, 0, true, true), m, true), b"\x1b[<35;1;1M");
+        assert_eq!(
+            encode_mouse(rep(3, 0, 0, true, true), m, true),
+            b"\x1b[<35;1;1M"
+        );
     }
 
     #[test]
     fn sgr_ctrl_modifier_sets_bit() {
         // Ctrl adds 16 to the button code.
         let m = ModifiersState::CONTROL;
-        assert_eq!(encode_mouse(rep(0, 0, 0, true, false), m, true), b"\x1b[<16;1;1M");
+        assert_eq!(
+            encode_mouse(rep(0, 0, 0, true, false), m, true),
+            b"\x1b[<16;1;1M"
+        );
     }
 
     #[test]
