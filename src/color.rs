@@ -348,6 +348,21 @@ pub fn selection_bg() -> [f32; 4] {
     to_f32(active().selection_bg)
 }
 
+/// The UI accent of the active theme, derived from its cursor color — the one
+/// entry every theme picks deliberately to "pop". Used by the inline toolbar
+/// (active chip fill, mark, new-tab `+`) so accents follow the theme instead of
+/// a hardcoded blue that clashes on Gruvbox / Solarized / etc.
+pub fn accent() -> [f32; 4] {
+    to_f32(active().cursor)
+}
+
+/// The UI danger color of the active theme, derived from ANSI red — used for
+/// destructive affordances (the hovered tab-close ✕) so "danger" reads as red
+/// in whatever red the theme actually uses.
+pub fn danger() -> [f32; 4] {
+    to_f32(active().ansi16[1])
+}
+
 /// Resolve a terminal `Color` (named / indexed / direct) to RGBA in [0, 1].
 pub fn resolve(color: Color, colors: &Colors) -> [f32; 4] {
     let rgb = match color {

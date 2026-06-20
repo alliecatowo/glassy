@@ -9,7 +9,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use alacritty_terminal::grid::{Indexed, Scroll};
+use alacritty_terminal::grid::{Dimensions, Indexed, Scroll};
 use alacritty_terminal::index::{Column, Line, Point, Side};
 use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::TermMode;
@@ -303,9 +303,9 @@ fn draw_modal(renderer: &mut Renderer, rows: usize, cols: usize, lines: &[&str])
     let total_rows = rows + TAB_STRIP_ROWS;
     let backdrop = darken(color::default_bg(), 0.45);
     let panel_bg = lighten(color::default_bg(), 0.07);
-    let border_bg = [0.45, 0.68, 1.0, 1.0]; // accent
+    let border_bg = color::accent();
     let text_fg = color::default_fg();
-    let title_fg = [0.55, 0.75, 1.0, 1.0];
+    let title_fg = lighten(color::accent(), 0.1);
 
     let content_w = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0);
     let panel_w = (content_w + 4).min(cols.max(1));
@@ -513,6 +513,10 @@ pub struct App {
     dragging_tab: Option<usize>,
     /// The toolbar item currently under the pointer, for hover highlighting.
     hovered_strip_item: Option<StripItem>,
+    /// The toolbar item the left button is currently pressed on, for the PRESSED
+    /// (inset/darker) treatment. Set on press over a strip item, cleared on
+    /// release — gives clicks real tactility distinct from hover.
+    held_strip_item: Option<StripItem>,
     /// Accumulated scroll/swipe delta while the pointer is over the tab strip,
     /// so a touchpad 2-finger swipe (many small deltas) cycles tabs smoothly.
     tab_scroll_accum: f32,
@@ -621,6 +625,7 @@ impl App {
             first_frame_done: false,
             dragging_tab: None,
             hovered_strip_item: None,
+            held_strip_item: None,
             tab_scroll_accum: 0.0,
             content_scroll_accum: 0.0,
             swipe_consumed: false,
@@ -778,7 +783,11 @@ impl App {
         // Hit-test against the actual toolbar layout (the same helper the renderer
         // uses, so click targets match what's drawn).
         let col = ((x - pad) / m.width as f64).floor().max(0.0) as usize;
-        match self.strip_item_at_col(col) {
+        let item = self.strip_item_at_col(col);
+        // Record the pressed item so the strip draws it inset (released in the
+        // MouseInput handler), giving the click visible tactility.
+        self.held_strip_item = item;
+        match item {
             Some(StripItem::Tab(pos)) => {
                 self.activate_tab(pos, event_loop);
                 // Begin a potential drag-to-reorder from this slot (the tab is now
@@ -1211,6 +1220,9 @@ impl App {
         // Read before `renderable_content()` so both immutable borrows of `term`
         // can coexist with the content's `display_iter`.
         let cursor_blinking = term.cursor_style().blinking;
+        // Total scrollback lines available, for the strip's fixed-width % readout.
+        // Read before `renderable_content()` so both immutable `term` borrows coexist.
+        let history_size = term.grid().history_size();
         let content = term.renderable_content();
         let colors = content.colors;
         let display_offset = content.display_offset as i32;
@@ -1424,16 +1436,24 @@ impl App {
         // right-aligned help / menu buttons. Drawn from `strip_layout` so the
         // click hit-test matches exactly. ---
         {
-            let bar_bg = color::selection_bg();
-            let base_fg = color::default_fg();
-            let base_bg = color::default_bg();
+            // Dim the whole strip while the window is unfocused so an idle window
+            // reads as "asleep" — a single scalar applied to every strip color.
+            let fdim = if self.focused { 1.0 } else { 0.6 };
+            let mul = |c: [f32; 4]| [c[0] * fdim, c[1] * fdim, c[2] * fdim, c[3]];
+
+            let bar_bg = mul(color::selection_bg());
+            let base_fg = mul(color::default_fg());
+            let base_bg = mul(color::default_bg());
+            let accent = mul(color::accent());
+            let danger = mul(color::danger());
             let dim_fg = [base_fg[0] * 0.55, base_fg[1] * 0.55, base_fg[2] * 0.55, base_fg[3]];
-            let accent = [0.45, 0.68, 1.0, 1.0];
             // Raised chip surfaces: idle chips sit slightly above the bar, the
-            // active chip is an accent fill, hovered chips brighten — giving the
-            // inline strip tactile "chips" instead of a flat run of text.
+            // active chip is an accent fill, hovered chips brighten, and a PRESSED
+            // chip insets (darker than the bar) — giving the inline strip tactile
+            // "chips" instead of a flat run of text.
             let chip_idle = lighten(bar_bg, 0.05);
             let chip_hover = lighten(bar_bg, 0.13);
+            let chip_press = darken(bar_bg, 0.7); // inset: darker than the bar
             let active_bg = accent;
             let active_fg = base_bg; // dark text on the accent chip
 
@@ -1469,33 +1489,62 @@ impl App {
                 .collect();
             let multi = descs.len() > 1;
             let hov = self.hovered_strip_item;
+            let held = self.held_strip_item;
             for seg in strip_layout(&descs, self.cols) {
                 let is_active = matches!(seg.item, StripItem::Tab(i) | StripItem::TabClose(i) if descs.get(i).is_some_and(|d| d.1));
                 let is_busy = matches!(seg.item, StripItem::Tab(i) if descs.get(i).is_some_and(|d| d.2));
                 let hovered = hov == Some(seg.item);
+                let pressed = held == Some(seg.item);
+                // Chip surface by precedence: PRESSED (inset/darker) > hover > idle.
+                // The pressed treatment is deliberately the opposite direction from
+                // hover (down/dark vs up/light) so a click reads as a real push.
+                let surface = |idle: [f32; 4]| {
+                    if pressed {
+                        chip_press
+                    } else if hovered {
+                        chip_hover
+                    } else {
+                        idle
+                    }
+                };
                 let (fg, sbg) = match seg.item {
-                    _ if is_active => (active_fg, active_bg), // accent-filled active chip
-                    StripItem::Tab(_) if !multi => (base_fg, bar_bg), // single-tab title (no chip)
+                    // Even the active chip insets while pressed, for tactile feedback.
+                    _ if is_active => (active_fg, if pressed { chip_press } else { active_bg }),
+                    StripItem::Tab(_) if !multi => (base_fg, surface(bar_bg)), // single-tab title
                     StripItem::Tab(_) => (
                         if is_busy { accent } else { base_fg },
-                        if hovered { chip_hover } else { chip_idle },
+                        surface(chip_idle),
                     ),
                     StripItem::TabClose(_) => (
-                        if hovered { [0.95, 0.45, 0.45, 1.0] } else { dim_fg },
-                        if hovered { chip_hover } else { chip_idle },
+                        if hovered { danger } else { dim_fg },
+                        surface(chip_idle),
                     ),
-                    StripItem::NewTab => (accent, if hovered { chip_hover } else { bar_bg }),
+                    StripItem::NewTab => (accent, surface(bar_bg)),
                     StripItem::Help | StripItem::Menu => (
-                        if hovered { base_fg } else { dim_fg },
-                        if hovered { chip_hover } else { bar_bg },
+                        if hovered || pressed { base_fg } else { dim_fg },
+                        surface(bar_bg),
                     ),
                 };
                 put(&mut bar, seg.start, &seg.label, fg, sbg);
+                // A clear activity dot on busy *background* tab chips (the active
+                // tab is never "busy"): replace the chip's leading pad with `•`.
+                if is_busy && !is_active {
+                    put(&mut bar, seg.start, "•", accent, sbg);
+                }
             }
 
-            // Scrollback-position indicator, tucked in left of the buttons.
+            // Scrollback-position indicator, tucked in left of the buttons. A
+            // FIXED-WIDTH percentage (` ⇡100% `) so the controls never shift as the
+            // number changes width; 100% = scrolled to the oldest line.
             if display_offset > 0 {
-                let s = format!("⇡ {display_offset} ");
+                let pct = if history_size > 0 {
+                    ((display_offset as f32 / history_size as f32) * 100.0).round() as u32
+                } else {
+                    100
+                }
+                .min(100);
+                // 7 cells: leading space, ⇡, up to 3 digits (right-aligned), %, space.
+                let s = format!(" ⇡{pct:>3}% ");
                 let n = s.chars().count();
                 let right_w = STRIP_BTN_W * 2;
                 if self.cols > right_w + n + 2 {
@@ -2280,6 +2329,10 @@ impl ApplicationHandler<UserEvent> for App {
                 self.held_button = if pressed { Some(base) } else { None };
                 if !pressed {
                     self.dragging_tab = None; // end any tab drag-reorder on release
+                    // Release any pressed toolbar item so its inset clears.
+                    if self.held_strip_item.take().is_some() {
+                        self.mark_dirty(event_loop);
+                    }
                 }
 
                 // A left click in the tab strip switches tabs; never sent onward.
