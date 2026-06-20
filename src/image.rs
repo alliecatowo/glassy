@@ -283,6 +283,207 @@ fn b64_decode(s: &str) -> Vec<u8> {
     out
 }
 
+/// Decode a sixel data stream (the bytes after `DCS <params> q`, up to `ST`)
+/// into RGBA. Pixels never written stay transparent so they composite over the
+/// terminal background. Returns `None` if nothing was drawn.
+///
+/// Sixel grammar handled: `#n;type;x;y;z` color definition (type 2 = RGB 0-100,
+/// type 1 = HLS), `#n` color select, `!n` repeat-count, `$` carriage return,
+/// `-` next 6-pixel band, `"..."` raster attributes (skipped), and the sixel
+/// data bytes `?`..`~` (each six vertical pixels in the current color).
+pub fn decode_sixel(data: &[u8]) -> Option<DecodedImage> {
+    let mut palette = default_sixel_palette();
+    let mut color = 0usize; // current color register
+    let mut rows: Vec<Vec<[u8; 4]>> = Vec::new(); // row-major, grown on demand
+    let mut x = 0usize; // current column
+    let mut band = 0usize; // current 6-pixel band index (top row = band*6)
+    let mut max_w = 0usize;
+
+    // Set the six vertical pixels of one sixel column for the current color.
+    fn put(rows: &mut Vec<Vec<[u8; 4]>>, x: usize, y: usize, c: [u8; 4]) {
+        while rows.len() <= y {
+            rows.push(Vec::new());
+        }
+        let row = &mut rows[y];
+        while row.len() <= x {
+            row.push([0, 0, 0, 0]);
+        }
+        row[x] = c;
+    }
+
+    let mut i = 0;
+    while i < data.len() {
+        let b = data[i];
+        match b {
+            b'#' => {
+                // Color: #n  or  #n;type;a;b;c
+                i += 1;
+                let (n, used) = parse_uint(&data[i..]);
+                i += used;
+                let n = n as usize;
+                if data.get(i) == Some(&b';') {
+                    let mut nums = [0u32; 4]; // type, a, b, c
+                    let mut k = 0;
+                    while data.get(i) == Some(&b';') && k < 4 {
+                        i += 1;
+                        let (v, u) = parse_uint(&data[i..]);
+                        nums[k] = v;
+                        i += u;
+                        k += 1;
+                    }
+                    if n < palette.len() {
+                        palette[n] = sixel_color(nums[0], nums[1], nums[2], nums[3]);
+                    }
+                }
+                color = n.min(palette.len() - 1);
+            }
+            b'!' => {
+                // Repeat: !n <sixelchar>
+                i += 1;
+                let (count, used) = parse_uint(&data[i..]);
+                i += used;
+                if let Some(&sx) = data.get(i) {
+                    if (b'?'..=b'~').contains(&sx) {
+                        let bits = sx - b'?';
+                        let c = palette[color];
+                        for _ in 0..count.max(1) {
+                            for bit in 0..6 {
+                                if bits & (1 << bit) != 0 {
+                                    put(&mut rows, x, band * 6 + bit, c);
+                                }
+                            }
+                            x += 1;
+                        }
+                        max_w = max_w.max(x);
+                    }
+                    i += 1;
+                }
+            }
+            b'$' => {
+                x = 0;
+                i += 1;
+            }
+            b'-' => {
+                band += 1;
+                x = 0;
+                i += 1;
+            }
+            b'"' => {
+                // Raster attributes: "Pan;Pad;Ph;Pv — consume digits/semicolons.
+                i += 1;
+                while i < data.len() && (data[i].is_ascii_digit() || data[i] == b';') {
+                    i += 1;
+                }
+            }
+            b'?'..=b'~' => {
+                let bits = b - b'?';
+                let c = palette[color];
+                for bit in 0..6 {
+                    if bits & (1 << bit) != 0 {
+                        put(&mut rows, x, band * 6 + bit, c);
+                    }
+                }
+                x += 1;
+                max_w = max_w.max(x);
+                i += 1;
+            }
+            _ => i += 1, // whitespace / unknown
+        }
+    }
+
+    if rows.is_empty() || max_w == 0 {
+        return None;
+    }
+    let width = max_w as u32;
+    let height = rows.len() as u32;
+    let mut rgba = Vec::with_capacity((width * height * 4) as usize);
+    for row in &rows {
+        for x in 0..max_w {
+            let px = row.get(x).copied().unwrap_or([0, 0, 0, 0]);
+            rgba.extend_from_slice(&px);
+        }
+    }
+    Some(DecodedImage { width, height, rgba })
+}
+
+/// Parse a leading base-10 unsigned integer, returning `(value, bytes_consumed)`.
+fn parse_uint(data: &[u8]) -> (u32, usize) {
+    let mut v = 0u32;
+    let mut n = 0;
+    while n < data.len() && data[n].is_ascii_digit() {
+        v = v.saturating_mul(10).saturating_add((data[n] - b'0') as u32);
+        n += 1;
+    }
+    (v, n)
+}
+
+/// Convert a sixel color spec to RGBA. `kind` 2 = RGB (each 0-100), 1 = HLS
+/// (H 0-360, L 0-100, S 0-100). Unknown kinds fall back to the RGB reading.
+fn sixel_color(kind: u32, a: u32, b: u32, c: u32) -> [u8; 4] {
+    let pct = |v: u32| ((v.min(100) as f32) * 255.0 / 100.0).round() as u8;
+    if kind == 1 {
+        let (r, g, bl) = hls_to_rgb(a as f32, b as f32 / 100.0, c as f32 / 100.0);
+        [r, g, bl, 255]
+    } else {
+        [pct(a), pct(b), pct(c), 255]
+    }
+}
+
+/// HLS (hue 0-360, lightness/saturation 0-1) to RGB bytes.
+fn hls_to_rgb(h: f32, l: f32, s: f32) -> (u8, u8, u8) {
+    if s <= 0.0 {
+        let v = (l * 255.0).round() as u8;
+        return (v, v, v);
+    }
+    let q = if l < 0.5 { l * (1.0 + s) } else { l + s - l * s };
+    let p = 2.0 * l - q;
+    let hk = (h / 360.0).rem_euclid(1.0);
+    let conv = |t: f32| {
+        let t = t.rem_euclid(1.0);
+        let v = if t < 1.0 / 6.0 {
+            p + (q - p) * 6.0 * t
+        } else if t < 0.5 {
+            q
+        } else if t < 2.0 / 3.0 {
+            p + (q - p) * (2.0 / 3.0 - t) * 6.0
+        } else {
+            p
+        };
+        (v * 255.0).round() as u8
+    };
+    (conv(hk + 1.0 / 3.0), conv(hk), conv(hk - 1.0 / 3.0))
+}
+
+/// The standard 16-color VT340 sixel palette (registers 0-15), RGB 0-100 scaled
+/// to 0-255; registers 16-255 default to opaque black. Images that define their
+/// own colors overwrite these.
+fn default_sixel_palette() -> Vec<[u8; 4]> {
+    const BASE: [(u8, u8, u8); 16] = [
+        (0, 0, 0),
+        (20, 20, 80),
+        (80, 13, 13),
+        (20, 80, 20),
+        (80, 20, 80),
+        (20, 80, 80),
+        (80, 80, 20),
+        (53, 53, 53),
+        (26, 26, 26),
+        (33, 33, 60),
+        (60, 26, 26),
+        (33, 60, 33),
+        (60, 33, 60),
+        (33, 60, 60),
+        (60, 60, 33),
+        (80, 80, 80),
+    ];
+    let s = |v: u8| ((v as f32) * 255.0 / 100.0).round() as u8;
+    let mut p = vec![[0u8, 0, 0, 255]; 256];
+    for (i, &(r, g, b)) in BASE.iter().enumerate() {
+        p[i] = [s(r), s(g), s(b), 255];
+    }
+    p
+}
+
 /// An image placed on the grid: which stored image, at which screen cell.
 #[derive(Clone)]
 pub struct Placement {
@@ -338,6 +539,13 @@ impl ImageStore {
         }
     }
 
+    /// Store decoded pixels under `id` without queuing a placement (used by the
+    /// sixel path, which displays at the cursor via a separate Display event).
+    pub fn insert_pixels(&mut self, id: u32, image: DecodedImage) {
+        self.by_id.insert(id, image);
+        self.revision += 1;
+    }
+
     /// Remove placements (kitty `a=d`): a specific id, or all when `id == 0`.
     /// Pixel data is retained so a later `a=p` can redisplay the same id.
     pub fn delete(&mut self, id: u32) {
@@ -388,7 +596,14 @@ pub struct StreamTap {
     state: TapState,
     apc: Vec<u8>,
     kitty: KittyParser,
+    dcs: Vec<u8>,
+    /// Next id to assign to a decoded sixel image (which carry no kitty id).
+    next_sixel_id: u32,
 }
+
+/// Sixel images have no protocol id, so they get synthetic ids from a high range
+/// that cannot collide with app-chosen kitty ids in normal use.
+const SIXEL_ID_BASE: u32 = 0x8000_0000;
 
 /// One ordered item produced by [`StreamTap::process`]: either VT bytes for the
 /// parser, or a point at which an image should be displayed (anchored at the
@@ -407,6 +622,8 @@ enum TapState {
     Escape,    // saw ESC in normal text
     Apc,       // inside an APC body
     ApcEscape, // saw ESC inside an APC body (maybe ST)
+    Dcs,       // inside a DCS body (ESC P ... ST) — sixel candidate
+    DcsEscape, // saw ESC inside a DCS body (maybe ST)
 }
 
 impl Default for StreamTap {
@@ -417,7 +634,13 @@ impl Default for StreamTap {
 
 impl StreamTap {
     pub fn new() -> Self {
-        Self { state: TapState::Normal, apc: Vec::new(), kitty: KittyParser::new() }
+        Self {
+            state: TapState::Normal,
+            apc: Vec::new(),
+            kitty: KittyParser::new(),
+            dcs: Vec::new(),
+            next_sixel_id: SIXEL_ID_BASE,
+        }
     }
 
     /// Process `input`, routing kitty graphics commands into `store` and
@@ -451,10 +674,13 @@ impl StreamTap {
                     if b == b'_' {
                         self.apc.clear();
                         self.state = TapState::Apc; // APC introducer; drop it
+                    } else if b == b'P' {
+                        self.dcs.clear();
+                        self.state = TapState::Dcs; // DCS introducer; buffer (sixel?)
                     } else if b == 0x1b {
                         out.push(0x1b); // another ESC; emit held ESC, stay
                     } else {
-                        out.push(0x1b); // not an APC; emit held ESC + this byte
+                        out.push(0x1b); // not an APC/DCS; emit held ESC + this byte
                         out.push(b);
                         self.state = TapState::Normal;
                     }
@@ -479,6 +705,40 @@ impl StreamTap {
                         self.state = TapState::Apc;
                     }
                 }
+                TapState::Dcs => {
+                    if b == 0x1b {
+                        self.state = TapState::DcsEscape;
+                    } else {
+                        self.dcs.push(b);
+                    }
+                }
+                TapState::DcsEscape => {
+                    if b == b'\\' {
+                        // ST terminator. Sixel -> image event; any other DCS is
+                        // reconstructed and passed through to the VT parser.
+                        match self.finish_dcs(store) {
+                            Some(ev) => {
+                                if !out.is_empty() {
+                                    events.push(TapEvent::Vt(std::mem::take(&mut out)));
+                                }
+                                events.push(ev);
+                            }
+                            None => {
+                                out.push(0x1b);
+                                out.push(b'P');
+                                out.extend_from_slice(&self.dcs);
+                                out.push(0x1b);
+                                out.push(b'\\');
+                                self.dcs.clear();
+                            }
+                        }
+                        self.state = TapState::Normal;
+                    } else {
+                        self.dcs.push(0x1b); // ESC was body, not terminator
+                        self.dcs.push(b);
+                        self.state = TapState::Dcs;
+                    }
+                }
             }
         }
         if !out.is_empty() {
@@ -497,6 +757,26 @@ impl StreamTap {
         };
         self.apc.clear();
         ev
+    }
+
+    /// Finish a buffered DCS. If it is a sixel sequence (`<params> q <data>`,
+    /// where the params before `q` are only digits/semicolons), decode it, store
+    /// the pixels, and return a Display event. Otherwise return `None` so the
+    /// caller passes the original DCS through to the VT parser. Clears the buffer
+    /// only when consumed as sixel (passthrough needs the bytes intact).
+    fn finish_dcs(&mut self, store: &FairMutex<ImageStore>) -> Option<TapEvent> {
+        let q = self.dcs.iter().position(|&b| b == b'q')?;
+        // Sixel params are digits and ';' only; anything else (e.g. DECRQSS `$q`)
+        // means this is not sixel.
+        if !self.dcs[..q].iter().all(|&b| b.is_ascii_digit() || b == b';') {
+            return None;
+        }
+        let image = decode_sixel(&self.dcs[q + 1..])?;
+        let id = self.next_sixel_id;
+        self.next_sixel_id = self.next_sixel_id.wrapping_add(1).max(SIXEL_ID_BASE);
+        store.lock().insert_pixels(id, image);
+        self.dcs.clear();
+        Some(TapEvent::Display(PendingDisplay { id, cols: 0, rows: 0 }))
     }
 }
 
@@ -647,6 +927,49 @@ mod tests {
             })
             .collect();
         assert_eq!(kinds, vec!["display", "delete"]);
+    }
+
+    #[test]
+    fn decodes_basic_sixel() {
+        // One color (red), one full sixel column `~` (all six bits) -> 1x6 red.
+        let img = decode_sixel(b"#0;2;100;0;0~").expect("decoded");
+        assert_eq!((img.width, img.height), (1, 6));
+        assert_eq!(&img.rgba[0..4], &[255, 0, 0, 255]);
+        // All six rows are red.
+        assert!(img.rgba.chunks_exact(4).all(|p| p == [255, 0, 0, 255]));
+    }
+
+    #[test]
+    fn sixel_repeat_and_newline() {
+        // `!3~` -> three columns; `-` -> next band; one column. Width 3, height 12.
+        let img = decode_sixel(b"#0;2;0;100;0!3~-#0;2;0;100;0~").expect("decoded");
+        assert_eq!((img.width, img.height), (3, 12));
+        // Top-left is green; the second band's columns 1..2 were never written
+        // (transparent).
+        assert_eq!(&img.rgba[0..4], &[0, 255, 0, 255]);
+        let band2 = (6 * 3 + 1) * 4; // row 6, col 1
+        assert_eq!(&img.rgba[band2..band2 + 4], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn tap_routes_sixel_dcs_to_display() {
+        let store = FairMutex::new(ImageStore::new());
+        let mut tap = StreamTap::new();
+        let events = tap.process(b"x\x1bPq#0;2;100;0;0~\x1b\\y", &store);
+        assert_eq!(vt_bytes(&events), b"xy");
+        assert_eq!(display_count(&events), 1);
+        assert_eq!(store.lock().len(), 1);
+    }
+
+    #[test]
+    fn tap_passes_through_non_sixel_dcs() {
+        // A DECRQSS-style DCS (`$q...`) is not sixel and must reach the parser.
+        let store = FairMutex::new(ImageStore::new());
+        let mut tap = StreamTap::new();
+        let events = tap.process(b"\x1bP$q\"p\x1b\\", &store);
+        assert_eq!(vt_bytes(&events), b"\x1bP$q\"p\x1b\\");
+        assert_eq!(display_count(&events), 0);
+        assert_eq!(store.lock().len(), 0);
     }
 
     #[test]
