@@ -339,6 +339,96 @@ fn draw_modal(renderer: &mut Renderer, rows: usize, cols: usize, lines: &[&str])
     }
 }
 
+/// The four actions in the ≡ hamburger dropdown menu. Kept as a small enum so
+/// the hit-test and the keyboard dispatch share one definition.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum MenuAction {
+    NewTab,
+    Settings,
+    Help,
+    CloseTab,
+}
+
+impl MenuAction {
+    const ALL: &'static [MenuAction] =
+        &[MenuAction::NewTab, MenuAction::Settings, MenuAction::Help, MenuAction::CloseTab];
+
+    fn label(self) -> &'static str {
+        match self {
+            MenuAction::NewTab => "New tab",
+            MenuAction::Settings => "Settings",
+            MenuAction::Help => "Help",
+            MenuAction::CloseTab => "Close tab",
+        }
+    }
+}
+
+/// Draw the ≡ hamburger dropdown as a small anchored panel. The panel appears
+/// just below the tab strip, right-aligned near the ≡ button. `sel` is the
+/// keyboard-highlighted row (0-based). Rendered over the existing frame content
+/// (terminal rows only — row 0 is the strip, which stays drawn beneath).
+fn draw_dropdown_menu(renderer: &mut Renderer, rows: usize, cols: usize, sel: usize) {
+    let items = MenuAction::ALL;
+    let panel_w = items.iter().map(|a| a.label().len()).max().unwrap_or(0) + 4; // 2 pad each side
+    let panel_h = items.len() + 2; // 1-cell border top + bottom
+
+    let panel_bg = lighten(color::default_bg(), 0.07);
+    let border_bg = color::accent();
+    let text_fg = color::default_fg();
+    let sel_bg = lighten(color::default_bg(), 0.18);
+    let sel_fg = lighten(color::accent(), 0.1);
+
+    // Anchor to the right edge of the window, just below the strip (row 1).
+    let left = cols.saturating_sub(panel_w);
+    let top = TAB_STRIP_ROWS; // row 1: immediately below the strip
+
+    // Only repaint the rows the panel occupies (the rest keep their content).
+    let row_end = (top + panel_h).min(rows + TAB_STRIP_ROWS);
+    for row in top..row_end {
+        renderer.begin_row(row);
+        for col in 0..cols {
+            let in_panel = col >= left && col < left + panel_w;
+            if !in_panel {
+                // Outside the panel: push a blank so the renderer has a cell for
+                // this column (it may not have been drawn in the terminal pass
+                // because the menu covers terminal rows).
+                renderer.push_cell(
+                    col,
+                    row,
+                    ' ',
+                    &[],
+                    color::default_fg(),
+                    color::default_bg(),
+                    false,
+                    false,
+                    false,
+                    Decorations::default(),
+                );
+                continue;
+            }
+            let prow = row - top;
+            let pcol = col - left;
+            let is_border =
+                prow == 0 || prow == panel_h - 1 || pcol == 0 || pcol == panel_w - 1;
+            let (ch, fg, bg) = if is_border {
+                (' ', text_fg, border_bg)
+            } else {
+                let li = prow - 1; // item index (0-based)
+                let label = items.get(li).map(|a| a.label()).unwrap_or("");
+                let tcol = pcol - 1;
+                let c = label.chars().nth(tcol).unwrap_or(' ');
+                let (fg, bg) = if li == sel {
+                    (sel_fg, sel_bg)
+                } else {
+                    (text_fg, panel_bg)
+                };
+                (c, fg, bg)
+            };
+            renderer.push_cell(col, row, ch, &[], fg, bg, false, false, false, Decorations::default());
+        }
+    }
+}
+
 /// Which mouse-button id to report for a pointer-motion event, or `None` to stay
 /// silent. `held` is the currently pressed button (0/1/2) or `None`. Mirrors
 /// xterm: any-motion mode (1003) reports even with no button (id 3); button-only
@@ -539,6 +629,10 @@ pub struct App {
     settings_sel: usize,
     /// True briefly after a successful settings save, for the overlay's status line.
     settings_saved: bool,
+    /// Whether the ≡ hamburger dropdown menu is currently shown.
+    menu_open: bool,
+    /// Currently-highlighted row in the dropdown menu (keyboard nav).
+    menu_sel: usize,
 
     // Mouse reporting state.
     /// Last known cursor cell (col, row), clamped to the grid.
@@ -633,6 +727,8 @@ impl App {
             settings_open: false,
             settings_sel: 0,
             settings_saved: false,
+            menu_open: false,
+            menu_sel: 0,
             mouse_cell: (0, 0),
             mouse_px: (0.0, 0.0),
             held_button: None,
@@ -769,6 +865,86 @@ impl App {
         true
     }
 
+    /// Invoke a menu action and close the dropdown.
+    fn invoke_menu_action(&mut self, action: MenuAction, event_loop: &ActiveEventLoop) {
+        self.menu_open = false;
+        self.force_full_redraw = true;
+        match action {
+            MenuAction::NewTab => self.new_tab(event_loop),
+            MenuAction::Settings => {
+                self.settings_open = true;
+                self.settings_sel = 0;
+                self.settings_saved = false;
+                self.mark_dirty(event_loop);
+            }
+            MenuAction::Help => {
+                self.help_open = true;
+                self.mark_dirty(event_loop);
+            }
+            MenuAction::CloseTab => self.close_active_tab(event_loop),
+        }
+    }
+
+    /// Handle a keypress while the dropdown menu is open. Returns true if the
+    /// key was consumed (caller should not forward to the child).
+    fn handle_menu_key(&mut self, key: &Key, event_loop: &ActiveEventLoop) -> bool {
+        let n = MenuAction::ALL.len();
+        match key {
+            Key::Named(NamedKey::ArrowUp) => {
+                self.menu_sel = (self.menu_sel + n - 1) % n;
+                self.force_full_redraw = true;
+                self.mark_dirty(event_loop);
+                true
+            }
+            Key::Named(NamedKey::ArrowDown) => {
+                self.menu_sel = (self.menu_sel + 1) % n;
+                self.force_full_redraw = true;
+                self.mark_dirty(event_loop);
+                true
+            }
+            Key::Named(NamedKey::Enter) => {
+                if let Some(&action) = MenuAction::ALL.get(self.menu_sel) {
+                    self.invoke_menu_action(action, event_loop);
+                }
+                true
+            }
+            Key::Named(NamedKey::Escape) => {
+                self.menu_open = false;
+                self.force_full_redraw = true;
+                self.mark_dirty(event_loop);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Hit-test a mouse click at physical pixel `(x, y)` against the open
+    /// dropdown menu. Returns the action if a row was clicked, `None` otherwise.
+    fn menu_hit_test(&self, x: f64, y: f64) -> Option<MenuAction> {
+        let renderer = self.renderer.as_ref()?;
+        let m = renderer.cell_metrics();
+        let pad = renderer.pad() as f64;
+        let items = MenuAction::ALL;
+        let label_w = items.iter().map(|a| a.label().len()).max().unwrap_or(0);
+        let panel_w = label_w + 4;
+        let left = self.cols.saturating_sub(panel_w);
+
+        // Panel occupies screen columns [left, left+panel_w).
+        let px_left = left as f64 * m.width as f64 + pad;
+        let px_right = (left + panel_w) as f64 * m.width as f64 + pad;
+        if x < px_left || x >= px_right {
+            return None;
+        }
+        // Panel rows: TAB_STRIP_ROWS+1 .. TAB_STRIP_ROWS+1+items.len()
+        // (row 0 = top border, rows 1..=items.len() = items, last = bottom border).
+        let top_px = (TAB_STRIP_ROWS as f64 + 1.0) * m.height as f64 + pad;
+        let row_rel = ((y - top_px) / m.height as f64).floor();
+        if row_rel < 0.0 || row_rel >= items.len() as f64 {
+            return None;
+        }
+        items.get(row_rel as usize).copied()
+    }
+
     fn strip_click(&mut self, event_loop: &ActiveEventLoop) -> bool {
         let Some(renderer) = self.renderer.as_ref() else {
             return false;
@@ -799,14 +975,16 @@ impl App {
             Some(StripItem::Help) => {
                 self.help_open = !self.help_open;
                 self.settings_open = false;
+                self.menu_open = false;
                 self.force_full_redraw = true;
                 self.mark_dirty(event_loop);
             }
             Some(StripItem::Menu) => {
-                self.settings_open = !self.settings_open;
+                // Toggle the hamburger dropdown; close other overlays.
+                self.menu_open = !self.menu_open;
+                self.menu_sel = 0;
                 self.help_open = false;
-                self.settings_sel = 0;
-                self.settings_saved = false;
+                self.settings_open = false;
                 self.force_full_redraw = true;
                 self.mark_dirty(event_loop);
             }
@@ -1606,8 +1784,8 @@ impl App {
         // live placement list, anchored to the cell they were displayed at. The
         // stored row is viewport-relative at display time; translate by the current
         // scroll offset so images move with the buffer as the user scrolls.
-        // Suppressed while a modal is up so images don't punch through it.
-        if !self.help_open && !self.settings_open {
+        // Suppressed while a modal or dropdown is up so images don't punch through it.
+        if !self.help_open && !self.settings_open && !self.menu_open {
             let store = pty.images.lock();
             if !store.placements().is_empty() {
                 let m = renderer.cell_metrics();
@@ -1643,6 +1821,10 @@ impl App {
             draw_modal(renderer, self.rows, self.cols, &refs);
         } else if self.help_open {
             draw_modal(renderer, self.rows, self.cols, HELP_LINES);
+        } else if self.menu_open {
+            // Hamburger dropdown: a small anchored panel just below the ≡ button.
+            // Drawn last so it floats above the terminal content.
+            draw_dropdown_menu(renderer, self.rows, self.cols, self.menu_sel);
         }
 
         // Record the state this frame drew from, so the next frame can repaint only
@@ -1966,6 +2148,10 @@ impl ApplicationHandler<UserEvent> for App {
             self.settings_open = true;
             self.force_full_redraw = true;
         }
+        if std::env::var_os("GLASSY_MENU").is_some() {
+            self.menu_open = true;
+            self.force_full_redraw = true;
+        }
         // Headless: open N tabs at startup to capture the multi-tab toolbar.
         if let Ok(n) = std::env::var("GLASSY_TABS")
             && let Ok(n) = n.parse::<usize>()
@@ -2174,6 +2360,20 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                 }
 
+                // While the hamburger dropdown is open, Up/Down/Enter/Esc navigate
+                // it. All other keys close it and pass through to the normal handler.
+                if event.state.is_pressed() && self.menu_open {
+                    let key = &event.logical_key;
+                    if self.handle_menu_key(key, event_loop) {
+                        return;
+                    }
+                    // Any key that didn't navigate the menu closes it.
+                    self.menu_open = false;
+                    self.force_full_redraw = true;
+                    self.mark_dirty(event_loop);
+                    // Fall through: let the keypress reach the child below.
+                }
+
                 // While an overlay is open it owns the keyboard — nothing reaches
                 // the child. Esc / F1 / Ctrl+, close it; settings handles nav/edit.
                 if event.state.is_pressed() && (self.help_open || self.settings_open) {
@@ -2333,6 +2533,21 @@ impl ApplicationHandler<UserEvent> for App {
                     if self.held_strip_item.take().is_some() {
                         self.mark_dirty(event_loop);
                     }
+                }
+
+                // A click anywhere while the dropdown is open: either invoke the
+                // selected item (if inside the panel) or dismiss the menu.
+                if button == MouseButton::Left && pressed && self.menu_open {
+                    let (mx, my) = self.mouse_px;
+                    if let Some(action) = self.menu_hit_test(mx, my) {
+                        self.invoke_menu_action(action, event_loop);
+                    } else {
+                        self.menu_open = false;
+                        self.force_full_redraw = true;
+                        self.mark_dirty(event_loop);
+                    }
+                    self.held_button = None;
+                    return;
                 }
 
                 // A left click in the tab strip switches tabs; never sent onward.
