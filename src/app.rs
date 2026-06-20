@@ -432,6 +432,10 @@ pub struct App {
 
     mods: ModifiersState,
     focused: bool,
+    /// Wall-clock at App construction + whether the first frame has been timed,
+    /// so we can log time-to-first-frame once (a startup benchmark).
+    started: Instant,
+    first_frame_done: bool,
     /// Whether the F1 help overlay is currently shown.
     help_open: bool,
     /// Whether the Ctrl+, settings overlay is currently shown.
@@ -521,6 +525,8 @@ impl App {
             base_font_px: None,
             mods: ModifiersState::empty(),
             focused: true,
+            started: Instant::now(),
+            first_frame_done: false,
             help_open: false,
             settings_open: false,
             settings_sel: 0,
@@ -1373,6 +1379,15 @@ impl App {
             log::debug!("frame skipped: {err:?}");
         }
 
+        // Startup benchmark: log time-to-first-frame once.
+        if !self.first_frame_done {
+            self.first_frame_done = true;
+            log::info!(
+                "glassy time-to-first-frame: {:.1} ms",
+                self.started.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+
         // If the glyph atlas overflowed and was repacked this frame, every cached
         // glyph's UVs changed; persisted rows now hold stale UVs. Force a full
         // rebuild and schedule one more frame to repaint cleanly.
@@ -1567,6 +1582,8 @@ impl ApplicationHandler<UserEvent> for App {
             }
         };
         window.set_ime_allowed(true);
+        let ms = |t: Instant| t.elapsed().as_secs_f64() * 1000.0;
+        log::info!("startup: window created at {:.1} ms", ms(self.started));
 
         // Query the monitor refresh rate for the frame-coalescing throttle.
         if let Some(hz) = window
@@ -1594,6 +1611,7 @@ impl ApplicationHandler<UserEvent> for App {
                 return;
             }
         };
+        log::info!("startup: renderer+GPU+font ready at {:.1} ms", ms(self.started));
         // Apply an explicit padding override (logical px scaled to physical).
         if let Some(pad) = self.config.padding {
             renderer.set_pad(pad * scale);
@@ -1625,6 +1643,7 @@ impl ApplicationHandler<UserEvent> for App {
             }
         };
 
+        log::info!("startup: shell spawned at {:.1} ms", ms(self.started));
         self.window = Some(window);
         self.renderer = Some(renderer);
         self.pty = Some(pty);

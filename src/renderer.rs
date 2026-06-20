@@ -364,8 +364,11 @@ impl Renderer {
         font_px: f32,
         opacity: f32,
     ) -> Result<Renderer> {
+        let t = std::time::Instant::now();
+        let ms = |t: std::time::Instant| t.elapsed().as_secs_f64() * 1000.0;
         let (text, metrics) =
             Text::load(font_family.as_deref(), font_px).context("loading font and cell metrics")?;
+        log::info!("  renderer: font loaded {:.1} ms", ms(t));
 
         // --- wgpu init (synchronous via pollster). ---
         // `InstanceDescriptor` has no `Default` in wgpu 29 (its `display` field is
@@ -380,9 +383,22 @@ impl Renderer {
             compatible_surface: Some(&surface),
         }))
         .context("requesting GPU adapter")?;
+        {
+            // Surface which GPU/backend we actually selected — confirms a real
+            // device (vs the llvmpipe/lavapipe software fallback) for benchmarking.
+            let info = adapter.get_info();
+            log::info!(
+                "glassy GPU: {} | backend={:?} | type={:?} | driver={}",
+                info.name,
+                info.backend,
+                info.device_type,
+                info.driver
+            );
+        }
         let (device, queue) =
             pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))
                 .context("requesting GPU device")?;
+        log::info!("  renderer: GPU device ready {:.1} ms", ms(t));
 
         // --- Surface format / present-mode selection. ---
         let caps = surface.get_capabilities(&adapter);
@@ -723,6 +739,8 @@ impl Renderer {
             cache: None,
         });
 
+        log::info!("  renderer: pipelines/shaders ready {:.1} ms", ms(t));
+
         // --- Instance buffers, created with a small nonzero capacity. ---
         let bg_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("bg-instances"),
@@ -801,6 +819,7 @@ impl Renderer {
         for byte in 0x20u8..=0x7E {
             renderer.ensure_glyphs(byte as char, false, false);
         }
+        log::info!("  renderer: ascii prewarm done {:.1} ms (total Renderer::new)", ms(t));
 
         Ok(renderer)
     }
