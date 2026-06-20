@@ -1,6 +1,6 @@
 .\" Man page for glassy -- a minimal GPU-accelerated terminal emulator.
 .\" Render locally with:  man ./extra/glassy.1
-.TH GLASSY 1 "2026-06-19" "glassy 0.1.0" "User Commands"
+.TH GLASSY 1 "2026-06-20" "glassy" "User Commands"
 .SH NAME
 glassy \- a minimal, GPU-accelerated terminal emulator
 .SH SYNOPSIS
@@ -15,7 +15,9 @@ the grid with an instanced
 .B wgpu
 renderer fed by a dynamic glyph atlas, supports 24-bit truecolor, color emoji
 and CJK fallback, procedural box-drawing, text decorations, mouse reporting,
-selection, clipboard, scrollback, OSC 8 hyperlinks, and tabs.
+selection, clipboard, scrollback, OSC 8 hyperlinks, tabs, inline images (the
+kitty graphics protocol and sixel), live-switchable themes, and in-app
+settings (\fBCtrl+,\fR) and help (\fBF1\fR) overlays.
 .PP
 Rendering is on-demand and damage-based: with nothing changing on screen glassy
 issues no frames and consumes no CPU, and when the screen does change only the
@@ -36,10 +38,10 @@ Font family name, or a path to a font file.
 .TP
 .BI \-\-theme " NAME"
 Color theme. One of
-.B tokyo\-night
-(default) or
-.BR catppuccin\-mocha .
-An unknown name falls back to Tokyo Night with a warning.
+.BR tokyo\-night " (default), " catppuccin\-mocha ", " catppuccin\-macchiato ", "
+.BR gruvbox\-dark ", " dracula ", " nord ", " solarized\-dark ", or " rose\-pine .
+An unknown name falls back to Tokyo Night with a warning. The theme can also be
+changed live in the settings overlay (\fBCtrl+,\fR).
 .TP
 .BI \-\-opacity " F"
 Window opacity as a float from
@@ -105,9 +107,8 @@ Font size in points (positive number). Default
 .TP
 .B theme
 Color theme:
-.B tokyo\-night
-or
-.BR catppuccin\-mocha .
+.BR tokyo\-night ", " catppuccin\-mocha ", " catppuccin\-macchiato ", " gruvbox\-dark ", "
+.BR dracula ", " nord ", " solarized\-dark ", or " rose\-pine .
 Default
 .BR tokyo\-night .
 .TP
@@ -155,6 +156,14 @@ shell        = /usr/bin/zsh \-l
 .EE
 .RE
 .SH KEYBINDINGS
+.TP
+.B F1
+Toggle the help overlay (a keybinding cheat-sheet).
+.TP
+.B Ctrl+,
+Toggle the settings overlay: arrow keys select and change font size, opacity,
+bell, and theme (font size, opacity, and theme apply live); Enter saves the
+changes to the config file; Esc closes.
 .TP
 .B Ctrl+Shift+C
 Copy the current selection to the clipboard.
