@@ -286,6 +286,24 @@ fn run_loop(
                     // stream; feed everything else to the VT parser.
                     let passthrough = tap.process(&buf[..n], &images);
                     let mut term = term.lock();
+                    // Anchor any just-displayed images at the cursor's current
+                    // screen cell, read before this chunk's text advances it.
+                    {
+                        let mut store = images.lock();
+                        let pending = store.take_pending();
+                        if !pending.is_empty() {
+                            let (row, col) = {
+                                let c = term.renderable_content();
+                                (
+                                    c.cursor.point.line.0 + c.display_offset as i32,
+                                    c.cursor.point.column.0,
+                                )
+                            };
+                            for id in pending {
+                                store.place(id, row, col);
+                            }
+                        }
+                    }
                     processor.advance(&mut *term, &passthrough);
                     drop(term);
                     proxy.send_event(Event::Wakeup);

@@ -265,19 +265,24 @@ fn b64_decode(s: &str) -> Vec<u8> {
     out
 }
 
-/// A placed image: a decoded picture plus the action the terminal requested.
-pub struct StoredImage {
-    pub action: Action,
-    pub image: DecodedImage,
+/// An image placed on the grid: which stored image, at which screen cell.
+#[derive(Clone)]
+pub struct Placement {
+    pub id: u32,
+    pub row: i32,
+    pub col: usize,
 }
 
-/// Holds images received from the PTY for the renderer to draw. For now it keeps
-/// the most recently transmitted/displayed images keyed by id; grid placement +
-/// GPU upload are layered on in the rendering step.
+/// Holds images received from the PTY and where they should be drawn. Decoded
+/// pixels are kept by id; `placements` is what the renderer draws. Images whose
+/// command requested display land in `pending` until the loop anchors them at the
+/// cursor (it knows the cursor position; the decoder does not).
 #[derive(Default)]
 pub struct ImageStore {
-    by_id: HashMap<u32, StoredImage>,
-    /// Monotonic counter so the renderer can tell when new images arrived.
+    by_id: HashMap<u32, DecodedImage>,
+    placements: Vec<Placement>,
+    pending: Vec<u32>,
+    /// Monotonic counter so the renderer can tell when the image set changed.
     pub revision: u64,
 }
 
@@ -286,13 +291,31 @@ impl ImageStore {
         Self::default()
     }
 
-    /// Record a decoded graphics command.
+    /// Record a decoded graphics command. Display actions queue a placement.
     pub fn insert(&mut self, id: u32, action: Action, image: DecodedImage) {
-        self.by_id.insert(id, StoredImage { action, image });
+        self.by_id.insert(id, image);
+        if matches!(action, Action::TransmitAndDisplay | Action::Display) {
+            self.pending.push(id);
+        }
         self.revision += 1;
     }
 
-    pub fn get(&self, id: u32) -> Option<&StoredImage> {
+    /// Take the ids awaiting placement (the loop assigns them a cursor cell).
+    pub fn take_pending(&mut self) -> Vec<u32> {
+        std::mem::take(&mut self.pending)
+    }
+
+    /// Anchor a pending image at a screen cell.
+    pub fn place(&mut self, id: u32, row: i32, col: usize) {
+        self.placements.push(Placement { id, row, col });
+        self.revision += 1;
+    }
+
+    pub fn placements(&self) -> &[Placement] {
+        &self.placements
+    }
+
+    pub fn image(&self, id: u32) -> Option<&DecodedImage> {
         self.by_id.get(&id)
     }
 
