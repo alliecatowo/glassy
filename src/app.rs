@@ -131,20 +131,81 @@ fn header_chip_labels(active_title: &str, background: &[(&str, bool)]) -> Vec<St
     labels
 }
 
-/// Index of the chip containing `click_col`, with chips laid out left-to-right
-/// from `start_col` (their cell widths are their char counts, matching how the
-/// header pushes one cell per char). `None` if the click is past the last chip.
-/// Pure for unit testing.
-fn chip_index_at(labels: &[String], start_col: usize, click_col: usize) -> Option<usize> {
-    let mut col = start_col;
-    for (i, label) in labels.iter().enumerate() {
-        let w = label.chars().count();
-        if click_col >= col && click_col < col + w {
-            return Some(i);
-        }
+/// An interactive item in the inline app toolbar (the strip *under* the native
+/// OS titlebar). Window controls (min/max/close) intentionally live in the
+/// native bar, not here.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum StripItem {
+    /// A tab chip: index 0 = active tab, i>=1 = background[i-1].
+    Tab(usize),
+    NewTab,
+    Help,
+    Menu,
+}
+
+/// One placed strip item with its label and half-open cell range `[start, end)`.
+#[derive(Clone)]
+struct StripSeg {
+    item: StripItem,
+    label: String,
+    start: usize,
+    end: usize,
+}
+
+/// Each toolbar control button is this many cells (a glyph padded by a space).
+const STRIP_BTN_W: usize = 3;
+
+/// Lay out the inline toolbar across `cols`: the glassy mark, the active title
+/// (one tab) or tab chips (multiple), a `+` new-tab button, then a `?` help and
+/// `≡` menu button on the right. The gap between is inert. Shared by the renderer
+/// and the click hit-test so the drawn items and click targets always agree.
+fn strip_layout(active_title: &str, background: &[(&str, bool)], cols: usize) -> Vec<StripSeg> {
+    let right_btns = [(StripItem::Help, " ? "), (StripItem::Menu, " ≡ ")];
+    let right_w = STRIP_BTN_W * right_btns.len();
+    let right_start = cols.saturating_sub(right_w);
+
+    let mut segs = Vec::new();
+    let mut col = HEADER_MARK_COLS; // after the decorative " ◆ " mark
+
+    if background.is_empty() {
+        let budget = right_start.saturating_sub(col + STRIP_BTN_W + 2).max(8);
+        let label = format!(" {} ", fit_label(active_title, budget));
+        let w = label.chars().count().min(right_start.saturating_sub(col));
+        segs.push(StripSeg { item: StripItem::Tab(0), label, start: col, end: col + w });
         col += w;
+    } else {
+        for (i, label) in header_chip_labels(active_title, background).into_iter().enumerate() {
+            let w = label.chars().count();
+            if col + w > right_start {
+                break;
+            }
+            segs.push(StripSeg { item: StripItem::Tab(i), label, start: col, end: col + w });
+            col += w;
+        }
     }
-    None
+    if col + STRIP_BTN_W <= right_start {
+        segs.push(StripSeg {
+            item: StripItem::NewTab,
+            label: " + ".to_string(),
+            start: col,
+            end: col + STRIP_BTN_W,
+        });
+    }
+    if right_start >= col {
+        let mut rc = right_start;
+        for (item, lbl) in right_btns {
+            segs.push(StripSeg { item, label: lbl.to_string(), start: rc, end: rc + STRIP_BTN_W });
+            rc += STRIP_BTN_W;
+        }
+    }
+    segs
+}
+
+/// The toolbar item containing `click_col`, if any. Pure for unit testing.
+fn strip_item_at(segs: &[StripSeg], click_col: usize) -> Option<StripItem> {
+    segs.iter()
+        .find(|s| click_col >= s.start && click_col < s.end)
+        .map(|s| s.item)
 }
 
 /// Lines shown in the F1 help overlay (left column = keys, right = action). Kept
@@ -626,22 +687,34 @@ impl App {
         if !(0.0..TAB_STRIP_ROWS as f64).contains(&screen_row) {
             return false;
         }
-        if self.tab_count() > 1 {
-            // Hit-test against the actual chip layout (same helper the renderer
-            // uses), not equal-width slots. Chip 0 is the active tab (clicking it
-            // is a no-op); chip i>=1 maps to background[i-1].
-            let col = ((x - pad) / m.width as f64).floor().max(0.0) as usize;
-            let bg: Vec<(&str, bool)> = self
-                .background
-                .iter()
-                .map(|s| (s.title.as_str(), s.activity))
-                .collect();
-            let labels = header_chip_labels(&self.active_title, &bg);
-            if let Some(idx) = chip_index_at(&labels, HEADER_MARK_COLS, col)
-                && idx >= 1
-            {
-                self.activate_background(idx - 1, event_loop);
+        // Hit-test against the actual toolbar layout (the same helper the renderer
+        // uses, so click targets match what's drawn).
+        let col = ((x - pad) / m.width as f64).floor().max(0.0) as usize;
+        let bg: Vec<(&str, bool)> = self
+            .background
+            .iter()
+            .map(|s| (s.title.as_str(), s.activity))
+            .collect();
+        let segs = strip_layout(&self.active_title, &bg, self.cols);
+        match strip_item_at(&segs, col) {
+            Some(StripItem::Tab(0)) => {} // active tab — no-op
+            Some(StripItem::Tab(i)) => self.activate_background(i - 1, event_loop),
+            Some(StripItem::NewTab) => self.new_tab(event_loop),
+            Some(StripItem::Help) => {
+                self.help_open = !self.help_open;
+                self.settings_open = false;
+                self.force_full_redraw = true;
+                self.mark_dirty(event_loop);
             }
+            Some(StripItem::Menu) => {
+                self.settings_open = !self.settings_open;
+                self.help_open = false;
+                self.settings_sel = 0;
+                self.settings_saved = false;
+                self.force_full_redraw = true;
+                self.mark_dirty(event_loop);
+            }
+            None => {} // inert gap (native bar handles window drag)
         }
         true
     }
@@ -1198,7 +1271,11 @@ impl App {
             ci += consumed;
         }
 
-        // --- Tab strip (screen row 0): a slim title + tab bar, always present. ---
+        // --- Inline app toolbar (screen row 0): sits UNDER the native OS titlebar
+        // (winit decorations own min/max/close + window drag). Holds the glassy
+        // mark, tab chips (or the title with one tab), a + new-tab button, and
+        // right-aligned help / menu buttons. Drawn from `strip_layout` so the
+        // click hit-test matches exactly. ---
         {
             let bar_bg = color::selection_bg();
             let base_fg = color::default_fg();
@@ -1211,68 +1288,46 @@ impl App {
                 base_fg[3],
             ];
             let accent = [0.45, 0.68, 1.0, 1.0];
-            let mut bar: Vec<(char, [f32; 4], [f32; 4])> = Vec::with_capacity(self.cols);
-            let push = |bar: &mut Vec<(char, [f32; 4], [f32; 4])>, s: &str, fg, bg| {
-                for ch in s.chars() {
-                    bar.push((ch, fg, bg));
+
+            // Whole-row tint, then paint items at their layout columns.
+            let mut bar: Vec<(char, [f32; 4], [f32; 4])> = vec![(' ', base_fg, bar_bg); self.cols];
+            let put = |bar: &mut Vec<(char, [f32; 4], [f32; 4])>, start: usize, s: &str, fg, bg| {
+                for (k, ch) in s.chars().enumerate() {
+                    if let Some(cell) = bar.get_mut(start + k) {
+                        *cell = (ch, fg, bg);
+                    }
                 }
             };
-            // tab_count() borrows all of self; the renderer borrow is live, so read
-            // the disjoint field directly (active tab + parked background tabs).
-            let total = 1 + self.background.len();
-            // glassy mark on the left.
-            push(&mut bar, " ◆ ", accent, bar_bg);
-            if total <= 1 {
-                // Single tab: the strip is a title bar — show the active title
-                // (cwd / running program) instead of a useless "1 shell" chip.
-                // Fit the title to the available width (cols minus the left mark
-                // and the right-side status region) so a long title is ellipsized
-                // cleanly instead of being clipped mid-word by the help hint.
-                let title_max = self.cols.saturating_sub(16).max(8);
-                push(&mut bar, &fit_label(&self.active_title, title_max), base_fg, bar_bg);
-            } else {
-                // Multiple tabs: chips, active highlighted, drawn from the shared
-                // layout helper (so click hit-testing matches exactly). Chip 0 is
-                // the active tab; chip i>=1 is background[i-1] (brighter + ● when
-                // it has unseen activity).
-                let bg: Vec<(&str, bool)> = self
-                    .background
-                    .iter()
-                    .map(|s| (s.title.as_str(), s.activity))
-                    .collect();
-                for (i, label) in header_chip_labels(&self.active_title, &bg).iter().enumerate() {
-                    let (cfg, cbg) = if i == 0 {
-                        (active_fg, active_bg)
-                    } else if bg[i - 1].1 {
-                        (base_fg, bar_bg)
-                    } else {
-                        (dim_fg, bar_bg)
-                    };
-                    push(&mut bar, label, cfg, cbg);
-                }
+            put(&mut bar, 0, " ◆ ", accent, bar_bg);
+
+            let bg: Vec<(&str, bool)> = self
+                .background
+                .iter()
+                .map(|s| (s.title.as_str(), s.activity))
+                .collect();
+            let multi = !bg.is_empty();
+            for seg in strip_layout(&self.active_title, &bg, self.cols) {
+                let (fg, sbg) = match seg.item {
+                    StripItem::Tab(0) if multi => (active_fg, active_bg),
+                    StripItem::Tab(0) => (base_fg, bar_bg), // single-tab title
+                    StripItem::Tab(i) if bg[i - 1].1 => (base_fg, bar_bg), // busy bg tab
+                    StripItem::Tab(_) => (dim_fg, bar_bg),
+                    StripItem::NewTab => (accent, bar_bg),
+                    _ => (dim_fg, bar_bg),
+                };
+                put(&mut bar, seg.start, &seg.label, fg, sbg);
             }
-            while bar.len() < self.cols {
-                bar.push((' ', base_fg, bar_bg));
-            }
-            // Right-aligned status: a scrollback-position indicator while scrolled
-            // up (in the accent color), then the help hint (dim). Overwrites the
-            // tail when there is room.
-            let mut right: Vec<(char, [f32; 4])> = Vec::new();
+
+            // Scrollback-position indicator, tucked in left of the buttons.
             if display_offset > 0 {
-                for ch in format!("⇡ {display_offset}  ").chars() {
-                    right.push((ch, accent));
+                let s = format!("⇡ {display_offset} ");
+                let n = s.chars().count();
+                let right_w = STRIP_BTN_W * 2;
+                if self.cols > right_w + n + 2 {
+                    put(&mut bar, self.cols - right_w - n, &s, accent, bar_bg);
                 }
             }
-            for ch in "F1 help ".chars() {
-                right.push((ch, dim_fg));
-            }
-            if self.cols > right.len() + 8 {
-                let start = self.cols - right.len();
-                for (k, (ch, fg)) in right.iter().enumerate() {
-                    bar[start + k] = (*ch, *fg, bar_bg);
-                }
-            }
-            bar.truncate(self.cols);
+
             renderer.begin_row(0);
             for (col, (ch, cfg, cbg)) in bar.into_iter().enumerate() {
                 renderer.push_cell(
@@ -2167,22 +2222,23 @@ impl ApplicationHandler<UserEvent> for App {
 #[cfg(test)]
 mod tests {
     use super::{
-        HEADER_MARK_COLS, WheelAction, chip_index_at, header_chip_labels, image_dst_size,
-        motion_button, wheel_action,
+        StripItem, WheelAction, header_chip_labels, image_dst_size, motion_button, strip_item_at,
+        strip_layout, wheel_action,
     };
     use alacritty_terminal::term::TermMode;
 
     #[test]
-    fn chip_hit_test_matches_layout() {
-        // Two tabs: active "1" + one background "2". A click in each chip's drawn
-        // range must resolve to that chip; clicks before/after resolve to nothing.
-        let labels = header_chip_labels("zsh", &[("vim", false)]);
-        // Chip 0 = " 1 zsh " (7 cols) starting at HEADER_MARK_COLS (3): cols 3..10.
-        // Chip 1 = " 2 vim " (7 cols): cols 10..17.
-        assert_eq!(chip_index_at(&labels, HEADER_MARK_COLS, 2), None); // in the mark
-        assert_eq!(chip_index_at(&labels, HEADER_MARK_COLS, 4), Some(0)); // active
-        assert_eq!(chip_index_at(&labels, HEADER_MARK_COLS, 12), Some(1)); // background
-        assert_eq!(chip_index_at(&labels, HEADER_MARK_COLS, 99), None); // past chips
+    fn strip_hit_test_matches_layout() {
+        // Two tabs + a + button + right-hand ? / ≡ buttons, on a wide strip.
+        let segs = strip_layout("zsh", &[("vim", false)], 120);
+        // Chip 0 = " 1 zsh " (7) at HEADER_MARK_COLS(3): 3..10; chip 1 = " 2 vim " 10..17.
+        assert_eq!(strip_item_at(&segs, 4), Some(StripItem::Tab(0)));
+        assert_eq!(strip_item_at(&segs, 12), Some(StripItem::Tab(1)));
+        assert_eq!(strip_item_at(&segs, 18), Some(StripItem::NewTab)); // " + " at 17..20
+        // Right buttons are the last 6 cols (114..120): " ? " then " ≡ ".
+        assert_eq!(strip_item_at(&segs, 115), Some(StripItem::Help));
+        assert_eq!(strip_item_at(&segs, 118), Some(StripItem::Menu));
+        assert_eq!(strip_item_at(&segs, 60), None); // inert gap
     }
 
     #[test]
