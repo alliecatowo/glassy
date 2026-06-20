@@ -516,6 +516,13 @@ pub struct App {
     /// Accumulated scroll/swipe delta while the pointer is over the tab strip,
     /// so a touchpad 2-finger swipe (many small deltas) cycles tabs smoothly.
     tab_scroll_accum: f32,
+    /// Accumulated touchpad pixel delta for terminal-content scrolling. Touchpads
+    /// stream many sub-line deltas; accumulating avoids truncating each to zero.
+    content_scroll_accum: f32,
+    /// True once the current touchpad swipe over the strip has already switched a
+    /// tab, so one continuous swipe moves exactly one tab (no twitchy carousel).
+    /// Reset when the gesture starts/ends.
+    swipe_consumed: bool,
     /// Wall-clock at App construction + whether the first frame has been timed,
     /// so we can log time-to-first-frame once (a startup benchmark).
     started: Instant,
@@ -615,6 +622,8 @@ impl App {
             dragging_tab: None,
             hovered_strip_item: None,
             tab_scroll_accum: 0.0,
+            content_scroll_accum: 0.0,
+            swipe_consumed: false,
             help_open: false,
             settings_open: false,
             settings_sel: 0,
@@ -686,11 +695,21 @@ impl App {
         let Some(window) = self.window.as_ref() else {
             return;
         };
-        let base = if self.active_title.is_empty() {
-            "glassy"
-        } else {
-            self.active_title.as_str()
-        };
+        // Sanitize the OSC title before it reaches the native (CSD) titlebar:
+        // strip control chars, zero-width / directional marks, and variation
+        // selectors, which the titlebar font renders as a blank "tofu" box.
+        let cleaned: String = self
+            .active_title
+            .chars()
+            .filter(|&c| {
+                !c.is_control()
+                    && !('\u{200b}'..='\u{200f}').contains(&c)
+                    && !('\u{fe00}'..='\u{fe0f}').contains(&c)
+                    && c != '\u{feff}'
+            })
+            .collect();
+        let base = cleaned.trim();
+        let base = if base.is_empty() { "glassy" } else { base };
         let total = self.tab_count();
         if total > 1 {
             window.set_title(&format!("{base}  \u{00b7}  {total} tabs"));
@@ -851,6 +870,17 @@ impl App {
         let pos = self.active_pos();
         let next = (((pos as isize + delta) % n as isize + n as isize) % n as isize) as usize;
         self.activate_tab(next, event_loop);
+    }
+
+    /// Move one tab in `tab_order` WITHOUT wrapping. A swipe gesture clamps at the
+    /// first/last tab instead of spinning around like an infinite carousel.
+    fn step_tab(&mut self, dir: isize, event_loop: &ActiveEventLoop) {
+        let pos = self.active_pos();
+        let next = pos as isize + dir;
+        if next < 0 || next >= self.tab_order.len() as isize {
+            return;
+        }
+        self.activate_tab(next as usize, event_loop);
     }
 
     /// Position of the active tab within `tab_order`.
@@ -1956,6 +1986,19 @@ impl ApplicationHandler<UserEvent> for App {
                     return;
                 }
             }
+            UserEvent::PtyWrite(id, text) => {
+                // Route the VT reply back to the session that produced it (active
+                // or a background tab); not a visual change, so no repaint.
+                let bytes = text.into_bytes();
+                if id == self.active_id {
+                    if let Some(pty) = &self.pty {
+                        pty.write(bytes);
+                    }
+                } else if let Some(s) = self.background.iter().find(|s| s.id == id) {
+                    s.pty.write(bytes);
+                }
+                return;
+            }
         }
         self.mark_dirty(event_loop);
     }
@@ -2123,7 +2166,13 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                 }
 
-                if let Some(bytes) = encode_key(&event, self.mods) {
+                // When the application has enabled the kitty keyboard protocol,
+                // encode modified keys in CSI-u form so it can disambiguate them
+                // (this is what makes Shift+Enter distinct from Enter).
+                let kitty = self
+                    .term_mode()
+                    .contains(TermMode::DISAMBIGUATE_ESC_CODES);
+                if let Some(bytes) = encode_key(&event, self.mods, kitty) {
                     // Typing resets the blink to solid-on so the cursor doesn't
                     // wink out mid-keystroke, matching every mainstream terminal.
                     self.reset_blink();
@@ -2136,12 +2185,24 @@ impl ApplicationHandler<UserEvent> for App {
                         pty.term.lock().scroll_display(Scroll::Bottom);
                         pty.write(bytes);
                     }
+                    // The snap-to-bottom (and the cursor/selection reset above) are
+                    // visual changes even when the child emits nothing back — e.g.
+                    // typing while scrolled up into a paused/blocked program. Repaint
+                    // unconditionally so the view never stays frozen in scrollback.
+                    self.mark_dirty(event_loop);
                 }
             }
             WindowEvent::Ime(winit::event::Ime::Commit(text)) => {
+                // Committed IME text is input like any keystroke: reset the blink,
+                // drop the selection, snap to the prompt, and repaint even if the
+                // child stays quiet.
+                self.reset_blink();
+                self.clear_selection();
                 if let Some(pty) = &self.pty {
+                    pty.term.lock().scroll_display(Scroll::Bottom);
                     pty.write(text.into_bytes());
                 }
+                self.mark_dirty(event_loop);
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.mouse_px = (position.x, position.y);
@@ -2282,11 +2343,23 @@ impl ApplicationHandler<UserEvent> for App {
                     _ => {}
                 }
             }
-            WindowEvent::MouseWheel { delta, .. } => {
-                // Over the tab strip: scroll / 2-finger swipe cycles tabs. Wheel
-                // notches step one tab each; touchpad pixel deltas accumulate to a
-                // threshold (so a swipe is smooth, not hyper-sensitive). Horizontal
-                // motion is preferred (the natural swipe-to-switch gesture).
+            WindowEvent::MouseWheel { delta, phase, .. } => {
+                use winit::event::TouchPhase;
+                // A touchpad gesture brackets its deltas with Started/Ended; reset
+                // the accumulators and the one-switch-per-swipe latch at those
+                // boundaries so each gesture is independent.
+                if matches!(
+                    phase,
+                    TouchPhase::Started | TouchPhase::Ended | TouchPhase::Cancelled
+                ) {
+                    self.tab_scroll_accum = 0.0;
+                    self.content_scroll_accum = 0.0;
+                    self.swipe_consumed = false;
+                }
+
+                // Over the tab strip: a swipe/scroll switches tabs as a discrete
+                // GESTURE — one tab per swipe, clamped at the ends (no wrap-around
+                // carousel). Horizontal motion is preferred (natural swipe-to-switch).
                 let in_strip = {
                     let (pad, ch_h) = self
                         .renderer
@@ -2297,23 +2370,28 @@ impl ApplicationHandler<UserEvent> for App {
                     (0.0..TAB_STRIP_ROWS as f64).contains(&row)
                 };
                 if in_strip {
-                    const STEP: f32 = 30.0; // px (touchpad) / scaled notch per tab
-                    let primary = match delta {
+                    const STEP: f32 = 24.0; // px of swipe travel to trigger one switch
+                    match delta {
+                        // A discrete wheel notch always steps one tab (clamped).
                         MouseScrollDelta::LineDelta(x, y) => {
-                            (if x.abs() > y.abs() { x } else { y }) * STEP
+                            let primary = if x.abs() > y.abs() { x } else { y };
+                            if primary > 0.0 {
+                                self.step_tab(1, event_loop);
+                            } else if primary < 0.0 {
+                                self.step_tab(-1, event_loop);
+                            }
                         }
+                        // Touchpad: accumulate, fire ONCE per swipe at the threshold,
+                        // then latch until the gesture ends — no twitchy carousel.
                         MouseScrollDelta::PixelDelta(p) => {
-                            if p.x.abs() > p.y.abs() { p.x as f32 } else { p.y as f32 }
+                            let primary = (if p.x.abs() > p.y.abs() { p.x } else { p.y }) as f32;
+                            self.tab_scroll_accum += primary;
+                            if !self.swipe_consumed && self.tab_scroll_accum.abs() >= STEP {
+                                let dir = if self.tab_scroll_accum > 0.0 { 1 } else { -1 };
+                                self.step_tab(dir, event_loop);
+                                self.swipe_consumed = true;
+                            }
                         }
-                    };
-                    self.tab_scroll_accum += primary;
-                    while self.tab_scroll_accum >= STEP {
-                        self.tab_scroll_accum -= STEP;
-                        self.cycle_tab(1, event_loop);
-                    }
-                    while self.tab_scroll_accum <= -STEP {
-                        self.tab_scroll_accum += STEP;
-                        self.cycle_tab(-1, event_loop);
                     }
                     return;
                 }
@@ -2321,13 +2399,28 @@ impl ApplicationHandler<UserEvent> for App {
 
                 let lines = match delta {
                     MouseScrollDelta::LineDelta(_, y) => {
+                        self.content_scroll_accum = 0.0;
                         if y == 0.0 {
                             0
                         } else {
                             (y.abs().ceil() as i32) * y.signum() as i32
                         }
                     }
-                    MouseScrollDelta::PixelDelta(p) => (p.y / 20.0) as i32,
+                    // Touchpads emit many sub-line pixel deltas; accumulate and step
+                    // by the cell height so slow scrolls register instead of being
+                    // truncated to zero each event (the "tiny scrolls do nothing" bug).
+                    MouseScrollDelta::PixelDelta(p) => {
+                        self.content_scroll_accum += p.y as f32;
+                        let step = self
+                            .renderer
+                            .as_ref()
+                            .map(|r| r.cell_metrics().height as f32)
+                            .unwrap_or(20.0)
+                            .max(1.0);
+                        let n = (self.content_scroll_accum / step) as i32;
+                        self.content_scroll_accum -= n as f32 * step;
+                        n
+                    }
                 };
                 if lines == 0 {
                     return;

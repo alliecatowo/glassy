@@ -43,6 +43,12 @@ pub enum UserEvent {
     Bell(usize),
     /// The child process exited; the session should close.
     ChildExit(usize),
+    /// The terminal produced a reply that must be written back to the child:
+    /// Device Attributes, cursor/mode reports (DSR/DECRQM), and the kitty
+    /// keyboard-protocol query response. Without this the child never learns the
+    /// terminal's capabilities, so feature negotiation (e.g. Shift+Enter via the
+    /// kitty keyboard protocol) silently fails.
+    PtyWrite(usize, String),
 }
 
 /// Bridges `alacritty_terminal`'s `EventListener` to the winit event loop, tagging
@@ -60,6 +66,9 @@ impl EventListener for EventProxy {
             Event::Title(title) => Some(UserEvent::Title(self.id, title)),
             Event::Bell => Some(UserEvent::Bell(self.id)),
             Event::ChildExit(_) | Event::Exit => Some(UserEvent::ChildExit(self.id)),
+            // VT replies (DA / DSR / DECRQM / kitty-keyboard query) must be
+            // written back to the child so capability negotiation completes.
+            Event::PtyWrite(text) => Some(UserEvent::PtyWrite(self.id, text)),
             _ => None,
         };
         if let Some(user_event) = mapped {

@@ -11,7 +11,7 @@ use winit::keyboard::{Key, ModifiersState, NamedKey};
 ///
 /// Returns `None` for keys that produce no input (pure modifiers, unhandled
 /// named keys, key releases).
-pub fn encode_key(event: &KeyEvent, mods: ModifiersState) -> Option<Vec<u8>> {
+pub fn encode_key(event: &KeyEvent, mods: ModifiersState, kitty: bool) -> Option<Vec<u8>> {
     // Terminals act on press (and OS autorepeat), never release.
     if !event.state.is_pressed() {
         return None;
@@ -25,6 +25,15 @@ pub fn encode_key(event: &KeyEvent, mods: ModifiersState) -> Option<Vec<u8>> {
     // Match on a reference: `Key<SmolStr>` isn't `Copy`, but `NamedKey` is.
     if let Key::Named(named) = &event.logical_key {
         let named = *named;
+        // When the kitty keyboard protocol is active, a MODIFIED named key goes
+        // out as a CSI-u / CSI-modifier sequence so the application can tell it
+        // apart from the unmodified key (e.g. Shift+Enter vs Enter). Unmodified
+        // keys fall through to the unambiguous legacy encoding below.
+        if kitty
+            && let Some(seq) = kitty_named(named, shift, alt, ctrl)
+        {
+            return Some(seq);
+        }
         let seq: &[u8] = match named {
             NamedKey::Enter => b"\r",
             NamedKey::Backspace => b"\x7f", // DEL — what real terminals send
@@ -156,6 +165,53 @@ pub fn encode_mouse(report: MouseReport, mods: ModifiersState, sgr: bool) -> Vec
         enc(report.col),
         enc(report.row),
     ]
+}
+
+/// Kitty keyboard-protocol encoding for a MODIFIED named key. Returns `None` for
+/// unmodified keys (legacy encoding is unambiguous) and for keys with no kitty
+/// form, so the caller falls back to the legacy path.
+///
+/// Codepoint-style keys report as `CSI <code> ; <mods> u`; cursor/edit/function
+/// keys keep their CSI final byte (`CSI 1 ; <mods> X`) or tilde (`CSI <n> ; <mods> ~`)
+/// form with the modifier parameter. `mods` = 1 + shift(1) + alt(2) + ctrl(4).
+fn kitty_named(named: NamedKey, shift: bool, alt: bool, ctrl: bool) -> Option<Vec<u8>> {
+    let m = 1 + (shift as u8) + (alt as u8) * 2 + (ctrl as u8) * 4;
+    if m == 1 {
+        return None; // unmodified: legacy encoding is unambiguous
+    }
+    let csi_u = |code: u32| Some(format!("\x1b[{code};{m}u").into_bytes());
+    let csi_final = |tail: char| Some(format!("\x1b[1;{m}{tail}").into_bytes());
+    let csi_tilde = |n: u32| Some(format!("\x1b[{n};{m}~").into_bytes());
+    match named {
+        NamedKey::Enter => csi_u(13),
+        NamedKey::Tab => csi_u(9),
+        NamedKey::Backspace => csi_u(127),
+        NamedKey::Escape => csi_u(27),
+        NamedKey::Space => csi_u(32),
+        NamedKey::ArrowUp => csi_final('A'),
+        NamedKey::ArrowDown => csi_final('B'),
+        NamedKey::ArrowRight => csi_final('C'),
+        NamedKey::ArrowLeft => csi_final('D'),
+        NamedKey::Home => csi_final('H'),
+        NamedKey::End => csi_final('F'),
+        NamedKey::PageUp => csi_tilde(5),
+        NamedKey::PageDown => csi_tilde(6),
+        NamedKey::Insert => csi_tilde(2),
+        NamedKey::Delete => csi_tilde(3),
+        NamedKey::F1 => csi_final('P'),
+        NamedKey::F2 => csi_final('Q'),
+        NamedKey::F3 => csi_final('R'),
+        NamedKey::F4 => csi_final('S'),
+        NamedKey::F5 => csi_tilde(15),
+        NamedKey::F6 => csi_tilde(17),
+        NamedKey::F7 => csi_tilde(18),
+        NamedKey::F8 => csi_tilde(19),
+        NamedKey::F9 => csi_tilde(20),
+        NamedKey::F10 => csi_tilde(21),
+        NamedKey::F11 => csi_tilde(23),
+        NamedKey::F12 => csi_tilde(24),
+        _ => None,
+    }
 }
 
 /// Map a character to its C0 control byte for Ctrl-<char>, if one exists.
