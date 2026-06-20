@@ -19,6 +19,7 @@ pub fn encode_key(event: &KeyEvent, mods: ModifiersState) -> Option<Vec<u8>> {
 
     let ctrl = mods.control_key();
     let alt = mods.alt_key();
+    let shift = mods.shift_key();
 
     // a) Named keys -> fixed control / CSI sequences.
     // Match on a reference: `Key<SmolStr>` isn't `Copy`, but `NamedKey` is.
@@ -27,7 +28,15 @@ pub fn encode_key(event: &KeyEvent, mods: ModifiersState) -> Option<Vec<u8>> {
         let seq: &[u8] = match named {
             NamedKey::Enter => b"\r",
             NamedKey::Backspace => b"\x7f", // DEL — what real terminals send
-            NamedKey::Tab => b"\t",
+            // Shift+Tab is back-tab (CBT, ESC [ Z); plain Tab is HT. Used by TUIs
+            // and shell completion menus for reverse field/candidate navigation.
+            NamedKey::Tab => {
+                if shift {
+                    b"\x1b[Z".as_slice()
+                } else {
+                    b"\t".as_slice()
+                }
+            }
             NamedKey::Escape => b"\x1b",
             NamedKey::ArrowUp => b"\x1b[A",
             NamedKey::ArrowDown => b"\x1b[B",
