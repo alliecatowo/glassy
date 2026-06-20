@@ -1039,6 +1039,38 @@ impl App {
 
         drop(term); // release before GPU submit / present
 
+        // Inline images (kitty graphics). Drawn as an overlay every frame from the
+        // live placement list, anchored to the cell they were displayed at. The
+        // stored row is viewport-relative at display time; translate by the current
+        // scroll offset so images move with the buffer as the user scrolls.
+        {
+            let store = pty.images.lock();
+            if !store.placements().is_empty() {
+                let m = renderer.cell_metrics();
+                let pad = renderer.pad();
+                for p in store.placements() {
+                    let Some(img) = store.image(p.id) else { continue };
+                    let screen_vp = p.row - display_offset;
+                    if screen_vp < 0 || screen_vp >= rows as i32 || p.col >= self.cols {
+                        continue;
+                    }
+                    let screen_row = screen_vp as usize + TAB_STRIP_ROWS;
+                    let x = p.col as f32 * m.width + pad;
+                    let y = screen_row as f32 * m.height + pad;
+                    renderer.draw_image(
+                        p.id,
+                        &img.rgba,
+                        img.width,
+                        img.height,
+                        x,
+                        y,
+                        img.width as f32,
+                        img.height as f32,
+                    );
+                }
+            }
+        }
+
         // Record the state this frame drew from, so the next frame can repaint only
         // what changed (the cursor's old/new row, selection, scroll position).
         self.prev_cursor = cur_cursor_cell;

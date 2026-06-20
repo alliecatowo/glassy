@@ -27,6 +27,10 @@ const ATLAS_SIZE: u32 = 1024;
 /// so it can be much smaller than the mask atlas; on overflow the shared
 /// full-atlas path clears both caches and repacks.
 const COLOR_ATLAS_SIZE: u32 = 256;
+/// Image-atlas dimensions (square, RGBA8). Inline images (kitty graphics) are
+/// packed here, kept separate from the glyph atlases so a large image can't evict
+/// the font cache. On overflow the image cache is cleared and repacked.
+const IMAGE_ATLAS_SIZE: u32 = 2048;
 /// 1px gap between packed glyphs to avoid bilinear bleed across neighbours.
 const GLYPH_GAP: u32 = 1;
 /// Initial instance-buffer capacity (in instances) so the first `cast_slice`
@@ -259,6 +263,21 @@ pub struct Renderer {
     mask_atlas_texture: wgpu::Texture,
     color_atlas_texture: wgpu::Texture,
     atlas_bind_group: wgpu::BindGroup,
+
+    /// Dedicated RGBA8 atlas + bind group for inline images. The fg shader's
+    /// color path (`flags == 1`) samples binding 2; this bind group puts the
+    /// image atlas there so image quads reuse the fg pipeline unchanged.
+    image_atlas_texture: wgpu::Texture,
+    image_bind_group: wgpu::BindGroup,
+    image_packer: Packer,
+    /// Image id -> packed location in the image atlas (uploaded once per id).
+    image_cache: HashMap<u32, AtlasGlyph>,
+    /// This frame's image quads, rebuilt every frame from live placements and
+    /// drawn as an overlay after the damage-tracked grid passes.
+    image_overlay: Vec<FgInstance>,
+    image_buffer: wgpu::Buffer,
+    image_capacity: usize,
+    image_count: u32,
 
     /// Shelf packer for the R8 mask atlas.
     packer: Packer,
@@ -544,6 +563,44 @@ impl Renderer {
             ],
         });
 
+        // Dedicated image atlas + bind group, sharing the atlas layout/sampler.
+        // The image atlas view occupies both the mask (0) and color (2) slots;
+        // image quads use `flags == 1`, so only slot 2 is actually sampled.
+        let image_atlas_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("image-atlas"),
+            size: wgpu::Extent3d {
+                width: IMAGE_ATLAS_SIZE,
+                height: IMAGE_ATLAS_SIZE,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let image_atlas_view =
+            image_atlas_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let image_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("image-bg"),
+            layout: &atlas_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&image_atlas_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&atlas_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&image_atlas_view),
+                },
+            ],
+        });
+
         // --- Shader + pipelines. ---
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("glassy-shader"),
@@ -670,6 +727,12 @@ impl Renderer {
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let image_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("image-instances"),
+            size: (64 * std::mem::size_of::<FgInstance>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
 
         let mut renderer = Renderer {
             _window: window,
@@ -685,6 +748,14 @@ impl Renderer {
             mask_atlas_texture,
             color_atlas_texture,
             atlas_bind_group,
+            image_atlas_texture,
+            image_bind_group,
+            image_packer: Packer::new(IMAGE_ATLAS_SIZE),
+            image_cache: HashMap::new(),
+            image_overlay: Vec::new(),
+            image_buffer,
+            image_capacity: 64,
+            image_count: 0,
             packer: Packer::new(ATLAS_SIZE),
             color_packer: Packer::new(COLOR_ATLAS_SIZE),
             glyph_cache: HashMap::new(),
@@ -821,6 +892,87 @@ impl Renderer {
         // the window opacity (and the visual-bell flash) just like the per-cell
         // default-background quads.
         self.clear_color = self.glass_bg(default_bg);
+        // Image quads are not damage-tracked; they are rebuilt from live
+        // placements every frame, so clear last frame's overlay here.
+        self.image_overlay.clear();
+    }
+
+    /// Queue an inline image to be drawn this frame at pixel rect
+    /// `(x, y, dst_w, dst_h)`. `rgba` is straight-alpha RGBA8, `img_w`x`img_h`.
+    /// The pixels are uploaded into the image atlas once per `id` and cached;
+    /// subsequent frames only push a quad. Oversized images (larger than the
+    /// atlas) are skipped.
+    pub fn draw_image(
+        &mut self,
+        id: u32,
+        rgba: &[u8],
+        img_w: u32,
+        img_h: u32,
+        x: f32,
+        y: f32,
+        dst_w: f32,
+        dst_h: f32,
+    ) {
+        if img_w == 0 || img_h == 0 || rgba.len() < (img_w * img_h * 4) as usize {
+            return;
+        }
+        let glyph = match self.image_cache.get(&id).copied() {
+            Some(g) => g,
+            None => {
+                let (px, py) = match self.image_packer.alloc(img_w, img_h) {
+                    Some(o) => o,
+                    None => {
+                        // Atlas full: drop cached images and repack from scratch.
+                        self.image_cache.clear();
+                        self.image_packer.reset();
+                        match self.image_packer.alloc(img_w, img_h) {
+                            Some(o) => o,
+                            None => return, // image larger than the atlas
+                        }
+                    }
+                };
+                self.queue.write_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &self.image_atlas_texture,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d { x: px, y: py, z: 0 },
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    rgba,
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(img_w * 4),
+                        rows_per_image: Some(img_h),
+                    },
+                    wgpu::Extent3d {
+                        width: img_w,
+                        height: img_h,
+                        depth_or_array_layers: 1,
+                    },
+                );
+                let inv = 1.0 / IMAGE_ATLAS_SIZE as f32;
+                let g = AtlasGlyph {
+                    uv_min: [px as f32 * inv, py as f32 * inv],
+                    uv_max: [(px + img_w) as f32 * inv, (py + img_h) as f32 * inv],
+                    px_w: img_w as f32,
+                    px_h: img_h as f32,
+                    left: 0,
+                    top: 0,
+                    is_color: true,
+                };
+                self.image_cache.insert(id, g);
+                g
+            }
+        };
+        self.image_overlay.push(FgInstance {
+            pos: [x, y],
+            size: [dst_w, dst_h],
+            uv_min: glyph.uv_min,
+            uv_max: glyph.uv_max,
+            color: [1.0, 1.0, 1.0, 1.0],
+            flags: 1,
+            _pad: [0; 3],
+        });
     }
 
     /// Begin (re)building grid row `row`: subsequent `push_cell`/`push_cursor`
@@ -1837,6 +1989,16 @@ impl Renderer {
             pass.set_vertex_buffer(1, self.fg_buffer.slice(..));
             pass.draw(0..4, 0..fg_count);
         }
+        // Inline images overlay on top of the grid, reusing the fg pipeline with
+        // the image atlas bound in the color slot (image quads use flags == 1).
+        if self.image_count > 0 {
+            pass.set_pipeline(&self.fg_pipeline);
+            pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+            pass.set_bind_group(1, &self.image_bind_group, &[]);
+            pass.set_vertex_buffer(0, self.unit_quad.slice(..));
+            pass.set_vertex_buffer(1, self.image_buffer.slice(..));
+            pass.draw(0..4, 0..self.image_count);
+        }
     }
 
     /// Render the current frame to an offscreen texture and write it to `path`
@@ -1982,6 +2144,22 @@ impl Renderer {
             &mut self.fg_capacity,
             "fg-instances",
         );
+        // Image overlay: a small, fully-rebuilt instance set each frame. Grow the
+        // buffer if needed, then upload the whole thing in one write.
+        self.image_count = self.image_overlay.len() as u32;
+        if !self.image_overlay.is_empty() {
+            if self.image_overlay.len() > self.image_capacity {
+                self.image_capacity = self.image_overlay.len().next_power_of_two();
+                self.image_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("image-instances"),
+                    size: (self.image_capacity * std::mem::size_of::<FgInstance>()) as u64,
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+            }
+            self.queue
+                .write_buffer(&self.image_buffer, 0, bytemuck::cast_slice(&self.image_overlay));
+        }
         self.dirty_rows.clear();
     }
 
