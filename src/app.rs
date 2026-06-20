@@ -33,6 +33,11 @@ use crate::renderer::{CursorOverlay, Decorations, Renderer, UnderlineStyle};
 /// scrolling glassy's own scrollback buffer.
 const WHEEL_LINES: i32 = 3;
 
+/// Screen rows reserved at the top for the tab strip. The strip doubles as a
+/// title bar (it always shows, even with one tab), so this is a constant and the
+/// terminal grid simply starts one row down — no resize churn when tabs change.
+const TAB_STRIP_ROWS: usize = 1;
+
 /// What a wheel notch should do, given the terminal's current mode. Pure so it
 /// can be unit-tested without a window or PTY.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -326,7 +331,9 @@ impl App {
         let usable_w = (size.width as f32 - 2.0 * pad).max(0.0);
         let usable_h = (size.height as f32 - 2.0 * pad).max(0.0);
         let cols = ((usable_w / cell_w).floor() as usize).max(1);
-        let rows = ((usable_h / cell_h).floor() as usize).max(1);
+        // Reserve the top row(s) for the tab strip; the terminal grid is the rest.
+        let window_rows = (usable_h / cell_h).floor() as usize;
+        let rows = window_rows.saturating_sub(TAB_STRIP_ROWS).max(1);
         (cols, rows)
     }
 
@@ -372,6 +379,33 @@ impl App {
         } else {
             window.set_title(base);
         }
+    }
+
+    /// Handle a click in the tab strip (screen row 0). Returns true if the click
+    /// landed in the strip (and was consumed), so the caller skips selection/paste.
+    /// Background tabs are hit-tested by equal-width slots; clicking the active
+    /// tab's slot is a no-op.
+    fn strip_click(&mut self, event_loop: &ActiveEventLoop) -> bool {
+        let Some(renderer) = self.renderer.as_ref() else {
+            return false;
+        };
+        let m = renderer.cell_metrics();
+        let pad = renderer.pad() as f64;
+        let (x, y) = self.mouse_px;
+        let screen_row = ((y - pad) / m.height as f64).floor();
+        if !(0.0..TAB_STRIP_ROWS as f64).contains(&screen_row) {
+            return false;
+        }
+        let total = self.tab_count();
+        if total > 1 {
+            let col = ((x - pad) / m.width as f64).floor().max(0.0) as usize;
+            let slot = (self.cols / total).max(1);
+            let idx = (col / slot).min(total - 1);
+            if idx >= 1 {
+                self.activate_background(idx - 1, event_loop);
+            }
+        }
+        true
     }
 
     /// Clear transient pointer/selection state. Called when switching tabs so an
@@ -528,9 +562,10 @@ impl App {
         let m = renderer.cell_metrics();
         let pad = renderer.pad() as f64;
         let col = ((x - pad) / m.width as f64).floor();
-        let row = ((y - pad) / m.height as f64).floor();
+        // Screen rows include the tab strip; terminal rows start below it.
+        let term_row = ((y - pad) / m.height as f64).floor() as i64 - TAB_STRIP_ROWS as i64;
         let col = (col.max(0.0) as usize).min(self.cols.saturating_sub(1));
-        let row = (row.max(0.0) as usize).min(self.rows.saturating_sub(1));
+        let row = (term_row.max(0) as usize).min(self.rows.saturating_sub(1));
         (col, row)
     }
 
@@ -770,15 +805,17 @@ impl App {
         // The renderer keeps per-row instances persistently; on a full rebuild we
         // clear/resize that storage so every row is repushed below.
         if full {
-            renderer.resize_grid(rows);
+            // +strip: the renderer grid spans the whole window (strip row + terminal).
+            renderer.resize_grid(rows + TAB_STRIP_ROWS);
             for d in dirty.iter_mut() {
                 *d = true;
             }
         }
 
-        // Track which rows we have begun this frame, so a row's first cell triggers
-        // `begin_row` (clearing it) and the cursor overlay can re-target it later.
-        let mut row_started = vec![false; rows];
+        // Track which *screen* rows we have begun this frame (terminal content is
+        // offset down by the strip), so a row's first cell triggers `begin_row` and
+        // the cursor overlay can re-target it later.
+        let mut row_started = vec![false; rows + TAB_STRIP_ROWS];
 
         // Collect the visible cells so we can look ahead across cells when
         // reconstructing grapheme clusters (compound emoji span several cells).
@@ -807,10 +844,12 @@ impl App {
                 ci += unit_len(&cells, ci);
                 continue;
             }
-            // First cell of a dirty row: clear it and begin pushing into it.
-            if !row_started[row_u] {
-                renderer.begin_row(row_u);
-                row_started[row_u] = true;
+            // Screen row = terminal row + strip offset. First cell of a dirty row:
+            // clear it and begin pushing into it.
+            let srow = row_u + TAB_STRIP_ROWS;
+            if !row_started[srow] {
+                renderer.begin_row(srow);
+                row_started[srow] = true;
             }
 
             let mut fg = color::resolve(cell.fg, colors);
@@ -899,7 +938,7 @@ impl App {
             };
             renderer.push_cell(
                 col as usize,
-                row as usize,
+                srow,
                 ch,
                 &combiners,
                 fg,
@@ -910,6 +949,61 @@ impl App {
                 decorations,
             );
             ci += consumed;
+        }
+
+        // --- Tab strip (screen row 0): a slim title + tab bar, always present. ---
+        {
+            let bar_bg = color::selection_bg();
+            let base_fg = color::default_fg();
+            let active_bg = base_fg;
+            let active_fg = color::default_bg();
+            let dim_fg = [
+                base_fg[0] * 0.6,
+                base_fg[1] * 0.6,
+                base_fg[2] * 0.6,
+                base_fg[3],
+            ];
+            let short = |t: &str| -> String {
+                let t = t.trim();
+                let base = if t.is_empty() { "shell" } else { t };
+                base.chars().take(16).collect()
+            };
+            // Active tab first, then background tabs in order.
+            let mut labels: Vec<(String, bool)> =
+                vec![(format!(" 1 {} ", short(&self.active_title)), true)];
+            for (i, s) in self.background.iter().enumerate() {
+                labels.push((format!(" {} {} ", i + 2, short(&s.title)), false));
+            }
+            let mut bar: Vec<(char, [f32; 4], [f32; 4])> = Vec::with_capacity(self.cols);
+            for (label, active) in &labels {
+                let (lfg, lbg) = if *active {
+                    (active_fg, active_bg)
+                } else {
+                    (dim_fg, bar_bg)
+                };
+                for ch in label.chars() {
+                    bar.push((ch, lfg, lbg));
+                }
+            }
+            while bar.len() < self.cols {
+                bar.push((' ', base_fg, bar_bg));
+            }
+            bar.truncate(self.cols);
+            renderer.begin_row(0);
+            for (col, (ch, cfg, cbg)) in bar.into_iter().enumerate() {
+                renderer.push_cell(
+                    col,
+                    0,
+                    ch,
+                    &[],
+                    cfg,
+                    cbg,
+                    false,
+                    false,
+                    false,
+                    Decorations::default(),
+                );
+            }
         }
 
         // Cursor overlay. Drawn after the cells so the bars/outline land on top of
@@ -935,9 +1029,10 @@ impl App {
             if let Some(overlay) = overlay {
                 // The cursor row was (re)built above; re-target it without clearing
                 // so the overlay appends on top of that row's cell backgrounds.
-                if cr < rows && row_started[cr] {
-                    renderer.set_cur_row(cr);
-                    renderer.push_cursor(cc, cr, overlay, cursor_color);
+                let scr = cr + TAB_STRIP_ROWS;
+                if cr < rows && row_started[scr] {
+                    renderer.set_cur_row(scr);
+                    renderer.push_cursor(cc, scr, overlay, cursor_color);
                 }
             }
         }
@@ -1343,6 +1438,12 @@ impl ApplicationHandler<UserEvent> for App {
                 let pressed = state == ElementState::Pressed;
                 // Track the held button for drag reports regardless of mode.
                 self.held_button = if pressed { Some(base) } else { None };
+
+                // A left click in the tab strip switches tabs; never sent onward.
+                if button == MouseButton::Left && pressed && self.strip_click(event_loop) {
+                    self.held_button = None;
+                    return;
+                }
 
                 let mode = self.term_mode();
                 // Ctrl+Left opens an OSC8 hyperlink under the pointer, overriding
