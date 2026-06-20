@@ -85,6 +85,173 @@ const CATPPUCCIN_MOCHA: Theme = Theme {
     ],
 };
 
+/// Catppuccin Macchiato: a slightly warmer, less-contrasty sibling of Mocha.
+/// Special entries use Text (fg), Base (bg) and Rosewater (cursor); the ANSI
+/// palette follows the project's published terminal mapping.
+const CATPPUCCIN_MACCHIATO: Theme = Theme {
+    fg: rgb(0xCA, 0xD3, 0xF5),     // Text
+    bg: rgb(0x24, 0x27, 0x3A),     // Base
+    cursor: rgb(0xF4, 0xDB, 0xD6), // Rosewater
+    selection_bg: rgb(0x44, 0x47, 0x5A),
+    ansi16: [
+        rgb(0x49, 0x4D, 0x64), // 0  black   (Surface1)
+        rgb(0xED, 0x87, 0x96), // 1  red     (Red)
+        rgb(0xA6, 0xDA, 0x95), // 2  green   (Green)
+        rgb(0xEE, 0xD4, 0x9F), // 3  yellow  (Yellow)
+        rgb(0x8A, 0xAD, 0xF4), // 4  blue    (Blue)
+        rgb(0xF5, 0xBD, 0xE6), // 5  magenta (Pink)
+        rgb(0x8B, 0xD5, 0xCA), // 6  cyan    (Teal)
+        rgb(0xB8, 0xC0, 0xE0), // 7  white   (Subtext1)
+        rgb(0x5B, 0x60, 0x78), // 8  bright black  (Surface2)
+        rgb(0xED, 0x87, 0x96), // 9  bright red
+        rgb(0xA6, 0xDA, 0x95), // 10 bright green
+        rgb(0xEE, 0xD4, 0x9F), // 11 bright yellow
+        rgb(0x8A, 0xAD, 0xF4), // 12 bright blue
+        rgb(0xF5, 0xBD, 0xE6), // 13 bright magenta
+        rgb(0x8B, 0xD5, 0xCA), // 14 bright cyan
+        rgb(0xA5, 0xAD, 0xCB), // 15 bright white (Subtext0)
+    ],
+};
+
+/// Gruvbox Dark: the classic retro-warm theme with a brown-black background and
+/// earthy, high-legibility accents. Uses the "dark" (medium) background and the
+/// standard fg1/bg0 special entries; cursor follows the foreground.
+const GRUVBOX_DARK: Theme = Theme {
+    fg: rgb(0xEB, 0xDB, 0xB2),     // fg1
+    bg: rgb(0x28, 0x28, 0x28),     // bg0
+    cursor: rgb(0xEB, 0xDB, 0xB2), // fg1
+    selection_bg: rgb(0x50, 0x49, 0x45),
+    ansi16: [
+        rgb(0x28, 0x28, 0x28), // 0  black         (bg0)
+        rgb(0xCC, 0x24, 0x1D), // 1  red           (neutral red)
+        rgb(0x98, 0x97, 0x1A), // 2  green         (neutral green)
+        rgb(0xD7, 0x99, 0x21), // 3  yellow        (neutral yellow)
+        rgb(0x45, 0x85, 0x88), // 4  blue          (neutral blue)
+        rgb(0xB1, 0x62, 0x86), // 5  magenta       (neutral purple)
+        rgb(0x68, 0x9D, 0x6A), // 6  cyan          (neutral aqua)
+        rgb(0xA8, 0x99, 0x84), // 7  white         (fg4 / gray)
+        rgb(0x92, 0x83, 0x74), // 8  bright black   (gray)
+        rgb(0xFB, 0x49, 0x34), // 9  bright red
+        rgb(0xB8, 0xBB, 0x26), // 10 bright green
+        rgb(0xFA, 0xBD, 0x2F), // 11 bright yellow
+        rgb(0x83, 0xA5, 0x98), // 12 bright blue
+        rgb(0xD3, 0x86, 0x9B), // 13 bright magenta
+        rgb(0x8E, 0xC0, 0x7C), // 14 bright cyan
+        rgb(0xEB, 0xDB, 0xB2), // 15 bright white   (fg1)
+    ],
+};
+
+/// Dracula: the famous dark theme with a desaturated indigo background and vivid,
+/// candy-bright accents. Special entries use Foreground/Background; cursor follows
+/// the foreground per the published spec.
+const DRACULA: Theme = Theme {
+    fg: rgb(0xF8, 0xF8, 0xF2),     // Foreground
+    bg: rgb(0x28, 0x2A, 0x36),     // Background
+    cursor: rgb(0xF8, 0xF8, 0xF2), // Foreground
+    selection_bg: rgb(0x44, 0x47, 0x5A),
+    ansi16: [
+        rgb(0x21, 0x22, 0x2C), // 0  black
+        rgb(0xFF, 0x55, 0x55), // 1  red
+        rgb(0x50, 0xFA, 0x7B), // 2  green
+        rgb(0xF1, 0xFA, 0x8C), // 3  yellow
+        rgb(0xBD, 0x93, 0xF9), // 4  blue   (Purple)
+        rgb(0xFF, 0x79, 0xC6), // 5  magenta(Pink)
+        rgb(0x8B, 0xE9, 0xFD), // 6  cyan
+        rgb(0xF8, 0xF8, 0xF2), // 7  white
+        rgb(0x62, 0x72, 0xA4), // 8  bright black  (Comment)
+        rgb(0xFF, 0x6E, 0x6E), // 9  bright red
+        rgb(0x69, 0xFF, 0x94), // 10 bright green
+        rgb(0xFF, 0xFF, 0xA5), // 11 bright yellow
+        rgb(0xD6, 0xAC, 0xFF), // 12 bright blue
+        rgb(0xFF, 0x92, 0xDF), // 13 bright magenta
+        rgb(0xA4, 0xFF, 0xFF), // 14 bright cyan
+        rgb(0xFF, 0xFF, 0xFF), // 15 bright white
+    ],
+};
+
+/// Nord: an arctic, bluish color palette with low-contrast frost/aurora accents.
+/// Special entries use nord4 (fg) / nord0 (bg); cursor follows the foreground.
+const NORD: Theme = Theme {
+    fg: rgb(0xD8, 0xDE, 0xE9),     // nord4
+    bg: rgb(0x2E, 0x34, 0x40),     // nord0
+    cursor: rgb(0xD8, 0xDE, 0xE9), // nord4
+    selection_bg: rgb(0x43, 0x4C, 0x5E),
+    ansi16: [
+        rgb(0x3B, 0x42, 0x52), // 0  black         (nord1)
+        rgb(0xBF, 0x61, 0x6A), // 1  red           (nord11)
+        rgb(0xA3, 0xBE, 0x8C), // 2  green         (nord14)
+        rgb(0xEB, 0xCB, 0x8B), // 3  yellow        (nord13)
+        rgb(0x81, 0xA1, 0xC1), // 4  blue          (nord9)
+        rgb(0xB4, 0x8E, 0xAD), // 5  magenta       (nord15)
+        rgb(0x88, 0xC0, 0xD0), // 6  cyan          (nord8)
+        rgb(0xE5, 0xE9, 0xF0), // 7  white         (nord5)
+        rgb(0x4C, 0x56, 0x6A), // 8  bright black   (nord3)
+        rgb(0xBF, 0x61, 0x6A), // 9  bright red     (nord11)
+        rgb(0xA3, 0xBE, 0x8C), // 10 bright green   (nord14)
+        rgb(0xEB, 0xCB, 0x8B), // 11 bright yellow  (nord13)
+        rgb(0x81, 0xA1, 0xC1), // 12 bright blue    (nord9)
+        rgb(0xB4, 0x8E, 0xAD), // 13 bright magenta (nord15)
+        rgb(0x8F, 0xBC, 0xBB), // 14 bright cyan    (nord7)
+        rgb(0xEC, 0xEF, 0xF4), // 15 bright white   (nord6)
+    ],
+};
+
+/// Solarized Dark: Ethan Schoonover's precision palette on the dark base03
+/// background with base0 body text. Special entries use base0 (fg) / base03 (bg);
+/// cursor follows the foreground.
+const SOLARIZED_DARK: Theme = Theme {
+    fg: rgb(0x83, 0x94, 0x96),     // base0
+    bg: rgb(0x00, 0x2B, 0x36),     // base03
+    cursor: rgb(0x83, 0x94, 0x96), // base0
+    selection_bg: rgb(0x07, 0x36, 0x42),
+    ansi16: [
+        rgb(0x07, 0x36, 0x42), // 0  black         (base02)
+        rgb(0xDC, 0x32, 0x2F), // 1  red
+        rgb(0x85, 0x99, 0x00), // 2  green
+        rgb(0xB5, 0x89, 0x00), // 3  yellow
+        rgb(0x26, 0x8B, 0xD2), // 4  blue
+        rgb(0xD3, 0x36, 0x82), // 5  magenta
+        rgb(0x2A, 0xA1, 0x98), // 6  cyan
+        rgb(0xEE, 0xE8, 0xD5), // 7  white         (base2)
+        rgb(0x00, 0x2B, 0x36), // 8  bright black   (base03)
+        rgb(0xCB, 0x4B, 0x16), // 9  bright red     (orange)
+        rgb(0x58, 0x6E, 0x75), // 10 bright green   (base01)
+        rgb(0x65, 0x7B, 0x83), // 11 bright yellow  (base00)
+        rgb(0x83, 0x94, 0x96), // 12 bright blue    (base0)
+        rgb(0x6C, 0x71, 0xC4), // 13 bright magenta (violet)
+        rgb(0x93, 0xA1, 0xA1), // 14 bright cyan    (base1)
+        rgb(0xFD, 0xF6, 0xE3), // 15 bright white   (base3)
+    ],
+};
+
+/// Rose Pine: a soho-vibes theme with a muted rose-tinted dark base and gentle
+/// pastel accents. Special entries use Text (fg) / Base (bg); cursor follows the
+/// Highlight High tint per the published terminal palette.
+const ROSE_PINE: Theme = Theme {
+    fg: rgb(0xE0, 0xDE, 0xF4),           // Text
+    bg: rgb(0x19, 0x17, 0x24),           // Base
+    cursor: rgb(0x52, 0x4F, 0x67),       // Highlight High
+    selection_bg: rgb(0x2A, 0x28, 0x3E), // Highlight Med
+    ansi16: [
+        rgb(0x26, 0x23, 0x3A), // 0  black         (Overlay)
+        rgb(0xEB, 0x6F, 0x92), // 1  red           (Love)
+        rgb(0x31, 0x74, 0x8F), // 2  green         (Pine)
+        rgb(0xF6, 0xC1, 0x77), // 3  yellow        (Gold)
+        rgb(0x9C, 0xCF, 0xD8), // 4  blue          (Foam)
+        rgb(0xC4, 0xA7, 0xE7), // 5  magenta       (Iris)
+        rgb(0xEB, 0xBC, 0xBA), // 6  cyan          (Rose)
+        rgb(0xE0, 0xDE, 0xF4), // 7  white         (Text)
+        rgb(0x6E, 0x6A, 0x86), // 8  bright black   (Subtle)
+        rgb(0xEB, 0x6F, 0x92), // 9  bright red     (Love)
+        rgb(0x31, 0x74, 0x8F), // 10 bright green   (Pine)
+        rgb(0xF6, 0xC1, 0x77), // 11 bright yellow  (Gold)
+        rgb(0x9C, 0xCF, 0xD8), // 12 bright blue    (Foam)
+        rgb(0xC4, 0xA7, 0xE7), // 13 bright magenta (Iris)
+        rgb(0xEB, 0xBC, 0xBA), // 14 bright cyan    (Rose)
+        rgb(0xE0, 0xDE, 0xF4), // 15 bright white   (Text)
+    ],
+};
+
 /// Resolve a theme by (case-insensitive, separator-insensitive) name. Returns
 /// `None` for an unknown name so the caller can warn and keep the default.
 pub fn theme_by_name(name: &str) -> Option<Theme> {
@@ -96,6 +263,12 @@ pub fn theme_by_name(name: &str) -> Option<Theme> {
     match key.as_str() {
         "tokyonight" | "tokyo" => Some(TOKYO_NIGHT),
         "catppuccinmocha" | "catppuccin" | "mocha" => Some(CATPPUCCIN_MOCHA),
+        "catppuccinmacchiato" | "macchiato" => Some(CATPPUCCIN_MACCHIATO),
+        "gruvboxdark" | "gruvbox" => Some(GRUVBOX_DARK),
+        "dracula" => Some(DRACULA),
+        "nord" => Some(NORD),
+        "solarizeddark" | "solarized" => Some(SOLARIZED_DARK),
+        "rosepine" | "rose" => Some(ROSE_PINE),
         _ => None,
     }
 }
