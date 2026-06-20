@@ -295,6 +295,11 @@ pub struct Renderer {
 
     clear_color: [f32; 4],
 
+    /// Visual-bell flash overlay: a non-premultiplied straight RGBA color blended
+    /// over the clear color and every cell background while a bell flash is
+    /// active, or `None` when not flashing. The alpha is the blend strength.
+    flash: Option<[f32; 4]>,
+
     /// Window background opacity in [0, 1]; applied to cell backgrounds and the
     /// clear color (premultiplied) when the surface is transparent.
     opacity: f32,
@@ -646,6 +651,7 @@ impl Renderer {
             bg_capacity: INITIAL_INSTANCES,
             fg_capacity: INITIAL_INSTANCES,
             clear_color: [0.0, 0.0, 0.0, 1.0],
+            flash: None,
             opacity: opacity.clamp(0.0, 1.0),
             transparent,
         };
@@ -751,7 +757,8 @@ impl Renderer {
     /// [`Renderer::begin_row`] are rewritten; the rest are reused from last frame.
     pub fn begin_frame(&mut self, default_bg: [f32; 4]) {
         // The clear color paints the (translucent) window backdrop, so it takes
-        // the window opacity just like the per-cell default-background quads.
+        // the window opacity (and the visual-bell flash) just like the per-cell
+        // default-background quads.
         self.clear_color = self.glass_bg(default_bg);
     }
 
@@ -789,11 +796,35 @@ impl Renderer {
     /// the foreground pass's premultiplied blending. A no-op (and fully opaque)
     /// when the compositor can't do translucency.
     fn glass_bg(&self, color: [f32; 4]) -> [f32; 4] {
+        let color = self.apply_flash(color);
         if !self.transparent {
             return color;
         }
         let a = color[3] * self.opacity;
         [color[0] * a, color[1] * a, color[2] * a, a]
+    }
+
+    /// Blend the active visual-bell flash (straight RGBA over) onto a straight
+    /// (non-premultiplied) background color, preserving its alpha. A no-op when no
+    /// flash is active. Applied to cell backgrounds and the clear color so the
+    /// whole window tints uniformly toward the flash color for the flash window.
+    fn apply_flash(&self, color: [f32; 4]) -> [f32; 4] {
+        match self.flash {
+            None => color,
+            Some([fr, fg, fb, fa]) => [
+                color[0] + (fr - color[0]) * fa,
+                color[1] + (fg - color[1]) * fa,
+                color[2] + (fb - color[2]) * fa,
+                color[3],
+            ],
+        }
+    }
+
+    /// Set (or clear) the visual-bell flash overlay color. `Some([r, g, b, a])`
+    /// blends that straight RGBA over the background for the next frames; `None`
+    /// restores the normal appearance. The caller drives the flash duration.
+    pub fn set_flash(&mut self, flash: Option<[f32; 4]>) {
+        self.flash = flash;
     }
 
     #[allow(clippy::too_many_arguments)]

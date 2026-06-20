@@ -16,6 +16,18 @@ rustix = "1.1.4"
 wgpu = "29.0.3"
 winit = "0.30.13"
 
+# Audible bell. Optional + off by default: the audio backend (cpal/alsa) needs
+# system audio dev libraries to build, so we keep the dependency behind a feature
+# rather than imposing that on every build. When the feature is not compiled in,
+# the audible bell is a no-op (logged once). `bell_audible` still parses from the
+# config regardless; it only takes effect in a `--features bell-audio` build.
+rodio = { version = "0.22.2", default-features = false, features = ["playback"], optional = true }
+
+[features]
+# Compile in the audible-bell backend. Requires audio dev libs (e.g. alsa-lib-devel
+# on Fedora / libasound2-dev on Debian) at build time.
+bell-audio = ["dep:rodio"]
+
 # Ultra-lean release build: this is core to the "faster/lighter than ghostty" goal.
 # fat LTO + single codegen unit maximize inlining across crates; abort-on-panic
 # drops the unwinding machinery; strip shrinks the binary.

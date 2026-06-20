@@ -119,6 +119,11 @@ pub fn default_bg() -> [f32; 4] {
     to_f32(active().bg)
 }
 
+/// Default foreground of the active theme (used e.g. for the visual-bell flash).
+pub fn default_fg() -> [f32; 4] {
+    to_f32(active().fg)
+}
+
 /// Selection-tint background of the active theme.
 pub fn selection_bg() -> [f32; 4] {
     to_f32(active().selection_bg)

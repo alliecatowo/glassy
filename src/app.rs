@@ -23,6 +23,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Window, WindowId};
 
+use crate::bell::{self, AudioBell};
 use crate::color;
 use crate::input::{MouseReport, encode_key, encode_mouse};
 use crate::pty::{Pty, UserEvent};
@@ -174,6 +175,11 @@ pub struct Config {
     pub scrollback: usize,
     /// Shell program + args; `None` uses the user's default shell.
     pub shell: Option<Shell>,
+    /// Flash the window briefly on the terminal bell. Default true.
+    pub bell_visual: bool,
+    /// Play a short soft beep on the terminal bell. Default false. Only audible in
+    /// a build compiled with the `bell-audio` feature.
+    pub bell_audible: bool,
 }
 
 pub struct App {
@@ -216,6 +222,14 @@ pub struct App {
     dirty: bool,
     next_frame: Instant,
     refresh: Duration,
+
+    // Visual-bell flash state: when set, the renderer overlays a low-alpha flash
+    // tint until this instant, then we restore. Driven by the render-on-demand
+    // WaitUntil timer; cleared (back to ControlFlow::Wait) once elapsed.
+    bell_flash_until: Option<Instant>,
+    /// Audible-bell player (lazy; holds the audio device open after the first
+    /// ring). A no-op when built without the `bell-audio` feature.
+    audio_bell: AudioBell,
 
     // Cursor blink state. `blink_on` is the current visible phase; `blink_at` is
     // when the next phase flip is due. Blinking only runs while focused and the
@@ -267,6 +281,8 @@ impl App {
             selecting: false,
             last_click: None,
             clipboard: None,
+            bell_flash_until: None,
+            audio_bell: AudioBell::new(),
             dirty: false,
             next_frame: Instant::now(),
             refresh: Duration::from_micros(16_666), // 60 Hz default until queried
@@ -311,6 +327,23 @@ impl App {
     fn reset_blink(&mut self) {
         self.blink_on = true;
         self.blink_at = Instant::now() + BLINK_INTERVAL;
+    }
+
+    /// React to a terminal bell. The visual bell starts (or extends) a brief
+    /// window flash; the audible bell rings a soft beep. Both are gated by config
+    /// (default: visual on, audible off). `user_event` marks the screen dirty
+    /// after this, so the flash paints on the next frame.
+    fn trigger_bell(&mut self) {
+        if self.config.bell_visual {
+            // (Re)arm the flash window. A burst of bells just keeps it lit rather
+            // than stuttering. Force a full rebuild so every cell picks up the
+            // tint this frame and drops it when the flash ends.
+            self.bell_flash_until = Some(Instant::now() + Duration::from_millis(bell::FLASH_MS));
+            self.force_full_redraw = true;
+        }
+        if self.config.bell_audible {
+            self.audio_bell.ring();
+        }
     }
 
     /// Mark the screen dirty and schedule a redraw no sooner than `next_frame`.
@@ -461,9 +494,20 @@ impl App {
     }
 
     fn render(&mut self) {
+        // Visual-bell overlay: while the flash window is open, tint the whole frame
+        // toward the foreground color; otherwise clear it. Computed before the
+        // renderer borrow so it can read `self.bell_flash_until`.
+        let flash = if self.bell_flash_until.is_some_and(|t| Instant::now() < t) {
+            let [r, g, b, _] = color::default_fg();
+            Some([r, g, b, bell::FLASH_ALPHA])
+        } else {
+            None
+        };
+
         let (Some(renderer), Some(pty)) = (self.renderer.as_mut(), self.pty.as_ref()) else {
             return;
         };
+        renderer.set_flash(flash);
 
         // Hold the terminal lock only long enough to copy out renderable state.
         let mut term = pty.term.lock();
@@ -752,6 +796,19 @@ impl App {
         self.force_full_redraw = true;
     }
 
+    /// The earliest timed wakeup we must schedule when otherwise idle: the blink
+    /// phase boundary and/or the visual-bell flash deadline, whichever is sooner.
+    /// `None` means nothing is pending and the loop can park on `ControlFlow::Wait`
+    /// (0% idle).
+    fn next_wake(&self, blink_active: bool, flash_active: bool) -> Option<Instant> {
+        let blink = blink_active.then_some(self.blink_at);
+        let flash = flash_active.then_some(self.bell_flash_until).flatten();
+        match (blink, flash) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
+    }
+
     fn handle_resize(&mut self, event_loop: &ActiveEventLoop, size: PhysicalSize<u32>) {
         if size.width == 0 || size.height == 0 {
             return;
@@ -891,7 +948,7 @@ impl ApplicationHandler<UserEvent> for App {
                 event_loop.exit();
                 return;
             }
-            UserEvent::Bell => { /* no audible/visual bell in v1 */ }
+            UserEvent::Bell => self.trigger_bell(),
             UserEvent::Wakeup => {}
         }
         self.mark_dirty(event_loop);
@@ -1190,13 +1247,28 @@ impl ApplicationHandler<UserEvent> for App {
             self.blink_on = true;
         }
 
+        // Visual-bell flash: while the flash window is open, keep redrawing so the
+        // overlay is painted; once it elapses, restore (a full rebuild drops the
+        // tint from every cell) and repaint one last frame. This is a short, finite
+        // wake; idle returns to `Wait` afterward.
+        let flash_active = match self.bell_flash_until {
+            Some(until) if now < until => true,
+            Some(_) => {
+                // Flash just ended: clear it and force the restore frame.
+                self.bell_flash_until = None;
+                self.force_full_redraw = true;
+                self.dirty = true;
+                false
+            }
+            None => false,
+        };
+
         if !self.dirty {
-            // Idle: stay parked on `Wait` (0% CPU) unless a blink flip is pending,
-            // in which case wake at the next phase boundary.
-            if blink_active {
-                event_loop.set_control_flow(ControlFlow::WaitUntil(self.blink_at));
-            } else {
-                event_loop.set_control_flow(ControlFlow::Wait);
+            // Idle: stay parked on `Wait` (0% CPU) unless a blink flip or a flash
+            // boundary is pending, in which case wake at the earliest deadline.
+            match self.next_wake(blink_active, flash_active) {
+                Some(at) => event_loop.set_control_flow(ControlFlow::WaitUntil(at)),
+                None => event_loop.set_control_flow(ControlFlow::Wait),
             }
             return;
         }
@@ -1206,12 +1278,11 @@ impl ApplicationHandler<UserEvent> for App {
                 w.request_redraw();
             }
             self.next_frame = now + self.refresh;
-            // RedrawRequested will clear `dirty`. While blinking, keep a wakeup
-            // scheduled for the next phase flip; otherwise wait for the next event.
-            if blink_active {
-                event_loop.set_control_flow(ControlFlow::WaitUntil(self.blink_at));
-            } else {
-                event_loop.set_control_flow(ControlFlow::Wait);
+            // RedrawRequested will clear `dirty`. Keep a wakeup scheduled for the
+            // next blink flip or flash boundary; otherwise wait for the next event.
+            match self.next_wake(blink_active, flash_active) {
+                Some(at) => event_loop.set_control_flow(ControlFlow::WaitUntil(at)),
+                None => event_loop.set_control_flow(ControlFlow::Wait),
             }
         } else {
             event_loop.set_control_flow(ControlFlow::WaitUntil(self.next_frame));

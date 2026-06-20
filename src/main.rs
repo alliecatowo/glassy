@@ -1,4 +1,5 @@
 mod app;
+mod bell;
 mod color;
 mod config;
 mod input;

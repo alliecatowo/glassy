@@ -12,6 +12,8 @@
 //! padding     = 6                      # logical px grid inset
 //! shell       = /usr/bin/zsh -l        # program + args
 //! scrollback  = 10000                  # lines of history
+//! bell_visual = true                   # flash the window on bell
+//! bell_audible= false                  # soft beep on bell (needs bell-audio build)
 //! ```
 //!
 //! CLI flags override the file: at minimum `--font-size <pt>`, `--opacity <f>`,
@@ -82,6 +84,8 @@ struct RawConfig {
     padding: Option<f32>,
     shell: Option<Shell>,
     scrollback: Option<usize>,
+    bell_visual: Option<bool>,
+    bell_audible: Option<bool>,
 }
 
 impl RawConfig {
@@ -101,6 +105,8 @@ impl RawConfig {
             padding: self.padding,
             scrollback: self.scrollback.unwrap_or(DEFAULT_SCROLLBACK),
             shell: self.shell,
+            bell_visual: self.bell_visual.unwrap_or(true),
+            bell_audible: self.bell_audible.unwrap_or(false),
         };
 
         Ok(Settings { config, theme })
@@ -192,11 +198,26 @@ fn apply_kv(key: &str, value: &str, raw: &mut RawConfig) -> Result<()> {
                 .with_context(|| format!("scrollback: invalid integer '{value}'"))?;
             raw.scrollback = Some(n);
         }
+        "bell_visual" => {
+            raw.bell_visual = Some(parse_bool(value, "bell_visual")?);
+        }
+        "bell_audible" => {
+            raw.bell_audible = Some(parse_bool(value, "bell_audible")?);
+        }
         other => {
             log::warn!("glassy: ignoring unknown config key '{other}'");
         }
     }
     Ok(())
+}
+
+/// Parse a boolean for a named field, accepting the usual spellings.
+fn parse_bool(value: &str, field: &str) -> Result<bool> {
+    match value.to_ascii_lowercase().as_str() {
+        "true" | "yes" | "on" | "1" => Ok(true),
+        "false" | "no" | "off" | "0" => Ok(false),
+        _ => bail!("{field} must be true/false (or yes/no, on/off, 1/0), got '{value}'"),
+    }
 }
 
 /// Parse a strictly-positive float for a named field.
@@ -225,9 +246,9 @@ fn parse_shell(value: &str) -> Option<Shell> {
 /// was handled (caller should exit successfully), or an error on a bad flag.
 ///
 /// Recognized: `--font-size <pt>`, `--font-family <name>`, `--theme <name>`,
-/// `--opacity <f>`, `--padding <px>`, `--scrollback <n>`, `-e/--command <cmd…>`
-/// (consumes the rest of the args as the program + its arguments), `-h/--help`,
-/// `-V/--version`.
+/// `--opacity <f>`, `--padding <px>`, `--scrollback <n>`, `--bell-visual <bool>`,
+/// `--bell-audible <bool>`, `-e/--command <cmd…>` (consumes the rest of the args
+/// as the program + its arguments), `-h/--help`, `-V/--version`.
 fn parse_cli(args: impl Iterator<Item = String>, raw: &mut RawConfig) -> Result<bool> {
     let mut args = args.peekable();
     while let Some(arg) = args.next() {
@@ -274,6 +295,14 @@ fn parse_cli(args: impl Iterator<Item = String>, raw: &mut RawConfig) -> Result<
                         .with_context(|| format!("--scrollback: invalid integer '{v}'"))?,
                 );
             }
+            "--bell-visual" => {
+                let v = next_value(&mut args, "--bell-visual")?;
+                raw.bell_visual = Some(parse_bool(&v, "--bell-visual")?);
+            }
+            "--bell-audible" => {
+                let v = next_value(&mut args, "--bell-audible")?;
+                raw.bell_audible = Some(parse_bool(&v, "--bell-audible")?);
+            }
             // `-e`/`--command`: everything after it is the program + its args
             // (the conventional terminal contract). Consume the rest verbatim.
             "-e" | "--command" => {
@@ -312,6 +341,8 @@ OPTIONS:
     --opacity <F>          Window opacity 0.0..1.0
     --padding <PX>         Grid inset padding in logical pixels
     --scrollback <N>       Lines of scrollback history
+    --bell-visual <BOOL>   Flash the window on the terminal bell (default true)
+    --bell-audible <BOOL>  Soft beep on the terminal bell (default false)
     -e, --command <CMD>    Run CMD (with the remaining args) instead of the shell
     -h, --help             Print this help and exit
     -V, --version          Print version and exit
@@ -319,7 +350,38 @@ OPTIONS:
 CONFIG FILE:
     $XDG_CONFIG_HOME/glassy/glassy.conf  (or ~/.config/glassy/glassy.conf)
     KEY=VALUE lines: font_family, font_size, theme, opacity, padding,
-    shell, scrollback. CLI flags override the file.",
+    shell, scrollback, bell_visual, bell_audible. CLI flags override the file.",
         env!("CARGO_PKG_VERSION")
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RawConfig, parse_bool, parse_config_file};
+
+    #[test]
+    fn bool_spellings() {
+        for v in ["true", "yes", "on", "1", "True", "ON"] {
+            assert!(parse_bool(v, "x").unwrap(), "{v}");
+        }
+        for v in ["false", "no", "off", "0", "No", "OFF"] {
+            assert!(!parse_bool(v, "x").unwrap(), "{v}");
+        }
+        assert!(parse_bool("maybe", "x").is_err());
+    }
+
+    #[test]
+    fn bell_keys_parse() {
+        let mut raw = RawConfig::default();
+        parse_config_file("bell_visual = false\nbell_audible = on\n", &mut raw).unwrap();
+        assert_eq!(raw.bell_visual, Some(false));
+        assert_eq!(raw.bell_audible, Some(true));
+    }
+
+    #[test]
+    fn bell_defaults_when_unset() {
+        let settings = RawConfig::default().into_settings().unwrap();
+        assert!(settings.config.bell_visual); // default on
+        assert!(!settings.config.bell_audible); // default off
+    }
 }
