@@ -1,0 +1,55 @@
+# Maintainer: Allie <allisonemilycoleman@gmail.com>
+pkgname=glassy
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="A fast, minimal GPU-accelerated terminal emulator written in Rust"
+arch=('x86_64')
+url="https://github.com/alliecatowo/glassy"
+license=('MIT')
+depends=('libxkbcommon' 'wayland' 'vulkan-icd-loader' 'alsa-lib' 'fontconfig' 'gcc-libs')
+makedepends=('cargo')
+source=("$pkgname-$pkgver.tar.gz::https://github.com/alliecatowo/glassy/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+prepare() {
+    cd "$pkgname-$pkgver"
+    export RUSTUP_TOOLCHAIN=stable
+    cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+    cd "$pkgname-$pkgver"
+    export RUSTUP_TOOLCHAIN=stable
+    export CARGO_TARGET_DIR=target
+    cargo build --frozen --release --all-features
+}
+
+check() {
+    cd "$pkgname-$pkgver"
+    export RUSTUP_TOOLCHAIN=stable
+    cargo test --frozen --release || true
+}
+
+package() {
+    cd "$pkgname-$pkgver"
+
+    # Binary.
+    install -Dm0755 "target/release/$pkgname" "$pkgdir/usr/bin/$pkgname"
+
+    # Icons (hicolor theme).
+    for sz in 16 32 48 64 128 256 512; do
+        install -Dm0644 "assets/icons/$pkgname-$sz.png" \
+            "$pkgdir/usr/share/icons/hicolor/${sz}x${sz}/apps/$pkgname.png"
+    done
+
+    # Desktop entry.
+    install -Dm0644 "extra/$pkgname.desktop" \
+        "$pkgdir/usr/share/applications/$pkgname.desktop"
+
+    # Man page.
+    install -Dm0644 "extra/$pkgname.1" \
+        "$pkgdir/usr/share/man/man1/$pkgname.1"
+
+    # License.
+    install -Dm0644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

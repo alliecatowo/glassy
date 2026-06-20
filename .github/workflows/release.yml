@@ -36,6 +36,9 @@ jobs:
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
 
+      - name: Install cargo-deb
+        run: cargo install cargo-deb
+
       - name: Build release
         run: cargo build --release --verbose
 
@@ -44,8 +47,13 @@ jobs:
           strip target/release/glassy
           cp target/release/glassy glassy-x86_64-linux
 
+      - name: Build .deb package
+        run: cargo deb --no-build --output target/debian/glassy_amd64.deb
+
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          files: glassy-x86_64-linux
+          files: |
+            glassy-x86_64-linux
+            target/debian/glassy_amd64.deb
           fail_on_unmatched_files: true

@@ -42,3 +42,41 @@ strip = true
 # are painfully slow unoptimized) but keeps our own crate quick to recompile.
 [profile.dev.package."*"]
 opt-level = 3
+
+# ---------------------------------------------------------------------------
+# Debian / Ubuntu packaging (cargo-deb).
+#
+# This metadata is inert for normal `cargo build`; it only takes effect when
+# building a .deb with `cargo deb` (install it first: `cargo install cargo-deb`).
+# It installs the release binary, the hicolor icon set, the .desktop entry, and
+# the man page, and declares the shared-library runtime dependencies glassy
+# links against (GUI/GPU/audio/text stack).
+# ---------------------------------------------------------------------------
+[package.metadata.deb]
+maintainer = "Allie <allisonemilycoleman@gmail.com>"
+copyright = "2026, Allie <allisonemilycoleman@gmail.com>"
+license-file = ["LICENSE", "0"]
+extended-description = """\
+glassy is a small, fast, GPU-accelerated terminal emulator written in Rust. \
+It draws the grid with an instanced wgpu renderer fed by a dynamic glyph atlas, \
+and supports 24-bit truecolor, color emoji, procedural box-drawing, mouse \
+reporting, selection, clipboard, scrollback, OSC 8 hyperlinks, tabs, window \
+decorations, configurable cursor, translucency, and themeable config."""
+section = "x11"
+priority = "optional"
+# Runtime shared libraries glassy links against. cargo-deb also auto-detects
+# some of these via dpkg-shlibdeps, but we pin the key ones explicitly so the
+# package is installable on a clean system.
+depends = "libc6, libxkbcommon0, libwayland-client0, libvulkan1, libasound2, libfontconfig1, libgcc-s1"
+assets = [
+    ["target/release/glassy", "usr/bin/", "755"],
+    ["assets/icons/glassy-16.png", "usr/share/icons/hicolor/16x16/apps/glassy.png", "644"],
+    ["assets/icons/glassy-32.png", "usr/share/icons/hicolor/32x32/apps/glassy.png", "644"],
+    ["assets/icons/glassy-48.png", "usr/share/icons/hicolor/48x48/apps/glassy.png", "644"],
+    ["assets/icons/glassy-64.png", "usr/share/icons/hicolor/64x64/apps/glassy.png", "644"],
+    ["assets/icons/glassy-128.png", "usr/share/icons/hicolor/128x128/apps/glassy.png", "644"],
+    ["assets/icons/glassy-256.png", "usr/share/icons/hicolor/256x256/apps/glassy.png", "644"],
+    ["assets/icons/glassy-512.png", "usr/share/icons/hicolor/512x512/apps/glassy.png", "644"],
+    ["extra/glassy.desktop", "usr/share/applications/glassy.desktop", "644"],
+    ["extra/glassy.1", "usr/share/man/man1/glassy.1", "644"],
+]

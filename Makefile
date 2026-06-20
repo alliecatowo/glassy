@@ -59,7 +59,7 @@ INSTALL     = install
 
 .POSIX:
 
-.PHONY: all build run test fmt clippy install uninstall clean
+.PHONY: all build run test fmt clippy install uninstall clean deb
 
 # ---------------------------------------------------------------------------
 # Development targets
@@ -135,6 +135,17 @@ uninstall:
 	rm -f "$(MANDIR)/$(BIN).1"
 	rm -f "$(FONTDIR)/NotoColorEmoji.ttf"
 	@echo "glassy uninstalled from $(DESTDIR)$(PREFIX)"
+
+# ---------------------------------------------------------------------------
+# Packaging
+# ---------------------------------------------------------------------------
+
+# Build a Debian/Ubuntu .deb package. The package contents and runtime
+# dependencies are configured in the [package.metadata.deb] section of
+# Cargo.toml. Requires cargo-deb (install it once with: cargo install cargo-deb).
+# The resulting .deb is written under target/debian/.
+deb:
+	$(CARGO) deb
 
 # ---------------------------------------------------------------------------
 # Cleanup
