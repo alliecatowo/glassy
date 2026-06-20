@@ -935,6 +935,7 @@ impl ApplicationHandler<UserEvent> for App {
 
         let pty = match Pty::spawn(
             self.proxy.clone(),
+            0,
             cols,
             rows,
             m.width.round() as u16,
@@ -977,17 +978,17 @@ impl ApplicationHandler<UserEvent> for App {
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
-            UserEvent::Title(title) => {
+            UserEvent::Title(_id, title) => {
                 if let Some(w) = &self.window {
                     w.set_title(&title);
                 }
             }
-            UserEvent::ChildExit => {
+            UserEvent::ChildExit(_id) => {
                 event_loop.exit();
                 return;
             }
-            UserEvent::Bell => self.trigger_bell(),
-            UserEvent::Wakeup => {}
+            UserEvent::Bell(_id) => self.trigger_bell(),
+            UserEvent::Wakeup(_id) => {}
         }
         self.mark_dirty(event_loop);
     }

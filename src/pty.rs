@@ -20,40 +20,45 @@ use alacritty_terminal::term::{Config, Term};
 use alacritty_terminal::tty::{self, Options as PtyOptions, Shell};
 use winit::event_loop::EventLoopProxy;
 
-/// Events delivered from the PTY thread (and timers) into the winit loop.
+/// Events delivered from the PTY thread (and timers) into the winit loop. Each
+/// carries the id of the session (tab) it came from so the UI can route it.
 #[derive(Debug, Clone)]
 pub enum UserEvent {
     /// New terminal content is ready to render.
-    Wakeup,
+    Wakeup(usize),
     /// OSC title change.
-    Title(String),
+    Title(usize, String),
     /// Terminal bell.
-    Bell,
-    /// The child process exited; we should close.
-    ChildExit,
+    Bell(usize),
+    /// The child process exited; the session should close.
+    ChildExit(usize),
 }
 
-/// Bridges `alacritty_terminal`'s `EventListener` to the winit event loop.
+/// Bridges `alacritty_terminal`'s `EventListener` to the winit event loop, tagging
+/// each forwarded event with its session id.
 ///
 /// `EventLoopProxy<T>` is `Clone + Send` when `T: Send`, so this is safe to move
 /// into the PTY reader thread.
 #[derive(Clone)]
-pub struct EventProxy(pub EventLoopProxy<UserEvent>);
+pub struct EventProxy {
+    proxy: EventLoopProxy<UserEvent>,
+    id: usize,
+}
 
 impl EventListener for EventProxy {
     fn send_event(&self, event: Event) {
         let mapped = match event {
-            Event::Wakeup => Some(UserEvent::Wakeup),
-            Event::Title(title) => Some(UserEvent::Title(title)),
-            Event::Bell => Some(UserEvent::Bell),
-            Event::ChildExit(_) | Event::Exit => Some(UserEvent::ChildExit),
+            Event::Wakeup => Some(UserEvent::Wakeup(self.id)),
+            Event::Title(title) => Some(UserEvent::Title(self.id, title)),
+            Event::Bell => Some(UserEvent::Bell(self.id)),
+            Event::ChildExit(_) | Event::Exit => Some(UserEvent::ChildExit(self.id)),
             // Clipboard / color / cursor-blink / mouse-dirty events are not
             // needed for the minimal feature set.
             _ => None,
         };
         if let Some(user_event) = mapped {
             // The loop may already be gone during shutdown; ignore the error.
-            let _ = self.0.send_event(user_event);
+            let _ = self.proxy.send_event(user_event);
         }
     }
 }
@@ -94,6 +99,7 @@ impl Pty {
     /// query pixel dimensions, e.g. for sixel/image protocols).
     pub fn spawn(
         proxy: EventLoopProxy<UserEvent>,
+        id: usize,
         cols: usize,
         rows: usize,
         cell_width: u16,
@@ -118,7 +124,7 @@ impl Pty {
             env!("CARGO_PKG_VERSION").to_string(),
         );
 
-        let event_proxy = EventProxy(proxy);
+        let event_proxy = EventProxy { proxy, id };
         let grid = GridSize { cols, rows };
 
         let config = Config {
