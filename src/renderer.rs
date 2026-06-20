@@ -2015,11 +2015,16 @@ impl Renderer {
         }
         // Inline images overlay on top of the grid, reusing the fg pipeline with
         // the image atlas bound in the color slot (image quads use flags == 1).
+        // The fg pass above already bound the fg pipeline, uniform group, and the
+        // unit-quad vertex buffer identically, so when it ran we only need to swap
+        // the atlas bind group + instance buffer here.
         if self.image_count > 0 {
-            pass.set_pipeline(&self.fg_pipeline);
-            pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+            if fg_count == 0 {
+                pass.set_pipeline(&self.fg_pipeline);
+                pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+                pass.set_vertex_buffer(0, self.unit_quad.slice(..));
+            }
             pass.set_bind_group(1, &self.image_bind_group, &[]);
-            pass.set_vertex_buffer(0, self.unit_quad.slice(..));
             pass.set_vertex_buffer(1, self.image_buffer.slice(..));
             pass.draw(0..4, 0..self.image_count);
         }
