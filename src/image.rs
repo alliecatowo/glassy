@@ -180,27 +180,44 @@ impl Controls {
     }
 }
 
+/// Maximum accepted image dimension (px) per side for raw/sixel decoding. Guards
+/// against malformed escape sequences declaring absurd sizes (overflow / OOM).
+const MAX_IMAGE_DIM: u32 = 16384;
+
+/// Maximum sixel canvas dimension (px) per side. Tighter than [`MAX_IMAGE_DIM`]
+/// because sixel RLE (`!count`) can amplify a tiny stream into a huge canvas, so
+/// this bounds worst-case memory (≈ 4096²·4 = 64 MB) for one malformed image.
+const SIXEL_MAX_DIM: usize = 4096;
+
 /// Decode reassembled payload bytes into RGBA per the declared format.
 fn decode_payload(controls: &Controls, payload: &[u8]) -> Option<DecodedImage> {
     if payload.is_empty() {
         return None;
     }
+    let (w, h) = (controls.width, controls.height);
+    // Reject absurd dimensions before any size math (avoids u32 overflow in the
+    // expected-length check below and downstream allocation/upload blowups).
+    if matches!(controls.format, Format::Rgba | Format::Rgb)
+        && (w == 0 || h == 0 || w > MAX_IMAGE_DIM || h > MAX_IMAGE_DIM)
+    {
+        return None;
+    }
     match controls.format {
         Format::Png => decode_png(payload),
         Format::Rgba => {
-            let (w, h) = (controls.width, controls.height);
-            (w * h * 4 == payload.len() as u32).then(|| DecodedImage {
+            // u64 math: w,h are each <= MAX_IMAGE_DIM so this cannot overflow.
+            let expected = w as u64 * h as u64 * 4;
+            (expected == payload.len() as u64).then(|| DecodedImage {
                 width: w,
                 height: h,
                 rgba: payload.to_vec(),
             })
         }
         Format::Rgb => {
-            let (w, h) = (controls.width, controls.height);
-            if w * h * 3 != payload.len() as u32 {
+            if w as u64 * h as u64 * 3 != payload.len() as u64 {
                 return None;
             }
-            let mut rgba = Vec::with_capacity((w * h * 4) as usize);
+            let mut rgba = Vec::with_capacity((w as usize) * (h as usize) * 4);
             for px in payload.chunks_exact(3) {
                 rgba.extend_from_slice(&[px[0], px[1], px[2], 255]);
             }
@@ -299,8 +316,13 @@ pub fn decode_sixel(data: &[u8]) -> Option<DecodedImage> {
     let mut band = 0usize; // current 6-pixel band index (top row = band*6)
     let mut max_w = 0usize;
 
-    // Set the six vertical pixels of one sixel column for the current color.
+    // Set one pixel for the current color, ignoring writes beyond the canvas cap
+    // so a malformed stream (huge !repeat / many bands) can't grow the buffer
+    // without bound.
     fn put(rows: &mut Vec<Vec<[u8; 4]>>, x: usize, y: usize, c: [u8; 4]) {
+        if x >= SIXEL_MAX_DIM || y >= SIXEL_MAX_DIM {
+            return;
+        }
         while rows.len() <= y {
             rows.push(Vec::new());
         }
@@ -346,7 +368,11 @@ pub fn decode_sixel(data: &[u8]) -> Option<DecodedImage> {
                     if (b'?'..=b'~').contains(&sx) {
                         let bits = sx - b'?';
                         let c = palette[color];
-                        for _ in 0..count.max(1) {
+                        // Clamp the run so x can't advance far past the canvas cap
+                        // (bounds the loop against a malicious huge repeat count).
+                        let reps = (count.max(1) as usize)
+                            .min(SIXEL_MAX_DIM.saturating_sub(x) + 1);
+                        for _ in 0..reps {
                             for bit in 0..6 {
                                 if bits & (1 << bit) != 0 {
                                     put(&mut rows, x, band * 6 + bit, c);
@@ -354,7 +380,7 @@ pub fn decode_sixel(data: &[u8]) -> Option<DecodedImage> {
                             }
                             x += 1;
                         }
-                        max_w = max_w.max(x);
+                        max_w = max_w.max(x.min(SIXEL_MAX_DIM));
                     }
                     i += 1;
                 }
@@ -384,7 +410,7 @@ pub fn decode_sixel(data: &[u8]) -> Option<DecodedImage> {
                     }
                 }
                 x += 1;
-                max_w = max_w.max(x);
+                max_w = max_w.max(x).min(SIXEL_MAX_DIM);
                 i += 1;
             }
             _ => i += 1, // whitespace / unknown
@@ -927,6 +953,33 @@ mod tests {
             })
             .collect();
         assert_eq!(kinds, vec!["display", "delete"]);
+    }
+
+    #[test]
+    fn rejects_oversized_raw_image_dims() {
+        // Malformed: absurd dimensions whose w*h*4 would overflow u32. Must be
+        // rejected, not accepted with a wrapped size or panic.
+        let c = Controls {
+            action: Action::TransmitAndDisplay,
+            format: Format::Rgba,
+            id: 1,
+            width: 65536,
+            height: 65536,
+            cols: 0,
+            rows: 0,
+            more: false,
+        };
+        assert!(decode_payload(&c, &[1, 2, 3, 4]).is_none());
+    }
+
+    #[test]
+    fn sixel_huge_repeat_is_bounded() {
+        // A tiny stream with a 4-billion repeat must not OOM/hang: the canvas is
+        // capped, so this returns quickly with width clamped to the cap.
+        let img = decode_sixel(b"#0;2;100;0;0!4000000000~").expect("decoded");
+        assert!(img.width as usize <= SIXEL_MAX_DIM);
+        assert_eq!(img.height, 6);
+        assert!(img.rgba.len() <= SIXEL_MAX_DIM * 6 * 4);
     }
 
     #[test]

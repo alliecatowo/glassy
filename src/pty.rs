@@ -285,7 +285,10 @@ fn run_loop(
 
     let mut events = Events::with_capacity(NonZeroUsize::new(64).unwrap());
     let mut buf = vec![0u8; 65536];
-    let mut child_exited = true;
+    // Set true only on the paths that actually mean the child is gone (EOF / read
+    // error). A transient poller error or a UI-initiated shutdown must NOT report
+    // a child exit, which would wrongly close the session.
+    let mut child_exited = false;
 
     'main: loop {
         events.clear();
@@ -315,7 +318,10 @@ fn run_loop(
         // Read pending output if the fd signalled readable.
         if events.iter().any(|ev| ev.key == PTY_KEY) {
             match pty.reader().read(&mut buf) {
-                Ok(0) => break 'main, // EOF: child gone
+                Ok(0) => {
+                    child_exited = true; // EOF: child gone
+                    break 'main;
+                }
                 Ok(n) => {
                     // Tap inline-image (kitty graphics) sequences out of the
                     // stream, yielding VT byte runs interleaved with image display
@@ -356,7 +362,10 @@ fn run_loop(
                     proxy.send_event(Event::Wakeup);
                 }
                 Err(ref e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted) => {}
-                Err(_) => break 'main, // e.g. EIO when the child exits
+                Err(_) => {
+                    child_exited = true; // e.g. EIO when the child exits
+                    break 'main;
+                }
             }
         }
 
