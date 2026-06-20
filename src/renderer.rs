@@ -1109,19 +1109,17 @@ impl Renderer {
             cluster.extend(combiners.iter());
             self.ensure_cluster_glyphs(&cluster, bold, italic);
             if let Some(glyphs) = self.cluster_cache.get(&(cluster, bold, italic)) {
-                let placed = Self::place_glyphs(glyphs, origin_x, baseline, cell_w, box_w, cell_h);
                 let cur = self.cur_row;
-                self.rows[cur].fg.extend(placed.into_iter().map(
-                    |(pos, size, g): (_, _, &AtlasGlyph)| FgInstance {
-                        pos,
-                        size,
-                        uv_min: g.uv_min,
-                        uv_max: g.uv_max,
-                        color: fg,
-                        flags: if g.is_color { 1 } else { 0 },
-                        _pad: [0; 3],
-                    },
-                ));
+                Self::place_glyphs(
+                    &mut self.rows[cur].fg,
+                    glyphs,
+                    fg,
+                    origin_x,
+                    baseline,
+                    cell_w,
+                    box_w,
+                    cell_h,
+                );
             }
             return;
         }
@@ -1153,19 +1151,17 @@ impl Renderer {
 
         self.ensure_glyphs(ch, bold, italic);
         if let Some(glyphs) = self.glyph_cache.get(&(ch, bold, italic)) {
-            let placed = Self::place_glyphs(glyphs, origin_x, baseline, cell_w, box_w, cell_h);
             let cur = self.cur_row;
-            self.rows[cur].fg.extend(placed.into_iter().map(
-                |(pos, size, g): (_, _, &AtlasGlyph)| FgInstance {
-                    pos,
-                    size,
-                    uv_min: g.uv_min,
-                    uv_max: g.uv_max,
-                    color: fg,
-                    flags: if g.is_color { 1 } else { 0 },
-                    _pad: [0; 3],
-                },
-            ));
+            Self::place_glyphs(
+                &mut self.rows[cur].fg,
+                glyphs,
+                fg,
+                origin_x,
+                baseline,
+                cell_w,
+                box_w,
+                cell_h,
+            );
         }
     }
 
@@ -1189,47 +1185,58 @@ impl Renderer {
     ///     neighbour or clipping at the top/bottom.
     ///
     /// `cell_w` is the single-cell advance; `box_w` is this cell's advance box.
-    /// Returns one `(pos, size, glyph)` triple per input glyph, in order.
+    /// `fg` is the glyph color. Pushes one [`FgInstance`] per atlas glyph directly
+    /// into `out` (no per-cell temporary allocation — this runs for nearly every
+    /// rebuilt cell, so the hot path stays alloc-free).
+    #[allow(clippy::too_many_arguments)]
     fn place_glyphs(
+        out: &mut Vec<FgInstance>,
         glyphs: &[AtlasGlyph],
+        fg: [f32; 4],
         origin_x: f32,
         baseline: f32,
         cell_w: f32,
         box_w: f32,
         cell_h: f32,
-    ) -> Vec<([f32; 2], [f32; 2], &AtlasGlyph)> {
+    ) {
         // Horizontal recentering for a wide box (0 for a single-width cell).
         let center_dx = (box_w - cell_w) * 0.5;
-        glyphs
-            .iter()
-            .map(|g| {
-                if g.is_color {
-                    // Color emoji: scale to fit the box height-first (preserving
-                    // aspect), capped to the box width, then center in the box.
-                    let scale = if g.px_h > 0.0 {
-                        let s = cell_h / g.px_h;
-                        if g.px_w * s > box_w && g.px_w > 0.0 {
-                            box_w / g.px_w
-                        } else {
-                            s
-                        }
+        for g in glyphs {
+            let (pos, size) = if g.is_color {
+                // Color emoji: scale to fit the box height-first (preserving
+                // aspect), capped to the box width, then center in the box.
+                let scale = if g.px_h > 0.0 {
+                    let s = cell_h / g.px_h;
+                    if g.px_w * s > box_w && g.px_w > 0.0 {
+                        box_w / g.px_w
                     } else {
-                        1.0
-                    };
-                    let w = g.px_w * scale;
-                    let h = g.px_h * scale;
-                    let x = origin_x + (box_w - w) * 0.5;
-                    let y = baseline - cell_h + (cell_h - h) * 0.5;
-                    ([x, y], [w, h], g)
+                        s
+                    }
                 } else {
-                    // Mask glyph: keep its size and bearings; shift right to
-                    // recenter the single-cell-anchored glyph in the box.
-                    let x = origin_x + g.left as f32 + center_dx;
-                    let y = baseline - g.top as f32;
-                    ([x, y], [g.px_w, g.px_h], g)
-                }
-            })
-            .collect()
+                    1.0
+                };
+                let w = g.px_w * scale;
+                let h = g.px_h * scale;
+                let x = origin_x + (box_w - w) * 0.5;
+                let y = baseline - cell_h + (cell_h - h) * 0.5;
+                ([x, y], [w, h])
+            } else {
+                // Mask glyph: keep its size and bearings; shift right to recenter
+                // the single-cell-anchored glyph in the box.
+                let x = origin_x + g.left as f32 + center_dx;
+                let y = baseline - g.top as f32;
+                ([x, y], [g.px_w, g.px_h])
+            };
+            out.push(FgInstance {
+                pos,
+                size,
+                uv_min: g.uv_min,
+                uv_max: g.uv_max,
+                color: fg,
+                flags: if g.is_color { 1 } else { 0 },
+                _pad: [0; 3],
+            });
+        }
     }
 
     /// Push a single solid-color rectangle as a [`BgInstance`]. Coordinates are
