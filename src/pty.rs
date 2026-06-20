@@ -286,28 +286,31 @@ fn run_loop(
                 Ok(0) => break 'main, // EOF: child gone
                 Ok(n) => {
                     // Tap inline-image (kitty graphics) sequences out of the
-                    // stream; feed everything else to the VT parser.
-                    let passthrough = tap.process(&buf[..n], &images);
+                    // stream, yielding VT byte runs interleaved with image display
+                    // points. Advance the parser for each run, then anchor each
+                    // image at the cursor cell it occupies at that point.
+                    let events = tap.process(&buf[..n], &images);
                     let mut term = term.lock();
-                    // Anchor any just-displayed images at the cursor's current
-                    // screen cell, read before this chunk's text advances it.
-                    {
-                        let mut store = images.lock();
-                        let pending = store.take_pending();
-                        if !pending.is_empty() {
-                            let (row, col) = {
-                                let c = term.renderable_content();
-                                (
-                                    c.cursor.point.line.0 + c.display_offset as i32,
-                                    c.cursor.point.column.0,
-                                )
-                            };
-                            for id in pending {
-                                store.place(id, row, col);
+                    for ev in events {
+                        match ev {
+                            crate::image::TapEvent::Vt(bytes) => {
+                                processor.advance(&mut *term, &bytes);
+                            }
+                            crate::image::TapEvent::Display(p) => {
+                                let (row, col) = {
+                                    let c = term.renderable_content();
+                                    (
+                                        c.cursor.point.line.0 + c.display_offset as i32,
+                                        c.cursor.point.column.0,
+                                    )
+                                };
+                                images.lock().place(p.id, row, col, p.cols, p.rows);
+                            }
+                            crate::image::TapEvent::Delete(id) => {
+                                images.lock().delete(id);
                             }
                         }
                     }
-                    processor.advance(&mut *term, &passthrough);
                     drop(term);
                     proxy.send_event(Event::Wakeup);
                 }

@@ -1057,16 +1057,19 @@ impl App {
                     let screen_row = screen_vp as usize + TAB_STRIP_ROWS;
                     let x = p.col as f32 * m.width + pad;
                     let y = screen_row as f32 * m.height + pad;
-                    renderer.draw_image(
-                        p.id,
-                        &img.rgba,
-                        img.width,
-                        img.height,
-                        x,
-                        y,
-                        img.width as f32,
-                        img.height as f32,
-                    );
+                    // Honor the kitty c=/r= display size (in cells); otherwise draw
+                    // at the image's native pixel size.
+                    let dst_w = if p.cols > 0 {
+                        p.cols as f32 * m.width
+                    } else {
+                        img.width as f32
+                    };
+                    let dst_h = if p.rows > 0 {
+                        p.rows as f32 * m.height
+                    } else {
+                        img.height as f32
+                    };
+                    renderer.draw_image(p.id, &img.rgba, img.width, img.height, x, y, dst_w, dst_h);
                 }
             }
         }
@@ -1250,16 +1253,15 @@ impl ApplicationHandler<UserEvent> for App {
         //   GLASSY_RESIZE - "COLSxROWS" to drive a grid resize (LoopMsg::Resize
         //                   -> on_resize) before the capture deadline.
         if let Some(pty) = &self.pty {
-            if let Ok(spec) = std::env::var("GLASSY_RESIZE") {
-                if let Some((c, r)) = spec.split_once('x') {
-                    if let (Ok(cols), Ok(rows)) = (c.parse::<usize>(), r.parse::<usize>()) {
-                        let m = self.renderer.as_ref().unwrap().cell_metrics();
-                        pty.resize(cols, rows, m.width as u16, m.height as u16);
-                        self.cols = cols;
-                        self.rows = rows;
-                        self.force_full_redraw = true;
-                    }
-                }
+            if let Ok(spec) = std::env::var("GLASSY_RESIZE")
+                && let Some((c, r)) = spec.split_once('x')
+                && let (Ok(cols), Ok(rows)) = (c.parse::<usize>(), r.parse::<usize>())
+            {
+                let m = self.renderer.as_ref().unwrap().cell_metrics();
+                pty.resize(cols, rows, m.width as u16, m.height as u16);
+                self.cols = cols;
+                self.rows = rows;
+                self.force_full_redraw = true;
             }
             if let Ok(input) = std::env::var("GLASSY_INPUT") {
                 let bytes = input.replace("\\n", "\n").replace("\\t", "\t").into_bytes();

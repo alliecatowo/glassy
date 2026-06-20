@@ -70,6 +70,9 @@ pub struct GraphicsCommand {
     pub id: u32,
     /// Decoded image, if the command carried displayable pixels.
     pub image: Option<DecodedImage>,
+    /// Requested display size in grid cells (`c=`/`r=`); 0 means native pixels.
+    pub cols: u32,
+    pub rows: u32,
 }
 
 /// Accumulates kitty graphics commands across APC chunks (`m=1` continuations)
@@ -118,7 +121,13 @@ impl KittyParser {
 
         let Pending { controls, payload } = self.pending.remove(&id)?;
         let image = decode_payload(&controls, &payload);
-        Some(GraphicsCommand { action: controls.action, id, image })
+        Some(GraphicsCommand {
+            action: controls.action,
+            id,
+            image,
+            cols: controls.cols,
+            rows: controls.rows,
+        })
     }
 }
 
@@ -130,6 +139,8 @@ struct Controls {
     id: u32,
     width: u32,  // s= (source width for raw formats)
     height: u32, // v= (source height for raw formats)
+    cols: u32,   // c= (display width in cells; 0 = native pixels)
+    rows: u32,   // r= (display height in cells; 0 = native pixels)
     more: bool,  // m=1 => more chunks follow
 }
 
@@ -140,6 +151,8 @@ impl Controls {
         let mut id = 0;
         let mut width = 0;
         let mut height = 0;
+        let mut cols = 0;
+        let mut rows = 0;
         let mut more = false;
         for pair in s.split(',') {
             let Some((k, v)) = pair.split_once('=') else {
@@ -157,11 +170,13 @@ impl Controls {
                 "i" => id = v.parse().unwrap_or(0),
                 "s" => width = v.parse().unwrap_or(0),
                 "v" => height = v.parse().unwrap_or(0),
+                "c" => cols = v.parse().unwrap_or(0),
+                "r" => rows = v.parse().unwrap_or(0),
                 "m" => more = v == "1",
                 _ => {}
             }
         }
-        Controls { action, format, id, width, height, more }
+        Controls { action, format, id, width, height, cols, rows, more }
     }
 }
 
@@ -271,6 +286,9 @@ pub struct Placement {
     pub id: u32,
     pub row: i32,
     pub col: usize,
+    /// Display size in grid cells (`c=`/`r=`); 0 means draw at native pixels.
+    pub cols: u32,
+    pub rows: u32,
 }
 
 /// Holds images received from the PTY and where they should be drawn. Decoded
@@ -281,9 +299,17 @@ pub struct Placement {
 pub struct ImageStore {
     by_id: HashMap<u32, DecodedImage>,
     placements: Vec<Placement>,
-    pending: Vec<u32>,
     /// Monotonic counter so the renderer can tell when the image set changed.
     pub revision: u64,
+}
+
+/// An image queued for display: the loop will anchor it at the cursor cell once
+/// the VT bytes preceding the image in the stream have advanced the cursor.
+#[derive(Clone, Copy)]
+pub struct PendingDisplay {
+    pub id: u32,
+    pub cols: u32,
+    pub rows: u32,
 }
 
 impl ImageStore {
@@ -291,23 +317,42 @@ impl ImageStore {
         Self::default()
     }
 
-    /// Record a decoded graphics command. Display actions queue a placement.
-    pub fn insert(&mut self, id: u32, action: Action, image: DecodedImage) {
-        self.by_id.insert(id, image);
-        if matches!(action, Action::TransmitAndDisplay | Action::Display) {
-            self.pending.push(id);
+    /// Apply a fully-parsed graphics command. Pixels are stored immediately;
+    /// placement-affecting actions (display, delete) are returned as ordered
+    /// [`TapEvent`]s so the caller applies them in stream order. Returns `None`
+    /// for transmit-only commands.
+    pub fn apply(&mut self, cmd: GraphicsCommand) -> Option<TapEvent> {
+        if let Some(image) = cmd.image {
+            self.by_id.insert(cmd.id, image);
+            self.revision += 1;
+        }
+        match cmd.action {
+            Action::Delete => Some(TapEvent::Delete(cmd.id)),
+            Action::TransmitAndDisplay | Action::Display => {
+                Some(TapEvent::Display(PendingDisplay { id: cmd.id, cols: cmd.cols, rows: cmd.rows }))
+            }
+            _ => None,
+        }
+    }
+
+    /// Remove placements (kitty `a=d`): a specific id, or all when `id == 0`.
+    /// Pixel data is retained so a later `a=p` can redisplay the same id.
+    pub fn delete(&mut self, id: u32) {
+        if id == 0 {
+            self.placements.clear();
+        } else {
+            self.placements.retain(|p| p.id != id);
         }
         self.revision += 1;
     }
 
-    /// Take the ids awaiting placement (the loop assigns them a cursor cell).
-    pub fn take_pending(&mut self) -> Vec<u32> {
-        std::mem::take(&mut self.pending)
-    }
-
-    /// Anchor a pending image at a screen cell.
-    pub fn place(&mut self, id: u32, row: i32, col: usize) {
-        self.placements.push(Placement { id, row, col });
+    /// Anchor an image at a screen cell with its requested cell size. Ignored if
+    /// the id has no stored pixels (e.g. a display of a never-transmitted id).
+    pub fn place(&mut self, id: u32, row: i32, col: usize, cols: u32, rows: u32) {
+        if !self.by_id.contains_key(&id) {
+            return;
+        }
+        self.placements.push(Placement { id, row, col, cols, rows });
         self.revision += 1;
     }
 
@@ -342,6 +387,17 @@ pub struct StreamTap {
     kitty: KittyParser,
 }
 
+/// One ordered item produced by [`StreamTap::process`]: either VT bytes for the
+/// parser, or a point at which an image should be displayed (anchored at the
+/// cursor *after* the preceding `Vt` bytes have advanced it).
+pub enum TapEvent {
+    Vt(Vec<u8>),
+    Display(PendingDisplay),
+    /// Delete placements for an image id (0 = all). Ordered with displays so a
+    /// delete that follows a display in the stream is applied after it.
+    Delete(u32),
+}
+
 #[derive(PartialEq, Eq)]
 enum TapState {
     Normal,
@@ -362,9 +418,23 @@ impl StreamTap {
     }
 
     /// Process `input`, routing kitty graphics commands into `store` and
-    /// returning the bytes that should still reach the VT parser.
-    pub fn process(&mut self, input: &[u8], store: &FairMutex<ImageStore>) -> Vec<u8> {
-        let mut out = Vec::with_capacity(input.len());
+    /// returning an ordered list of events: VT byte runs interleaved with image
+    /// display points, so the caller can advance the parser and anchor each image
+    /// at the cursor position it occupied at that point in the stream.
+    pub fn process(&mut self, input: &[u8], store: &FairMutex<ImageStore>) -> Vec<TapEvent> {
+        let mut events = Vec::new();
+        let mut out: Vec<u8> = Vec::with_capacity(input.len());
+        // Flush accumulated VT bytes (if any) before recording an image event.
+        macro_rules! finish {
+            () => {
+                if let Some(ev) = self.finish_apc(store) {
+                    if !out.is_empty() {
+                        events.push(TapEvent::Vt(std::mem::take(&mut out)));
+                    }
+                    events.push(ev);
+                }
+            };
+        }
         for &b in input {
             match self.state {
                 TapState::Normal => {
@@ -390,7 +460,7 @@ impl StreamTap {
                     if b == 0x1b {
                         self.state = TapState::ApcEscape;
                     } else if b == 0x07 {
-                        self.finish_apc(store); // BEL terminator
+                        finish!(); // BEL terminator
                         self.state = TapState::Normal;
                     } else {
                         self.apc.push(b);
@@ -398,7 +468,7 @@ impl StreamTap {
                 }
                 TapState::ApcEscape => {
                     if b == b'\\' {
-                        self.finish_apc(store); // ST terminator (ESC \)
+                        finish!(); // ST terminator (ESC \)
                         self.state = TapState::Normal;
                     } else {
                         self.apc.push(0x1b); // ESC was body, not terminator
@@ -408,17 +478,22 @@ impl StreamTap {
                 }
             }
         }
-        out
+        if !out.is_empty() {
+            events.push(TapEvent::Vt(out));
+        }
+        events
     }
 
-    fn finish_apc(&mut self, store: &FairMutex<ImageStore>) {
-        if self.apc.first() == Some(&b'G')
+    fn finish_apc(&mut self, store: &FairMutex<ImageStore>) -> Option<TapEvent> {
+        let ev = if self.apc.first() == Some(&b'G')
             && let Some(cmd) = self.kitty.feed(&self.apc[1..])
-            && let Some(image) = cmd.image
         {
-            store.lock().insert(cmd.id, cmd.action, image);
-        }
+            store.lock().apply(cmd)
+        } else {
+            None
+        };
         self.apc.clear();
+        ev
     }
 }
 
@@ -468,6 +543,21 @@ mod tests {
         assert_eq!(img.rgba, vec![255, 255, 255, 255, 0, 0, 0, 255]);
     }
 
+    /// Concatenate the VT byte runs from a tap event list (dropping display points).
+    fn vt_bytes(events: &[TapEvent]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for ev in events {
+            if let TapEvent::Vt(b) = ev {
+                out.extend_from_slice(b);
+            }
+        }
+        out
+    }
+
+    fn display_count(events: &[TapEvent]) -> usize {
+        events.iter().filter(|e| matches!(e, TapEvent::Display(_))).count()
+    }
+
     #[test]
     fn tap_strips_image_passes_text() {
         let store = FairMutex::new(ImageStore::new());
@@ -477,9 +567,27 @@ mod tests {
         // kitty APC: 1x1 red RGBA pixel.
         input.extend_from_slice(b"\x1b_Ga=T,f=32,s=1,v=1;/wAA/w==\x1b\\");
         input.extend_from_slice(b"!");
-        let out = tap.process(&input, &store);
-        assert_eq!(out, b"hi!"); // text passes through, image stripped
+        let events = tap.process(&input, &store);
+        assert_eq!(vt_bytes(&events), b"hi!"); // text passes through, image stripped
+        assert_eq!(display_count(&events), 1); // one display point emitted
         assert_eq!(store.lock().len(), 1); // one image captured
+    }
+
+    #[test]
+    fn tap_orders_display_after_preceding_text() {
+        // The display point must come AFTER the "hi" text run so the cursor has
+        // advanced past it before the image is anchored.
+        let store = FairMutex::new(ImageStore::new());
+        let mut tap = StreamTap::new();
+        let events =
+            tap.process(b"hi\x1b_Ga=T,f=32,s=1,v=1;/wAA/w==\x1b\\rest", &store);
+        match (&events[0], &events[1], &events[2]) {
+            (TapEvent::Vt(a), TapEvent::Display(_), TapEvent::Vt(b)) => {
+                assert_eq!(a, b"hi");
+                assert_eq!(b, b"rest");
+            }
+            _ => panic!("expected Vt, Display, Vt ordering, got {} events", events.len()),
+        }
     }
 
     #[test]
@@ -489,8 +597,42 @@ mod tests {
         // APC split mid-sequence across two process() calls.
         let a = tap.process(b"A\x1b_Ga=T,f=32,s=1,v=1;/wAA", &store);
         let b = tap.process(b"/w==\x1b\\B", &store);
-        assert_eq!(a, b"A");
-        assert_eq!(b, b"B");
+        assert_eq!(vt_bytes(&a), b"A");
+        assert_eq!(vt_bytes(&b), b"B");
         assert_eq!(store.lock().len(), 1);
+    }
+
+    #[test]
+    fn tap_orders_delete_after_display() {
+        // A display followed by a delete of the same id must emit Display *then*
+        // Delete, so the loop places the image before removing it (regression:
+        // applying delete eagerly inside process() ran it before placement).
+        let store = FairMutex::new(ImageStore::new());
+        let mut tap = StreamTap::new();
+        let events = tap.process(
+            b"\x1b_Ga=T,f=32,s=1,v=1,i=3;/wAA/w==\x1b\\\x1b_Ga=d,i=3\x1b\\",
+            &store,
+        );
+        let kinds: Vec<_> = events
+            .iter()
+            .map(|e| match e {
+                TapEvent::Vt(_) => "vt",
+                TapEvent::Display(_) => "display",
+                TapEvent::Delete(_) => "delete",
+            })
+            .collect();
+        assert_eq!(kinds, vec!["display", "delete"]);
+    }
+
+    #[test]
+    fn delete_removes_placements_keeps_pixels() {
+        let mut store = ImageStore::new();
+        let img = DecodedImage { width: 1, height: 1, rgba: vec![1, 2, 3, 4] };
+        store.by_id.insert(5, img);
+        store.place(5, 0, 0, 0, 0);
+        assert_eq!(store.placements().len(), 1);
+        store.delete(5);
+        assert_eq!(store.placements().len(), 0); // placement gone
+        assert!(store.image(5).is_some()); // pixels retained for redisplay
     }
 }
