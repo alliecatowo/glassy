@@ -16,9 +16,16 @@ use winit::window::Window;
 
 use crate::text::{CellMetrics, Text};
 
-/// Atlas dimensions (square, RGBA8). Big enough for a full ASCII set plus a
-/// healthy amount of CJK/emoji before the shelf packer has to recycle.
+/// Mask-atlas dimensions (square, single-channel R8). Holds the coverage masks
+/// for ordinary text (ASCII, CJK, box-drawing, monochrome symbols) — the vast
+/// majority of glyphs. R8 cuts this atlas's memory and per-glyph upload bandwidth
+/// 4x versus the old RGBA8 atlas (1 MB instead of 4 MB) since a coverage mask
+/// only needs one byte per pixel.
 const ATLAS_SIZE: u32 = 1024;
+/// Color-atlas dimensions (square, RGBA8). Only color glyphs (emoji) live here,
+/// so it can be much smaller than the mask atlas; on overflow the shared
+/// full-atlas path clears both caches and repacks.
+const COLOR_ATLAS_SIZE: u32 = 256;
 /// 1px gap between packed glyphs to avoid bilinear bleed across neighbours.
 const GLYPH_GAP: u32 = 1;
 /// Initial instance-buffer capacity (in instances) so the first `cast_slice`
@@ -182,16 +189,17 @@ fn pad_for(cell_height: f32) -> f32 {
     (cell_height * 0.35).round().max(4.0)
 }
 
-/// Simple shelf packer state for the atlas texture.
+/// Simple shelf packer state for an atlas texture of side `size`.
 struct Packer {
+    size: u32,
     cursor_x: u32,
     cursor_y: u32,
     shelf_height: u32,
 }
 
 impl Packer {
-    fn new() -> Self {
-        Self { cursor_x: 0, cursor_y: 0, shelf_height: 0 }
+    fn new(size: u32) -> Self {
+        Self { size, cursor_x: 0, cursor_y: 0, shelf_height: 0 }
     }
 
     fn reset(&mut self) {
@@ -203,16 +211,16 @@ impl Packer {
     /// Reserve a `w`x`h` region. Returns its top-left origin, or `None` if the
     /// atlas is full (caller should clear the cache and retry).
     fn alloc(&mut self, w: u32, h: u32) -> Option<(u32, u32)> {
-        if w > ATLAS_SIZE || h > ATLAS_SIZE {
+        if w > self.size || h > self.size {
             return None;
         }
         // Wrap to a new shelf if the glyph doesn't fit the current row.
-        if self.cursor_x + w > ATLAS_SIZE {
+        if self.cursor_x + w > self.size {
             self.cursor_y += self.shelf_height + GLYPH_GAP;
             self.cursor_x = 0;
             self.shelf_height = 0;
         }
-        if self.cursor_y + h > ATLAS_SIZE {
+        if self.cursor_y + h > self.size {
             return None;
         }
         let origin = (self.cursor_x, self.cursor_y);
@@ -238,13 +246,18 @@ pub struct Renderer {
     uniform_buffer: wgpu::Buffer,
     uniform_bind_group: wgpu::BindGroup,
 
-    atlas_texture: wgpu::Texture,
-    // The bind group internally retains the texture view, sampler, and layout it
-    // was built from, so we only need to keep the texture (for atlas writes) and
-    // the bind group itself.
+    // The R8 mask atlas (ordinary text) and the RGBA8 color atlas (emoji). The
+    // bind group internally retains both texture views, the sampler, and the
+    // layout it was built from, so we only keep the textures (for atlas writes)
+    // and the bind group itself.
+    mask_atlas_texture: wgpu::Texture,
+    color_atlas_texture: wgpu::Texture,
     atlas_bind_group: wgpu::BindGroup,
 
+    /// Shelf packer for the R8 mask atlas.
     packer: Packer,
+    /// Shelf packer for the RGBA8 color atlas.
+    color_packer: Packer,
     glyph_cache: HashMap<(char, bool, bool), Vec<AtlasGlyph>>,
     /// Atlas entries for multi-codepoint grapheme clusters (combining/ZWJ).
     cluster_cache: HashMap<(String, bool, bool), Vec<AtlasGlyph>>,
@@ -426,12 +439,28 @@ impl Renderer {
             }],
         });
 
-        // --- group(1): glyph atlas texture + sampler. ---
-        let atlas_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("glyph-atlas"),
+        // --- group(1): glyph atlas textures (R8 mask + RGBA8 color) + sampler. ---
+        let mask_atlas_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("glyph-mask-atlas"),
             size: wgpu::Extent3d {
                 width: ATLAS_SIZE,
                 height: ATLAS_SIZE,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let mask_atlas_view =
+            mask_atlas_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let color_atlas_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("glyph-color-atlas"),
+            size: wgpu::Extent3d {
+                width: COLOR_ATLAS_SIZE,
+                height: COLOR_ATLAS_SIZE,
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1,
@@ -441,7 +470,8 @@ impl Renderer {
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
-        let atlas_view = atlas_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let color_atlas_view =
+            color_atlas_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let atlas_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("atlas-sampler"),
             mag_filter: wgpu::FilterMode::Linear,
@@ -453,6 +483,7 @@ impl Renderer {
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("atlas-bgl"),
                 entries: &[
+                    // binding 0: R8 mask atlas.
                     wgpu::BindGroupLayoutEntry {
                         binding: 0,
                         visibility: wgpu::ShaderStages::FRAGMENT,
@@ -463,10 +494,22 @@ impl Renderer {
                         },
                         count: None,
                     },
+                    // binding 1: shared sampler.
                     wgpu::BindGroupLayoutEntry {
                         binding: 1,
                         visibility: wgpu::ShaderStages::FRAGMENT,
                         ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                    // binding 2: RGBA8 color atlas.
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
                         count: None,
                     },
                 ],
@@ -477,11 +520,15 @@ impl Renderer {
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&atlas_view),
+                    resource: wgpu::BindingResource::TextureView(&mask_atlas_view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
                     resource: wgpu::BindingResource::Sampler(&atlas_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&color_atlas_view),
                 },
             ],
         });
@@ -626,9 +673,11 @@ impl Renderer {
             unit_quad,
             uniform_buffer,
             uniform_bind_group,
-            atlas_texture,
+            mask_atlas_texture,
+            color_atlas_texture,
             atlas_bind_group,
-            packer: Packer::new(),
+            packer: Packer::new(ATLAS_SIZE),
+            color_packer: Packer::new(COLOR_ATLAS_SIZE),
             glyph_cache: HashMap::new(),
             cluster_cache: HashMap::new(),
             text,
@@ -724,9 +773,10 @@ impl Renderer {
         self.pad = self.pad_override.unwrap_or_else(|| pad_for(metrics.height));
         self.font_px = font_px;
 
-        // The atlas holds glyphs rasterized at the old size; reset the packer and
-        // both caches so glyphs are re-rasterized at the new size on demand.
+        // The atlases hold glyphs rasterized at the old size; reset both packers
+        // and caches so glyphs are re-rasterized at the new size on demand.
         self.packer.reset();
+        self.color_packer.reset();
         self.glyph_cache.clear();
         self.cluster_cache.clear();
 
@@ -2049,17 +2099,27 @@ impl Renderer {
         self.cluster_cache.insert(key, packed);
     }
 
-    /// Pack owned glyph bitmaps into the atlas, returning their placed entries.
-    /// If the atlas fills mid-pack, both glyph caches are cleared and we repack
-    /// once (entries are re-created lazily on demand thereafter).
+    /// Pack owned glyph bitmaps into the atlases, returning their placed entries.
+    /// Coverage-mask glyphs go into the R8 mask atlas; color glyphs (emoji) go
+    /// into the RGBA8 color atlas. If either atlas fills mid-pack, both glyph
+    /// caches and both packers are cleared and we repack once (entries are
+    /// re-created lazily on demand thereafter).
     fn pack_rasters(&mut self, rasters: &[Raster]) -> Vec<AtlasGlyph> {
         let mut packed: Vec<AtlasGlyph> = Vec::with_capacity(rasters.len());
         let mut retried = false;
-        let inv = 1.0 / ATLAS_SIZE as f32;
+        let inv_mask = 1.0 / ATLAS_SIZE as f32;
+        let inv_color = 1.0 / COLOR_ATLAS_SIZE as f32;
         'attempt: loop {
             packed.clear();
             for r in rasters {
-                let (x, y) = match self.packer.alloc(r.width, r.height) {
+                // Select the destination atlas, its packer, its uv scale, and the
+                // source bytes-per-pixel for the upload.
+                let (packer, texture, inv, bpp) = if r.is_color {
+                    (&mut self.color_packer, &self.color_atlas_texture, inv_color, 4)
+                } else {
+                    (&mut self.packer, &self.mask_atlas_texture, inv_mask, 1)
+                };
+                let (x, y) = match packer.alloc(r.width, r.height) {
                     Some(o) => o,
                     None => {
                         if retried {
@@ -2070,13 +2130,14 @@ impl Renderer {
                         self.glyph_cache.clear();
                         self.cluster_cache.clear();
                         self.packer.reset();
+                        self.color_packer.reset();
                         retried = true;
                         continue 'attempt;
                     }
                 };
                 self.queue.write_texture(
                     wgpu::TexelCopyTextureInfo {
-                        texture: &self.atlas_texture,
+                        texture,
                         mip_level: 0,
                         origin: wgpu::Origin3d { x, y, z: 0 },
                         aspect: wgpu::TextureAspect::All,
@@ -2084,7 +2145,7 @@ impl Renderer {
                     &r.data,
                     wgpu::TexelCopyBufferLayout {
                         offset: 0,
-                        bytes_per_row: Some(r.width * 4),
+                        bytes_per_row: Some(r.width * bpp),
                         rows_per_image: Some(r.height),
                     },
                     wgpu::Extent3d {

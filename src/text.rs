@@ -46,9 +46,12 @@ pub struct RasterizedGlyph {
     /// (positive = above the baseline), per swash's placement convention.
     pub top: i32,
     /// `true` when `data` is the glyph's own color (e.g. emoji); `false` when it
-    /// is white RGBA with the alpha channel carrying the coverage mask.
+    /// is a single-channel coverage mask.
     pub is_color: bool,
-    /// RGBA8 pixels, length == `width * height * 4` (empty when either dim is 0).
+    /// Glyph pixels. For a coverage mask (`is_color == false`) this is one byte
+    /// per pixel (R8 coverage), length == `width * height`. For a color glyph
+    /// (`is_color == true`) it is RGBA8, length == `width * height * 4`. Empty
+    /// when either dimension is 0.
     pub data: Vec<u8>,
 }
 
@@ -120,28 +123,36 @@ impl Text {
     /// family); discovery then falls back to the curated list and the rest of the
     /// chain so a typo'd or absent family still yields a usable monospace font.
     pub fn load(family: Option<&str>, font_px: f32) -> Result<(Text, CellMetrics)> {
-        // Gather candidates in priority order (explicit override, requested
-        // family, curated families verified via fontconfig, generic monospace,
-        // known paths).
-        let candidates = discover_font_candidates(family);
+        // Gather candidate *producers* in priority order (explicit override,
+        // requested family, curated families verified via fontconfig, generic
+        // monospace, known paths). Each producer is a closure that only runs its
+        // (potentially expensive: an `fc-match` subprocess + a font read) work
+        // when actually polled — so once an early candidate loads as a usable
+        // monospace face we stop and never pay for the rest of the chain. This is
+        // a large startup win: the common case (FiraCode present) used to run an
+        // `fc-match` for every curated family before picking the first one.
+        let producers = discover_font_producers(family);
 
-        // Build a `FontSystem` from the first candidate that yields a usable
-        // face. If a candidate's loaded face is *not* monospaced and more
-        // candidates remain, reject it and try the next; otherwise accept it.
+        // Build a `FontSystem` from the first producer that yields a usable
+        // monospaced face. A non-monospaced face is accepted only as a last
+        // resort (no producer after it yields a usable face).
         let mut loaded: Option<LoadedFont> = None;
-        let total = candidates.len();
-        for (idx, candidate) in candidates.into_iter().enumerate() {
-            let is_last = idx + 1 == total;
+        let mut fallback: Option<LoadedFont> = None;
+        for producer in producers {
+            let Some(candidate) = producer() else {
+                continue;
+            };
             match build_font_system(candidate.bytes, candidate.path) {
                 Some(found) => {
-                    if found.is_monospaced || is_last {
+                    if found.is_monospaced {
                         loaded = Some(found);
                         break;
                     }
                     log::debug!(
-                        "glassy: rejecting non-monospaced candidate '{}', trying next",
+                        "glassy: candidate '{}' is not monospaced; keeping as fallback",
                         candidate.source_label
                     );
+                    fallback.get_or_insert(found);
                 }
                 None => {
                     log::debug!(
@@ -151,6 +162,7 @@ impl Text {
                 }
             }
         }
+        let loaded = loaded.or(fallback);
 
         // If nothing loaded, scan the system and rely on the generic monospace
         // family resolution.
@@ -351,24 +363,18 @@ impl Text {
                 let pixels = (w * h) as usize;
 
                 let (data, is_color) = match img.content {
-                    // 1 byte/px coverage -> opaque white with alpha = coverage.
-                    SwashContent::Mask => {
-                        let mut d = Vec::with_capacity(pixels * 4);
-                        for &a in &img.data {
-                            d.extend_from_slice(&[255, 255, 255, a]);
-                        }
-                        (d, false)
-                    }
-                    // 3 bytes/px subpixel coverage; collapse to a single alpha.
+                    // 1 byte/px coverage: keep it as-is for the R8 mask atlas.
+                    SwashContent::Mask => (img.data.clone(), false),
+                    // 3 bytes/px subpixel coverage; collapse to a single coverage
+                    // byte for the R8 mask atlas.
                     SwashContent::SubpixelMask => {
-                        let mut d = Vec::with_capacity(pixels * 4);
+                        let mut d = Vec::with_capacity(pixels);
                         for px in img.data.chunks_exact(3) {
-                            let a = px[0].max(px[1]).max(px[2]);
-                            d.extend_from_slice(&[255, 255, 255, a]);
+                            d.push(px[0].max(px[1]).max(px[2]));
                         }
                         (d, false)
                     }
-                    // Already RGBA (color emoji): keep as-is.
+                    // Already RGBA (color emoji): keep as-is for the color atlas.
                     SwashContent::Color => (img.data.clone(), true),
                 };
 
@@ -482,14 +488,14 @@ fn load_fallback_fonts(db: &mut fontdb::Database, primary_path: Option<&Path>) {
             // Already loaded (primary or an earlier fallback resolved here).
             continue;
         }
-        match read_font(&path) {
-            Some(bytes) => {
-                db.load_font_source(fontdb::Source::Binary(Arc::new(bytes)));
-                log::debug!("glassy: loaded fallback font for '{pattern}': {path}");
-            }
-            None => {
-                log::debug!("glassy: fallback '{pattern}' resolved to unreadable {path}");
-            }
+        // Load by path (memory-mapped) rather than reading the bytes into the
+        // heap: large fallback faces (CJK, color emoji) are then only paged in
+        // when a glyph actually needs them, keeping idle memory low for the
+        // common ASCII-only session.
+        if load_font_file(db, &path) {
+            log::debug!("glassy: loaded fallback font for '{pattern}': {path}");
+        } else {
+            log::debug!("glassy: fallback '{pattern}' resolved to unreadable {path}");
         }
     }
 }
@@ -518,8 +524,7 @@ fn load_primary_styles(db: &mut fontdb::Database, family: &str, primary_path: Op
         if !seen.insert(key) {
             continue;
         }
-        if let Some(bytes) = read_font(&path) {
-            db.load_font_source(fontdb::Source::Binary(Arc::new(bytes)));
+        if load_font_file(db, &path) {
             log::debug!("glassy: loaded style face '{pattern}': {path}");
         }
     }
@@ -537,8 +542,9 @@ fn load_emoji_fallback(db: &mut fontdb::Database, seen: &mut HashSet<PathBuf>) {
     if let Some(path) = color_emoji_path() {
         let key = canonical_or_owned(&path);
         if seen.insert(key) {
-            if let Some(bytes) = read_font(&path) {
-                db.load_font_source(fontdb::Source::Binary(Arc::new(bytes)));
+            // The bundled color emoji face is ~11 MB; load it memory-mapped so the
+            // bytes are only paged in if a session actually renders an emoji.
+            if load_font_file(db, &path) {
                 log::debug!("glassy: loaded color emoji: {}", path.display());
                 return;
             }
@@ -552,8 +558,7 @@ fn load_emoji_fallback(db: &mut fontdb::Database, seen: &mut HashSet<PathBuf>) {
         if let Some(path) = fc_match_file(pattern) {
             let key = canonical_or_owned(Path::new(&path));
             if seen.insert(key) {
-                if let Some(bytes) = read_font(&path) {
-                    db.load_font_source(fontdb::Source::Binary(Arc::new(bytes)));
+                if load_font_file(db, &path) {
                     log::debug!("glassy: loaded monochrome emoji for '{pattern}': {path}");
                     return;
                 }
@@ -604,52 +609,61 @@ fn fc_match_file(pattern: &str) -> Option<String> {
     if path.is_empty() { None } else { Some(path) }
 }
 
-/// Resolve an ordered list of font candidates via the discovery chain. Each
-/// candidate carries the raw bytes plus a short label identifying its origin.
-/// An empty list signals that the caller should fall back to a full system
-/// scan.
-fn discover_font_candidates(requested: Option<&str>) -> Vec<FontCandidate> {
-    let mut candidates = Vec::new();
+/// A lazy font-candidate producer: invoking it runs its discovery work (which may
+/// spawn an `fc-match` subprocess and read a font file) and yields the candidate,
+/// or `None` if that source is absent/unreadable. Boxed so the staged chain can
+/// be a single `Vec` regardless of each stage's capture.
+type CandidateProducer = Box<dyn FnOnce() -> Option<FontCandidate>>;
+
+/// Build the ordered chain of lazy candidate *producers*. Returning closures
+/// (rather than eagerly materializing every candidate) lets [`Text::load`] stop
+/// at the first producer that yields a usable monospace face, so a host with a
+/// good default font never pays the `fc-match` + read cost of the rest of the
+/// chain. Order: explicit override, requested family, curated families, generic
+/// monospace, then known install paths.
+fn discover_font_producers(requested: Option<&str>) -> Vec<CandidateProducer> {
+    let mut producers: Vec<CandidateProducer> = Vec::new();
 
     // 1. Explicit override: an absolute path to a font file.
-    if let Ok(path) = std::env::var("GLASSY_FONT") {
-        if let Some(bytes) = read_font(&path) {
-            candidates.push(FontCandidate {
-                bytes,
-                path: Some(PathBuf::from(&path)),
-                source_label: format!("GLASSY_FONT={path}"),
-            });
-        }
-    }
+    producers.push(Box::new(|| {
+        let path = std::env::var("GLASSY_FONT").ok()?;
+        let bytes = read_font(&path)?;
+        Some(FontCandidate {
+            bytes,
+            path: Some(PathBuf::from(&path)),
+            source_label: format!("GLASSY_FONT={path}"),
+        })
+    }));
 
     // 1b. Config/CLI-requested family: resolve via fontconfig and verify it is
     //     genuinely that family (fc-match returns a fallback otherwise). An
     //     absolute path is also accepted directly as a font file.
     #[cfg(unix)]
     if let Some(name) = requested {
-        let name = name.trim();
+        let name = name.trim().to_string();
         if !name.is_empty() {
-            // Allow `font_family` to be an explicit file path.
-            let as_path = Path::new(name);
-            if as_path.is_file() {
-                if let Some(bytes) = read_font(name) {
-                    candidates.push(FontCandidate {
+            producers.push(Box::new(move || {
+                // Allow `font_family` to be an explicit file path.
+                let as_path = Path::new(&name);
+                if as_path.is_file() {
+                    let bytes = read_font(&name)?;
+                    return Some(FontCandidate {
                         bytes,
-                        path: Some(PathBuf::from(name)),
+                        path: Some(PathBuf::from(&name)),
                         source_label: format!("font_family path ({name})"),
                     });
                 }
-            } else if let Some(path) = fc_match_family(name) {
-                if let Some(bytes) = read_font(&path) {
-                    candidates.push(FontCandidate {
+                if let Some(path) = fc_match_family(&name) {
+                    let bytes = read_font(&path)?;
+                    return Some(FontCandidate {
                         bytes,
                         path: Some(PathBuf::from(&path)),
                         source_label: format!("font_family {name} ({path})"),
                     });
                 }
-            } else {
                 log::warn!("glassy: requested font_family '{name}' not found; using default");
-            }
+                None
+            }));
         }
     }
     #[cfg(not(unix))]
@@ -657,44 +671,63 @@ fn discover_font_candidates(requested: Option<&str>) -> Vec<FontCandidate> {
 
     // 2. A curated list of good monospace families, each resolved to a concrete
     //    file via fontconfig and verified to actually *be* that family (fc-match
-    //    returns a nearest fallback even when the family is absent).
+    //    returns a nearest fallback even when the family is absent). One producer
+    //    per family so discovery stops at the first installed one.
     #[cfg(unix)]
     for family in CURATED_FAMILIES {
-        if let Some(path) = fc_match_family(family) {
-            if let Some(bytes) = read_font(&path) {
-                candidates.push(FontCandidate {
-                    bytes,
-                    path: Some(PathBuf::from(&path)),
-                    source_label: format!("{family} ({path})"),
-                });
-            }
-        }
+        producers.push(Box::new(move || {
+            let path = fc_match_family(family)?;
+            let bytes = read_font(&path)?;
+            Some(FontCandidate {
+                bytes,
+                path: Some(PathBuf::from(&path)),
+                source_label: format!("{family} ({path})"),
+            })
+        }));
     }
 
     // 3. Generic monospace via fontconfig; always a real monospace face.
     #[cfg(unix)]
-    if let Some(path) = fc_match_monospace() {
-        if let Some(bytes) = read_font(&path) {
-            candidates.push(FontCandidate {
-                bytes,
-                path: Some(PathBuf::from(&path)),
-                source_label: format!("fc-match monospace ({path})"),
-            });
-        }
-    }
+    producers.push(Box::new(|| {
+        let path = fc_match_monospace()?;
+        let bytes = read_font(&path)?;
+        Some(FontCandidate {
+            bytes,
+            path: Some(PathBuf::from(&path)),
+            source_label: format!("fc-match monospace ({path})"),
+        })
+    }));
 
     // 4. Probe well-known install locations as a last resort.
     for path in PROBE_PATHS {
-        if let Some(bytes) = read_font(path) {
-            candidates.push(FontCandidate {
+        producers.push(Box::new(move || {
+            let bytes = read_font(path)?;
+            Some(FontCandidate {
                 bytes,
                 path: Some(PathBuf::from(path)),
                 source_label: format!("probe ({path})"),
-            });
-        }
+            })
+        }));
     }
 
-    candidates
+    producers
+}
+
+/// Load a font file into `db` by path (memory-mapped via fontdb), so the face
+/// bytes are not copied onto the heap and are only paged in on demand when a
+/// glyph from that face is rasterized. Returns `true` on success. Used for the
+/// fallback/style chain, where most faces (CJK, emoji, symbols) are never
+/// touched in an ordinary ASCII session and should not cost idle memory.
+#[cfg(unix)]
+fn load_font_file(db: &mut fontdb::Database, path: impl AsRef<Path>) -> bool {
+    let path = path.as_ref();
+    match db.load_font_file(path) {
+        Ok(()) => true,
+        Err(err) => {
+            log::debug!("glassy: skipping font {}: {err}", path.display());
+            false
+        }
+    }
 }
 
 /// Read a font file, logging and skipping on any I/O error. Paths may contain

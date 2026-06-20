@@ -27,8 +27,11 @@ struct BgOut {
 }
 
 // --- Foreground pipeline: one textured quad per glyph. ----------------------
-@group(1) @binding(0) var atlas_tex: texture_2d<f32>;
+// Two atlases: an R8 coverage-mask atlas for ordinary text (binding 0) and an
+// RGBA8 color atlas for emoji (binding 2). They share one sampler (binding 1).
+@group(1) @binding(0) var mask_tex: texture_2d<f32>;
 @group(1) @binding(1) var atlas_samp: sampler;
+@group(1) @binding(2) var color_tex: texture_2d<f32>;
 struct FgIn {
     @location(0) unit: vec2<f32>,   // unit quad corner (slot 0)
     @location(1) pos: vec2<f32>,    // glyph quad top-left in px (slot 1, instance)
@@ -120,17 +123,18 @@ fn coverage_blend(color: vec3<f32>, cov: f32) -> vec4<f32> {
         let cov = undercurl_coverage(in.uv, in.quad_px) * in.color.a;
         return coverage_blend(in.color.rgb, cov);
     }
-    let texel = textureSample(atlas_tex, atlas_samp, in.uv);
     if (in.flags == 1u) {
-        // Color glyph: the atlas holds straight-alpha RGBA, so premultiply it here
-        // for the premultiplied-alpha blend (otherwise the edges fringe dark).
-        // Color emoji carry their own (already gamma-encoded) RGB, so we leave
-        // them untouched and only premultiply — no linear re-tinting.
+        // Color glyph: the color atlas holds straight-alpha RGBA, so premultiply
+        // it here for the premultiplied-alpha blend (otherwise the edges fringe
+        // dark). Color emoji carry their own (already gamma-encoded) RGB, so we
+        // leave them untouched and only premultiply — no linear re-tinting.
+        let texel = textureSample(color_tex, atlas_samp, in.uv);
         let a = texel.a;
         return vec4<f32>(texel.rgb * a, a);
     }
-    // Coverage mask: tint with the cell foreground, coverage applied in linear
-    // space for gamma-correct antialiasing of the glyph edges.
-    let cov = in.color.a * texel.a;
+    // Coverage mask: the R8 mask atlas carries coverage in the red channel. Tint
+    // with the cell foreground, coverage applied in linear space for gamma-correct
+    // antialiasing of the glyph edges.
+    let cov = in.color.a * textureSample(mask_tex, atlas_samp, in.uv).r;
     return coverage_blend(in.color.rgb, cov);
 }
