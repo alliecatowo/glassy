@@ -316,6 +316,10 @@ pub struct Renderer {
     /// total). Empty means "layout unknown — do a full reflatten + upload".
     bg_row_offsets: Vec<u32>,
     fg_row_offsets: Vec<u32>,
+    /// Persistent scratch for building each frame's prefix-sum offsets, swapped
+    /// into `*_row_offsets` on a layout change — avoids a per-frame Vec alloc.
+    bg_scratch_offsets: Vec<u32>,
+    fg_scratch_offsets: Vec<u32>,
     /// Rows rebuilt via [`Renderer::begin_row`] this frame, in call order. Used to
     /// upload just those rows when the buffer layout is otherwise unchanged.
     dirty_rows: Vec<usize>,
@@ -770,6 +774,8 @@ impl Renderer {
             cur_row: 0,
             bg_row_offsets: Vec::new(),
             fg_row_offsets: Vec::new(),
+            bg_scratch_offsets: Vec::new(),
+            fg_scratch_offsets: Vec::new(),
             dirty_rows: Vec::new(),
             bg_flat: Vec::with_capacity(INITIAL_INSTANCES),
             fg_flat: Vec::with_capacity(INITIAL_INSTANCES),
@@ -2145,6 +2151,7 @@ impl Renderer {
             |r| &r.bg,
             &mut self.bg_flat,
             &mut self.bg_row_offsets,
+            &mut self.bg_scratch_offsets,
             &self.dirty_rows,
             &mut self.bg_buffer,
             &mut self.bg_capacity,
@@ -2157,6 +2164,7 @@ impl Renderer {
             |r| &r.fg,
             &mut self.fg_flat,
             &mut self.fg_row_offsets,
+            &mut self.fg_scratch_offsets,
             &self.dirty_rows,
             &mut self.fg_buffer,
             &mut self.fg_capacity,
@@ -2192,6 +2200,7 @@ impl Renderer {
         pick: impl Fn(&RowInstances) -> &Vec<T>,
         flat: &mut Vec<T>,
         offsets: &mut Vec<u32>,
+        scratch: &mut Vec<u32>,
         dirty_rows: &[usize],
         buffer: &mut wgpu::Buffer,
         capacity: &mut usize,
@@ -2200,9 +2209,12 @@ impl Renderer {
         let stride = std::mem::size_of::<T>();
         let n = rows.len();
 
-        // Current layout: prefix sums of per-row counts (offsets[i] = first
-        // instance index of row i; offsets[n] = total).
-        let mut new_offsets: Vec<u32> = Vec::with_capacity(n + 1);
+        // Current layout: prefix sums of per-row counts (new_offsets[i] = first
+        // instance index of row i; new_offsets[n] = total). Built into the
+        // persistent `scratch` buffer to avoid a per-frame allocation.
+        let new_offsets = scratch;
+        new_offsets.clear();
+        new_offsets.reserve(n + 1);
         let mut acc: u32 = 0;
         new_offsets.push(0);
         for r in rows {
@@ -2286,7 +2298,8 @@ impl Renderer {
             );
         }
 
-        *offsets = new_offsets;
+        // Adopt the new layout, keeping the old buffer as next frame's scratch.
+        std::mem::swap(offsets, new_offsets);
         total as u32
     }
 
