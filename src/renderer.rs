@@ -30,7 +30,9 @@ const COLOR_ATLAS_SIZE: u32 = 256;
 /// Image-atlas dimensions (square, RGBA8). Inline images (kitty graphics) are
 /// packed here, kept separate from the glyph atlases so a large image can't evict
 /// the font cache. On overflow the image cache is cleared and repacked.
-const IMAGE_ATLAS_SIZE: u32 = 2048;
+/// 1024 (4 MB) is sufficient for typical inline images and cuts idle VRAM vs the
+/// old 2048 (16 MB) — change to 2048 if you display many/large kitty images at once.
+const IMAGE_ATLAS_SIZE: u32 = 1024;
 /// 1px gap between packed glyphs to avoid bilinear bleed across neighbours.
 const GLYPH_GAP: u32 = 1;
 /// Initial instance-buffer capacity (in instances) so the first `cast_slice`
@@ -377,8 +379,18 @@ impl Renderer {
         let surface = instance
             .create_surface(window.clone())
             .context("creating wgpu surface")?;
+        // Default to the integrated/low-power GPU: a 2D glyph renderer never needs
+        // the dGPU, and on a hybrid laptop HighPerformance wakes NVIDIA (5-7 W idle
+        // pre-Turing, plus per-process driver RSS). Override with GLASSY_GPU=high or
+        // GLASSY_GPU=discrete for the discrete GPU (also set WGPU_ADAPTER_NAME=<name>
+        // and PRIME vars on Optimus: __NV_PRIME_RENDER_OFFLOAD=1 __VK_LAYER_NV_optimus=NVIDIA_only).
+        let power_preference = match std::env::var("GLASSY_GPU").ok().as_deref() {
+            Some("high") | Some("discrete") => wgpu::PowerPreference::HighPerformance,
+            Some("low") | Some("integrated") => wgpu::PowerPreference::LowPower,
+            _ => wgpu::PowerPreference::LowPower, // default: iGPU / integrated
+        };
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
+            power_preference,
             force_fallback_adapter: false,
             compatible_surface: Some(&surface),
         }))
@@ -395,9 +407,22 @@ impl Renderer {
                 info.driver
             );
         }
-        let (device, queue) =
-            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))
-                .context("requesting GPU device")?;
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("glassy"),
+            required_features: wgpu::Features::empty(),
+            // Keep limits at their default (adapter-reported) values — over-tight
+            // limits can make request_device fail (e.g. max_texture_dimension_2d
+            // below the surface size, or wrong max_vertex_attributes for the fg
+            // layout). The big win is memory_hints, which avoids the Vulkan
+            // sub-allocator pre-reserving large block pools.
+            required_limits: wgpu::Limits::default(),
+            // MemoryUsage tells the wgpu Vulkan/Metal sub-allocators to prefer
+            // smaller pool blocks and release memory eagerly — the single biggest
+            // idle VRAM reduction without changing render behavior.
+            memory_hints: wgpu::MemoryHints::MemoryUsage,
+            ..Default::default() // experimental_features + trace
+        }))
+        .context("requesting GPU device")?;
         log::info!("  renderer: GPU device ready {:.1} ms", ms(t));
 
         // --- Surface format / present-mode selection. ---
@@ -420,10 +445,11 @@ impl Renderer {
             .or_else(|| caps.formats.iter().copied().find(|f| !f.is_srgb()))
             .or_else(|| caps.formats.first().copied())
             .context("GPU adapter reported no compatible surface formats")?;
-        let present_mode = [wgpu::PresentMode::Mailbox, wgpu::PresentMode::Immediate]
-            .into_iter()
-            .find(|m| caps.present_modes.contains(m))
-            .unwrap_or(wgpu::PresentMode::Fifo);
+        // Fifo (vsync, guaranteed-available) is correct for an event-driven terminal:
+        // it keeps the minimum swapchain images (2 vs Mailbox's typical 3, saving
+        // ~8 MB at 1080p Bgra8), never redraws idle frames, and avoids the tearing
+        // / latency tradeoffs of Mailbox/Immediate that are meaningless for a glyph app.
+        let present_mode = wgpu::PresentMode::Fifo;
 
         // Window translucency: prefer PreMultiplied so the surface's alpha is
         // composited against the desktop. We emit premultiplied colors (RGB
