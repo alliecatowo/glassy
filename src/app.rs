@@ -6,6 +6,7 @@
 //! Claude Code streaming tokens collapses into a single redraw per refresh
 //! instead of one redraw per token burst.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -26,6 +27,7 @@ use winit::window::{Window, WindowId};
 use crate::bell::{self, AudioBell};
 use crate::color;
 use crate::input::{MouseReport, encode_key, encode_mouse};
+use crate::pane;
 use crate::pty::{Pty, UserEvent};
 use crate::renderer::{CursorOverlay, Decorations, Renderer, UnderlineStyle};
 
@@ -573,12 +575,26 @@ pub struct Config {
     pub theme: String,
 }
 
+/// A tab's split layout: the tiling tree (whose leaf ids are pty/pane ids) plus
+/// the parked PTYs of every pane EXCEPT the focused one. The focused pane's PTY
+/// lives in `App::pty` (active tab) or `Session::pty` (parked tab), exactly like
+/// the single-pane model — so all the existing single-session code keeps working
+/// unchanged, and `panes == None` is byte-identical to today's one-pane tab.
+struct PaneGroup {
+    layout: pane::Layout,
+    /// Non-focused panes' PTYs, keyed by pane id (== leaf id == pty id).
+    others: HashMap<usize, Pty>,
+}
+
 /// One terminal tab. The *active* tab's PTY lives directly in `App::pty` (so all
 /// rendering/input code stays single-session); inactive tabs are parked here and
 /// swapped in on switch.
 struct Session {
     id: usize,
     pty: Pty,
+    /// Split layout for this parked tab. `None` for a single-pane tab; when set,
+    /// `pty` above holds the focused pane and `panes.others` the rest.
+    panes: Option<PaneGroup>,
     title: String,
     /// Set when this background tab produces output; shown as a dot on its chip
     /// and cleared when the tab is activated. Lets you see which tab is busy.
@@ -597,6 +613,11 @@ pub struct App {
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
     pty: Option<Pty>,
+    /// Split layout for the ACTIVE tab. `None` when the active tab has one pane
+    /// (the common case — then `pty` is the sole pane and every existing path
+    /// runs unchanged). When set, `pty` is the focused pane and `panes.others`
+    /// holds the rest; rendering/input fan out across `panes.layout`.
+    panes: Option<PaneGroup>,
 
     // Tabs. The active tab's PTY is `pty`; inactive tabs are parked in
     // `background` (an unordered pool keyed by id). `tab_order` is the STABLE
@@ -745,6 +766,7 @@ impl App {
             window: None,
             renderer: None,
             pty: None,
+            panes: None,
             background: Vec::new(),
             tab_order: vec![0], // the first tab (spawned in resumed) is id 0
             active_id: 0,
@@ -1170,6 +1192,7 @@ impl App {
             self.background.push(Session {
                 id: self.active_id,
                 pty: old,
+                panes: self.panes.take(),
                 title: std::mem::take(&mut self.active_title),
                 activity: false,
                 // Carry the parked session's busy state so its chip keeps spinning.
@@ -1234,6 +1257,7 @@ impl App {
             self.background.push(Session {
                 id: self.active_id,
                 pty: cur,
+                panes: self.panes.take(),
                 title: std::mem::take(&mut self.active_title),
                 activity: false,
                 // Carry the parked session's busy state so its chip keeps spinning.
@@ -1243,10 +1267,15 @@ impl App {
         let bi = self.background.iter().position(|s| s.id == target_id).unwrap_or(bi);
         let target = self.background.remove(bi);
         self.pty = Some(target.pty);
+        self.panes = target.panes;
         self.active_id = target.id;
         self.active_title = target.title;
         // Inherit the activated session's busy deadline (it streams in the fg now).
         self.active_busy_until = target.busy_until;
+        // A split tab may have been parked at a different window size; re-tile it.
+        if self.panes.is_some() {
+            self.resize_panes();
+        }
         self.reset_pointer_state();
         self.update_window_title();
         // A full repaint so the new tab's grid replaces the old one's persisted
@@ -1273,6 +1302,12 @@ impl App {
             if let Some(pty) = &self.pty {
                 pty.shutdown();
             }
+            // Shut down every other pane of this tab too.
+            if let Some(g) = self.panes.take() {
+                for (_, p) in g.others {
+                    p.shutdown();
+                }
+            }
             self.pty = None;
             self.active_title.clear();
             if self.tab_order.is_empty() {
@@ -1285,18 +1320,400 @@ impl App {
             if let Some(bi) = self.background.iter().position(|s| s.id == new_id) {
                 let next = self.background.remove(bi);
                 self.pty = Some(next.pty);
+                self.panes = next.panes;
                 self.active_id = next.id;
                 self.active_title = next.title;
+                if self.panes.is_some() {
+                    self.resize_panes();
+                }
             }
         } else if let Some(bi) = self.background.iter().position(|s| s.id == id) {
-            // Closing a background tab: shut it down and drop it.
+            // Closing a background tab: shut it (and all its panes) down and drop it.
             let s = self.background.remove(bi);
             s.pty.shutdown();
+            if let Some(g) = s.panes {
+                for (_, p) in g.others {
+                    p.shutdown();
+                }
+            }
         }
         self.reset_pointer_state();
         self.update_window_title();
         self.force_full_redraw = true;
         self.mark_dirty(event_loop);
+    }
+
+    // --- Split panes -------------------------------------------------------
+    //
+    // The active tab may be tiled into several panes via `self.panes`. The
+    // FOCUSED pane's PTY is always `self.pty`, so every single-pane code path
+    // (input, selection, scrollback, mouse-report, cursor) automatically targets
+    // the focused pane with no changes. `panes == None` is the one-pane case and
+    // is byte-identical to the pre-split app.
+
+    /// Pixel gutter reserved between tiled panes (also the divider thickness).
+    const PANE_GAP: i32 = 1;
+
+    /// The content rectangle (surface pixels) that panes tile: the whole surface
+    /// below the tab strip. Each pane is internally inset by the renderer pad (the
+    /// renderer adds `pad` to every cell), so this spans edge-to-edge and the pad
+    /// supplies the symmetric margin within each pane. Returns `None` before the
+    /// renderer exists.
+    fn content_area(&self) -> Option<pane::Rect> {
+        let r = self.renderer.as_ref()?;
+        let m = r.cell_metrics();
+        let pad = r.pad();
+        let strip_bottom = (pad + TAB_STRIP_ROWS as f32 * m.height).round() as i32;
+        let (sw, sh) = r.surface_size();
+        Some(pane::Rect {
+            x: 0,
+            y: strip_bottom,
+            w: sw as i32,
+            h: (sh as i32 - strip_bottom).max(0),
+        })
+    }
+
+    /// Convert a pane's pixel rect into a (cols, rows) grid size for its PTY. The
+    /// renderer insets cells by `pad` on the top-left, so a pane's usable extent
+    /// is its rect minus one pad on each side (mirroring the whole-window inset).
+    fn pane_grid(&self, rect: pane::Rect) -> (usize, usize) {
+        let Some(r) = self.renderer.as_ref() else {
+            return (1, 1);
+        };
+        let m = r.cell_metrics();
+        let pad = r.pad();
+        let cols = (((rect.w as f32 - 2.0 * pad) / m.width).floor() as usize).max(1);
+        let rows = (((rect.h as f32 - 2.0 * pad) / m.height).floor() as usize).max(1);
+        (cols, rows)
+    }
+
+    /// Resize every pane's PTY to match its current tiled rectangle. The FOCUSED
+    /// pane drives `self.cols/self.rows` (so the single-pane render path and all
+    /// cell math keep using the focused pane's grid); the others are sized to
+    /// their own rects directly. A no-op (single-pane handling) when not split.
+    fn resize_panes(&mut self) {
+        let Some(area) = self.content_area() else { return };
+        // Collect rects first to drop the immutable `self` borrow before mutating.
+        let rects: Vec<(usize, pane::Rect)> = match self.panes.as_ref() {
+            Some(g) => g.layout.rects(area, Self::PANE_GAP),
+            None => return,
+        };
+        let Some(r) = self.renderer.as_ref() else { return };
+        let m = r.cell_metrics();
+        let (cw, ch) = (m.width.round() as u16, m.height.round() as u16);
+        let focused = self.panes.as_ref().unwrap().layout.focused();
+        for (id, rect) in rects {
+            let (cols, rows) = self.pane_grid(rect);
+            if id == focused {
+                if let Some(pty) = &self.pty {
+                    pty.resize(cols, rows, cw, ch);
+                }
+                // The focused pane is the one the single-pane paths read from.
+                self.cols = cols;
+                self.rows = rows;
+            } else if let Some(pty) = self.panes.as_ref().unwrap().others.get(&id) {
+                pty.resize(cols, rows, cw, ch);
+            }
+        }
+    }
+
+    /// Split the focused pane in `dir`, spawning a fresh shell for the new pane
+    /// and focusing it. Promotes a single-pane tab into a `PaneGroup` on the
+    /// first split. Re-points `self.pty` at the (new) focused pane.
+    fn split_pane(&mut self, dir: pane::Dir, event_loop: &ActiveEventLoop) {
+        if self.renderer.is_none() || self.pty.is_none() {
+            return;
+        }
+        let new_id = self.next_id;
+        let m = self.renderer.as_ref().unwrap().cell_metrics();
+        let pty = match Pty::spawn(
+            self.proxy.clone(),
+            new_id,
+            self.cols,
+            self.rows,
+            m.width.round() as u16,
+            m.height.round() as u16,
+            self.config.shell.clone(),
+            None,
+            self.config.scrollback,
+        ) {
+            Ok(p) => p,
+            Err(e) => {
+                log::error!("failed to spawn pane: {e:#}");
+                return;
+            }
+        };
+        self.next_id += 1;
+
+        // Promote to a PaneGroup whose sole leaf is the current focused pane.
+        if self.panes.is_none() {
+            self.panes = Some(PaneGroup {
+                layout: pane::Layout::new(self.active_id),
+                others: HashMap::new(),
+            });
+        }
+        // The pane currently in `self.pty` is the focused leaf; park it as an
+        // "other" and make the freshly-spawned pane the new focused `self.pty`.
+        let g = self.panes.as_mut().unwrap();
+        let prev_focus = g.layout.focused();
+        if !g.layout.split(dir, new_id) {
+            // Couldn't split (shouldn't happen for a fresh id); drop the new pty.
+            pty.shutdown();
+            return;
+        }
+        if let Some(old) = self.pty.take() {
+            g.others.insert(prev_focus, old);
+        }
+        self.pty = Some(pty);
+
+        self.resize_panes();
+        self.reset_pointer_state();
+        self.force_full_redraw = true;
+        self.mark_dirty(event_loop);
+    }
+
+    /// Move focus to the neighbouring pane in direction `m` (Alt+Arrow). Swaps
+    /// `self.pty` with the newly-focused pane's parked PTY. No-op when not split.
+    fn focus_pane(&mut self, m: pane::Move, event_loop: &ActiveEventLoop) {
+        let Some(area) = self.content_area() else { return };
+        let Some(g) = self.panes.as_mut() else { return };
+        let prev = g.layout.focused();
+        let Some(next) = g.layout.focus_move(m, area, Self::PANE_GAP) else {
+            return;
+        };
+        if next == prev {
+            return;
+        }
+        // Swap the previously-focused PTY out and the newly-focused one in.
+        if let Some(old) = self.pty.take() {
+            g.others.insert(prev, old);
+        }
+        if let Some(p) = g.others.remove(&next) {
+            self.pty = Some(p);
+        }
+        // The focused pane defines the active grid dims; re-sync them.
+        self.resize_panes();
+        self.reset_pointer_state();
+        self.force_full_redraw = true;
+        self.mark_dirty(event_loop);
+    }
+
+    /// Close the focused pane. When more than one pane remains, the focused pane's
+    /// shell is shut down, the layout collapses, and focus moves to the promoted
+    /// sibling. When only one pane is left, falls back to closing the whole tab.
+    fn close_pane(&mut self, event_loop: &ActiveEventLoop) {
+        let n = self.panes.as_ref().map(|g| g.layout.len()).unwrap_or(1);
+        if n <= 1 {
+            self.close_active_tab(event_loop);
+            return;
+        }
+        let g = self.panes.as_mut().unwrap();
+        let closing = g.layout.focused();
+        if !g.layout.close(closing) {
+            return;
+        }
+        let new_focus = g.layout.focused();
+        // Shut down the closed pane's shell (it was the focused `self.pty`).
+        if let Some(old) = self.pty.take() {
+            old.shutdown();
+        }
+        // Bring the promoted pane's PTY in as the new focus.
+        if let Some(p) = g.others.remove(&new_focus) {
+            self.pty = Some(p);
+        }
+        // Collapse back to single-pane if only one leaf remains.
+        if g.layout.len() == 1 {
+            self.panes = None;
+            // The PTY now in `self.pty` is the sole pane; resize it to the full
+            // content area (the single-pane resize uses self.cols/self.rows, which
+            // handle_resize keeps current).
+            if let Some(area) = self.content_area()
+                && let Some(pty) = &self.pty
+            {
+                let (cols, rows) = self.pane_grid(area);
+                let m = self.renderer.as_ref().unwrap().cell_metrics();
+                pty.resize(cols, rows, m.width.round() as u16, m.height.round() as u16);
+                self.cols = cols;
+                self.rows = rows;
+            }
+        } else {
+            self.resize_panes();
+        }
+        self.reset_pointer_state();
+        self.force_full_redraw = true;
+        self.mark_dirty(event_loop);
+    }
+
+    /// Look up a pane id in the active tab by the pointer position, returning the
+    /// pane id and its rect. `None` when not split or the pointer is outside any
+    /// pane. Used to route wheel/clicks to the pane under the cursor.
+    fn pane_at(&self, x: f64, y: f64) -> Option<(usize, pane::Rect)> {
+        let area = self.content_area()?;
+        let g = self.panes.as_ref()?;
+        let (xi, yi) = (x.round() as i32, y.round() as i32);
+        g.layout
+            .rects(area, Self::PANE_GAP)
+            .into_iter()
+            .find(|(_, r)| xi >= r.x && xi < r.x + r.w && yi >= r.y && yi < r.y + r.h)
+    }
+
+    /// Whether the active tab is currently split into more than one pane.
+    fn is_split(&self) -> bool {
+        self.panes.as_ref().is_some_and(|g| g.layout.len() > 1)
+    }
+
+    /// The pixel rect of the FOCUSED pane in the active split. `None` when not
+    /// split. Used to translate pointer positions into focused-pane-local cells.
+    fn focused_pane_rect(&self) -> Option<pane::Rect> {
+        let area = self.content_area()?;
+        let g = self.panes.as_ref()?;
+        let f = g.layout.focused();
+        g.layout
+            .rects(area, Self::PANE_GAP)
+            .into_iter()
+            .find(|(id, _)| *id == f)
+            .map(|(_, r)| r)
+    }
+
+    /// Focus the pane under the pointer (if any) when split, swapping `self.pty`.
+    /// Returns true when focus actually changed (caller should repaint). No-op
+    /// (false) when not split or the pointer is over the already-focused pane.
+    fn focus_pane_at(&mut self, x: f64, y: f64, event_loop: &ActiveEventLoop) -> bool {
+        let Some((id, _)) = self.pane_at(x, y) else {
+            return false;
+        };
+        let Some(g) = self.panes.as_mut() else { return false };
+        let prev = g.layout.focused();
+        if id == prev {
+            return false;
+        }
+        if !g.layout.focus(id) {
+            return false;
+        }
+        if let Some(old) = self.pty.take() {
+            g.others.insert(prev, old);
+        }
+        if let Some(p) = g.others.remove(&id) {
+            self.pty = Some(p);
+        }
+        self.resize_panes();
+        self.reset_pointer_state();
+        self.force_full_redraw = true;
+        self.mark_dirty(event_loop);
+        true
+    }
+
+    /// Find a PTY by its pane/pty id anywhere it might live: the active focused
+    /// pane, a non-focused pane of the active tab, or any pane (focused or not) of
+    /// a background tab. Used to route PTY-keyed events (VT replies, etc.) to the
+    /// correct pane regardless of which tab or split it belongs to.
+    fn pty_by_id(&self, id: usize) -> Option<&Pty> {
+        if id == self.active_id {
+            return self.pty.as_ref();
+        }
+        if let Some(g) = self.panes.as_ref()
+            && let Some(p) = g.others.get(&id)
+        {
+            return Some(p);
+        }
+        for s in &self.background {
+            if s.id == id {
+                return Some(&s.pty);
+            }
+            if let Some(g) = s.panes.as_ref()
+                && let Some(p) = g.others.get(&id)
+            {
+                return Some(p);
+            }
+        }
+        None
+    }
+
+    /// Whether `id` names a pane (focused or not) of the ACTIVE tab — i.e. one
+    /// whose output is currently visible and should trigger a repaint.
+    fn id_in_active_tab(&self, id: usize) -> bool {
+        id == self.active_id || self.panes.as_ref().is_some_and(|g| g.others.contains_key(&id))
+    }
+
+    /// The display position (in `tab_order`) of the tab that owns pane `id`, where
+    /// the tab is identified by its FOCUSED pane id (== the tab's stable id). A
+    /// non-focused pane resolves to its owning tab. `None` if unknown.
+    fn tab_pos_of_pane(&self, id: usize) -> Option<usize> {
+        // Active tab.
+        if self.id_in_active_tab(id) {
+            return Some(self.active_pos());
+        }
+        // Background tabs: the tab id is the focused pane id; a non-focused pane is
+        // found in that session's group.
+        for s in &self.background {
+            let owns = s.id == id || s.panes.as_ref().is_some_and(|g| g.others.contains_key(&id));
+            if owns {
+                return self.tab_order.iter().position(|&t| t == s.id);
+            }
+        }
+        None
+    }
+
+    /// Handle a child shell exit for pane `id`: close exactly that pane. A
+    /// non-focused pane of the active tab collapses out of the split; the active
+    /// focused pane (or a single-pane tab) closes the tab. Background-tab panes are
+    /// dropped from their group (or the whole tab when it was their last pane).
+    fn handle_child_exit(&mut self, id: usize, event_loop: &ActiveEventLoop) {
+        // A non-focused pane of the ACTIVE tab: drop it from the split.
+        if id != self.active_id
+            && let Some(g) = self.panes.as_mut()
+            && g.others.contains_key(&id)
+        {
+            if let Some(p) = g.others.remove(&id) {
+                p.shutdown();
+            }
+            g.layout.close(id);
+            let collapsed = g.layout.len() == 1;
+            if collapsed {
+                self.panes = None;
+            }
+            self.resize_panes();
+            self.force_full_redraw = true;
+            self.mark_dirty(event_loop);
+            return;
+        }
+        // The active focused pane: if the tab is split, close just that pane;
+        // otherwise close the whole tab (the original single-pane behaviour).
+        if id == self.active_id {
+            if self.is_split() {
+                self.close_pane(event_loop);
+            } else {
+                self.close_active_tab(event_loop);
+            }
+            return;
+        }
+        // A background tab's pane.
+        for s in self.background.iter_mut() {
+            if let Some(g) = s.panes.as_mut()
+                && g.others.contains_key(&id)
+            {
+                if let Some(p) = g.others.remove(&id) {
+                    p.shutdown();
+                }
+                g.layout.close(id);
+                if g.layout.len() == 1 {
+                    s.panes = None;
+                }
+                return;
+            }
+        }
+        // A background tab's focused pane (id == tab id): drop the whole tab,
+        // shutting down any sibling panes it owned. (Matches the pre-split
+        // behaviour, which left `tab_order` untouched here.)
+        if let Some(bi) = self.background.iter().position(|s| s.id == id) {
+            let s = self.background.remove(bi);
+            if let Some(g) = s.panes {
+                for (_, p) in g.others {
+                    p.shutdown();
+                }
+            }
+            self.update_window_title();
+        }
     }
 
     /// Whether the cursor should currently blink: the child requested a blinking
@@ -1345,12 +1762,25 @@ impl App {
 
     /// Translate a physical cursor position into a 0-based grid cell, clamped to
     /// the visible grid. The renderer insets the grid by `pad` px on all sides.
+    /// When the active tab is split, the cell is taken relative to the FOCUSED
+    /// pane's tile (origin = rect + pad), since selection / mouse-reporting act on
+    /// the focused pane (`self.pty`) and `self.cols/self.rows` track its grid.
     fn px_to_cell(&self, x: f64, y: f64) -> (usize, usize) {
         let Some(renderer) = self.renderer.as_ref() else {
             return (0, 0);
         };
         let m = renderer.cell_metrics();
         let pad = renderer.pad() as f64;
+        if let Some(rect) = self.focused_pane_rect() {
+            // Pane-local: subtract the tile origin + the per-pane pad inset.
+            let ox = rect.x as f64 + pad;
+            let oy = rect.y as f64 + pad;
+            let col = ((x - ox) / m.width as f64).floor();
+            let row = ((y - oy) / m.height as f64).floor();
+            let col = (col.max(0.0) as usize).min(self.cols.saturating_sub(1));
+            let row = (row.max(0.0) as usize).min(self.rows.saturating_sub(1));
+            return (col, row);
+        }
         let col = ((x - pad) / m.width as f64).floor();
         // Screen rows include the tab strip; terminal rows start below it.
         let term_row = ((y - pad) / m.height as f64).floor() as i64 - TAB_STRIP_ROWS as i64;
@@ -1396,7 +1826,13 @@ impl App {
         };
         let m = renderer.cell_metrics();
         let pad = renderer.pad() as f64;
-        let rel = (x - pad) / m.width as f64;
+        // In a split, measure from the focused pane's tile origin (matching
+        // `px_to_cell`), so the sub-cell boundary test stays correct per pane.
+        let ox = self
+            .focused_pane_rect()
+            .map(|r| r.x as f64 + pad)
+            .unwrap_or(pad);
+        let rel = (x - ox) / m.width as f64;
         let frac = rel - rel.floor();
         if frac < 0.5 { Side::Left } else { Side::Right }
     }
@@ -1491,7 +1927,167 @@ impl App {
         self.clipboard.as_mut()
     }
 
+    /// Build the inline app toolbar (screen row 0) cells: the glassy mark, tab
+    /// chips (or the single-tab title), the +/help/menu buttons, and the
+    /// scrollback-position readout. Returns one `(char, fg, bg)` per column so
+    /// both the single-pane and split render paths push an identical strip. Takes
+    /// the focused pane's `display_offset`/`history_size` for the % readout.
+    fn build_strip(
+        &self,
+        display_offset: i32,
+        history_size: usize,
+    ) -> Vec<(char, [f32; 4], [f32; 4])> {
+        // Dim the whole strip while the window is unfocused so an idle window
+        // reads as "asleep" — a single scalar applied to every strip color.
+        let fdim = if self.focused { 1.0 } else { 0.6 };
+        let mul = |c: [f32; 4]| [c[0] * fdim, c[1] * fdim, c[2] * fdim, c[3]];
+
+        let bar_bg = mul(color::selection_bg());
+        let base_fg = mul(color::default_fg());
+        let base_bg = mul(color::default_bg());
+        let accent = mul(color::accent());
+        let danger = mul(color::danger());
+        let dim_fg = [base_fg[0] * 0.55, base_fg[1] * 0.55, base_fg[2] * 0.55, base_fg[3]];
+        // Raised chip surfaces: idle chips sit slightly above the bar, the
+        // active chip is an accent fill, hovered chips brighten, and a PRESSED
+        // chip insets (darker than the bar) — giving the inline strip tactile
+        // "chips" instead of a flat run of text.
+        let chip_idle = lighten(bar_bg, 0.05);
+        let chip_hover = lighten(bar_bg, 0.13);
+        let chip_press = darken(bar_bg, 0.7); // inset: darker than the bar
+        let active_bg = accent;
+        let active_fg = base_bg; // dark text on the accent chip
+
+        // The toolbar's own backdrop is the terminal bg (so the chips read as
+        // raised surfaces against it), with a 1px-feel accent on the mark.
+        let mut bar: Vec<(char, [f32; 4], [f32; 4])> = vec![(' ', base_fg, bar_bg); self.cols];
+        let put = |bar: &mut Vec<(char, [f32; 4], [f32; 4])>, start: usize, s: &str, fg, bg| {
+            for (k, ch) in s.chars().enumerate() {
+                if let Some(cell) = bar.get_mut(start + k) {
+                    *cell = (ch, fg, bg);
+                }
+            }
+        };
+        put(&mut bar, 0, " ◆ ", accent, bar_bg);
+
+        // Tab descriptors in STABLE order: the active tab keeps its position,
+        // only the highlight follows it.
+        let descs: Vec<(&str, bool, bool)> = self
+            .tab_order
+            .iter()
+            .map(|&id| {
+                if id == self.active_id {
+                    (self.active_title.as_str(), true, false)
+                } else {
+                    self.background
+                        .iter()
+                        .find(|s| s.id == id)
+                        .map(|s| (s.title.as_str(), false, s.activity))
+                        .unwrap_or(("", false, false))
+                }
+            })
+            .collect();
+        let multi = descs.len() > 1;
+        let hov = self.hovered_strip_item;
+        let held = self.held_strip_item;
+        // Current spinner glyph + per-tab "actively streaming" flags (in stable
+        // order, parallel to `descs`).
+        let now = Instant::now();
+        let spin = SPINNER_FRAMES[self.spinner_frame % SPINNER_FRAMES.len()];
+        let (active_id, active_busy, bg) =
+            (self.active_id, self.active_busy_until, &self.background);
+        let spinning: Vec<bool> = self
+            .tab_order
+            .iter()
+            .map(|&id| {
+                let until = if id == active_id {
+                    active_busy
+                } else {
+                    bg.iter().find(|s| s.id == id).and_then(|s| s.busy_until)
+                };
+                until.is_some_and(|t| now < t)
+            })
+            .collect();
+        for seg in strip_layout(&descs, self.cols) {
+            let is_active = matches!(seg.item, StripItem::Tab(i) | StripItem::TabClose(i) if descs.get(i).is_some_and(|d| d.1));
+            let is_busy = matches!(seg.item, StripItem::Tab(i) if descs.get(i).is_some_and(|d| d.2));
+            // Whether THIS tab is actively producing output (spinner, not dot).
+            let is_spinning = matches!(seg.item, StripItem::Tab(i)
+                if spinning.get(i).copied().unwrap_or(false));
+            let hovered = hov == Some(seg.item);
+            let pressed = held == Some(seg.item);
+            // Chip surface by precedence: PRESSED (inset/darker) > hover > idle.
+            let surface = |idle: [f32; 4]| {
+                if pressed {
+                    chip_press
+                } else if hovered {
+                    chip_hover
+                } else {
+                    idle
+                }
+            };
+            let (fg, sbg) = match seg.item {
+                // Even the active chip insets while pressed, for tactile feedback.
+                _ if is_active => (active_fg, if pressed { chip_press } else { active_bg }),
+                StripItem::Tab(_) if !multi => (base_fg, surface(bar_bg)), // single-tab title
+                StripItem::Tab(_) => (
+                    if is_busy { accent } else { base_fg },
+                    surface(chip_idle),
+                ),
+                StripItem::TabClose(_) => (
+                    if hovered { danger } else { dim_fg },
+                    surface(chip_idle),
+                ),
+                StripItem::NewTab => (accent, surface(bar_bg)),
+                StripItem::Help | StripItem::Menu => (
+                    if hovered || pressed { base_fg } else { dim_fg },
+                    surface(bar_bg),
+                ),
+            };
+            put(&mut bar, seg.start, &seg.label, fg, sbg);
+            // Replace the chip's leading pad with a status glyph: a braille
+            // spinner while the session is actively streaming, else a static
+            // activity dot for a background tab that produced output.
+            if is_spinning {
+                let gfg = if is_active { active_fg } else { accent };
+                put(&mut bar, seg.start, &spin.to_string(), gfg, sbg);
+            } else if is_busy && !is_active {
+                put(&mut bar, seg.start, "•", accent, sbg);
+            }
+        }
+
+        // Scrollback-position indicator, tucked in left of the buttons. A
+        // FIXED-WIDTH percentage (` ⇡100% `) so the controls never shift.
+        if display_offset > 0 {
+            let pct = if history_size > 0 {
+                ((display_offset as f32 / history_size as f32) * 100.0).round() as u32
+            } else {
+                100
+            }
+            .min(100);
+            // 7 cells: leading space, ⇡, up to 3 digits (right-aligned), %, space.
+            let s = format!(" ⇡{pct:>3}% ");
+            let n = s.chars().count();
+            let right_w = STRIP_BTN_W * 2;
+            if self.cols > right_w + n + 2 {
+                put(&mut bar, self.cols - right_w - n, &s, accent, bar_bg);
+            }
+        }
+        bar
+    }
+
     fn render(&mut self) {
+        // Split tabs take the dedicated multi-pane path; a single-pane tab (the
+        // common case) falls through to the byte-identical fast path below.
+        if self.is_split() {
+            self.render_split();
+            self.dirty = false;
+            if !self.first_frame_done {
+                self.first_frame_done = true;
+            }
+            return;
+        }
+
         // The OSC8 hyperlink under the pointer, underlined for affordance.
         // Captured before the renderer borrow.
         let hovered_link = self.hovered_link.clone();
@@ -1505,6 +2101,19 @@ impl App {
         } else {
             None
         };
+
+        // Build the toolbar strip cells up-front (a snapshot of `self`'s tab
+        // fields + the focused pane's scroll position), before borrowing the
+        // renderer — so the immutable `&self` borrow in `build_strip` doesn't
+        // collide with the `&mut self.renderer` borrow held across the frame.
+        let (strip_off, strip_hist) = match self.pty.as_ref() {
+            Some(pty) => {
+                let t = pty.term.lock();
+                (t.grid().display_offset() as i32, t.grid().history_size())
+            }
+            None => (0, 0),
+        };
+        let strip_bar = self.build_strip(strip_off, strip_hist);
 
         let (Some(renderer), Some(pty)) = (self.renderer.as_mut(), self.pty.as_ref()) else {
             return;
@@ -1541,9 +2150,6 @@ impl App {
         // Read before `renderable_content()` so both immutable borrows of `term`
         // can coexist with the content's `display_iter`.
         let cursor_blinking = term.cursor_style().blinking;
-        // Total scrollback lines available, for the strip's fixed-width % readout.
-        // Read before `renderable_content()` so both immutable `term` borrows coexist.
-        let history_size = term.grid().history_size();
         let content = term.renderable_content();
         let colors = content.colors;
         let display_offset = content.display_offset as i32;
@@ -1757,151 +2363,7 @@ impl App {
         // right-aligned help / menu buttons. Drawn from `strip_layout` so the
         // click hit-test matches exactly. ---
         {
-            // Dim the whole strip while the window is unfocused so an idle window
-            // reads as "asleep" — a single scalar applied to every strip color.
-            let fdim = if self.focused { 1.0 } else { 0.6 };
-            let mul = |c: [f32; 4]| [c[0] * fdim, c[1] * fdim, c[2] * fdim, c[3]];
-
-            let bar_bg = mul(color::selection_bg());
-            let base_fg = mul(color::default_fg());
-            let base_bg = mul(color::default_bg());
-            let accent = mul(color::accent());
-            let danger = mul(color::danger());
-            let dim_fg = [base_fg[0] * 0.55, base_fg[1] * 0.55, base_fg[2] * 0.55, base_fg[3]];
-            // Raised chip surfaces: idle chips sit slightly above the bar, the
-            // active chip is an accent fill, hovered chips brighten, and a PRESSED
-            // chip insets (darker than the bar) — giving the inline strip tactile
-            // "chips" instead of a flat run of text.
-            let chip_idle = lighten(bar_bg, 0.05);
-            let chip_hover = lighten(bar_bg, 0.13);
-            let chip_press = darken(bar_bg, 0.7); // inset: darker than the bar
-            let active_bg = accent;
-            let active_fg = base_bg; // dark text on the accent chip
-
-            // The toolbar's own backdrop is the terminal bg (so the chips read as
-            // raised surfaces against it), with a 1px-feel accent on the mark.
-            let mut bar: Vec<(char, [f32; 4], [f32; 4])> = vec![(' ', base_fg, bar_bg); self.cols];
-            let put = |bar: &mut Vec<(char, [f32; 4], [f32; 4])>, start: usize, s: &str, fg, bg| {
-                for (k, ch) in s.chars().enumerate() {
-                    if let Some(cell) = bar.get_mut(start + k) {
-                        *cell = (ch, fg, bg);
-                    }
-                }
-            };
-            put(&mut bar, 0, " ◆ ", accent, bar_bg);
-
-            // Tab descriptors in STABLE order: the active tab keeps its position,
-            // only the highlight follows it. (Disjoint fields from the renderer
-            // borrow, so this is allowed alongside it.)
-            let descs: Vec<(&str, bool, bool)> = self
-                .tab_order
-                .iter()
-                .map(|&id| {
-                    if id == self.active_id {
-                        (self.active_title.as_str(), true, false)
-                    } else {
-                        self.background
-                            .iter()
-                            .find(|s| s.id == id)
-                            .map(|s| (s.title.as_str(), false, s.activity))
-                            .unwrap_or(("", false, false))
-                    }
-                })
-                .collect();
-            let multi = descs.len() > 1;
-            let hov = self.hovered_strip_item;
-            let held = self.held_strip_item;
-            // Current spinner glyph + per-tab "actively streaming" flags (in stable
-            // order, parallel to `descs`). Computed here, off `self`'s tab fields,
-            // before the loop borrows the renderer below.
-            let now = Instant::now();
-            let spin = SPINNER_FRAMES[self.spinner_frame % SPINNER_FRAMES.len()];
-            let (active_id, active_busy, bg) =
-                (self.active_id, self.active_busy_until, &self.background);
-            let spinning: Vec<bool> = self
-                .tab_order
-                .iter()
-                .map(|&id| {
-                    let until = if id == active_id {
-                        active_busy
-                    } else {
-                        bg.iter().find(|s| s.id == id).and_then(|s| s.busy_until)
-                    };
-                    until.is_some_and(|t| now < t)
-                })
-                .collect();
-            for seg in strip_layout(&descs, self.cols) {
-                let is_active = matches!(seg.item, StripItem::Tab(i) | StripItem::TabClose(i) if descs.get(i).is_some_and(|d| d.1));
-                let is_busy = matches!(seg.item, StripItem::Tab(i) if descs.get(i).is_some_and(|d| d.2));
-                // Whether THIS tab is actively producing output (spinner, not dot).
-                let is_spinning = matches!(seg.item, StripItem::Tab(i)
-                    if spinning.get(i).copied().unwrap_or(false));
-                let hovered = hov == Some(seg.item);
-                let pressed = held == Some(seg.item);
-                // Chip surface by precedence: PRESSED (inset/darker) > hover > idle.
-                // The pressed treatment is deliberately the opposite direction from
-                // hover (down/dark vs up/light) so a click reads as a real push.
-                let surface = |idle: [f32; 4]| {
-                    if pressed {
-                        chip_press
-                    } else if hovered {
-                        chip_hover
-                    } else {
-                        idle
-                    }
-                };
-                let (fg, sbg) = match seg.item {
-                    // Even the active chip insets while pressed, for tactile feedback.
-                    _ if is_active => (active_fg, if pressed { chip_press } else { active_bg }),
-                    StripItem::Tab(_) if !multi => (base_fg, surface(bar_bg)), // single-tab title
-                    StripItem::Tab(_) => (
-                        if is_busy { accent } else { base_fg },
-                        surface(chip_idle),
-                    ),
-                    StripItem::TabClose(_) => (
-                        if hovered { danger } else { dim_fg },
-                        surface(chip_idle),
-                    ),
-                    StripItem::NewTab => (accent, surface(bar_bg)),
-                    StripItem::Help | StripItem::Menu => (
-                        if hovered || pressed { base_fg } else { dim_fg },
-                        surface(bar_bg),
-                    ),
-                };
-                put(&mut bar, seg.start, &seg.label, fg, sbg);
-                // Replace the chip's leading pad with a status glyph: a braille
-                // spinner while the session is actively streaming (any tab,
-                // including the active one), else a static activity dot for a
-                // background tab that produced output but has since gone quiet. On
-                // the accent-filled active chip the glyph uses the dark active_fg so
-                // it stays legible; elsewhere it reuses the accent color.
-                if is_spinning {
-                    let gfg = if is_active { active_fg } else { accent };
-                    put(&mut bar, seg.start, &spin.to_string(), gfg, sbg);
-                } else if is_busy && !is_active {
-                    put(&mut bar, seg.start, "•", accent, sbg);
-                }
-            }
-
-            // Scrollback-position indicator, tucked in left of the buttons. A
-            // FIXED-WIDTH percentage (` ⇡100% `) so the controls never shift as the
-            // number changes width; 100% = scrolled to the oldest line.
-            if display_offset > 0 {
-                let pct = if history_size > 0 {
-                    ((display_offset as f32 / history_size as f32) * 100.0).round() as u32
-                } else {
-                    100
-                }
-                .min(100);
-                // 7 cells: leading space, ⇡, up to 3 digits (right-aligned), %, space.
-                let s = format!(" ⇡{pct:>3}% ");
-                let n = s.chars().count();
-                let right_w = STRIP_BTN_W * 2;
-                if self.cols > right_w + n + 2 {
-                    put(&mut bar, self.cols - right_w - n, &s, accent, bar_bg);
-                }
-            }
-
+            let bar = strip_bar;
             renderer.begin_row(0);
             for (col, (ch, cfg, cbg)) in bar.into_iter().enumerate() {
                 renderer.push_cell(
@@ -1918,6 +2380,7 @@ impl App {
                 );
             }
         }
+
 
         // Cursor overlay. Drawn after the cells so the bars/outline land on top of
         // the cell background (glyphs still paint over them in the fg pass). The
@@ -2056,6 +2519,265 @@ impl App {
         }
 
         self.dirty = false;
+    }
+
+    /// Render a split (multi-pane) tab via the renderer's scissored multi-pane
+    /// path: one pane per leaf clipped to its tile, the tab strip on top, the
+    /// focused-pane border, and dividers between tiles. Forgoes the per-row damage
+    /// machinery (rebuilds every frame) — splitting is rare and this keeps the
+    /// fast single-pane path untouched.
+    fn render_split(&mut self) {
+        let flash = if self.bell_flash_until.is_some_and(|t| Instant::now() < t) {
+            Some(bell::FLASH_COLOR)
+        } else {
+            None
+        };
+        let Some(area) = self.content_area() else { return };
+        let focused_pane = match self.panes.as_ref() {
+            Some(g) => g.layout.focused(),
+            None => return,
+        };
+        // Precompute every leaf's rect + grid size (whole-`self` method calls)
+        // BEFORE taking disjoint field borrows for the render loop below.
+        let rects = self.panes.as_ref().unwrap().layout.rects(area, Self::PANE_GAP);
+        let pane_specs: Vec<(usize, pane::Rect, usize, usize)> = rects
+            .iter()
+            .map(|(id, r)| {
+                let (c, rw) = self.pane_grid(*r);
+                (*id, *r, c, rw)
+            })
+            .collect();
+
+        // Focused pane's scroll position for the strip % readout.
+        let (strip_off, strip_hist) = match self.pty.as_ref() {
+            Some(pty) => {
+                let t = pty.term.lock();
+                (t.grid().display_offset() as i32, t.grid().history_size())
+            }
+            None => (0, 0),
+        };
+        let strip_bar = self.build_strip(strip_off, strip_hist);
+        let win_focused = self.focused;
+        let blink_on = self.blink_on;
+        let hovered_link = self.hovered_link.clone();
+        let (sw, _sh) = self.renderer.as_ref().unwrap().surface_size();
+        let divider = lighten(color::selection_bg(), 0.18);
+
+        // Disjoint field borrows: `renderer` (mut), `panes`/`pty` (shared) are
+        // distinct fields, so the borrow checker allows them together as long as
+        // we don't route through a whole-`self` method past this point.
+        let g = self.panes.as_ref().unwrap();
+        let focused_pty = self.pty.as_ref();
+        let renderer = match self.renderer.as_mut() {
+            Some(r) => r,
+            None => return,
+        };
+        renderer.set_flash(flash);
+        renderer.begin_multi_frame(color::default_bg());
+
+        // The tab strip as a full-width pane anchored at the surface origin so its
+        // row-0 cells land exactly where the single-pane path draws them.
+        renderer.begin_pane(
+            pane::Rect { x: 0, y: 0, w: sw as i32, h: area.y.max(1) },
+            false,
+        );
+        renderer.begin_row(0);
+        for (col, (ch, cfg, cbg)) in strip_bar.into_iter().enumerate() {
+            renderer.push_cell(col, 0, ch, &[], cfg, cbg, false, false, false, Decorations::default());
+        }
+        renderer.end_pane();
+
+        // Each leaf pane, clipped to its tile.
+        for (id, rect, cols, prows) in &pane_specs {
+            let is_focused = *id == focused_pane;
+            let pty = if is_focused {
+                focused_pty
+            } else {
+                g.others.get(id)
+            };
+            let Some(pty) = pty else { continue };
+            renderer.begin_pane(*rect, is_focused);
+            Self::push_pane(renderer, pty, *cols, *prows, win_focused, blink_on, hovered_link.as_deref());
+            renderer.end_pane();
+        }
+
+        // Dividers in the gutters between adjacent tiles (drawn full-surface
+        // scissored so they are never clipped by a pane rect).
+        if Self::PANE_GAP > 0 {
+            for (i, (_, a)) in rects.iter().enumerate() {
+                for (_, b) in rects.iter().skip(i + 1) {
+                    // Vertical gutter: b sits to the right of a, sharing a column.
+                    if b.x == a.x + a.w + Self::PANE_GAP {
+                        let y0 = a.y.max(b.y);
+                        let y1 = (a.y + a.h).min(b.y + b.h);
+                        if y1 > y0 {
+                            renderer.push_divider(a.x + a.w, y0, Self::PANE_GAP, y1 - y0, divider);
+                        }
+                    }
+                    // Horizontal gutter: b sits below a, sharing a row.
+                    if b.y == a.y + a.h + Self::PANE_GAP {
+                        let x0 = a.x.max(b.x);
+                        let x1 = (a.x + a.w).min(b.x + b.w);
+                        if x1 > x0 {
+                            renderer.push_divider(x0, a.y + a.h, x1 - x0, Self::PANE_GAP, divider);
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Err(err) = renderer.render_multi() {
+            log::debug!("split frame dropped: {err:?}");
+            self.force_full_redraw = true;
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
+        }
+    }
+
+    /// Author one pane's terminal grid into the renderer's current pane (between
+    /// `begin_pane`/`end_pane`) using LOCAL `(col, row)` coords. A self-contained
+    /// version of the single-pane cell loop: full rebuild (no damage), cells +
+    /// selection + cursor overlay. `win_focused`/`blink_on` drive the cursor
+    /// style; `hovered_link` underlines the hovered OSC8 link.
+    #[allow(clippy::too_many_arguments)]
+    fn push_pane(
+        renderer: &mut Renderer,
+        pty: &Pty,
+        cols: usize,
+        rows: usize,
+        win_focused: bool,
+        blink_on: bool,
+        hovered_link: Option<&str>,
+    ) {
+        let term = pty.term.lock();
+        let content = term.renderable_content();
+        let colors = content.colors;
+        let display_offset = content.display_offset as i32;
+        let cursor = content.cursor;
+        let selection = content.selection;
+        let cursor_color = color::resolve(Color::Named(NamedColor::Cursor), colors);
+
+        let cursor_shown = cursor.shape != CursorShape::Hidden;
+        let cursor_row = cursor.point.line.0 + display_offset;
+        let cursor_col = cursor.point.column.0 as i32;
+        // A focused window's block cursor inverts the cell beneath it; the pane is
+        // always treated as "containing" the cursor (focus is window-level here).
+        let invert_block = cursor_shown && win_focused && cursor.shape == CursorShape::Block;
+
+        let cells: Vec<_> = content.display_iter.collect();
+        let mut row_started = vec![false; rows];
+        let mut ci = 0;
+        while ci < cells.len() {
+            let indexed = &cells[ci];
+            let cell = indexed.cell;
+            if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                ci += 1;
+                continue;
+            }
+            let row = indexed.point.line.0 + display_offset;
+            let col = indexed.point.column.0 as i32;
+            if row < 0 || row >= rows as i32 || col < 0 || col >= cols as i32 {
+                ci += 1;
+                continue;
+            }
+            let row_u = row as usize;
+            if !row_started[row_u] {
+                renderer.begin_row(row_u);
+                row_started[row_u] = true;
+            }
+
+            let mut fg = color::resolve(cell.fg, colors);
+            let mut bg = color::resolve(cell.bg, colors);
+            if cell.flags.contains(Flags::INVERSE) {
+                std::mem::swap(&mut fg, &mut bg);
+            }
+            if cell.flags.contains(Flags::DIM) {
+                fg = [fg[0] * 0.66, fg[1] * 0.66, fg[2] * 0.66, fg[3]];
+            }
+            if selection.is_some_and(|range| range.contains(indexed.point)) {
+                bg = color::selection_bg();
+            }
+            if invert_block && row == cursor_row && col == cursor_col {
+                std::mem::swap(&mut fg, &mut bg);
+            }
+            let hidden = cell.flags.contains(Flags::HIDDEN);
+            let bold = cell.flags.contains(Flags::BOLD) || cell.flags.contains(Flags::BOLD_ITALIC);
+            let italic =
+                cell.flags.contains(Flags::ITALIC) || cell.flags.contains(Flags::BOLD_ITALIC);
+            let wide = cell.flags.contains(Flags::WIDE_CHAR);
+
+            let mut decorations = if hidden {
+                Decorations::default()
+            } else {
+                let underline = if cell.flags.contains(Flags::UNDERCURL) {
+                    UnderlineStyle::Curl
+                } else if cell.flags.contains(Flags::DOTTED_UNDERLINE) {
+                    UnderlineStyle::Dotted
+                } else if cell.flags.contains(Flags::DASHED_UNDERLINE) {
+                    UnderlineStyle::Dashed
+                } else if cell.flags.contains(Flags::DOUBLE_UNDERLINE) {
+                    UnderlineStyle::Double
+                } else if cell.flags.contains(Flags::UNDERLINE) {
+                    UnderlineStyle::Single
+                } else {
+                    UnderlineStyle::None
+                };
+                let color = cell
+                    .underline_color()
+                    .map(|c| color::resolve(c, colors))
+                    .unwrap_or(fg);
+                Decorations {
+                    underline,
+                    strikeout: cell.flags.contains(Flags::STRIKEOUT),
+                    color,
+                }
+            };
+            if !hidden
+                && matches!(decorations.underline, UnderlineStyle::None)
+                && let Some(hov) = hovered_link
+                && cell.hyperlink().is_some_and(|h| h.uri() == hov)
+            {
+                decorations.underline = UnderlineStyle::Single;
+            }
+
+            let ch = if hidden || cell.c == '\0' { ' ' } else { cell.c };
+            let (combiners, consumed) = if hidden {
+                (Vec::new(), unit_len(&cells, ci))
+            } else {
+                build_grapheme(&cells, ci, indexed.point.line.0)
+            };
+            let wide = wide || consumed >= 2;
+            renderer.push_cell(col as usize, row_u, ch, &combiners, fg, bg, bold, italic, wide, decorations);
+            ci += consumed;
+        }
+
+        // Cursor overlay (same precedence as the single-pane path).
+        if cursor_shown && cursor_row >= 0 && cursor_row < rows as i32 && cursor_col >= 0 && cursor_col < cols as i32 {
+            let blink_off = win_focused && cursor.shape != CursorShape::Hidden && !blink_on
+                && term.cursor_style().blinking;
+            if !blink_off {
+                let overlay = if !win_focused {
+                    Some(CursorOverlay::Hollow)
+                } else {
+                    match cursor.shape {
+                        CursorShape::Beam => Some(CursorOverlay::Beam),
+                        CursorShape::Underline => Some(CursorOverlay::Underline),
+                        CursorShape::HollowBlock => Some(CursorOverlay::Hollow),
+                        CursorShape::Block | CursorShape::Hidden => None,
+                    }
+                };
+                if let Some(overlay) = overlay {
+                    let r = cursor_row as usize;
+                    if row_started[r] {
+                        renderer.set_cur_row(r);
+                    } else {
+                        renderer.begin_row(r);
+                    }
+                    renderer.push_cursor(cursor_col as usize, r, overlay, cursor_color);
+                }
+            }
+        }
     }
 
     /// Handle a keypress while the settings overlay is open: arrow-key navigation
@@ -2197,19 +2919,29 @@ impl App {
         if size.width == 0 || size.height == 0 {
             return;
         }
-        let (Some(renderer), Some(pty)) = (self.renderer.as_mut(), self.pty.as_ref()) else {
+        let Some(renderer) = self.renderer.as_mut() else {
             return;
         };
         renderer.resize(size.width, size.height);
         let m = renderer.cell_metrics();
         let (cols, rows) = Self::grid_for(size, m.width, m.height, renderer.pad());
-        if cols != self.cols || rows != self.rows {
+        let (cw, ch) = (m.width.round() as u16, m.height.round() as u16);
+
+        if self.panes.is_some() {
+            // Active tab is split: fan each pane out to its new tile rectangle.
+            // (This also re-points self.cols/self.rows at the focused pane.)
+            self.resize_panes();
+        } else if cols != self.cols || rows != self.rows {
             self.cols = cols;
             self.rows = rows;
-            let (cw, ch) = (m.width.round() as u16, m.height.round() as u16);
-            pty.resize(cols, rows, cw, ch);
-            // Keep background tabs in sync so switching to one shows correct layout.
-            for s in &self.background {
+            if let Some(pty) = self.pty.as_ref() {
+                pty.resize(cols, rows, cw, ch);
+            }
+        }
+        // Keep NON-split background tabs in sync so switching to one shows the
+        // correct layout; split background tabs are re-laid-out on activation.
+        for s in &self.background {
+            if s.panes.is_none() {
                 s.pty.resize(cols, rows, cw, ch);
             }
         }
@@ -2354,6 +3086,22 @@ impl ApplicationHandler<UserEvent> for App {
                 self.new_tab(event_loop);
             }
         }
+        // Headless: split the active tab at startup to capture the multi-pane path.
+        //   v = one vertical (left|right) split, h = one horizontal (top/bottom),
+        //   grid = both (a 2x2 quad).
+        if let Ok(spec) = std::env::var("GLASSY_SPLIT") {
+            match spec.as_str() {
+                "v" => self.split_pane(pane::Dir::Vertical, event_loop),
+                "h" => self.split_pane(pane::Dir::Horizontal, event_loop),
+                "grid" => {
+                    self.split_pane(pane::Dir::Vertical, event_loop);
+                    self.split_pane(pane::Dir::Horizontal, event_loop);
+                    self.focus_pane(pane::Move::Left, event_loop);
+                    self.split_pane(pane::Dir::Horizontal, event_loop);
+                }
+                _ => {}
+            }
+        }
 
         // Draw the first frame, then reveal the window (avoids a white flash).
         self.next_frame = Instant::now();
@@ -2378,6 +3126,8 @@ impl ApplicationHandler<UserEvent> for App {
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
             UserEvent::Title(id, title) => {
+                // Only a tab's FOCUSED pane drives the chip/window title; a
+                // non-focused pane's title is not surfaced (kept simple).
                 if id == self.active_id {
                     self.active_title = title;
                     self.update_window_title();
@@ -2386,16 +3136,12 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             UserEvent::ChildExit(id) => {
-                if id == self.active_id {
-                    self.close_active_tab(event_loop);
-                } else {
-                    self.background.retain(|s| s.id != id);
-                    self.update_window_title();
-                }
+                self.handle_child_exit(id, event_loop);
                 return;
             }
             UserEvent::Bell(id) => {
-                if id == self.active_id {
+                // Ring for any pane of the active tab (the visible one).
+                if self.id_in_active_tab(id) {
                     self.trigger_bell();
                 }
             }
@@ -2407,15 +3153,23 @@ impl ApplicationHandler<UserEvent> for App {
                 // about_to_wait advances the spinner and clears the deadline (and
                 // keeps a finite wakeup scheduled) exactly like the bell flash.
                 let busy = Instant::now() + BUSY_LINGER;
+                // Output from a NON-focused pane of the ACTIVE tab is visible, so
+                // mark the active tab busy and repaint just like the focused pane.
+                if id != self.active_id && self.id_in_active_tab(id) {
+                    self.active_busy_until = Some(busy);
+                    self.mark_dirty(event_loop);
+                    return;
+                }
                 if id != self.active_id {
-                    // A background tab produced output: flag it for the header
-                    // activity dot. Only repaint on the false->true edge so a busy
-                    // background tab (e.g. a build) doesn't spam redraws.
-                    if let Some(s) = self.background.iter_mut().find(|s| s.id == id) {
+                    // A background tab produced output (in any of its panes): flag
+                    // its chip for the activity dot. Only repaint on the false->true
+                    // edge so a busy background tab doesn't spam redraws.
+                    let owner = self.tab_pos_of_pane(id).and_then(|p| self.tab_order.get(p).copied());
+                    if let Some(owner) = owner
+                        && let Some(s) = self.background.iter_mut().find(|s| s.id == owner)
+                    {
                         let was_busy = s.busy_until.is_some_and(|t| Instant::now() < t);
                         s.busy_until = Some(busy);
-                        // Repaint on a false->true edge (first activity, or the
-                        // spinner restarting) so the chip starts spinning promptly.
                         if !s.activity || !was_busy {
                             s.activity = true;
                             self.mark_dirty(event_loop);
@@ -2426,15 +3180,11 @@ impl ApplicationHandler<UserEvent> for App {
                 self.active_busy_until = Some(busy);
             }
             UserEvent::PtyWrite(id, text) => {
-                // Route the VT reply back to the session that produced it (active
-                // or a background tab); not a visual change, so no repaint.
+                // Route the VT reply back to the exact pane that produced it (any
+                // tab, any split pane); not a visual change, so no repaint.
                 let bytes = text.into_bytes();
-                if id == self.active_id {
-                    if let Some(pty) = &self.pty {
-                        pty.write(bytes);
-                    }
-                } else if let Some(s) = self.background.iter().find(|s| s.id == id) {
-                    s.pty.write(bytes);
+                if let Some(pty) = self.pty_by_id(id) {
+                    pty.write(bytes);
                 }
                 return;
             }
@@ -2507,10 +3257,43 @@ impl ApplicationHandler<UserEvent> for App {
                             return;
                         }
                         "W" | "w" => {
-                            self.close_active_tab(event_loop);
+                            // Close the focused pane; falls back to closing the tab
+                            // when the tab has only a single pane.
+                            self.close_pane(event_loop);
+                            return;
+                        }
+                        // Split the focused pane: E = vertical (left|right),
+                        // O = horizontal (top/bottom). Mirrors common terminals.
+                        "E" | "e" => {
+                            self.split_pane(pane::Dir::Vertical, event_loop);
+                            return;
+                        }
+                        "O" | "o" => {
+                            self.split_pane(pane::Dir::Horizontal, event_loop);
                             return;
                         }
                         _ => {}
+                    }
+                }
+
+                // Alt+Arrow moves focus between tiled panes (no-op when not split,
+                // so a single-pane tab passes Alt+Arrow through to the child).
+                if event.state.is_pressed()
+                    && self.mods.alt_key()
+                    && !self.mods.control_key()
+                    && self.is_split()
+                    && let Key::Named(named) = &event.logical_key
+                {
+                    let m = match named {
+                        NamedKey::ArrowLeft => Some(pane::Move::Left),
+                        NamedKey::ArrowRight => Some(pane::Move::Right),
+                        NamedKey::ArrowUp => Some(pane::Move::Up),
+                        NamedKey::ArrowDown => Some(pane::Move::Down),
+                        _ => None,
+                    };
+                    if let Some(m) = m {
+                        self.focus_pane(m, event_loop);
+                        return;
                     }
                 }
 
@@ -2771,6 +3554,16 @@ impl ApplicationHandler<UserEvent> for App {
                     return;
                 }
 
+                // In a split, a press over a non-focused pane focuses it first, so
+                // selection / mouse-reporting below target the pane the user
+                // clicked. Re-derive the (now pane-local) cell after the swap.
+                if pressed && self.is_split() {
+                    let (mx, my) = self.mouse_px;
+                    if self.focus_pane_at(mx, my, event_loop) {
+                        self.mouse_cell = self.px_to_cell(mx, my);
+                    }
+                }
+
                 let mode = self.term_mode();
                 // Ctrl+Left opens an OSC8 hyperlink under the pointer, overriding
                 // application mouse handling (the common terminal convention).
@@ -2894,6 +3687,13 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 self.tab_scroll_accum = 0.0;
 
+                // In a split, the wheel targets the pane under the pointer: focus it
+                // so the scroll / mouse-report below acts on that pane's PTY.
+                if self.is_split() {
+                    let (mx, my) = self.mouse_px;
+                    self.focus_pane_at(mx, my, event_loop);
+                }
+
                 let lines = match delta {
                     MouseScrollDelta::LineDelta(_, y) => {
                         self.content_scroll_accum = 0.0;
@@ -2984,11 +3784,19 @@ impl ApplicationHandler<UserEvent> for App {
         // dump it to disk, and exit.
         if let Some(deadline) = self.capture_deadline {
             if Instant::now() >= deadline {
+                let split = self.is_split();
                 self.render();
                 if let (Some(renderer), Some(path)) =
                     (self.renderer.as_mut(), self.capture.as_ref())
                 {
-                    match renderer.capture(path) {
+                    // A split tab builds the multi-pane instance lists; capture
+                    // those, otherwise the single-grid path.
+                    let res = if split {
+                        renderer.capture_multi(path)
+                    } else {
+                        renderer.capture(path)
+                    };
+                    match res {
                         Ok(()) => log::info!("captured frame to {}", path.display()),
                         Err(e) => log::error!("capture failed: {e:#}"),
                     }

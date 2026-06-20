@@ -964,6 +964,12 @@ impl Renderer {
         self.font_px
     }
 
+    /// The current surface size in physical pixels `(width, height)`. Used by the
+    /// split-pane layout to tile the full surface below the tab strip.
+    pub fn surface_size(&self) -> (u32, u32) {
+        (self.config.width, self.config.height)
+    }
+
     /// Override the grid padding (inset) with an explicit physical-pixel value,
     /// preserved across runtime font resizes. The caller must recompute the grid.
     pub fn set_pad(&mut self, pad: f32) {
@@ -2436,24 +2442,24 @@ impl Renderer {
                 continue;
             }
             pass.set_scissor_rect(s.x, s.y, s.w, s.h);
-            if p.bg_end > p.bg_start {
-                if let Some(buf) = &self.mp.bg_buffer {
-                    pass.set_pipeline(&self.bg_pipeline);
-                    pass.set_bind_group(0, &self.uniform_bind_group, &[]);
-                    pass.set_vertex_buffer(0, self.unit_quad.slice(..));
-                    pass.set_vertex_buffer(1, buf.slice(..));
-                    pass.draw(0..4, p.bg_start..p.bg_end);
-                }
+            if p.bg_end > p.bg_start
+                && let Some(buf) = &self.mp.bg_buffer
+            {
+                pass.set_pipeline(&self.bg_pipeline);
+                pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+                pass.set_vertex_buffer(0, self.unit_quad.slice(..));
+                pass.set_vertex_buffer(1, buf.slice(..));
+                pass.draw(0..4, p.bg_start..p.bg_end);
             }
-            if p.fg_end > p.fg_start {
-                if let Some(buf) = &self.mp.fg_buffer {
-                    pass.set_pipeline(&self.fg_pipeline);
-                    pass.set_bind_group(0, &self.uniform_bind_group, &[]);
-                    pass.set_bind_group(1, &self.atlas_bind_group, &[]);
-                    pass.set_vertex_buffer(0, self.unit_quad.slice(..));
-                    pass.set_vertex_buffer(1, buf.slice(..));
-                    pass.draw(0..4, p.fg_start..p.fg_end);
-                }
+            if p.fg_end > p.fg_start
+                && let Some(buf) = &self.mp.fg_buffer
+            {
+                pass.set_pipeline(&self.fg_pipeline);
+                pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+                pass.set_bind_group(1, &self.atlas_bind_group, &[]);
+                pass.set_vertex_buffer(0, self.unit_quad.slice(..));
+                pass.set_vertex_buffer(1, buf.slice(..));
+                pass.draw(0..4, p.fg_start..p.fg_end);
             }
         }
     }
@@ -2461,6 +2467,43 @@ impl Renderer {
     /// Render the current frame to an offscreen texture and write it to `path`
     /// as a binary PPM (P6). Used for headless screenshot verification.
     pub fn capture(&mut self, path: &std::path::Path) -> Result<()> {
+        self.end_frame();
+        let bg_count = self.bg_count;
+        let fg_count = self.fg_count;
+        self.capture_with(path, |s, view, enc| s.record_passes(view, enc, bg_count, fg_count))
+    }
+
+    /// Capture the last-built MULTI-PANE frame to a PPM (headless verification of
+    /// the split render path). Uploads the flat per-pane instance lists, then
+    /// records the same scissored passes as `render_multi` into an offscreen
+    /// target.
+    pub fn capture_multi(&mut self, path: &std::path::Path) -> Result<()> {
+        Self::upload_mp_buffer::<BgInstance>(
+            &self.device,
+            &self.queue,
+            &self.mp.bg,
+            &mut self.mp.bg_buffer,
+            &mut self.mp.bg_capacity,
+            "mp-bg-instances",
+        );
+        Self::upload_mp_buffer::<FgInstance>(
+            &self.device,
+            &self.queue,
+            &self.mp.fg,
+            &mut self.mp.fg_buffer,
+            &mut self.mp.fg_capacity,
+            "mp-fg-instances",
+        );
+        self.capture_with(path, |s, view, enc| s.record_multi_passes(view, enc))
+    }
+
+    /// Shared offscreen-capture machinery: allocate a render target, let `record`
+    /// emit its passes into it, copy it back, and write a binary PPM (P6).
+    fn capture_with(
+        &mut self,
+        path: &std::path::Path,
+        record: impl FnOnce(&Self, &wgpu::TextureView, &mut wgpu::CommandEncoder),
+    ) -> Result<()> {
         let width = self.config.width.max(1);
         let height = self.config.height.max(1);
 
@@ -2480,10 +2523,6 @@ impl Renderer {
         });
         let view = target.create_view(&wgpu::TextureViewDescriptor::default());
 
-        self.end_frame();
-        let bg_count = self.bg_count;
-        let fg_count = self.fg_count;
-
         // Readback rows must be padded to COPY_BYTES_PER_ROW_ALIGNMENT.
         let unpadded = width * 4;
         let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
@@ -2500,7 +2539,7 @@ impl Renderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("capture-encoder"),
             });
-        self.record_passes(&view, &mut encoder, bg_count, fg_count);
+        record(self, &view, &mut encoder);
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
                 texture: &target,
