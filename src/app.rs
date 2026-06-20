@@ -839,8 +839,9 @@ impl App {
         // toward the foreground color; otherwise clear it. Computed before the
         // renderer borrow so it can read `self.bell_flash_until`.
         let flash = if self.bell_flash_until.is_some_and(|t| Instant::now() < t) {
-            let [r, g, b, _] = color::default_fg();
-            Some([r, g, b, bell::FLASH_ALPHA])
+            // A soft accent tint rather than a stark white flash — a shell bell
+            // (failed tab-completion, pager limits) fires often, so keep it gentle.
+            Some(bell::FLASH_COLOR)
         } else {
             None
         };

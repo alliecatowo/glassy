@@ -221,6 +221,38 @@ impl Pty {
     }
 }
 
+/// Whether a VT byte run contains a full-screen erase (`CSI 2J` or `CSI 3J`) or a
+/// terminal reset (`ESC c`, RIS) — the signals that the screen content (and thus
+/// any inline images anchored to it) is being wiped, e.g. by `clear`/`reset`.
+fn clears_screen(bytes: &[u8]) -> bool {
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == 0x1b {
+            match bytes.get(i + 1) {
+                Some(b'c') => return true, // RIS
+                Some(b'[') => {
+                    // CSI ... J — scan the (numeric) parameter up to the final 'J'.
+                    let mut j = i + 2;
+                    while j < bytes.len() && (bytes[j].is_ascii_digit() || bytes[j] == b';') {
+                        j += 1;
+                    }
+                    if bytes.get(j) == Some(&b'J') {
+                        let param = &bytes[i + 2..j];
+                        if param == b"2" || param == b"3" {
+                            return true;
+                        }
+                    }
+                    i = j;
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
 /// PTY read/parse loop: waits on the master fd, drains control messages, reads
 /// available bytes, taps image sequences, and feeds the rest to the VT parser.
 fn run_loop(
@@ -294,6 +326,15 @@ fn run_loop(
                     for ev in events {
                         match ev {
                             crate::image::TapEvent::Vt(bytes) => {
+                                // A full screen erase (CSI 2J / 3J) or terminal
+                                // reset (RIS, ESC c) wipes the content images sit
+                                // on, so drop placements at that point in the
+                                // stream (ordered: images later in this read
+                                // survive, since the tap split them into their own
+                                // Display events after this Vt run).
+                                if clears_screen(&bytes) {
+                                    images.lock().delete(0);
+                                }
                                 processor.advance(&mut *term, &bytes);
                             }
                             crate::image::TapEvent::Display(p) => {
