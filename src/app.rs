@@ -111,6 +111,42 @@ fn fit_label(t: &str, max: usize) -> String {
     format!("…{tail}")
 }
 
+/// Cells occupied by the left-hand " ◆ " mark before the tab chips. MUST match
+/// the mark pushed in the header renderer.
+const HEADER_MARK_COLS: usize = 3;
+
+/// Build the tab-strip chip labels in display order (index 0 = the active tab as
+/// "1", then background tabs "2".., each with a ● when it has unseen activity).
+/// Shared by the header renderer and the click hit-test so the drawn chips and
+/// the click targets never disagree.
+fn header_chip_labels(active_title: &str, background: &[(&str, bool)]) -> Vec<String> {
+    let mut labels = vec![format!(" 1 {} ", fit_label(active_title, 16))];
+    for (i, (title, activity)) in background.iter().enumerate() {
+        labels.push(if *activity {
+            format!(" {} {} ● ", i + 2, fit_label(title, 16))
+        } else {
+            format!(" {} {} ", i + 2, fit_label(title, 16))
+        });
+    }
+    labels
+}
+
+/// Index of the chip containing `click_col`, with chips laid out left-to-right
+/// from `start_col` (their cell widths are their char counts, matching how the
+/// header pushes one cell per char). `None` if the click is past the last chip.
+/// Pure for unit testing.
+fn chip_index_at(labels: &[String], start_col: usize, click_col: usize) -> Option<usize> {
+    let mut col = start_col;
+    for (i, label) in labels.iter().enumerate() {
+        let w = label.chars().count();
+        if click_col >= col && click_col < col + w {
+            return Some(i);
+        }
+        col += w;
+    }
+    None
+}
+
 /// Lines shown in the F1 help overlay (left column = keys, right = action). Kept
 /// as static text so the overlay costs nothing until it is opened.
 const HELP_LINES: &[&str] = &[
@@ -584,12 +620,20 @@ impl App {
         if !(0.0..TAB_STRIP_ROWS as f64).contains(&screen_row) {
             return false;
         }
-        let total = self.tab_count();
-        if total > 1 {
+        if self.tab_count() > 1 {
+            // Hit-test against the actual chip layout (same helper the renderer
+            // uses), not equal-width slots. Chip 0 is the active tab (clicking it
+            // is a no-op); chip i>=1 maps to background[i-1].
             let col = ((x - pad) / m.width as f64).floor().max(0.0) as usize;
-            let slot = (self.cols / total).max(1);
-            let idx = (col / slot).min(total - 1);
-            if idx >= 1 {
+            let bg: Vec<(&str, bool)> = self
+                .background
+                .iter()
+                .map(|s| (s.title.as_str(), s.activity))
+                .collect();
+            let labels = header_chip_labels(&self.active_title, &bg);
+            if let Some(idx) = chip_index_at(&labels, HEADER_MARK_COLS, col)
+                && idx >= 1
+            {
                 self.activate_background(idx - 1, event_loop);
             }
         }
@@ -1181,22 +1225,24 @@ impl App {
                 let title_max = self.cols.saturating_sub(16).max(8);
                 push(&mut bar, &fit_label(&self.active_title, title_max), base_fg, bar_bg);
             } else {
-                // Multiple tabs: chips, active highlighted. Active tab first.
-                push(
-                    &mut bar,
-                    &format!(" 1 {} ", fit_label(&self.active_title, 16)),
-                    active_fg,
-                    active_bg,
-                );
-                for (i, s) in self.background.iter().enumerate() {
-                    // A background tab with unseen output gets a ● dot and a
-                    // brighter label so it stands out.
-                    let (cfg, label) = if s.activity {
-                        (base_fg, format!(" {} {} ● ", i + 2, fit_label(&s.title, 16)))
+                // Multiple tabs: chips, active highlighted, drawn from the shared
+                // layout helper (so click hit-testing matches exactly). Chip 0 is
+                // the active tab; chip i>=1 is background[i-1] (brighter + ● when
+                // it has unseen activity).
+                let bg: Vec<(&str, bool)> = self
+                    .background
+                    .iter()
+                    .map(|s| (s.title.as_str(), s.activity))
+                    .collect();
+                for (i, label) in header_chip_labels(&self.active_title, &bg).iter().enumerate() {
+                    let (cfg, cbg) = if i == 0 {
+                        (active_fg, active_bg)
+                    } else if bg[i - 1].1 {
+                        (base_fg, bar_bg)
                     } else {
-                        (dim_fg, format!(" {} {} ", i + 2, fit_label(&s.title, 16)))
+                        (dim_fg, bar_bg)
                     };
-                    push(&mut bar, &label, cfg, bar_bg);
+                    push(&mut bar, label, cfg, cbg);
                 }
             }
             while bar.len() < self.cols {
@@ -2091,8 +2137,31 @@ impl ApplicationHandler<UserEvent> for App {
 
 #[cfg(test)]
 mod tests {
-    use super::{WheelAction, image_dst_size, motion_button, wheel_action};
+    use super::{
+        HEADER_MARK_COLS, WheelAction, chip_index_at, header_chip_labels, image_dst_size,
+        motion_button, wheel_action,
+    };
     use alacritty_terminal::term::TermMode;
+
+    #[test]
+    fn chip_hit_test_matches_layout() {
+        // Two tabs: active "1" + one background "2". A click in each chip's drawn
+        // range must resolve to that chip; clicks before/after resolve to nothing.
+        let labels = header_chip_labels("zsh", &[("vim", false)]);
+        // Chip 0 = " 1 zsh " (7 cols) starting at HEADER_MARK_COLS (3): cols 3..10.
+        // Chip 1 = " 2 vim " (7 cols): cols 10..17.
+        assert_eq!(chip_index_at(&labels, HEADER_MARK_COLS, 2), None); // in the mark
+        assert_eq!(chip_index_at(&labels, HEADER_MARK_COLS, 4), Some(0)); // active
+        assert_eq!(chip_index_at(&labels, HEADER_MARK_COLS, 12), Some(1)); // background
+        assert_eq!(chip_index_at(&labels, HEADER_MARK_COLS, 99), None); // past chips
+    }
+
+    #[test]
+    fn chip_label_marks_activity() {
+        let labels = header_chip_labels("a", &[("b", true)]);
+        assert!(labels[1].contains('●')); // busy background tab shows a dot
+        assert!(!labels[0].contains('●'));
+    }
 
     #[test]
     fn wheel_normal_screen_scrolls_scrollback() {
