@@ -1068,18 +1068,21 @@ impl Renderer {
         // keep the ordinary one-cell box.
         let box_w = if wide { cell_w * 2.0 } else { cell_w };
 
-        // Always push the cell background; the clear color handles the common case
-        // but per-cell quads keep the model simple and overdraw is cheap here.
-        // A wide cell's background spans both columns so the spacer column (which
-        // we never visit) is still painted. Backgrounds take the window opacity
-        // (premultiplied) so the desktop shows through uniformly; foreground solids
-        // pushed via `push_solid` stay opaque.
+        // Push the cell background, but skip cells whose background equals the
+        // frame's clear color — the clear already paints those, so emitting a quad
+        // for every default cell is pure overdraw (the common case is most of the
+        // grid). Decorations and procedural box/block segments are separate
+        // instances pushed afterward, so they are unaffected by the skip. A wide
+        // cell's background spans both columns. Backgrounds take the window opacity
+        // (premultiplied) so the desktop shows through uniformly.
         let glass = self.glass_bg(bg);
-        self.rows[self.cur_row].bg.push(BgInstance {
-            pos: [origin_x, origin_y],
-            size: [box_w, cell_h],
-            color: glass,
-        });
+        if glass != self.clear_color {
+            self.rows[self.cur_row].bg.push(BgInstance {
+                pos: [origin_x, origin_y],
+                size: [box_w, cell_h],
+                color: glass,
+            });
+        }
 
         // Underline / strikethrough strokes span the full cell width so they join
         // seamlessly across adjacent decorated cells. Pushed here (after the cell
