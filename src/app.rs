@@ -459,6 +459,15 @@ fn motion_button(mode: TermMode, held: Option<u8>) -> Option<u8> {
 /// terminal cadence (and the GTK/VTE default).
 const BLINK_INTERVAL: Duration = Duration::from_millis(530);
 
+/// Tab "busy" spinner. A session is BUSY while it is actively producing output;
+/// each PTY wakeup re-arms a `BUSY_LINGER` deadline, and the chip spins until that
+/// elapses with no further output (mirroring the bell-flash deadline). While any
+/// tab is busy we advance one `SPINNER_FRAMES` glyph every `SPINNER_INTERVAL` and
+/// schedule a finite wakeup for it; once nothing is busy we return to `Wait`.
+const SPINNER_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧'];
+const SPINNER_INTERVAL: Duration = Duration::from_millis(100);
+const BUSY_LINGER: Duration = Duration::from_millis(600);
+
 // --- Grapheme-cluster reconstruction across grid cells ----------------------
 // A user-perceived character (extended grapheme cluster) can span several grid
 // cells: a base emoji plus a ZWJ-joined emoji (flags, family, profession), a
@@ -574,6 +583,10 @@ struct Session {
     /// Set when this background tab produces output; shown as a dot on its chip
     /// and cleared when the tab is activated. Lets you see which tab is busy.
     activity: bool,
+    /// While this session is actively producing output, the deadline after which
+    /// it counts as idle again. Re-armed on every PTY wakeup; cleared (back to
+    /// `None`) once elapsed in `about_to_wait`. Drives the chip's busy spinner.
+    busy_until: Option<Instant>,
 }
 
 pub struct App {
@@ -691,6 +704,15 @@ pub struct App {
     blink_on: bool,
     blink_at: Instant,
 
+    // Tab busy-spinner state. `active_busy_until` is the active session's busy
+    // deadline (the parked sessions keep their own in `Session::busy_until`).
+    // `spinner_at` is when the next spinner frame is due and `spinner_frame` the
+    // current glyph index. The spinner only animates while some tab is busy;
+    // otherwise we never schedule a wakeup for it (preserving the 0%-idle path).
+    active_busy_until: Option<Instant>,
+    spinner_frame: usize,
+    spinner_at: Instant,
+
     // Headless capture: when `GLASSY_CAPTURE` is set, render after a short delay
     // (so the shell has produced output), write a PPM, and exit.
     capture: Option<std::path::PathBuf>,
@@ -763,6 +785,9 @@ impl App {
             refresh: Duration::from_micros(16_666), // 60 Hz default until queried
             blink_on: true,
             blink_at: Instant::now() + BLINK_INTERVAL,
+            active_busy_until: None,
+            spinner_frame: 0,
+            spinner_at: Instant::now() + SPINNER_INTERVAL,
             capture: std::env::var_os("GLASSY_CAPTURE").map(std::path::PathBuf::from),
             capture_deadline: None,
             force_full_redraw: true,
@@ -1147,12 +1172,15 @@ impl App {
                 pty: old,
                 title: std::mem::take(&mut self.active_title),
                 activity: false,
+                // Carry the parked session's busy state so its chip keeps spinning.
+                busy_until: self.active_busy_until.take(),
             });
         }
         self.tab_order.push(id);
         self.pty = Some(pty);
         self.active_id = id;
         self.active_title.clear();
+        self.active_busy_until = None;
         self.reset_pointer_state();
         self.update_window_title();
         self.force_full_redraw = true;
@@ -1208,6 +1236,8 @@ impl App {
                 pty: cur,
                 title: std::mem::take(&mut self.active_title),
                 activity: false,
+                // Carry the parked session's busy state so its chip keeps spinning.
+                busy_until: self.active_busy_until.take(),
             });
         }
         let bi = self.background.iter().position(|s| s.id == target_id).unwrap_or(bi);
@@ -1215,6 +1245,8 @@ impl App {
         self.pty = Some(target.pty);
         self.active_id = target.id;
         self.active_title = target.title;
+        // Inherit the activated session's busy deadline (it streams in the fg now).
+        self.active_busy_until = target.busy_until;
         self.reset_pointer_state();
         self.update_window_title();
         // A full repaint so the new tab's grid replaces the old one's persisted
@@ -1779,9 +1811,31 @@ impl App {
             let multi = descs.len() > 1;
             let hov = self.hovered_strip_item;
             let held = self.held_strip_item;
+            // Current spinner glyph + per-tab "actively streaming" flags (in stable
+            // order, parallel to `descs`). Computed here, off `self`'s tab fields,
+            // before the loop borrows the renderer below.
+            let now = Instant::now();
+            let spin = SPINNER_FRAMES[self.spinner_frame % SPINNER_FRAMES.len()];
+            let (active_id, active_busy, bg) =
+                (self.active_id, self.active_busy_until, &self.background);
+            let spinning: Vec<bool> = self
+                .tab_order
+                .iter()
+                .map(|&id| {
+                    let until = if id == active_id {
+                        active_busy
+                    } else {
+                        bg.iter().find(|s| s.id == id).and_then(|s| s.busy_until)
+                    };
+                    until.is_some_and(|t| now < t)
+                })
+                .collect();
             for seg in strip_layout(&descs, self.cols) {
                 let is_active = matches!(seg.item, StripItem::Tab(i) | StripItem::TabClose(i) if descs.get(i).is_some_and(|d| d.1));
                 let is_busy = matches!(seg.item, StripItem::Tab(i) if descs.get(i).is_some_and(|d| d.2));
+                // Whether THIS tab is actively producing output (spinner, not dot).
+                let is_spinning = matches!(seg.item, StripItem::Tab(i)
+                    if spinning.get(i).copied().unwrap_or(false));
                 let hovered = hov == Some(seg.item);
                 let pressed = held == Some(seg.item);
                 // Chip surface by precedence: PRESSED (inset/darker) > hover > idle.
@@ -1815,9 +1869,16 @@ impl App {
                     ),
                 };
                 put(&mut bar, seg.start, &seg.label, fg, sbg);
-                // A clear activity dot on busy *background* tab chips (the active
-                // tab is never "busy"): replace the chip's leading pad with `•`.
-                if is_busy && !is_active {
+                // Replace the chip's leading pad with a status glyph: a braille
+                // spinner while the session is actively streaming (any tab,
+                // including the active one), else a static activity dot for a
+                // background tab that produced output but has since gone quiet. On
+                // the accent-filled active chip the glyph uses the dark active_fg so
+                // it stays legible; elsewhere it reuses the accent color.
+                if is_spinning {
+                    let gfg = if is_active { active_fg } else { accent };
+                    put(&mut bar, seg.start, &spin.to_string(), gfg, sbg);
+                } else if is_busy && !is_active {
                     put(&mut bar, seg.start, "•", accent, sbg);
                 }
             }
@@ -2118,13 +2179,18 @@ impl App {
     /// phase boundary and/or the visual-bell flash deadline, whichever is sooner.
     /// `None` means nothing is pending and the loop can park on `ControlFlow::Wait`
     /// (0% idle).
-    fn next_wake(&self, blink_active: bool, flash_active: bool) -> Option<Instant> {
+    fn next_wake(&self, blink_active: bool, flash_active: bool, spin_active: bool) -> Option<Instant> {
         let blink = blink_active.then_some(self.blink_at);
         let flash = flash_active.then_some(self.bell_flash_until).flatten();
-        match (blink, flash) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
-        }
+        let spin = spin_active.then_some(self.spinner_at);
+        [blink, flash, spin].into_iter().flatten().min()
+    }
+
+    /// Whether any tab is currently busy. While true the spinner must keep
+    /// animating (a finite, self-extending wakeup); when false we return to `Wait`.
+    fn any_tab_busy(&self, now: Instant) -> bool {
+        self.active_busy_until.is_some_and(|t| now < t)
+            || self.background.iter().any(|s| s.busy_until.is_some_and(|t| now < t))
     }
 
     fn handle_resize(&mut self, event_loop: &ActiveEventLoop, size: PhysicalSize<u32>) {
@@ -2336,18 +2402,28 @@ impl ApplicationHandler<UserEvent> for App {
             // A background tab produced output: its terminal state updated
             // silently; no redraw needed until it becomes active.
             UserEvent::Wakeup(id) => {
+                // (Re)arm this session's busy window: a wakeup means it just emitted
+                // output, so its chip spins until BUSY_LINGER elapses with no more.
+                // about_to_wait advances the spinner and clears the deadline (and
+                // keeps a finite wakeup scheduled) exactly like the bell flash.
+                let busy = Instant::now() + BUSY_LINGER;
                 if id != self.active_id {
                     // A background tab produced output: flag it for the header
                     // activity dot. Only repaint on the false->true edge so a busy
                     // background tab (e.g. a build) doesn't spam redraws.
-                    if let Some(s) = self.background.iter_mut().find(|s| s.id == id)
-                        && !s.activity
-                    {
-                        s.activity = true;
-                        self.mark_dirty(event_loop);
+                    if let Some(s) = self.background.iter_mut().find(|s| s.id == id) {
+                        let was_busy = s.busy_until.is_some_and(|t| Instant::now() < t);
+                        s.busy_until = Some(busy);
+                        // Repaint on a false->true edge (first activity, or the
+                        // spinner restarting) so the chip starts spinning promptly.
+                        if !s.activity || !was_busy {
+                            s.activity = true;
+                            self.mark_dirty(event_loop);
+                        }
                     }
                     return;
                 }
+                self.active_busy_until = Some(busy);
             }
             UserEvent::PtyWrite(id, text) => {
                 // Route the VT reply back to the session that produced it (active
@@ -2958,10 +3034,41 @@ impl ApplicationHandler<UserEvent> for App {
             None => false,
         };
 
+        // Tab busy-spinner: while any tab is busy, advance one glyph at each
+        // `spinner_at` deadline and repaint so the chip animates. Once a session's
+        // busy window lapses, clear it (so its chip stops spinning) and repaint one
+        // last frame. This is a finite, self-extending wake; when nothing is busy
+        // we never schedule a spinner wakeup and idle returns to `Wait`.
+        let mut busy_lapsed = false;
+        if self.active_busy_until.is_some_and(|t| now >= t) {
+            self.active_busy_until = None;
+            busy_lapsed = true;
+        }
+        for s in &mut self.background {
+            if s.busy_until.is_some_and(|t| now >= t) {
+                s.busy_until = None;
+                busy_lapsed = true;
+            }
+        }
+        let spin_active = self.any_tab_busy(now);
+        if spin_active {
+            if now >= self.spinner_at {
+                self.spinner_frame = self.spinner_frame.wrapping_add(1);
+                self.spinner_at = now + SPINNER_INTERVAL;
+                self.dirty = true;
+            }
+        } else {
+            // Settle the phase so the next busy burst starts on the first frame.
+            self.spinner_frame = 0;
+        }
+        if busy_lapsed {
+            self.dirty = true;
+        }
+
         if !self.dirty {
-            // Idle: stay parked on `Wait` (0% CPU) unless a blink flip or a flash
-            // boundary is pending, in which case wake at the earliest deadline.
-            match self.next_wake(blink_active, flash_active) {
+            // Idle: stay parked on `Wait` (0% CPU) unless a blink flip, a flash
+            // boundary, or a spinner frame is pending — then wake at the earliest.
+            match self.next_wake(blink_active, flash_active, spin_active) {
                 Some(at) => event_loop.set_control_flow(ControlFlow::WaitUntil(at)),
                 None => event_loop.set_control_flow(ControlFlow::Wait),
             }
@@ -2974,8 +3081,9 @@ impl ApplicationHandler<UserEvent> for App {
             }
             self.next_frame = now + self.refresh;
             // RedrawRequested will clear `dirty`. Keep a wakeup scheduled for the
-            // next blink flip or flash boundary; otherwise wait for the next event.
-            match self.next_wake(blink_active, flash_active) {
+            // next blink flip, flash boundary, or spinner frame; else wait for an
+            // event.
+            match self.next_wake(blink_active, flash_active, spin_active) {
                 Some(at) => event_loop.set_control_flow(ControlFlow::WaitUntil(at)),
                 None => event_loop.set_control_flow(ControlFlow::Wait),
             }
