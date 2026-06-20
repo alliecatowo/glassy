@@ -6,7 +6,6 @@
 //! glyph atlas; everything here is pure CPU work and is fully cached per
 //! `(char, bold, italic)` so repeated cells are a cheap `HashMap` lookup.
 
-use std::collections::HashMap;
 #[cfg(unix)]
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -55,7 +54,8 @@ pub struct RasterizedGlyph {
     pub data: Vec<u8>,
 }
 
-/// Owns the shaping/rasterization state and the glyph cache.
+/// Owns the shaping/rasterization state. Rasterized glyphs are *not* cached here;
+/// the renderer caches the packed atlas glyphs and only calls in on a miss.
 pub struct Text {
     font_system: FontSystem,
     swash_cache: SwashCache,
@@ -64,9 +64,6 @@ pub struct Text {
     /// The resolved font family. We store the name as an owned `String` because
     /// `Family::Name` borrows; `attrs()` rebuilds the borrowing `Family` per call.
     family: FamilyOwned,
-    cache: HashMap<(char, bool, bool), Vec<RasterizedGlyph>>,
-    /// Cache for multi-codepoint grapheme clusters (combining/ZWJ sequences).
-    cluster_cache: HashMap<(String, bool, bool), Vec<RasterizedGlyph>>,
 }
 
 /// Owned counterpart to `cosmic_text::Family`, holding the name string so we can
@@ -181,8 +178,6 @@ impl Text {
             swash_cache: SwashCache::new(),
             buffer: Buffer::new_empty(metrics),
             family,
-            cache: HashMap::new(),
-            cluster_cache: HashMap::new(),
         };
 
         let cell = text.measure_cell(font_px, line_height);
@@ -302,39 +297,23 @@ impl Text {
 
     /// Return the glyph bitmap(s) needed to draw `ch` in the given style.
     ///
-    /// Results are cached per `(char, bold, italic)`. Blank cells (spaces and
-    /// anything with no drawable coverage) yield an empty slice.
-    pub fn rasterize(&mut self, ch: char, bold: bool, italic: bool) -> &[RasterizedGlyph] {
-        let key = (ch, bold, italic);
-        if !self.cache.contains_key(&key) {
-            // Compute into a local Vec first: this borrows `font_system`,
-            // `swash_cache`, `buffer`, and `family` — all fields disjoint from
-            // `cache` — so the later `cache.insert` does not conflict.
-            let mut tmp = [0u8; 4];
-            let glyphs = self.build_glyphs(ch.encode_utf8(&mut tmp), bold, italic);
-            self.cache.insert(key, glyphs);
-        }
-        &self.cache[&key]
+    /// Blank cells (spaces and anything with no drawable coverage) yield an empty
+    /// Vec. Not cached here: the renderer caches the *packed atlas glyphs* and only
+    /// calls this on a cache miss, so a second Text-level cache would just retain a
+    /// duplicate bitmap that is never read.
+    pub fn rasterize(&mut self, ch: char, bold: bool, italic: bool) -> Vec<RasterizedGlyph> {
+        let mut tmp = [0u8; 4];
+        self.build_glyphs(ch.encode_utf8(&mut tmp), bold, italic)
     }
 
     /// Rasterize a full grapheme cluster (a base character plus its combining
     /// marks / ZWJ-joined codepoints) as a single shaped unit, so compound
     /// emoji (flags, ZWJ sequences, skin-tone modifiers) and combining
-    /// sequences resolve to their single combined glyph. Cached by the cluster
-    /// string + style. Used only for cells that actually carry combiners; the
-    /// common single-character path stays on `rasterize`.
-    pub fn rasterize_cluster(
-        &mut self,
-        cluster: &str,
-        bold: bool,
-        italic: bool,
-    ) -> &[RasterizedGlyph] {
-        let key = (cluster.to_string(), bold, italic);
-        if !self.cluster_cache.contains_key(&key) {
-            let glyphs = self.build_glyphs(cluster, bold, italic);
-            self.cluster_cache.insert(key.clone(), glyphs);
-        }
-        &self.cluster_cache[&key]
+    /// sequences resolve to their single combined glyph. Used only for cells that
+    /// actually carry combiners; the common single-character path stays on
+    /// `rasterize`. Uncached for the same reason as [`Text::rasterize`].
+    pub fn rasterize_cluster(&mut self, cluster: &str, bold: bool, italic: bool) -> Vec<RasterizedGlyph> {
+        self.build_glyphs(cluster, bold, italic)
     }
 
     /// Shape and rasterize a single character into owned RGBA bitmaps.

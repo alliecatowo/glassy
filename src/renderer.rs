@@ -2297,7 +2297,7 @@ impl Renderer {
         if self.glyph_cache.contains_key(&key) {
             return;
         }
-        let rasters = collect_rasters(self.text.rasterize(ch, bold, italic));
+        let rasters = collect_rasters(&self.text.rasterize(ch, bold, italic));
         let packed = self.pack_rasters(&rasters);
         self.glyph_cache.insert(key, packed);
     }
@@ -2309,7 +2309,7 @@ impl Renderer {
         if self.cluster_cache.contains_key(&key) {
             return;
         }
-        let rasters = collect_rasters(self.text.rasterize_cluster(cluster, bold, italic));
+        let rasters = collect_rasters(&self.text.rasterize_cluster(cluster, bold, italic));
         let packed = self.pack_rasters(&rasters);
         self.cluster_cache.insert(key, packed);
     }
