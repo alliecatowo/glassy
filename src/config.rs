@@ -97,10 +97,25 @@ impl RawConfig {
         });
         let theme_name = color::canonical_name(theme_input).to_string();
 
+        // A non-finite opacity (e.g. `--opacity nan`) survives `clamp` as NaN and
+        // would poison the renderer's premultiply math, so fall back to the
+        // default. font_size is similarly guarded against non-finite input.
+        let opacity = self.opacity.unwrap_or(DEFAULT_OPACITY);
+        let opacity = if opacity.is_finite() {
+            opacity.clamp(0.0, 1.0)
+        } else {
+            DEFAULT_OPACITY
+        };
+        let font_size = self.font_size.unwrap_or(DEFAULT_FONT_SIZE);
+        let font_size = if font_size.is_finite() && font_size > 0.0 {
+            font_size
+        } else {
+            DEFAULT_FONT_SIZE
+        };
         let config = Config {
             font_family: self.font_family,
-            font_size: self.font_size.unwrap_or(DEFAULT_FONT_SIZE),
-            opacity: self.opacity.unwrap_or(DEFAULT_OPACITY).clamp(0.0, 1.0),
+            font_size,
+            opacity,
             padding: self.padding,
             scrollback: self.scrollback.unwrap_or(DEFAULT_SCROLLBACK),
             shell: self.shell,
@@ -413,6 +428,18 @@ CONFIG FILE:
 #[cfg(test)]
 mod tests {
     use super::{RawConfig, merge_config, parse_bool, parse_config_file};
+
+    #[test]
+    fn non_finite_opacity_and_font_size_fall_back() {
+        let raw = RawConfig {
+            opacity: Some(f32::NAN),
+            font_size: Some(f32::INFINITY),
+            ..Default::default()
+        };
+        let s = raw.into_settings().expect("settings");
+        assert!(s.config.opacity.is_finite() && (0.0..=1.0).contains(&s.config.opacity));
+        assert!(s.config.font_size.is_finite() && s.config.font_size > 0.0);
+    }
 
     #[test]
     fn merge_updates_in_place_and_appends() {
