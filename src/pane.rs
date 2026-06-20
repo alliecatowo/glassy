@@ -2,6 +2,10 @@
 //! the spirit of a tiling window manager. No winit/wgpu dependencies: this is
 //! geometry + tree only. The running app supplies fresh leaf ids and consumes
 //! the computed per-leaf pixel rectangles; everything here is unit-testable.
+//!
+//! Staged ahead of UI wiring: the engine is complete and unit-tested, but the
+//! app doesn't drive it yet, so silence dead-code noise until it's hooked up.
+#![allow(dead_code)]
 
 /// Direction a split divides space. `Vertical` is a left|right divider (the two
 /// children sit side by side); `Horizontal` is a top/bottom divider (children

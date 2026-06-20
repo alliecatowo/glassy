@@ -2682,7 +2682,7 @@ impl ApplicationHandler<UserEvent> for App {
                         let step = self
                             .renderer
                             .as_ref()
-                            .map(|r| r.cell_metrics().height as f32)
+                            .map(|r| r.cell_metrics().height)
                             .unwrap_or(20.0)
                             .max(1.0);
                         let n = (self.content_scroll_accum / step) as i32;
