@@ -94,6 +94,102 @@ fn image_dst_size(
     }
 }
 
+/// Trim a header/tab label to at most `max` chars, keeping the *tail* (the cwd or
+/// git-branch end is the informative part) with a leading ellipsis when cut.
+/// Empty input becomes "shell". Pure for unit testing.
+fn fit_label(t: &str, max: usize) -> String {
+    let t = t.trim();
+    let base = if t.is_empty() { "shell" } else { t };
+    let chars: Vec<char> = base.chars().collect();
+    if chars.len() <= max {
+        return base.to_string();
+    }
+    if max <= 1 {
+        return "…".to_string();
+    }
+    let tail: String = chars[chars.len() - (max - 1)..].iter().collect();
+    format!("…{tail}")
+}
+
+/// Lines shown in the F1 help overlay (left column = keys, right = action). Kept
+/// as static text so the overlay costs nothing until it is opened.
+const HELP_LINES: &[&str] = &[
+    "  glassy — keybindings",
+    "",
+    "  Ctrl+Shift+T      New tab",
+    "  Ctrl+Shift+W      Close tab",
+    "  Ctrl+Tab          Next tab",
+    "  Ctrl+Shift+Tab    Previous tab",
+    "  Ctrl+Shift+C / V  Copy / Paste",
+    "  Ctrl  +  /  -  / 0  Font bigger / smaller / reset",
+    "  Shift+PgUp/PgDn   Scroll history",
+    "  Shift+Home/End    Scroll top / bottom",
+    "  Ctrl+Click        Open hyperlink",
+    "",
+    "  F1 or Esc         Close this help",
+];
+
+/// Darken an RGB color toward black by `f` (0 = black, 1 = unchanged), keeping
+/// alpha. Used for the help-overlay backdrop.
+fn darken(c: [f32; 4], f: f32) -> [f32; 4] {
+    [c[0] * f, c[1] * f, c[2] * f, c[3]]
+}
+
+/// Lighten an RGB color toward white by `amount`, keeping alpha. Used for the
+/// raised help-panel surface.
+fn lighten(c: [f32; 4], amount: f32) -> [f32; 4] {
+    [
+        (c[0] + amount).min(1.0),
+        (c[1] + amount).min(1.0),
+        (c[2] + amount).min(1.0),
+        c[3],
+    ]
+}
+
+/// Draw the F1 help overlay: a dimmed full-screen backdrop with a centered panel
+/// of keybindings. Rebuilds every screen row (`rows` terminal rows + the strip)
+/// so terminal content underneath is fully replaced. Associated (not `&self`) so
+/// it composes with the active `&mut Renderer` borrow in `render`.
+fn draw_help_overlay(renderer: &mut Renderer, rows: usize, cols: usize) {
+    let total_rows = rows + TAB_STRIP_ROWS;
+    let backdrop = darken(color::default_bg(), 0.45);
+    let panel_bg = lighten(color::default_bg(), 0.07);
+    let border_bg = [0.45, 0.68, 1.0, 1.0]; // accent
+    let text_fg = color::default_fg();
+    let title_fg = [0.55, 0.75, 1.0, 1.0];
+
+    let content_w = HELP_LINES.iter().map(|l| l.chars().count()).max().unwrap_or(0);
+    let panel_w = (content_w + 4).min(cols.max(1));
+    let panel_h = (HELP_LINES.len() + 2).min(total_rows.max(1));
+    let left = (cols.saturating_sub(panel_w)) / 2;
+    let top = (total_rows.saturating_sub(panel_h)) / 2;
+
+    for row in 0..total_rows {
+        renderer.begin_row(row);
+        for col in 0..cols {
+            let in_panel =
+                row >= top && row < top + panel_h && col >= left && col < left + panel_w;
+            let (ch, fg, bg) = if in_panel {
+                let prow = row - top;
+                let pcol = col - left;
+                if prow == 0 || prow == panel_h - 1 || pcol == 0 || pcol == panel_w - 1 {
+                    (' ', text_fg, border_bg) // 1-cell accent border
+                } else {
+                    let li = prow - 1;
+                    let line = HELP_LINES.get(li).copied().unwrap_or("");
+                    let tcol = pcol - 1; // 1-cell interior pad
+                    let c = line.chars().nth(tcol).unwrap_or(' ');
+                    let fg = if li == 0 { title_fg } else { text_fg };
+                    (c, fg, panel_bg)
+                }
+            } else {
+                (' ', backdrop, backdrop)
+            };
+            renderer.push_cell(col, row, ch, &[], fg, bg, false, false, false, Decorations::default());
+        }
+    }
+}
+
 /// Which mouse-button id to report for a pointer-motion event, or `None` to stay
 /// silent. `held` is the currently pressed button (0/1/2) or `None`. Mirrors
 /// xterm: any-motion mode (1003) reports even with no button (id 3); button-only
@@ -251,6 +347,8 @@ pub struct App {
 
     mods: ModifiersState,
     focused: bool,
+    /// Whether the F1 help overlay is currently shown.
+    help_open: bool,
 
     // Mouse reporting state.
     /// Last known cursor cell (col, row), clamped to the grid.
@@ -332,6 +430,7 @@ impl App {
             base_font_px: None,
             mods: ModifiersState::empty(),
             focused: true,
+            help_open: false,
             mouse_cell: (0, 0),
             mouse_px: (0.0, 0.0),
             held_button: None,
@@ -994,30 +1093,50 @@ impl App {
                 base_fg[2] * 0.6,
                 base_fg[3],
             ];
-            let short = |t: &str| -> String {
-                let t = t.trim();
-                let base = if t.is_empty() { "shell" } else { t };
-                base.chars().take(16).collect()
-            };
-            // Active tab first, then background tabs in order.
-            let mut labels: Vec<(String, bool)> =
-                vec![(format!(" 1 {} ", short(&self.active_title)), true)];
-            for (i, s) in self.background.iter().enumerate() {
-                labels.push((format!(" {} {} ", i + 2, short(&s.title)), false));
-            }
+            let accent = [0.45, 0.68, 1.0, 1.0];
             let mut bar: Vec<(char, [f32; 4], [f32; 4])> = Vec::with_capacity(self.cols);
-            for (label, active) in &labels {
-                let (lfg, lbg) = if *active {
-                    (active_fg, active_bg)
-                } else {
-                    (dim_fg, bar_bg)
-                };
-                for ch in label.chars() {
-                    bar.push((ch, lfg, lbg));
+            let push = |bar: &mut Vec<(char, [f32; 4], [f32; 4])>, s: &str, fg, bg| {
+                for ch in s.chars() {
+                    bar.push((ch, fg, bg));
+                }
+            };
+            // tab_count() borrows all of self; the renderer borrow is live, so read
+            // the disjoint field directly (active tab + parked background tabs).
+            let total = 1 + self.background.len();
+            // glassy mark on the left.
+            push(&mut bar, " ◆ ", accent, bar_bg);
+            if total <= 1 {
+                // Single tab: the strip is a title bar — show the active title
+                // (cwd / running program) instead of a useless "1 shell" chip.
+                push(&mut bar, &fit_label(&self.active_title, 72), base_fg, bar_bg);
+            } else {
+                // Multiple tabs: chips, active highlighted. Active tab first.
+                push(
+                    &mut bar,
+                    &format!(" 1 {} ", fit_label(&self.active_title, 16)),
+                    active_fg,
+                    active_bg,
+                );
+                for (i, s) in self.background.iter().enumerate() {
+                    push(
+                        &mut bar,
+                        &format!(" {} {} ", i + 2, fit_label(&s.title, 16)),
+                        dim_fg,
+                        bar_bg,
+                    );
                 }
             }
             while bar.len() < self.cols {
                 bar.push((' ', base_fg, bar_bg));
+            }
+            // Right-aligned help hint, overwriting the tail when there is room.
+            let hint = "F1 help ";
+            let hint_len = hint.chars().count();
+            if self.cols > hint_len + 8 {
+                let start = self.cols - hint_len;
+                for (k, ch) in hint.chars().enumerate() {
+                    bar[start + k] = (ch, dim_fg, bar_bg);
+                }
             }
             bar.truncate(self.cols);
             renderer.begin_row(0);
@@ -1074,7 +1193,8 @@ impl App {
         // live placement list, anchored to the cell they were displayed at. The
         // stored row is viewport-relative at display time; translate by the current
         // scroll offset so images move with the buffer as the user scrolls.
-        {
+        // Suppressed while the help modal is up so images don't punch through it.
+        if !self.help_open {
             let store = pty.images.lock();
             if !store.placements().is_empty() {
                 let m = renderer.cell_metrics();
@@ -1095,6 +1215,13 @@ impl App {
                     renderer.draw_image(p.id, &img.rgba, img.width, img.height, x, y, dst_w, dst_h);
                 }
             }
+        }
+
+        // F1 help overlay: a centered modal over a dimmed backdrop. Rebuilds every
+        // screen row (cheap — only while open, and the screen is static), replacing
+        // terminal content so nothing bleeds through.
+        if self.help_open {
+            draw_help_overlay(renderer, self.rows, self.cols);
         }
 
         // Record the state this frame drew from, so the next frame can repaint only
@@ -1291,6 +1418,11 @@ impl ApplicationHandler<UserEvent> for App {
                 pty.write(bytes);
             }
         }
+        // Headless: open the help overlay at startup for capture verification.
+        if std::env::var_os("GLASSY_HELP").is_some() {
+            self.help_open = true;
+            self.force_full_redraw = true;
+        }
 
         // Draw the first frame, then reveal the window (avoids a white flash).
         self.next_frame = Instant::now();
@@ -1457,6 +1589,25 @@ impl ApplicationHandler<UserEvent> for App {
                         if let Some(pty) = &self.pty {
                             pty.term.lock().scroll_display(scroll);
                         }
+                        self.mark_dirty(event_loop);
+                        return;
+                    }
+                }
+
+                // F1 toggles the help overlay; Esc closes it when open. Both are
+                // consumed (Esc still reaches the child when help is closed).
+                if event.state.is_pressed() {
+                    if let Key::Named(NamedKey::F1) = &event.logical_key {
+                        self.help_open = !self.help_open;
+                        self.force_full_redraw = true;
+                        self.mark_dirty(event_loop);
+                        return;
+                    }
+                    if self.help_open
+                        && matches!(&event.logical_key, Key::Named(NamedKey::Escape))
+                    {
+                        self.help_open = false;
+                        self.force_full_redraw = true;
                         self.mark_dirty(event_loop);
                         return;
                     }
