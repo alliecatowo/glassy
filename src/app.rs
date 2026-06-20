@@ -207,6 +207,15 @@ fn strip_item_at(segs: &[StripSeg], click_col: usize) -> Option<StripItem> {
         .map(|s| s.item)
 }
 
+/// Move the element at index `from` to index `to`, shifting the rest. Used to
+/// reorder tabs by dragging. Pure for unit testing.
+fn move_in_order<T>(v: &mut Vec<T>, from: usize, to: usize) {
+    if from < v.len() && to < v.len() && from != to {
+        let item = v.remove(from);
+        v.insert(to, item);
+    }
+}
+
 /// Lines shown in the F1 help overlay (left column = keys, right = action). Kept
 /// as static text so the overlay costs nothing until it is opened.
 const HELP_LINES: &[&str] = &[
@@ -497,6 +506,10 @@ pub struct App {
 
     mods: ModifiersState,
     focused: bool,
+    /// While a tab chip is held, its current stable position — set on press,
+    /// updated as the pointer drags it over other slots (reorders `tab_order`),
+    /// cleared on release. `None` when not dragging a tab.
+    dragging_tab: Option<usize>,
     /// Wall-clock at App construction + whether the first frame has been timed,
     /// so we can log time-to-first-frame once (a startup benchmark).
     started: Instant,
@@ -593,6 +606,7 @@ impl App {
             focused: true,
             started: Instant::now(),
             first_frame_done: false,
+            dragging_tab: None,
             help_open: false,
             settings_open: false,
             settings_sel: 0,
@@ -681,6 +695,48 @@ impl App {
     /// landed in the strip (and was consumed), so the caller skips selection/paste.
     /// Background tabs are hit-tested by equal-width slots; clicking the active
     /// tab's slot is a no-op.
+    /// The toolbar item at strip column `col`, built from the live (stable-order)
+    /// tab descriptors. Shared by click + drag-reorder so they agree with render.
+    fn strip_item_at_col(&self, col: usize) -> Option<StripItem> {
+        let descs: Vec<(String, bool, bool)> = self
+            .tab_order
+            .iter()
+            .map(|&id| {
+                if id == self.active_id {
+                    (self.active_title.clone(), true, false)
+                } else {
+                    self.background
+                        .iter()
+                        .find(|s| s.id == id)
+                        .map(|s| (s.title.clone(), false, s.activity))
+                        .unwrap_or((String::new(), false, false))
+                }
+            })
+            .collect();
+        let refs: Vec<(&str, bool, bool)> =
+            descs.iter().map(|(t, a, b)| (t.as_str(), *a, *b)).collect();
+        strip_item_at(&strip_layout(&refs, self.cols), col)
+    }
+
+    /// While a tab is held (`dragging_tab`), reorder it under the pointer at strip
+    /// column `col`: if the pointer is over a different tab slot, move the dragged
+    /// tab there in `tab_order`. Returns true if a reorder happened (repaint).
+    fn drag_tab_to(&mut self, col: usize) -> bool {
+        let Some(from) = self.dragging_tab else {
+            return false;
+        };
+        let to = match self.strip_item_at_col(col) {
+            Some(StripItem::Tab(p)) | Some(StripItem::TabClose(p)) => p,
+            _ => return false,
+        };
+        if to == from || from >= self.tab_order.len() || to >= self.tab_order.len() {
+            return false;
+        }
+        move_in_order(&mut self.tab_order, from, to);
+        self.dragging_tab = Some(to);
+        true
+    }
+
     fn strip_click(&mut self, event_loop: &ActiveEventLoop) -> bool {
         let Some(renderer) = self.renderer.as_ref() else {
             return false;
@@ -693,31 +749,15 @@ impl App {
             return false;
         }
         // Hit-test against the actual toolbar layout (the same helper the renderer
-        // uses, so click targets match what's drawn). Scope the descriptor borrow
-        // so the dispatch below can take `&mut self`.
+        // uses, so click targets match what's drawn).
         let col = ((x - pad) / m.width as f64).floor().max(0.0) as usize;
-        let item = {
-            let descs: Vec<(String, bool, bool)> = self
-                .tab_order
-                .iter()
-                .map(|&id| {
-                    if id == self.active_id {
-                        (self.active_title.clone(), true, false)
-                    } else {
-                        self.background
-                            .iter()
-                            .find(|s| s.id == id)
-                            .map(|s| (s.title.clone(), false, s.activity))
-                            .unwrap_or((String::new(), false, false))
-                    }
-                })
-                .collect();
-            let refs: Vec<(&str, bool, bool)> =
-                descs.iter().map(|(t, a, b)| (t.as_str(), *a, *b)).collect();
-            strip_item_at(&strip_layout(&refs, self.cols), col)
-        };
-        match item {
-            Some(StripItem::Tab(pos)) => self.activate_tab(pos, event_loop),
+        match self.strip_item_at_col(col) {
+            Some(StripItem::Tab(pos)) => {
+                self.activate_tab(pos, event_loop);
+                // Begin a potential drag-to-reorder from this slot (the tab is now
+                // active at `pos`); CursorMoved reorders, release ends it.
+                self.dragging_tab = Some(self.active_pos());
+            }
             Some(StripItem::TabClose(pos)) => self.close_tab(pos, event_loop),
             Some(StripItem::NewTab) => self.new_tab(event_loop),
             Some(StripItem::Help) => {
@@ -746,6 +786,7 @@ impl App {
         self.held_button = None;
         self.hovered_link = None;
         self.last_click = None;
+        self.dragging_tab = None;
     }
 
     /// Open a new tab and make it active, parking the current tab in `background`.
@@ -2074,6 +2115,21 @@ impl ApplicationHandler<UserEvent> for App {
                 let moved = cell != self.mouse_cell;
                 self.mouse_cell = cell;
 
+                // Drag-to-reorder a tab: while a tab chip is held, move it under
+                // the pointer's column. Takes priority over selection/hover.
+                if self.dragging_tab.is_some() {
+                    if let Some(r) = self.renderer.as_ref() {
+                        let col = ((position.x - r.pad() as f64) / r.cell_metrics().width as f64)
+                            .floor()
+                            .max(0.0) as usize;
+                        if self.drag_tab_to(col) {
+                            self.force_full_redraw = true;
+                            self.mark_dirty(event_loop);
+                        }
+                    }
+                    return;
+                }
+
                 // Extend an in-progress glassy text selection while dragging.
                 if self.selecting {
                     self.update_selection();
@@ -2106,6 +2162,9 @@ impl ApplicationHandler<UserEvent> for App {
                 let pressed = state == ElementState::Pressed;
                 // Track the held button for drag reports regardless of mode.
                 self.held_button = if pressed { Some(base) } else { None };
+                if !pressed {
+                    self.dragging_tab = None; // end any tab drag-reorder on release
+                }
 
                 // A left click in the tab strip switches tabs; never sent onward.
                 if button == MouseButton::Left && pressed && self.strip_click(event_loop) {
@@ -2314,9 +2373,22 @@ impl ApplicationHandler<UserEvent> for App {
 #[cfg(test)]
 mod tests {
     use super::{
-        StripItem, WheelAction, image_dst_size, motion_button, strip_item_at, strip_layout,
-        wheel_action,
+        StripItem, WheelAction, image_dst_size, motion_button, move_in_order, strip_item_at,
+        strip_layout, wheel_action,
     };
+
+    #[test]
+    fn move_in_order_reorders() {
+        let mut v = vec![10, 20, 30, 40];
+        move_in_order(&mut v, 0, 2); // drag first to index 2
+        assert_eq!(v, vec![20, 30, 10, 40]);
+        move_in_order(&mut v, 3, 0); // drag last to front
+        assert_eq!(v, vec![40, 20, 30, 10]);
+        move_in_order(&mut v, 1, 1); // no-op
+        assert_eq!(v, vec![40, 20, 30, 10]);
+        move_in_order(&mut v, 9, 0); // out of range: no-op
+        assert_eq!(v, vec![40, 20, 30, 10]);
+    }
     use alacritty_terminal::term::TermMode;
 
     #[test]
