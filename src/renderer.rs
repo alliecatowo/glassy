@@ -357,6 +357,88 @@ pub struct Renderer {
     /// window). When false we keep backgrounds fully opaque so a compositor that
     /// can't do translucency doesn't darken the window via premultiplied RGB.
     transparent: bool,
+
+    /// Multi-pane (split) render path. Empty/idle on the single-grid fast path;
+    /// populated only between [`Renderer::begin_multi_frame`] and
+    /// [`Renderer::render_multi`]. Splitting is rare, so this path fully rebuilds
+    /// each frame (no per-row damage tracking) for simplicity.
+    mp: MultiPane,
+}
+
+/// State for the multi-pane (split) render path. A flat instance list whose
+/// every quad already carries its ABSOLUTE surface-pixel position (pane pixel
+/// origin + cell offset), plus one scissored draw per pane so a pane never
+/// paints outside its region. Kept entirely separate from the single-grid
+/// `rows`/`bg_buffer`/`fg_buffer` machinery so the fast path is untouched.
+#[derive(Default)]
+struct MultiPane {
+    /// Per-pane draw records (scissor rect + the instance sub-ranges to draw).
+    panes: Vec<PaneDraw>,
+    /// Flattened background instances for all panes, in pane order.
+    bg: Vec<BgInstance>,
+    /// Flattened foreground instances for all panes, in pane order.
+    fg: Vec<FgInstance>,
+    /// The pane currently being built (its origin + scissor), if any.
+    cur: Option<PaneBuild>,
+    /// Instance buffers + capacities for this path (grown on demand).
+    bg_buffer: Option<wgpu::Buffer>,
+    fg_buffer: Option<wgpu::Buffer>,
+    bg_capacity: usize,
+    fg_capacity: usize,
+}
+
+/// A finished pane's draw record: the GPU scissor rectangle and the half-open
+/// instance ranges (into `MultiPane::bg`/`fg`) that belong to this pane.
+#[derive(Clone, Copy)]
+struct PaneDraw {
+    scissor: ScissorRect,
+    bg_start: u32,
+    bg_end: u32,
+    fg_start: u32,
+    fg_end: u32,
+}
+
+/// The pane being assembled between `begin_pane` and `end_pane`.
+#[derive(Clone, Copy)]
+struct PaneBuild {
+    /// Absolute pixel origin (top-left) added to every pushed quad.
+    origin: [f32; 2],
+    /// Clamped scissor for this pane.
+    scissor: ScissorRect,
+    /// First bg/fg instance index of this pane in the flat lists.
+    bg_start: u32,
+    fg_start: u32,
+    /// Whether to draw the accent focus border for this pane.
+    focused: bool,
+}
+
+/// A GPU scissor rectangle in surface pixels: an unsigned origin + extent,
+/// already clamped to the surface so `set_scissor_rect` never rejects it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct ScissorRect {
+    x: u32,
+    y: u32,
+    w: u32,
+    h: u32,
+}
+
+/// Clamp an integer pixel rect (which may be partly off-surface or have a
+/// negative origin) to the `surface_w` x `surface_h` bounds, yielding a scissor
+/// the GPU will accept. A rect fully outside the surface clamps to zero extent.
+/// Pure geometry (no GPU state) so it is unit-tested directly.
+fn clamp_scissor(x: i32, y: i32, w: i32, h: i32, surface_w: u32, surface_h: u32) -> ScissorRect {
+    // Left/top edges clamped to [0, surface]; right/bottom edges likewise, then
+    // the extent is the (non-negative) difference.
+    let x0 = x.max(0).min(surface_w as i32);
+    let y0 = y.max(0).min(surface_h as i32);
+    let x1 = (x + w.max(0)).max(0).min(surface_w as i32);
+    let y1 = (y + h.max(0)).max(0).min(surface_h as i32);
+    ScissorRect {
+        x: x0 as u32,
+        y: y0 as u32,
+        w: (x1 - x0).max(0) as u32,
+        h: (y1 - y0).max(0) as u32,
+    }
 }
 
 impl Renderer {
@@ -839,6 +921,7 @@ impl Renderer {
             flash: None,
             opacity: opacity.clamp(0.0, 1.0),
             transparent,
+            mp: MultiPane::default(),
         };
 
         // Pre-warm the atlas with printable ASCII so the first frame is rasterize-free.
@@ -2087,6 +2170,294 @@ impl Renderer {
         }
     }
 
+    // --- Multi-pane (split) render path ------------------------------------
+    //
+    // The single-grid path above (begin_frame/begin_row/push_cell/render) is the
+    // zero-overhead default used whenever a tab has one pane. The methods below
+    // are a SEPARATE path for tiled splits: each pane is built relative to its
+    // own pixel origin and drawn under its own scissor rect, so panes never bleed
+    // into one another. This path forgoes per-row damage tracking (it rebuilds
+    // every frame) — splitting is rare, and the simplicity is worth it.
+    //
+    // Usage per frame:
+    //   begin_multi_frame(default_bg);
+    //   for each pane:
+    //     begin_pane(rect, focused);
+    //     begin_row(r); push_cell(...); ...        // local (col,row) as usual
+    //     push_cursor(...);                         // local (col,row)
+    //     end_pane();
+    //   draw_divider(rect, ...) / focus border emitted by end_pane;
+    //   render_multi();
+    //
+    // `begin_row`/`push_cell`/`push_cursor` are reused verbatim: a pane authors
+    // its cells into `self.rows` exactly like the single-grid path, and `end_pane`
+    // translates those instances by the pane's pixel origin into the flat
+    // per-pane lists. So all the box-drawing / decoration / glyph / cursor logic
+    // is shared with zero duplication.
+
+    /// Begin a multi-pane frame: set the clear color and reset the pane lists.
+    /// Follow with one `begin_pane`/.../`end_pane` group per pane, then
+    /// `render_multi`. Mirrors [`Renderer::begin_frame`]'s clear-color handling.
+    #[allow(dead_code)]
+    pub fn begin_multi_frame(&mut self, default_bg: [f32; 4]) {
+        self.clear_color = self.glass_bg(default_bg);
+        self.image_overlay.clear();
+        self.mp.panes.clear();
+        self.mp.bg.clear();
+        self.mp.fg.clear();
+        self.mp.cur = None;
+    }
+
+    /// Begin a pane occupying surface-pixel rectangle `rect`. Cells pushed until
+    /// the matching [`Renderer::end_pane`] are authored with local `(col, row)`
+    /// and end up positioned at `rect`'s origin under a scissor clamped to `rect`.
+    /// `focused` requests the subtle accent focus border (drawn by `end_pane`).
+    /// The per-pane grid is sized large enough to hold the pane's rows via the
+    /// usual `begin_row`; oversized rows are clamped by the scissor.
+    #[allow(dead_code)]
+    pub fn begin_pane(&mut self, rect: crate::pane::Rect, focused: bool) {
+        // Reset the shared scratch rows so this pane starts clean. The pane's
+        // grid height is unknown here; `begin_row` grows `self.rows` on demand.
+        self.rows.clear();
+        self.dirty_rows.clear();
+        let scissor = clamp_scissor(
+            rect.x,
+            rect.y,
+            rect.w,
+            rect.h,
+            self.config.width,
+            self.config.height,
+        );
+        self.mp.cur = Some(PaneBuild {
+            origin: [rect.x as f32, rect.y as f32],
+            scissor,
+            bg_start: self.mp.bg.len() as u32,
+            fg_start: self.mp.fg.len() as u32,
+            focused,
+        });
+    }
+
+    /// Finish the current pane: flush its authored rows (offset by the pane's
+    /// pixel origin) into the flat instance lists, optionally adding the focus
+    /// border, and record the pane's scissored draw range.
+    #[allow(dead_code)]
+    pub fn end_pane(&mut self) {
+        let Some(build) = self.mp.cur.take() else {
+            return;
+        };
+        let [ox, oy] = build.origin;
+        // Translate every authored bg/fg instance by the pane origin. The cells
+        // were laid out at local pixel coords (col*cell_w + pad, ...), so adding
+        // the pane's top-left gives absolute surface pixels.
+        for row in &self.rows {
+            for b in &row.bg {
+                self.mp.bg.push(BgInstance {
+                    pos: [b.pos[0] + ox, b.pos[1] + oy],
+                    size: b.size,
+                    color: b.color,
+                });
+            }
+        }
+        for row in &self.rows {
+            for f in &row.fg {
+                let mut f = *f;
+                f.pos = [f.pos[0] + ox, f.pos[1] + oy];
+                self.mp.fg.push(f);
+            }
+        }
+
+        // Subtle focused-pane border: four thin accent rails just inside the
+        // pane rect, in the bg pass (after the pane's cell backgrounds, before
+        // glyphs) and clipped by this pane's scissor so it never overruns.
+        if build.focused {
+            let th = (self.metrics.height / 12.0).round().max(1.0);
+            let s = build.scissor;
+            if s.w > 0 && s.h > 0 {
+                let x = s.x as f32;
+                let y = s.y as f32;
+                let w = s.w as f32;
+                let h = s.h as f32;
+                let c = crate::color::accent();
+                self.mp.bg.push(BgInstance { pos: [x, y], size: [w, th], color: c }); // top
+                self.mp
+                    .bg
+                    .push(BgInstance { pos: [x, y + h - th], size: [w, th], color: c }); // bottom
+                self.mp.bg.push(BgInstance { pos: [x, y], size: [th, h], color: c }); // left
+                self.mp
+                    .bg
+                    .push(BgInstance { pos: [x + w - th, y], size: [th, h], color: c });
+                // right
+            }
+        }
+
+        self.mp.panes.push(PaneDraw {
+            scissor: build.scissor,
+            bg_start: build.bg_start,
+            bg_end: self.mp.bg.len() as u32,
+            fg_start: build.fg_start,
+            fg_end: self.mp.fg.len() as u32,
+        });
+        // Leave `self.rows` cleared so the next pane (or a return to the
+        // single-grid path via `resize_grid`) starts fresh.
+        self.rows.clear();
+        self.dirty_rows.clear();
+    }
+
+    /// Emit a thin 1px divider rectangle at surface-pixel rect `(x, y, w, h)` in
+    /// `color`. Call between `end_pane` and `render_multi` (e.g. once per gap
+    /// between adjacent panes). Drawn full-screen scissored in the bg pass.
+    #[allow(dead_code)]
+    pub fn push_divider(&mut self, x: i32, y: i32, w: i32, h: i32, color: [f32; 4]) {
+        if w <= 0 || h <= 0 {
+            return;
+        }
+        // A divider belongs to no pane; record it as its own single-quad draw
+        // with a full-surface scissor so it is never clipped by a pane rect.
+        let bg_start = self.mp.bg.len() as u32;
+        self.mp.bg.push(BgInstance {
+            pos: [x as f32, y as f32],
+            size: [w as f32, h as f32],
+            color,
+        });
+        self.mp.panes.push(PaneDraw {
+            scissor: clamp_scissor(0, 0, self.config.width as i32, self.config.height as i32, self.config.width, self.config.height),
+            bg_start,
+            bg_end: self.mp.bg.len() as u32,
+            fg_start: 0,
+            fg_end: 0,
+        });
+    }
+
+    /// Present the multi-pane frame: upload the flat instance lists and issue one
+    /// scissored bg + fg draw per pane. Mirrors [`Renderer::render`]'s surface
+    /// acquisition / self-heal handling.
+    #[allow(dead_code)]
+    pub fn render_multi(&mut self) -> RenderResult {
+        let frame = match self.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(f)
+            | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
+            wgpu::CurrentSurfaceTexture::Lost | wgpu::CurrentSurfaceTexture::Outdated => {
+                let (w, h) = (self.config.width, self.config.height);
+                self.resize(w, h);
+                return Err(SurfaceError::Outdated);
+            }
+            wgpu::CurrentSurfaceTexture::Timeout => return Err(SurfaceError::Timeout),
+            wgpu::CurrentSurfaceTexture::Occluded => return Err(SurfaceError::Occluded),
+            wgpu::CurrentSurfaceTexture::Validation => return Err(SurfaceError::Validation),
+        };
+        let view = frame
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+
+        Self::upload_mp_buffer::<BgInstance>(
+            &self.device,
+            &self.queue,
+            &self.mp.bg,
+            &mut self.mp.bg_buffer,
+            &mut self.mp.bg_capacity,
+            "mp-bg-instances",
+        );
+        Self::upload_mp_buffer::<FgInstance>(
+            &self.device,
+            &self.queue,
+            &self.mp.fg,
+            &mut self.mp.fg_buffer,
+            &mut self.mp.fg_capacity,
+            "mp-fg-instances",
+        );
+
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("frame-encoder-mp"),
+            });
+        self.record_multi_passes(&view, &mut encoder);
+        self.queue.submit(std::iter::once(encoder.finish()));
+        frame.present();
+        Ok(())
+    }
+
+    /// Upload a flat multi-pane instance list, growing the buffer if needed.
+    fn upload_mp_buffer<T: bytemuck::Pod>(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        data: &[T],
+        buffer: &mut Option<wgpu::Buffer>,
+        capacity: &mut usize,
+        label: &str,
+    ) {
+        if data.is_empty() {
+            return;
+        }
+        let stride = std::mem::size_of::<T>();
+        if buffer.is_none() || data.len() > *capacity {
+            let cap = data.len().next_power_of_two().max(INITIAL_INSTANCES);
+            *buffer = Some(device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size: (cap * stride) as u64,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }));
+            *capacity = cap;
+        }
+        queue.write_buffer(buffer.as_ref().unwrap(), 0, bytemuck::cast_slice(data));
+    }
+
+    /// Record the multi-pane passes: clear once, then for each pane set its
+    /// scissor and draw its bg + fg instance sub-ranges. The image overlay (if
+    /// any) draws full-surface on top, matching the single-grid path.
+    fn record_multi_passes(&self, view: &wgpu::TextureView, encoder: &mut wgpu::CommandEncoder) {
+        let [r, g, b, a] = self.clear_color;
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("grid-pass-mp"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color {
+                        r: r as f64,
+                        g: g as f64,
+                        b: b as f64,
+                        a: a as f64,
+                    }),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+
+        for p in &self.mp.panes {
+            let s = p.scissor;
+            if s.w == 0 || s.h == 0 {
+                continue;
+            }
+            pass.set_scissor_rect(s.x, s.y, s.w, s.h);
+            if p.bg_end > p.bg_start {
+                if let Some(buf) = &self.mp.bg_buffer {
+                    pass.set_pipeline(&self.bg_pipeline);
+                    pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+                    pass.set_vertex_buffer(0, self.unit_quad.slice(..));
+                    pass.set_vertex_buffer(1, buf.slice(..));
+                    pass.draw(0..4, p.bg_start..p.bg_end);
+                }
+            }
+            if p.fg_end > p.fg_start {
+                if let Some(buf) = &self.mp.fg_buffer {
+                    pass.set_pipeline(&self.fg_pipeline);
+                    pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+                    pass.set_bind_group(1, &self.atlas_bind_group, &[]);
+                    pass.set_vertex_buffer(0, self.unit_quad.slice(..));
+                    pass.set_vertex_buffer(1, buf.slice(..));
+                    pass.draw(0..4, p.fg_start..p.fg_end);
+                }
+            }
+        }
+    }
+
     /// Render the current frame to an offscreen texture and write it to `path`
     /// as a binary PPM (P6). Used for headless screenshot verification.
     pub fn capture(&mut self, path: &std::path::Path) -> Result<()> {
@@ -2466,5 +2837,49 @@ impl Renderer {
             break;
         }
         packed
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::clamp_scissor;
+
+    #[test]
+    fn scissor_fully_inside_is_unchanged() {
+        let s = clamp_scissor(10, 20, 100, 50, 800, 600);
+        assert_eq!((s.x, s.y, s.w, s.h), (10, 20, 100, 50));
+    }
+
+    #[test]
+    fn scissor_clamps_right_and_bottom_overflow() {
+        // Rect extends past the surface: extent is trimmed, origin kept.
+        let s = clamp_scissor(700, 550, 200, 200, 800, 600);
+        assert_eq!((s.x, s.y, s.w, s.h), (700, 550, 100, 50));
+    }
+
+    #[test]
+    fn scissor_clamps_negative_origin() {
+        // A negative origin clamps to 0 and the extent shrinks accordingly so
+        // the right/bottom edge stays put.
+        let s = clamp_scissor(-30, -10, 100, 80, 800, 600);
+        assert_eq!((s.x, s.y, s.w, s.h), (0, 0, 70, 70));
+    }
+
+    #[test]
+    fn scissor_fully_outside_is_zero_extent() {
+        let s = clamp_scissor(900, 700, 100, 100, 800, 600);
+        assert_eq!((s.w, s.h), (0, 0));
+    }
+
+    #[test]
+    fn scissor_negative_extent_is_zero() {
+        let s = clamp_scissor(10, 10, -50, -50, 800, 600);
+        assert_eq!((s.w, s.h), (0, 0));
+    }
+
+    #[test]
+    fn scissor_exactly_at_surface_edge() {
+        let s = clamp_scissor(0, 0, 800, 600, 800, 600);
+        assert_eq!((s.x, s.y, s.w, s.h), (0, 0, 800, 600));
     }
 }
