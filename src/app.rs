@@ -63,6 +63,37 @@ fn wheel_action(mode: TermMode) -> WheelAction {
     }
 }
 
+/// Pixel size to draw an inline image at, from the kitty `c=`/`r=` display
+/// request (`cols`/`rows`, 0 = unset), the image's native size, and the cell
+/// box. Both set -> exact cell box; one set -> scale the other preserving the
+/// image aspect ratio; neither -> native pixels. Pure for unit testing.
+fn image_dst_size(
+    cols: u32,
+    rows: u32,
+    img_w: u32,
+    img_h: u32,
+    cell_w: f32,
+    cell_h: f32,
+) -> (f32, f32) {
+    let aspect = if img_h > 0 {
+        img_w as f32 / img_h as f32
+    } else {
+        1.0
+    };
+    match (cols, rows) {
+        (0, 0) => (img_w as f32, img_h as f32),
+        (c, 0) => {
+            let w = c as f32 * cell_w;
+            (w, w / aspect)
+        }
+        (0, r) => {
+            let h = r as f32 * cell_h;
+            (h * aspect, h)
+        }
+        (c, r) => (c as f32 * cell_w, r as f32 * cell_h),
+    }
+}
+
 /// Which mouse-button id to report for a pointer-motion event, or `None` to stay
 /// silent. `held` is the currently pressed button (0/1/2) or `None`. Mirrors
 /// xterm: any-motion mode (1003) reports even with no button (id 3); button-only
@@ -1059,16 +1090,8 @@ impl App {
                     let y = screen_row as f32 * m.height + pad;
                     // Honor the kitty c=/r= display size (in cells); otherwise draw
                     // at the image's native pixel size.
-                    let dst_w = if p.cols > 0 {
-                        p.cols as f32 * m.width
-                    } else {
-                        img.width as f32
-                    };
-                    let dst_h = if p.rows > 0 {
-                        p.rows as f32 * m.height
-                    } else {
-                        img.height as f32
-                    };
+                    let (dst_w, dst_h) =
+                        image_dst_size(p.cols, p.rows, img.width, img.height, m.width, m.height);
                     renderer.draw_image(p.id, &img.rgba, img.width, img.height, x, y, dst_w, dst_h);
                 }
             }
@@ -1704,12 +1727,31 @@ impl ApplicationHandler<UserEvent> for App {
 
 #[cfg(test)]
 mod tests {
-    use super::{WheelAction, motion_button, wheel_action};
+    use super::{WheelAction, image_dst_size, motion_button, wheel_action};
     use alacritty_terminal::term::TermMode;
 
     #[test]
     fn wheel_normal_screen_scrolls_scrollback() {
         assert_eq!(wheel_action(TermMode::empty()), WheelAction::Scrollback);
+    }
+
+    #[test]
+    fn image_size_native_when_unsized() {
+        assert_eq!(image_dst_size(0, 0, 64, 32, 10.0, 20.0), (64.0, 32.0));
+    }
+
+    #[test]
+    fn image_size_exact_cell_box_when_both_given() {
+        // 4 cols x 3 rows at a 10x20 cell box.
+        assert_eq!(image_dst_size(4, 3, 64, 32, 10.0, 20.0), (40.0, 60.0));
+    }
+
+    #[test]
+    fn image_size_preserves_aspect_with_one_dim() {
+        // 2:1 image, only cols=20 at cell_w=10 -> 200px wide, 100px tall (2:1).
+        assert_eq!(image_dst_size(20, 0, 64, 32, 10.0, 20.0), (200.0, 100.0));
+        // 2:1 image, only rows=5 at cell_h=20 -> 100px tall, 200px wide (2:1).
+        assert_eq!(image_dst_size(0, 5, 64, 32, 10.0, 20.0), (200.0, 100.0));
     }
 
     #[test]
