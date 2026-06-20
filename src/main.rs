@@ -4,6 +4,7 @@ mod color;
 mod config;
 mod image;
 mod input;
+mod pane;
 mod pty;
 mod renderer;
 mod text;
