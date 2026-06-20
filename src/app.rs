@@ -213,6 +213,8 @@ pub struct App {
     selecting: bool,
     /// Click-chain state for double/triple click detection: (cell, count, time).
     last_click: Option<((usize, usize), u32, Instant)>,
+    /// URI of the OSC8 hyperlink currently under the pointer (for hover underline).
+    hovered_link: Option<String>,
 
     /// Lazily-created OS clipboard handle (arboard). `None` until first use, and
     /// stays `None` if the platform clipboard is unavailable.
@@ -280,6 +282,7 @@ impl App {
             held_button: None,
             selecting: false,
             last_click: None,
+            hovered_link: None,
             clipboard: None,
             bell_flash_until: None,
             audio_bell: AudioBell::new(),
@@ -306,6 +309,28 @@ impl App {
         let cols = ((usable_w / cell_w).floor() as usize).max(1);
         let rows = ((usable_h / cell_h).floor() as usize).max(1);
         (cols, rows)
+    }
+
+    /// The OSC8 hyperlink URI at a visible screen cell, if the cell carries one.
+    fn cell_hyperlink(&self, col: usize, row: usize) -> Option<String> {
+        let pty = self.pty.as_ref()?;
+        if col >= self.cols || row >= self.rows {
+            return None;
+        }
+        let point = self.grid_point(col, row);
+        let term = pty.term.lock();
+        term.grid()[point].hyperlink().map(|h| h.uri().to_owned())
+    }
+
+    /// Open a URL with the system handler, detached. Restricted to web/file
+    /// schemes so terminal output can't launch arbitrary URI handlers.
+    fn open_url(url: &str) {
+        if url.starts_with("http://") || url.starts_with("https://") || url.starts_with("file://")
+        {
+            if let Err(e) = std::process::Command::new("xdg-open").arg(url).spawn() {
+                log::warn!("failed to open {url}: {e}");
+            }
+        }
     }
 
     /// Whether the cursor should currently blink: the child requested a blinking
@@ -494,6 +519,9 @@ impl App {
     }
 
     fn render(&mut self) {
+        // The OSC8 hyperlink under the pointer, underlined for affordance.
+        // Captured before the renderer borrow.
+        let hovered_link = self.hovered_link.clone();
         // Visual-bell overlay: while the flash window is open, tint the whole frame
         // toward the foreground color; otherwise clear it. Computed before the
         // renderer borrow so it can read `self.bell_flash_until`.
@@ -671,7 +699,7 @@ impl App {
             // map the cell flags to a single style. The decoration color is the
             // SGR 58 underline color when set, else the cell foreground, so e.g.
             // a red LSP curl sits under default-fg text.
-            let decorations = if hidden {
+            let mut decorations = if hidden {
                 Decorations::default()
             } else {
                 let underline = if cell.flags.contains(Flags::UNDERCURL) {
@@ -693,6 +721,16 @@ impl App {
                     .unwrap_or(fg);
                 Decorations { underline, strikeout: cell.flags.contains(Flags::STRIKEOUT), color }
             };
+
+            // Underline the hovered hyperlink's cells (only when not already
+            // underlined by the app), as a click affordance.
+            if !hidden && matches!(decorations.underline, UnderlineStyle::None) {
+                if let Some(ref hov) = hovered_link {
+                    if cell.hyperlink().is_some_and(|h| h.uri() == hov) {
+                        decorations.underline = UnderlineStyle::Single;
+                    }
+                }
+            }
 
             let ch = if hidden || cell.c == '\0' { ' ' } else { cell.c };
             // Reconstruct the grapheme cluster, merging this cell's combining /
@@ -1092,6 +1130,14 @@ impl ApplicationHandler<UserEvent> for App {
                     let mode = self.term_mode();
                     if let Some(button) = motion_button(mode, self.held_button) {
                         self.report_mouse(button, true, true, mode);
+                    } else if !mode.intersects(TermMode::MOUSE_MODE) {
+                        // Track the hovered OSC8 hyperlink so it can be underlined.
+                        let (c, r) = self.mouse_cell;
+                        let link = self.cell_hyperlink(c, r);
+                        if link != self.hovered_link {
+                            self.hovered_link = link;
+                            self.mark_dirty(event_loop);
+                        }
                     }
                 }
             }
@@ -1107,6 +1153,15 @@ impl ApplicationHandler<UserEvent> for App {
                 self.held_button = if pressed { Some(base) } else { None };
 
                 let mode = self.term_mode();
+                // Ctrl+Left opens an OSC8 hyperlink under the pointer, overriding
+                // application mouse handling (the common terminal convention).
+                if button == MouseButton::Left && pressed && self.mods.control_key() {
+                    let (c, r) = self.mouse_cell;
+                    if let Some(uri) = self.cell_hyperlink(c, r) {
+                        Self::open_url(&uri);
+                        return;
+                    }
+                }
                 if mode.intersects(TermMode::MOUSE_MODE) {
                     // The application owns the mouse; never start a glassy
                     // selection or paste underneath it.
