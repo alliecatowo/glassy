@@ -153,6 +153,7 @@ fn settings_lines(config: &Config, font_px: f32, sel: usize, saved: bool) -> Vec
         format!("{} Font size    {font_px:.0} px", mark(0)),
         format!("{} Opacity      {:.2}", mark(1), config.opacity),
         format!("{} Bell         {bell}", mark(2)),
+        format!("{} Theme        {}", mark(3), config.theme),
         String::new(),
         format!("  Font         {family}"),
         format!("  Scrollback   {} lines", config.scrollback),
@@ -351,6 +352,9 @@ pub struct Config {
     /// Play a short soft beep on the terminal bell. Default false. Only audible in
     /// a build compiled with the `bell-audio` feature.
     pub bell_audible: bool,
+    /// Canonical name of the active color theme (one of `color::THEME_NAMES`),
+    /// tracked so the settings overlay can show, cycle, and save it.
+    pub theme: String,
 }
 
 /// One terminal tab. The *active* tab's PTY lives directly in `App::pty` (so all
@@ -1325,7 +1329,7 @@ impl App {
     /// Handle a keypress while the settings overlay is open: arrow-key navigation
     /// + adjustment, Enter/`s` to save. Other keys are consumed (ignored).
     fn handle_settings_key(&mut self, key: Key, event_loop: &ActiveEventLoop) {
-        const ROWS: usize = 3; // font, opacity, bell
+        const ROWS: usize = 4; // font, opacity, bell, theme
         match key {
             Key::Named(NamedKey::ArrowUp) => {
                 self.settings_sel = (self.settings_sel + ROWS - 1) % ROWS;
@@ -1359,7 +1363,24 @@ impl App {
                 }
             }
             2 => self.config.bell_visual = !self.config.bell_visual,
+            3 => self.cycle_theme(dir),
             _ => {}
+        }
+    }
+
+    /// Cycle the active theme by `dir` through `color::THEME_NAMES`, applying it
+    /// live (swap the global theme + full redraw).
+    fn cycle_theme(&mut self, dir: i32) {
+        let names = color::THEME_NAMES;
+        let cur = names.iter().position(|&n| n == self.config.theme).unwrap_or(0);
+        let next = (cur as i32 + dir).rem_euclid(names.len() as i32) as usize;
+        let name = names[next];
+        if let Some(theme) = color::theme_by_name(name) {
+            color::set_theme(theme);
+            self.config.theme = name.to_string();
+            // The renderer reads theme colors fresh each frame; a full rebuild
+            // repaints every cell + the clear color in the new palette.
+            self.force_full_redraw = true;
         }
     }
 
@@ -1382,6 +1403,7 @@ impl App {
             ("font_size", format!("{pt:.0}")),
             ("opacity", format!("{:.2}", self.config.opacity)),
             ("bell_visual", self.config.bell_visual.to_string()),
+            ("theme", self.config.theme.clone()),
         ];
         match crate::config::save(&updates) {
             Ok(()) => {

@@ -9,7 +9,7 @@
 //! globally thereafter, so the hot `resolve` path and the cell-drawing code can
 //! reach it without threading a `&Theme` through every call.
 
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicPtr, Ordering};
 
 use alacritty_terminal::term::color::Colors;
 use alacritty_terminal::vte::ansi::{Color, NamedColor, Rgb};
@@ -273,18 +273,64 @@ pub fn theme_by_name(name: &str) -> Option<Theme> {
     }
 }
 
-/// The process-wide active theme, set once at startup. Reads before `set_theme`
-/// (there are none in practice) fall back to the default.
-static ACTIVE: OnceLock<Theme> = OnceLock::new();
+/// Canonical theme names in display order, for the settings overlay to cycle.
+pub const THEME_NAMES: &[&str] = &[
+    "tokyo-night",
+    "catppuccin-mocha",
+    "catppuccin-macchiato",
+    "gruvbox-dark",
+    "dracula",
+    "nord",
+    "solarized-dark",
+    "rose-pine",
+];
 
-/// Install the active theme. Idempotent: only the first call wins (startup).
+/// Map any accepted theme name/alias to its canonical [`THEME_NAMES`] entry,
+/// defaulting to `tokyo-night`. Lets the app store + cycle + save a stable name.
+pub fn canonical_name(input: &str) -> &'static str {
+    let key: String = input
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    match key.as_str() {
+        "catppuccinmocha" | "catppuccin" | "mocha" => "catppuccin-mocha",
+        "catppuccinmacchiato" | "macchiato" => "catppuccin-macchiato",
+        "gruvboxdark" | "gruvbox" => "gruvbox-dark",
+        "dracula" => "dracula",
+        "nord" => "nord",
+        "solarizeddark" | "solarized" => "solarized-dark",
+        "rosepine" | "rose" => "rose-pine",
+        _ => "tokyo-night",
+    }
+}
+
+/// The process-wide active theme. An `AtomicPtr` to a leaked `Theme` so reads
+/// (per cell, on the UI thread) are a single relaxed load + deref — no lock —
+/// while `set_theme` can swap it live (settings overlay). Null means "default".
+static ACTIVE: AtomicPtr<Theme> = AtomicPtr::new(std::ptr::null_mut());
+
+/// Install the active theme. Safe to call repeatedly (startup + live changes).
+/// The previous theme is intentionally leaked rather than freed: a concurrent
+/// reader may hold a `&'static Theme` from `active()`, and themes are tiny and
+/// swapped rarely, so leaking a few hundred bytes per change is the simplest
+/// sound choice.
 pub fn set_theme(theme: Theme) {
-    let _ = ACTIVE.set(theme);
+    let ptr = Box::into_raw(Box::new(theme));
+    ACTIVE.swap(ptr, Ordering::AcqRel);
 }
 
 /// The active theme, defaulting to Tokyo Night before `set_theme` is called.
 fn active() -> &'static Theme {
-    ACTIVE.get().unwrap_or(&TOKYO_NIGHT)
+    let ptr = ACTIVE.load(Ordering::Acquire);
+    if ptr.is_null() {
+        &TOKYO_NIGHT
+    } else {
+        // SAFETY: `ptr` is either null (handled above) or a pointer produced by
+        // `Box::into_raw` in `set_theme` and never freed, so it is valid for the
+        // life of the process.
+        unsafe { &*ptr }
+    }
 }
 
 /// Default background of the active theme.

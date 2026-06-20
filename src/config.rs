@@ -90,13 +90,12 @@ struct RawConfig {
 
 impl RawConfig {
     fn into_settings(self) -> Result<Settings> {
-        let theme = match self.theme {
-            Some(name) => color::theme_by_name(&name).unwrap_or_else(|| {
-                log::warn!("glassy: unknown theme '{name}'; using Tokyo Night");
-                color::theme_by_name("tokyo-night").expect("default theme exists")
-            }),
-            None => color::theme_by_name("tokyo-night").expect("default theme exists"),
-        };
+        let theme_input = self.theme.as_deref().unwrap_or("tokyo-night");
+        let theme = color::theme_by_name(theme_input).unwrap_or_else(|| {
+            log::warn!("glassy: unknown theme '{theme_input}'; using Tokyo Night");
+            color::theme_by_name("tokyo-night").expect("default theme exists")
+        });
+        let theme_name = color::canonical_name(theme_input).to_string();
 
         let config = Config {
             font_family: self.font_family,
@@ -107,6 +106,7 @@ impl RawConfig {
             shell: self.shell,
             bell_visual: self.bell_visual.unwrap_or(true),
             bell_audible: self.bell_audible.unwrap_or(false),
+            theme: theme_name,
         };
 
         Ok(Settings { config, theme })
