@@ -902,6 +902,7 @@ impl Renderer {
     /// The pixels are uploaded into the image atlas once per `id` and cached;
     /// subsequent frames only push a quad. Oversized images (larger than the
     /// atlas) are skipped.
+    #[allow(clippy::too_many_arguments)]
     pub fn draw_image(
         &mut self,
         id: u32,

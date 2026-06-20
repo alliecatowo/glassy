@@ -143,6 +143,9 @@ impl Pty {
             cell_width,
             cell_height,
         };
+        // `..default()` covers the windows-only `escape_args` field; on unix every
+        // field is set explicitly, so silence the resulting needless-update lint.
+        #[allow(clippy::needless_update)]
         let pty_options = PtyOptions {
             shell,
             working_directory,

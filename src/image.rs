@@ -412,12 +412,11 @@ impl StreamTap {
     }
 
     fn finish_apc(&mut self, store: &FairMutex<ImageStore>) {
-        if self.apc.first() == Some(&b'G') {
-            if let Some(cmd) = self.kitty.feed(&self.apc[1..]) {
-                if let Some(image) = cmd.image {
-                    store.lock().insert(cmd.id, cmd.action, image);
-                }
-            }
+        if self.apc.first() == Some(&b'G')
+            && let Some(cmd) = self.kitty.feed(&self.apc[1..])
+            && let Some(image) = cmd.image
+        {
+            store.lock().insert(cmd.id, cmd.action, image);
         }
         self.apc.clear();
     }
