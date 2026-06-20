@@ -283,6 +283,11 @@ pub struct Renderer {
     packer: Packer,
     /// Shelf packer for the RGBA8 color atlas.
     color_packer: Packer,
+    /// Set when a glyph atlas overflowed and was repacked mid-frame (which
+    /// invalidates every cached glyph's UVs). The app must then force a full
+    /// row rebuild so persisted rows don't keep stale UVs. Read via
+    /// [`Renderer::pull_atlas_reset`].
+    atlas_reset: bool,
     glyph_cache: HashMap<(char, bool, bool), Vec<AtlasGlyph>>,
     /// Atlas entries for multi-codepoint grapheme clusters (combining/ZWJ).
     cluster_cache: HashMap<(String, bool, bool), Vec<AtlasGlyph>>,
@@ -762,6 +767,7 @@ impl Renderer {
             image_count: 0,
             packer: Packer::new(ATLAS_SIZE),
             color_packer: Packer::new(COLOR_ATLAS_SIZE),
+            atlas_reset: false,
             glyph_cache: HashMap::new(),
             cluster_cache: HashMap::new(),
             text,
@@ -879,6 +885,12 @@ impl Renderer {
         for byte in 0x20u8..=0x7E {
             self.ensure_glyphs(byte as char, false, false);
         }
+    }
+
+    /// Take the "atlas was repacked" flag (clearing it). When true, the caller
+    /// should force a full row rebuild + repaint so no row keeps stale glyph UVs.
+    pub fn pull_atlas_reset(&mut self) -> bool {
+        std::mem::take(&mut self.atlas_reset)
     }
 
     /// Size the persistent per-row instance storage to `rows` grid rows, clearing
@@ -2369,6 +2381,10 @@ impl Renderer {
                         self.cluster_cache.clear();
                         self.packer.reset();
                         self.color_packer.reset();
+                        // Every cached glyph's atlas position just changed, so any
+                        // row already built this frame (and persisted rows from
+                        // earlier frames) now hold stale UVs. Flag a full rebuild.
+                        self.atlas_reset = true;
                         retried = true;
                         continue 'attempt;
                     }

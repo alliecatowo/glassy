@@ -1373,6 +1373,16 @@ impl App {
             log::debug!("frame skipped: {err:?}");
         }
 
+        // If the glyph atlas overflowed and was repacked this frame, every cached
+        // glyph's UVs changed; persisted rows now hold stale UVs. Force a full
+        // rebuild and schedule one more frame to repaint cleanly.
+        if renderer.pull_atlas_reset() {
+            self.force_full_redraw = true;
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
+        }
+
         self.dirty = false;
     }
 
