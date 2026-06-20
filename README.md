@@ -45,7 +45,7 @@ Accurate, not magic: glassy is fast because it's simple and because it leans on 
 - 🎮 GPU **instanced** renderer with a dynamic glyph atlas — one draw, many cells
 - 🌈 **Gamma-correct** antialiasing for crisp, correctly-weighted text
 - 💤 **Render-on-demand** + **damage-based** redraw (0% idle CPU)
-- 🖼️ **Inline images** — kitty graphics protocol (PNG + raw RGBA, cell-sized, aspect-aware), drawn on a dedicated GPU atlas
+- 🖼️ **Inline images** — kitty graphics (PNG + raw RGBA, cell-sized, aspect-aware) **and sixel**, drawn on a dedicated GPU atlas
 
 **Color & text**
 - 🎨 Full **24-bit truecolor** and **256-color** support
@@ -162,12 +162,12 @@ The honest version: parts of glassy stand on mature crates while the bespoke, fa
 
 ## Status / roadmap
 
-**Working today:** GPU rendering, truecolor + 256, color emoji + CJK fallback, box-drawing, text decorations, cursor shapes/blink, mouse + selection + clipboard, scrollback, OSC 8 hyperlinks, tabs, translucency, themes, runtime config, bell, **inline images (kitty graphics)**.
+**Working today:** GPU rendering, truecolor + 256, color emoji + CJK fallback, box-drawing, text decorations, cursor shapes/blink, mouse + selection + clipboard, scrollback, OSC 8 hyperlinks, tabs, translucency, themes, runtime config, bell, **inline images (kitty graphics + sixel)**.
 
 **Planned:**
-- 🖼️ Sixel graphics (kitty graphics already supported)
 - ⬛ Window splits / panes
 - ⌨️ Kitty keyboard protocol
+- 🔔 OSC 9 / OSC 777 desktop notifications
 
 ---
 
