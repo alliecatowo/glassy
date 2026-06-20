@@ -159,6 +159,24 @@ pub struct App {
     // (so the shell has produced output), write a PPM, and exit.
     capture: Option<std::path::PathBuf>,
     capture_deadline: Option<Instant>,
+
+    // --- Per-frame damage tracking (drives the renderer's per-row updates). ---
+    /// Force a full grid rebuild on the next frame regardless of terminal damage.
+    /// Set on resize / font change / first frame, where the per-row layout or all
+    /// content changes at once.
+    force_full_redraw: bool,
+    /// The cursor cell (col, row) drawn last frame, so we can repaint the row it
+    /// vacated (alacritty's own cursor damage covers the terminal cursor move, but
+    /// glassy's blink/focus/selection overlays are not part of that damage).
+    prev_cursor: Option<(usize, usize)>,
+    /// Scrollback display offset rendered last frame; a change means the whole
+    /// viewport scrolled and every row must be rebuilt.
+    prev_display_offset: i32,
+    /// Whether a text selection existed last frame. A selection spans arbitrary
+    /// rows and is not part of terminal damage, so any change forces a full
+    /// rebuild (selections only change during interactive drags, which are rare
+    /// relative to streaming output).
+    prev_has_selection: bool,
 }
 
 impl App {
@@ -187,6 +205,10 @@ impl App {
             blink_at: Instant::now() + BLINK_INTERVAL,
             capture: std::env::var_os("GLASSY_CAPTURE").map(std::path::PathBuf::from),
             capture_deadline: None,
+            force_full_redraw: true,
+            prev_cursor: None,
+            prev_display_offset: 0,
+            prev_has_selection: false,
         }
     }
 
@@ -375,7 +397,30 @@ impl App {
         };
 
         // Hold the terminal lock only long enough to copy out renderable state.
-        let term = pty.term.lock();
+        let mut term = pty.term.lock();
+
+        // Collect the terminal's per-line damage BEFORE reading renderable
+        // content. `damage()` borrows `term` mutably and reports which viewport
+        // rows changed since the last frame (it also damages the previous and
+        // current terminal-cursor rows). We translate that into a per-row dirty
+        // mask; rows not marked are reused from the renderer's persistent storage.
+        // `TermDamage::Full` (entered insert mode, scrollback scroll, reset, etc.)
+        // forces a full rebuild. After reading we must `reset_damage()`.
+        let rows = self.rows;
+        let mut dirty = vec![false; rows];
+        let mut full = self.force_full_redraw;
+        match term.damage() {
+            alacritty_terminal::term::TermDamage::Full => full = true,
+            alacritty_terminal::term::TermDamage::Partial(it) => {
+                for line in it {
+                    if line.line < rows {
+                        dirty[line.line] = true;
+                    }
+                }
+            }
+        }
+        term.reset_damage();
+
         // The child's requested cursor style (shape is also mirrored in
         // `content.cursor.shape`); `blinking` decides whether the blink timer runs.
         // Read before `renderable_content()` so both immutable borrows of `term`
@@ -400,7 +445,52 @@ impl App {
         let invert_block =
             cursor_shown && self.focused && cursor.shape == CursorShape::Block;
 
+        // --- Decide what to rebuild this frame. ---
+        // A scrollback scroll moves every row; alacritty reports Full for it, but
+        // guard explicitly too. A selection spans arbitrary rows and is not part
+        // of terminal damage, so any change forces a full rebuild.
+        let has_selection = selection.is_some();
+        if display_offset != self.prev_display_offset
+            || has_selection != self.prev_has_selection
+            || (has_selection && self.prev_has_selection)
+        {
+            full = true;
+        }
+        // glassy's cursor overlay/invert (and its blink/focus state) is not part of
+        // alacritty's damage, so always repaint the row the cursor sits on and the
+        // row it occupied last frame. (alacritty damages the terminal-cursor rows
+        // itself, but blink phase flips and focus changes produce no damage.)
+        let cur_cursor_cell = if cursor_shown
+            && cursor_row >= 0
+            && cursor_row < rows as i32
+            && cursor_col >= 0
+            && cursor_col < self.cols as i32
+        {
+            Some((cursor_col as usize, cursor_row as usize))
+        } else {
+            None
+        };
+        if let Some((_, r)) = cur_cursor_cell.filter(|&(_, r)| r < rows) {
+            dirty[r] = true;
+        }
+        if let Some((_, r)) = self.prev_cursor.filter(|&(_, r)| r < rows) {
+            dirty[r] = true;
+        }
+
         renderer.begin_frame(color::default_bg());
+
+        // The renderer keeps per-row instances persistently; on a full rebuild we
+        // clear/resize that storage so every row is repushed below.
+        if full {
+            renderer.resize_grid(rows);
+            for d in dirty.iter_mut() {
+                *d = true;
+            }
+        }
+
+        // Track which rows we have begun this frame, so a row's first cell triggers
+        // `begin_row` (clearing it) and the cursor overlay can re-target it later.
+        let mut row_started = vec![false; rows];
 
         for indexed in content.display_iter {
             let cell = indexed.cell;
@@ -414,6 +504,16 @@ impl App {
             let col = indexed.point.column.0 as i32;
             if row < 0 || row >= self.rows as i32 || col < 0 || col >= self.cols as i32 {
                 continue;
+            }
+            let row_u = row as usize;
+            // Skip cells in rows that did not change: their instances are reused.
+            if !dirty[row_u] {
+                continue;
+            }
+            // First cell of a dirty row: clear it and begin pushing into it.
+            if !row_started[row_u] {
+                renderer.begin_row(row_u);
+                row_started[row_u] = true;
             }
 
             let mut fg = color::resolve(cell.fg, colors);
@@ -498,12 +598,7 @@ impl App {
         //   - focused HollowBlock: an outline box.
         //   - unfocused (any non-hidden shape): an outline box, so an idle window
         //     still shows where the cursor is.
-        if cursor_shown
-            && cursor_row >= 0
-            && cursor_row < self.rows as i32
-            && cursor_col >= 0
-            && cursor_col < self.cols as i32
-        {
+        if let Some((cc, cr)) = cur_cursor_cell {
             let overlay = if !self.focused {
                 Some(CursorOverlay::Hollow)
             } else {
@@ -516,16 +611,23 @@ impl App {
                 }
             };
             if let Some(overlay) = overlay {
-                renderer.push_cursor(
-                    cursor_col as usize,
-                    cursor_row as usize,
-                    overlay,
-                    cursor_color,
-                );
+                // The cursor row was (re)built above; re-target it without clearing
+                // so the overlay appends on top of that row's cell backgrounds.
+                if cr < rows && row_started[cr] {
+                    renderer.set_cur_row(cr);
+                    renderer.push_cursor(cc, cr, overlay, cursor_color);
+                }
             }
         }
 
         drop(term); // release before GPU submit / present
+
+        // Record the state this frame drew from, so the next frame can repaint only
+        // what changed (the cursor's old/new row, selection, scroll position).
+        self.prev_cursor = cur_cursor_cell;
+        self.prev_display_offset = display_offset;
+        self.prev_has_selection = has_selection;
+        self.force_full_redraw = false;
 
         // The renderer self-heals lost/outdated surfaces internally; a transient
         // skip just waits for the next wakeup or resize to repaint.
@@ -560,6 +662,9 @@ impl App {
             self.rows = rows;
             pty.resize(cols, rows, m.width.round() as u16, m.height.round() as u16);
         }
+        // The cell box changed, so every glyph position and the per-row storage
+        // must be rebuilt next frame.
+        self.force_full_redraw = true;
     }
 
     fn handle_resize(&mut self, event_loop: &ActiveEventLoop, size: PhysicalSize<u32>) {
@@ -577,6 +682,9 @@ impl App {
             self.rows = rows;
             pty.resize(cols, rows, m.width.round() as u16, m.height.round() as u16);
         }
+        // Reproject + repaint the whole grid against the new surface; the per-row
+        // storage is resized to match in the next frame's full rebuild.
+        self.force_full_redraw = true;
         self.mark_dirty(event_loop);
     }
 }

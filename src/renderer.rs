@@ -85,6 +85,15 @@ struct FgInstance {
     _pad: [u32; 3],
 }
 
+/// The instances belonging to a single grid row. Held persistently across frames
+/// so a row whose terminal content did not change is reused verbatim instead of
+/// being rebuilt and re-uploaded every frame.
+#[derive(Default)]
+struct RowInstances {
+    bg: Vec<BgInstance>,
+    fg: Vec<FgInstance>,
+}
+
 /// A glyph that has been packed into the atlas: its uv rect plus the placement
 /// data needed to position the quad relative to the cell pen origin.
 #[derive(Clone, Copy)]
@@ -254,8 +263,31 @@ pub struct Renderer {
     /// reload the same family at the new size. `None` uses the discovery default.
     font_family: Option<String>,
 
-    bg_instances: Vec<BgInstance>,
-    fg_instances: Vec<FgInstance>,
+    /// Persistent per-row instance storage. Index `r` holds row `r`'s background
+    /// and foreground instances; only the rows reported as changed are rewritten
+    /// each frame (see [`Renderer::begin_row`]/[`Renderer::end_frame`]), the rest
+    /// are reused verbatim. The vectors are sized to the grid height by
+    /// [`Renderer::resize_grid`].
+    rows: Vec<RowInstances>,
+    /// The row currently being (re)built; pushes from `push_cell` and friends land
+    /// here. Set by [`Renderer::begin_row`].
+    cur_row: usize,
+    /// Per-row instance offsets (in instances, not bytes) describing the previous
+    /// upload's layout, so an unchanged-layout frame can `write_buffer` just the
+    /// dirty rows' sub-ranges. `len() == rows.len() + 1` (the last entry is the
+    /// total). Empty means "layout unknown — do a full reflatten + upload".
+    bg_row_offsets: Vec<u32>,
+    fg_row_offsets: Vec<u32>,
+    /// Rows rebuilt via [`Renderer::begin_row`] this frame, in call order. Used to
+    /// upload just those rows when the buffer layout is otherwise unchanged.
+    dirty_rows: Vec<usize>,
+    /// Flattened upload scratch: the concatenation of every row's instances in row
+    /// order, rebuilt from `rows` when offsets shift. Kept to avoid reallocating.
+    bg_flat: Vec<BgInstance>,
+    fg_flat: Vec<FgInstance>,
+    /// Total instance counts for the current frame's draw calls.
+    bg_count: u32,
+    fg_count: u32,
     bg_buffer: wgpu::Buffer,
     fg_buffer: wgpu::Buffer,
     bg_capacity: usize,
@@ -600,8 +632,15 @@ impl Renderer {
             pad_override: None,
             font_px,
             font_family,
-            bg_instances: Vec::with_capacity(INITIAL_INSTANCES),
-            fg_instances: Vec::with_capacity(INITIAL_INSTANCES),
+            rows: Vec::new(),
+            cur_row: 0,
+            bg_row_offsets: Vec::new(),
+            fg_row_offsets: Vec::new(),
+            dirty_rows: Vec::new(),
+            bg_flat: Vec::with_capacity(INITIAL_INSTANCES),
+            fg_flat: Vec::with_capacity(INITIAL_INSTANCES),
+            bg_count: 0,
+            fg_count: 0,
             bg_buffer,
             fg_buffer,
             bg_capacity: INITIAL_INSTANCES,
@@ -691,12 +730,57 @@ impl Renderer {
         }
     }
 
+    /// Size the persistent per-row instance storage to `rows` grid rows, clearing
+    /// every row. The app calls this whenever the grid height changes (resize /
+    /// font resize) so subsequent per-row rebuilds index a correctly-sized table.
+    /// Forces a full re-upload on the next `end_frame` (offsets are invalidated).
+    pub fn resize_grid(&mut self, rows: usize) {
+        // Drop or grow to exactly `rows` entries, clearing all so a fresh full
+        // rebuild populates them. `RowInstances::default` is empty.
+        self.rows.clear();
+        self.rows.resize_with(rows, RowInstances::default);
+        // Offsets no longer describe the buffer; clearing them forces end_frame to
+        // reflatten and reupload everything.
+        self.bg_row_offsets.clear();
+        self.fg_row_offsets.clear();
+        self.dirty_rows.clear();
+    }
+
+    /// Begin a frame: set the clear color. Unlike a full rebuild this does NOT
+    /// clear the per-row instance storage — only the rows the app re-pushes via
+    /// [`Renderer::begin_row`] are rewritten; the rest are reused from last frame.
     pub fn begin_frame(&mut self, default_bg: [f32; 4]) {
-        self.bg_instances.clear();
-        self.fg_instances.clear();
         // The clear color paints the (translucent) window backdrop, so it takes
         // the window opacity just like the per-cell default-background quads.
         self.clear_color = self.glass_bg(default_bg);
+    }
+
+    /// Begin (re)building grid row `row`: subsequent `push_cell`/`push_cursor`
+    /// calls land in this row's instance storage, replacing its previous contents.
+    /// Out-of-range rows are ignored (clamped to a scratch slot) so a stale cursor
+    /// row past a shrink never panics.
+    pub fn begin_row(&mut self, row: usize) {
+        if row >= self.rows.len() {
+            // Should not happen if the app keeps the grid in sync, but stay safe:
+            // grow so the index is valid rather than panicking mid-frame.
+            self.rows.resize_with(row + 1, RowInstances::default);
+            self.bg_row_offsets.clear();
+            self.fg_row_offsets.clear();
+        }
+        self.cur_row = row;
+        self.rows[row].bg.clear();
+        self.rows[row].fg.clear();
+        self.dirty_rows.push(row);
+    }
+
+    /// Re-target pushes at an already-built row WITHOUT clearing it, so callers can
+    /// append to a row after its cells were laid down (the cursor overlay is pushed
+    /// this way so it lands on top of the cursor row's cell backgrounds). The row
+    /// must already have been built via [`Renderer::begin_row`] this frame.
+    pub fn set_cur_row(&mut self, row: usize) {
+        if row < self.rows.len() {
+            self.cur_row = row;
+        }
     }
 
     /// Apply the window opacity to a cell-background color and premultiply it.
@@ -745,10 +829,11 @@ impl Renderer {
         // we never visit) is still painted. Backgrounds take the window opacity
         // (premultiplied) so the desktop shows through uniformly; foreground solids
         // pushed via `push_solid` stay opaque.
-        self.bg_instances.push(BgInstance {
+        let glass = self.glass_bg(bg);
+        self.rows[self.cur_row].bg.push(BgInstance {
             pos: [origin_x, origin_y],
             size: [box_w, cell_h],
-            color: self.glass_bg(bg),
+            color: glass,
         });
 
         // Underline / strikethrough strokes span the full cell width so they join
@@ -770,7 +855,8 @@ impl Renderer {
             self.ensure_cluster_glyphs(&cluster, bold, italic);
             if let Some(glyphs) = self.cluster_cache.get(&(cluster, bold, italic)) {
                 let placed = Self::place_glyphs(glyphs, origin_x, baseline, cell_w, box_w, cell_h);
-                self.fg_instances.extend(placed.into_iter().map(
+                let cur = self.cur_row;
+                self.rows[cur].fg.extend(placed.into_iter().map(
                     |(pos, size, g): (_, _, &AtlasGlyph)| FgInstance {
                         pos,
                         size,
@@ -813,7 +899,8 @@ impl Renderer {
         self.ensure_glyphs(ch, bold, italic);
         if let Some(glyphs) = self.glyph_cache.get(&(ch, bold, italic)) {
             let placed = Self::place_glyphs(glyphs, origin_x, baseline, cell_w, box_w, cell_h);
-            self.fg_instances.extend(placed.into_iter().map(
+            let cur = self.cur_row;
+            self.rows[cur].fg.extend(placed.into_iter().map(
                 |(pos, size, g): (_, _, &AtlasGlyph)| FgInstance {
                     pos,
                     size,
@@ -899,7 +986,7 @@ impl Renderer {
         if w <= 0.0 || h <= 0.0 {
             return;
         }
-        self.bg_instances.push(BgInstance {
+        self.rows[self.cur_row].bg.push(BgInstance {
             pos: [x, y],
             size: [w, h],
             color,
@@ -1007,7 +1094,7 @@ impl Renderer {
         }
         // UV spans the full 0..1 quad so the shader can derive the local position
         // (and thus the sine wave) from the interpolated `uv` on the curl path.
-        self.fg_instances.push(FgInstance {
+        self.rows[self.cur_row].fg.push(FgInstance {
             pos: [x, y],
             size: [w, h],
             uv_min: [0.0, 0.0],
@@ -1594,11 +1681,11 @@ impl Renderer {
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
 
-        // Grow + upload instance buffers (write_buffer when capacity suffices).
-        self.upload_bg();
-        self.upload_fg();
-        let bg_count = self.bg_instances.len() as u32;
-        let fg_count = self.fg_instances.len() as u32;
+        // Flatten changed rows + upload only the dirty sub-ranges (or grow + full
+        // upload when a row's count shifted the layout).
+        self.end_frame();
+        let bg_count = self.bg_count;
+        let fg_count = self.fg_count;
 
         let mut encoder = self
             .device
@@ -1683,10 +1770,9 @@ impl Renderer {
         });
         let view = target.create_view(&wgpu::TextureViewDescriptor::default());
 
-        self.upload_bg();
-        self.upload_fg();
-        let bg_count = self.bg_instances.len() as u32;
-        let fg_count = self.fg_instances.len() as u32;
+        self.end_frame();
+        let bg_count = self.bg_count;
+        let fg_count = self.fg_count;
 
         // Readback rows must be padded to COPY_BYTES_PER_ROW_ALIGNMENT.
         let unpadded = width * 4;
@@ -1767,42 +1853,145 @@ impl Renderer {
 
     // --- internals ---------------------------------------------------------
 
-    /// Upload bg instances, recreating the buffer if it must grow.
-    fn upload_bg(&mut self) {
-        if self.bg_instances.is_empty() {
-            return;
-        }
-        if self.bg_instances.len() > self.bg_capacity {
-            let cap = self.bg_instances.len().next_power_of_two();
-            self.bg_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("bg-instances"),
-                size: (cap * std::mem::size_of::<BgInstance>()) as u64,
-                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            self.bg_capacity = cap;
-        }
-        self.queue
-            .write_buffer(&self.bg_buffer, 0, bytemuck::cast_slice(&self.bg_instances));
+    /// Finalize the frame's instance data and upload only what changed.
+    ///
+    /// For each pass we compare this frame's per-row instance counts against the
+    /// previous upload's layout (`*_row_offsets`):
+    ///   * If the layout is identical, only the rows rebuilt this frame
+    ///     (`dirty_rows`) are written, each as a small `write_buffer` sub-range —
+    ///     the common per-frame case (a few rows of typing). Untouched rows are
+    ///     left on the GPU as-is.
+    ///   * If a row's count changed (shifting every later row), or the layout is
+    ///     unknown (after `resize_grid`), we reflatten the whole grid and upload a
+    ///     single contiguous range from the first divergent row to the end (rows
+    ///     before it are byte-identical and already resident), growing the buffer
+    ///     if needed.
+    fn end_frame(&mut self) {
+        self.bg_count = Self::flush_pass::<BgInstance>(
+            &self.device,
+            &self.queue,
+            &self.rows,
+            |r| &r.bg,
+            &mut self.bg_flat,
+            &mut self.bg_row_offsets,
+            &self.dirty_rows,
+            &mut self.bg_buffer,
+            &mut self.bg_capacity,
+            "bg-instances",
+        );
+        self.fg_count = Self::flush_pass::<FgInstance>(
+            &self.device,
+            &self.queue,
+            &self.rows,
+            |r| &r.fg,
+            &mut self.fg_flat,
+            &mut self.fg_row_offsets,
+            &self.dirty_rows,
+            &mut self.fg_buffer,
+            &mut self.fg_capacity,
+            "fg-instances",
+        );
+        self.dirty_rows.clear();
     }
 
-    /// Upload fg instances, recreating the buffer if it must grow.
-    fn upload_fg(&mut self) {
-        if self.fg_instances.is_empty() {
-            return;
+    /// Upload a single instance pass (bg or fg), returning the total instance
+    /// count for the draw call. See [`Renderer::end_frame`] for the strategy. The
+    /// `pick` closure selects the per-row vector for the pass.
+    #[allow(clippy::too_many_arguments)]
+    fn flush_pass<T: bytemuck::Pod>(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        rows: &[RowInstances],
+        pick: impl Fn(&RowInstances) -> &Vec<T>,
+        flat: &mut Vec<T>,
+        offsets: &mut Vec<u32>,
+        dirty_rows: &[usize],
+        buffer: &mut wgpu::Buffer,
+        capacity: &mut usize,
+        label: &str,
+    ) -> u32 {
+        let stride = std::mem::size_of::<T>();
+        let n = rows.len();
+
+        // Current layout: prefix sums of per-row counts (offsets[i] = first
+        // instance index of row i; offsets[n] = total).
+        let mut new_offsets: Vec<u32> = Vec::with_capacity(n + 1);
+        let mut acc: u32 = 0;
+        new_offsets.push(0);
+        for r in rows {
+            acc += pick(r).len() as u32;
+            new_offsets.push(acc);
         }
-        if self.fg_instances.len() > self.fg_capacity {
-            let cap = self.fg_instances.len().next_power_of_two();
-            self.fg_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("fg-instances"),
-                size: (cap * std::mem::size_of::<FgInstance>()) as u64,
+        let total = acc as usize;
+
+        // Fast path: the layout is unchanged from the last upload, so each row sits
+        // at the same buffer offset. Upload only the rows rebuilt this frame.
+        let layout_same = offsets.as_slice() == new_offsets.as_slice();
+        if layout_same && total <= *capacity {
+            for &row in dirty_rows {
+                if row >= n {
+                    continue;
+                }
+                let data = pick(&rows[row]);
+                if data.is_empty() {
+                    continue;
+                }
+                let byte_off = new_offsets[row] as u64 * stride as u64;
+                queue.write_buffer(buffer, byte_off, bytemuck::cast_slice(data));
+            }
+            return total as u32;
+        }
+
+        // Slow path: a row's count shifted the layout (or it's unknown). Reflatten
+        // and upload one contiguous range from the first divergent row onward.
+        flat.clear();
+        flat.reserve(total);
+        for r in rows {
+            flat.extend_from_slice(pick(r));
+        }
+
+        // Grow the buffer if needed (full re-upload then, from offset 0).
+        let mut start_instance: usize = 0;
+        if total > *capacity {
+            let cap = total.next_power_of_two().max(INITIAL_INSTANCES);
+            *buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size: (cap * stride) as u64,
                 usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
-            self.fg_capacity = cap;
+            *capacity = cap;
+        } else {
+            // Buffer kept. We can skip a leading prefix of rows that are BOTH
+            // positionally unchanged (their start offset matches the last upload)
+            // AND not rebuilt this frame. The first row failing either condition is
+            // where the resident bytes first diverge from `flat`.
+            //
+            // First positional divergence: the first index where the prefix offsets
+            // stop matching. `offsets` may be a different length than `new_offsets`
+            // (grid height change without a buffer grow), which `zip` handles by
+            // stopping at the shorter; any remaining rows are treated as divergent.
+            let pos_div = offsets
+                .iter()
+                .zip(new_offsets.iter())
+                .take_while(|(a, b)| a == b)
+                .count()
+                .saturating_sub(1) // row index whose start offset first differs
+                .min(n);
+            // Earliest row rebuilt this frame (content may differ even at the same
+            // offset), if any.
+            let min_dirty = dirty_rows.iter().copied().filter(|&r| r < n).min().unwrap_or(n);
+            let first_row = pos_div.min(min_dirty);
+            start_instance = new_offsets[first_row] as usize;
         }
-        self.queue
-            .write_buffer(&self.fg_buffer, 0, bytemuck::cast_slice(&self.fg_instances));
+
+        if total > start_instance {
+            let byte_off = (start_instance * stride) as u64;
+            queue.write_buffer(buffer, byte_off, bytemuck::cast_slice(&flat[start_instance..]));
+        }
+
+        *offsets = new_offsets;
+        total as u32
     }
 
     /// Ensure the glyph(s) for `(ch, bold, italic)` are rasterized and packed
