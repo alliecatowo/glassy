@@ -9,11 +9,11 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use alacritty_terminal::grid::Scroll;
+use alacritty_terminal::grid::{Indexed, Scroll};
 use alacritty_terminal::index::{Column, Line, Point, Side};
 use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::TermMode;
-use alacritty_terminal::term::cell::Flags;
+use alacritty_terminal::term::cell::{Cell, Flags};
 use alacritty_terminal::tty::Shell;
 use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor};
 use winit::application::ApplicationHandler;
@@ -78,6 +78,75 @@ fn motion_button(mode: TermMode, held: Option<u8>) -> Option<u8> {
 /// Cursor blink half-period: the on/off phase length. ~530ms matches the de-facto
 /// terminal cadence (and the GTK/VTE default).
 const BLINK_INTERVAL: Duration = Duration::from_millis(530);
+
+// --- Grapheme-cluster reconstruction across grid cells ----------------------
+// A user-perceived character (extended grapheme cluster) can span several grid
+// cells: a base emoji plus a ZWJ-joined emoji (flags, family, profession), a
+// skin-tone modifier, a regional-indicator flag pair, or a variation selector.
+// alacritty attaches zero-width code points to one cell but places *wide* joined
+// emoji and modifiers in their own cells, so we re-stitch them here before
+// shaping, otherwise compound emoji render as their separate components.
+
+fn is_zwj(c: char) -> bool {
+    c == '\u{200D}'
+}
+fn is_variation_selector(c: char) -> bool {
+    c == '\u{FE0E}' || c == '\u{FE0F}'
+}
+fn is_emoji_modifier(c: char) -> bool {
+    ('\u{1F3FB}'..='\u{1F3FF}').contains(&c)
+}
+fn is_regional_indicator(c: char) -> bool {
+    ('\u{1F1E6}'..='\u{1F1FF}').contains(&c)
+}
+
+/// Number of `cells` entries occupied by the cell unit at `start`: the cell plus
+/// a following wide-character spacer, if any.
+fn unit_len(cells: &[Indexed<&Cell>], start: usize) -> usize {
+    let wide = cells[start].cell.flags.contains(Flags::WIDE_CHAR);
+    let has_spacer = cells
+        .get(start + 1)
+        .is_some_and(|c| c.cell.flags.contains(Flags::WIDE_CHAR_SPACER));
+    if wide && has_spacer { 2 } else { 1 }
+}
+
+/// Reconstruct the extended grapheme cluster anchored at cell `start`, greedily
+/// merging following cells on the same `line` that continue it (trailing ZWJ joins
+/// anything; a leading emoji modifier / variation selector / second regional
+/// indicator also joins). Returns the code points to append after the base cell's
+/// char and the number of `cells` entries the whole cluster consumed (>= 1).
+fn build_grapheme(cells: &[Indexed<&Cell>], start: usize, line: i32) -> (Vec<char>, usize) {
+    let base = cells[start].cell;
+    let mut combiners: Vec<char> = base.zerowidth().unwrap_or(&[]).to_vec();
+    let mut consumed = unit_len(cells, start);
+    let base_regional = is_regional_indicator(base.c);
+    let mut paired_regional = false;
+
+    while let Some(next) = cells.get(start + consumed) {
+        if next.point.line.0 != line {
+            break;
+        }
+        let ncell = next.cell;
+        if ncell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+            break;
+        }
+        let last = combiners.last().copied().unwrap_or(base.c);
+        let joins = is_zwj(last)
+            || is_emoji_modifier(ncell.c)
+            || is_variation_selector(ncell.c)
+            || (base_regional && is_regional_indicator(ncell.c) && !paired_regional);
+        if !joins {
+            break;
+        }
+        if is_regional_indicator(ncell.c) {
+            paired_regional = true;
+        }
+        combiners.push(ncell.c);
+        combiners.extend_from_slice(ncell.zerowidth().unwrap_or(&[]));
+        consumed += unit_len(cells, start + consumed);
+    }
+    (combiners, consumed)
+}
 
 /// Physical-pixel step per Ctrl +/- font-size adjustment.
 const FONT_STEP_PX: f32 = 2.0;
@@ -492,22 +561,31 @@ impl App {
         // `begin_row` (clearing it) and the cursor overlay can re-target it later.
         let mut row_started = vec![false; rows];
 
-        for indexed in content.display_iter {
+        // Collect the visible cells so we can look ahead across cells when
+        // reconstructing grapheme clusters (compound emoji span several cells).
+        let cells: Vec<_> = content.display_iter.collect();
+        let mut ci = 0;
+        while ci < cells.len() {
+            let indexed = &cells[ci];
             let cell = indexed.cell;
 
-            // The right half of a wide character is a spacer; skip it.
+            // The right half of a wide character is a spacer; a base cell consumes
+            // its own spacer below, so any spacer reached here is stray — skip it.
             if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                ci += 1;
                 continue;
             }
 
             let row = indexed.point.line.0 + display_offset;
             let col = indexed.point.column.0 as i32;
             if row < 0 || row >= self.rows as i32 || col < 0 || col >= self.cols as i32 {
+                ci += 1;
                 continue;
             }
             let row_u = row as usize;
             // Skip cells in rows that did not change: their instances are reused.
             if !dirty[row_u] {
+                ci += unit_len(&cells, ci);
                 continue;
             }
             // First cell of a dirty row: clear it and begin pushing into it.
@@ -573,14 +651,20 @@ impl App {
             };
 
             let ch = if hidden || cell.c == '\0' { ' ' } else { cell.c };
-            // Combining marks / ZWJ-joined codepoints (compound emoji, accents)
-            // attached to this cell; shaped together so they form one glyph.
-            let combiners: &[char] = if hidden { &[] } else { cell.zerowidth().unwrap_or(&[]) };
+            // Reconstruct the grapheme cluster, merging this cell's combining /
+            // ZWJ code points with any following cells joined by ZWJ, a skin-tone
+            // modifier, a regional-indicator pair, or a variation selector — so
+            // compound emoji (flags, families, professions) shape into one glyph.
+            let (combiners, consumed) = if hidden {
+                (Vec::new(), unit_len(&cells, ci))
+            } else {
+                build_grapheme(&cells, ci, indexed.point.line.0)
+            };
             renderer.push_cell(
                 col as usize,
                 row as usize,
                 ch,
-                combiners,
+                &combiners,
                 fg,
                 bg,
                 bold,
@@ -588,6 +672,7 @@ impl App {
                 wide,
                 decorations,
             );
+            ci += consumed;
         }
 
         // Cursor overlay. Drawn after the cells so the bars/outline land on top of
