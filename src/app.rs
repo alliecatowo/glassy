@@ -1879,11 +1879,20 @@ impl App {
                 }
             };
             if let Some(overlay) = overlay {
-                // The cursor row was (re)built above; re-target it without clearing
-                // so the overlay appends on top of that row's cell backgrounds.
+                // The cursor row is usually (re)built above, in which case we
+                // re-target it WITHOUT clearing so the overlay appends on top of
+                // that row's cell backgrounds. On a partial-dirty frame (e.g. a
+                // resize) the cursor's row can have no in-bounds cells and so was
+                // never begun this frame — begin it now so the overlay still
+                // paints instead of being dropped for a frame.
                 let scr = cr + TAB_STRIP_ROWS;
-                if cr < rows && row_started[scr] {
-                    renderer.set_cur_row(scr);
+                if cr < rows {
+                    if row_started[scr] {
+                        renderer.set_cur_row(scr);
+                    } else {
+                        renderer.begin_row(scr);
+                        row_started[scr] = true;
+                    }
                     renderer.push_cursor(cc, scr, overlay, cursor_color);
                 }
             }
@@ -2373,9 +2382,16 @@ impl ApplicationHandler<UserEvent> for App {
                 self.mark_dirty(event_loop);
             }
             WindowEvent::ThemeChanged(_) => {
-                // The system light/dark color-scheme changed at runtime. Repaint so
-                // winit's client-side decorations (sctk-adwaita titlebar) re-theme to
-                // match — previously glassy only picked it up at launch.
+                // The system light/dark color-scheme changed at runtime. Re-assert
+                // our palette so the terminal colors track the new preference —
+                // previously glassy only repainted (re-theming winit's client-side
+                // sctk-adwaita titlebar) but left the global color theme untouched.
+                // Every built-in theme is dark, and config pins a single named
+                // theme, so the coherent thing to do is re-apply that configured
+                // theme (safe to call repeatedly) rather than guess a light variant.
+                if let Some(theme) = color::theme_by_name(&self.config.theme) {
+                    color::set_theme(theme);
+                }
                 self.force_full_redraw = true;
                 self.mark_dirty(event_loop);
             }
@@ -2867,7 +2883,17 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             WindowEvent::Resized(size) => self.handle_resize(event_loop, size),
-            WindowEvent::ScaleFactorChanged { .. } => {
+            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                // Moving to a different-DPI monitor changes the logical->physical
+                // ratio. Reload the font at the new physical px first (otherwise
+                // glyphs stay rasterized at the old DPI), then let handle_resize
+                // reproject the grid against the new surface.
+                let scale = scale_factor as f32;
+                let font_px = self.config.font_size * scale;
+                if let Some(r) = self.renderer.as_mut() {
+                    r.set_font_size(font_px);
+                    self.base_font_px = Some(font_px);
+                }
                 if let Some(w) = &self.window {
                     self.handle_resize(event_loop, w.inner_size());
                 }
