@@ -14,6 +14,8 @@
 
 use std::collections::HashMap;
 
+use alacritty_terminal::sync::FairMutex;
+
 /// A decoded image ready to upload to the GPU: tightly-packed RGBA8, row-major.
 #[derive(Clone)]
 pub struct DecodedImage {
@@ -263,6 +265,141 @@ fn b64_decode(s: &str) -> Vec<u8> {
     out
 }
 
+/// A placed image: a decoded picture plus the action the terminal requested.
+pub struct StoredImage {
+    pub action: Action,
+    pub image: DecodedImage,
+}
+
+/// Holds images received from the PTY for the renderer to draw. For now it keeps
+/// the most recently transmitted/displayed images keyed by id; grid placement +
+/// GPU upload are layered on in the rendering step.
+#[derive(Default)]
+pub struct ImageStore {
+    by_id: HashMap<u32, StoredImage>,
+    /// Monotonic counter so the renderer can tell when new images arrived.
+    pub revision: u64,
+}
+
+impl ImageStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record a decoded graphics command.
+    pub fn insert(&mut self, id: u32, action: Action, image: DecodedImage) {
+        self.by_id.insert(id, StoredImage { action, image });
+        self.revision += 1;
+    }
+
+    pub fn get(&self, id: u32) -> Option<&StoredImage> {
+        self.by_id.get(&id)
+    }
+
+    pub fn len(&self) -> usize {
+        self.by_id.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.by_id.is_empty()
+    }
+}
+
+/// Extracts kitty-graphics APC sequences from a PTY byte stream, feeding them to
+/// a [`KittyParser`] (and an [`ImageStore`]) while returning the remaining bytes
+/// for the VT parser. State persists across reads, so a sequence split across
+/// `read()` boundaries is handled correctly.
+///
+/// APC sequences are `ESC _ <data> ST`, where ST is `ESC \` or BEL. Only `G`-led
+/// (graphics) APCs are interpreted; any other APC is dropped (the VT parser would
+/// discard it anyway), and everything else passes through untouched.
+pub struct StreamTap {
+    state: TapState,
+    apc: Vec<u8>,
+    kitty: KittyParser,
+}
+
+#[derive(PartialEq, Eq)]
+enum TapState {
+    Normal,
+    Escape,    // saw ESC in normal text
+    Apc,       // inside an APC body
+    ApcEscape, // saw ESC inside an APC body (maybe ST)
+}
+
+impl Default for StreamTap {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl StreamTap {
+    pub fn new() -> Self {
+        Self { state: TapState::Normal, apc: Vec::new(), kitty: KittyParser::new() }
+    }
+
+    /// Process `input`, routing kitty graphics commands into `store` and
+    /// returning the bytes that should still reach the VT parser.
+    pub fn process(&mut self, input: &[u8], store: &FairMutex<ImageStore>) -> Vec<u8> {
+        let mut out = Vec::with_capacity(input.len());
+        for &b in input {
+            match self.state {
+                TapState::Normal => {
+                    if b == 0x1b {
+                        self.state = TapState::Escape;
+                    } else {
+                        out.push(b);
+                    }
+                }
+                TapState::Escape => {
+                    if b == b'_' {
+                        self.apc.clear();
+                        self.state = TapState::Apc; // APC introducer; drop it
+                    } else if b == 0x1b {
+                        out.push(0x1b); // another ESC; emit held ESC, stay
+                    } else {
+                        out.push(0x1b); // not an APC; emit held ESC + this byte
+                        out.push(b);
+                        self.state = TapState::Normal;
+                    }
+                }
+                TapState::Apc => {
+                    if b == 0x1b {
+                        self.state = TapState::ApcEscape;
+                    } else if b == 0x07 {
+                        self.finish_apc(store); // BEL terminator
+                        self.state = TapState::Normal;
+                    } else {
+                        self.apc.push(b);
+                    }
+                }
+                TapState::ApcEscape => {
+                    if b == b'\\' {
+                        self.finish_apc(store); // ST terminator (ESC \)
+                        self.state = TapState::Normal;
+                    } else {
+                        self.apc.push(0x1b); // ESC was body, not terminator
+                        self.apc.push(b);
+                        self.state = TapState::Apc;
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    fn finish_apc(&mut self, store: &FairMutex<ImageStore>) {
+        if self.apc.first() == Some(&b'G') {
+            if let Some(cmd) = self.kitty.feed(&self.apc[1..]) {
+                if let Some(image) = cmd.image {
+                    store.lock().insert(cmd.id, cmd.action, image);
+                }
+            }
+        }
+        self.apc.clear();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -307,5 +444,31 @@ mod tests {
         let img = cmd.image.expect("image");
         assert_eq!((img.width, img.height), (1, 2));
         assert_eq!(img.rgba, vec![255, 255, 255, 255, 0, 0, 0, 255]);
+    }
+
+    #[test]
+    fn tap_strips_image_passes_text() {
+        let store = FairMutex::new(ImageStore::new());
+        let mut tap = StreamTap::new();
+        let mut input = Vec::new();
+        input.extend_from_slice(b"hi");
+        // kitty APC: 1x1 red RGBA pixel.
+        input.extend_from_slice(b"\x1b_Ga=T,f=32,s=1,v=1;/wAA/w==\x1b\\");
+        input.extend_from_slice(b"!");
+        let out = tap.process(&input, &store);
+        assert_eq!(out, b"hi!"); // text passes through, image stripped
+        assert_eq!(store.lock().len(), 1); // one image captured
+    }
+
+    #[test]
+    fn tap_handles_split_across_reads() {
+        let store = FairMutex::new(ImageStore::new());
+        let mut tap = StreamTap::new();
+        // APC split mid-sequence across two process() calls.
+        let a = tap.process(b"A\x1b_Ga=T,f=32,s=1,v=1;/wAA", &store);
+        let b = tap.process(b"/w==\x1b\\B", &store);
+        assert_eq!(a, b"A");
+        assert_eq!(b, b"B");
+        assert_eq!(store.lock().len(), 1);
     }
 }

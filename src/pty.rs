@@ -1,24 +1,35 @@
-//! PTY + VT integration via `alacritty_terminal`.
+//! PTY + VT integration.
 //!
-//! A background OS thread (owned by `alacritty_terminal::event_loop::EventLoop`)
-//! reads the PTY, runs the VT parser, and mutates the shared `Term` behind a
-//! `FairMutex`. When new content is ready it emits `Event::Wakeup`, which we
-//! forward to the winit UI thread via an `EventLoopProxy`. The UI thread never
-//! touches the PTY fd directly; it only reads `Term` state on a wakeup and
-//! writes input bytes through the `Notifier`.
+//! We run our own read/parse loop (rather than `alacritty_terminal`'s
+//! `EventLoop`) so we can *tap* the PTY byte stream for inline-image escape
+//! sequences (kitty graphics) that the VT parser would otherwise discard —
+//! while still leaning on alacritty's battle-tested `Pty`, `ansi::Processor`,
+//! and `Term`. A background thread owns the `Pty`, waits on its fd with
+//! `polling`, reads bytes, routes image sequences to the image store, feeds the
+//! rest to the parser (mutating the shared `Term` under a `FairMutex`), and
+//! wakes the winit UI thread via an `EventLoopProxy`. Input/resize/shutdown
+//! flow from the UI thread over a channel; the loop is woken with
+//! `Poller::notify`.
 
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::io::{Read, Write};
+use std::num::NonZeroUsize;
+use std::os::fd::{AsRawFd, BorrowedFd};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 
-use alacritty_terminal::event::{Event, EventListener, Notify, WindowSize};
-use alacritty_terminal::event_loop::{EventLoop as PtyEventLoop, Msg, Notifier};
-use alacritty_terminal::grid::Dimensions;
+use alacritty_terminal::event::{Event, EventListener, OnResize, WindowSize};
 use alacritty_terminal::sync::FairMutex;
+use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::term::{Config, Term};
-use alacritty_terminal::tty::{self, Options as PtyOptions, Shell};
+use alacritty_terminal::tty::{self, EventedReadWrite, Options as PtyOptions, Shell};
+use alacritty_terminal::vte::ansi::Processor;
+use polling::{Event as PollEvent, Events, PollMode, Poller};
 use winit::event_loop::EventLoopProxy;
+
+use crate::image::ImageStore;
 
 /// Events delivered from the PTY thread (and timers) into the winit loop. Each
 /// carries the id of the session (tab) it came from so the UI can route it.
@@ -36,9 +47,6 @@ pub enum UserEvent {
 
 /// Bridges `alacritty_terminal`'s `EventListener` to the winit event loop, tagging
 /// each forwarded event with its session id.
-///
-/// `EventLoopProxy<T>` is `Clone + Send` when `T: Send`, so this is safe to move
-/// into the PTY reader thread.
 #[derive(Clone)]
 pub struct EventProxy {
     proxy: EventLoopProxy<UserEvent>,
@@ -52,19 +60,15 @@ impl EventListener for EventProxy {
             Event::Title(title) => Some(UserEvent::Title(self.id, title)),
             Event::Bell => Some(UserEvent::Bell(self.id)),
             Event::ChildExit(_) | Event::Exit => Some(UserEvent::ChildExit(self.id)),
-            // Clipboard / color / cursor-blink / mouse-dirty events are not
-            // needed for the minimal feature set.
             _ => None,
         };
         if let Some(user_event) = mapped {
-            // The loop may already be gone during shutdown; ignore the error.
             let _ = self.proxy.send_event(user_event);
         }
     }
 }
 
-/// Trivial `Dimensions` implementation for sizing the grid. `alacritty_terminal`
-/// only ships a public `TermSize` inside its `test` module, so we provide our own.
+/// Trivial `Dimensions` implementation for sizing the grid.
 #[derive(Copy, Clone, Debug)]
 pub struct GridSize {
     pub cols: usize,
@@ -83,20 +87,25 @@ impl Dimensions for GridSize {
     }
 }
 
-/// Owns the shared terminal state and the input channel to the PTY thread.
+/// Control messages from the UI thread to the PTY loop.
+enum LoopMsg {
+    Input(Cow<'static, [u8]>),
+    Resize(WindowSize),
+    Shutdown,
+}
+
+/// Owns the shared terminal state and the channel to the PTY loop thread.
 pub struct Pty {
     /// Shared VT state. Lock briefly to read damage/renderable content.
     pub term: Arc<FairMutex<Term<EventProxy>>>,
-    /// Input path: keystrokes are written here immediately (single syscall),
-    /// pixels come back asynchronously as PTY echo -> `Event::Wakeup`.
-    notifier: Notifier,
+    /// Decoded inline images received from the PTY, for the renderer to draw.
+    pub images: Arc<FairMutex<ImageStore>>,
+    tx: Sender<LoopMsg>,
+    poller: Arc<Poller>,
 }
 
 impl Pty {
-    /// Spawn the shell, wire up the VT parser thread, and return a handle.
-    ///
-    /// `cell_width`/`cell_height` are in physical pixels (used by programs that
-    /// query pixel dimensions, e.g. for sixel/image protocols).
+    /// Spawn the shell + the read/parse loop thread, returning a handle.
     #[allow(clippy::too_many_arguments)]
     pub fn spawn(
         proxy: EventLoopProxy<UserEvent>,
@@ -109,13 +118,8 @@ impl Pty {
         working_directory: Option<PathBuf>,
         scrollback: usize,
     ) -> anyhow::Result<Pty> {
-        // Sets COLORTERM=truecolor and a base TERM on glassy's own environment,
-        // which the child inherits.
         tty::setup_env();
 
-        // Per-child environment. glassy ships no terminfo of its own, so we
-        // advertise the universally-available `xterm-256color` (a strict subset
-        // of what our VT parser handles) plus 24-bit color and a program identity.
         let mut env = HashMap::new();
         env.insert("TERM".to_string(), "xterm-256color".to_string());
         env.insert("COLORTERM".to_string(), "truecolor".to_string());
@@ -127,16 +131,11 @@ impl Pty {
 
         let event_proxy = EventProxy { proxy, id };
         let grid = GridSize { cols, rows };
-
         let config = Config {
             scrolling_history: scrollback,
             ..Config::default()
         };
-        let term = Arc::new(FairMutex::new(Term::new(
-            config,
-            &grid,
-            event_proxy.clone(),
-        )));
+        let term = Arc::new(FairMutex::new(Term::new(config, &grid, event_proxy.clone())));
 
         let window_size = WindowSize {
             num_cols: cols as u16,
@@ -144,40 +143,47 @@ impl Pty {
             cell_width,
             cell_height,
         };
-
         let pty_options = PtyOptions {
             shell,
             working_directory,
             drain_on_exit: false,
             env,
-            #[cfg(windows)]
-            escape_args: false,
+            ..PtyOptions::default()
         };
+        let pty = tty::new(&pty_options, window_size, id as u64)?;
 
-        // `window_id` is only used to set $WINDOWID; 0 is fine for a single window.
-        let pty = tty::new(&pty_options, window_size, 0)?;
+        let (tx, rx) = channel::<LoopMsg>();
+        let poller = Arc::new(Poller::new()?);
+        let images = Arc::new(FairMutex::new(ImageStore::new()));
 
-        // drain_on_exit = false, ref_test = false.
-        let pty_loop = PtyEventLoop::new(term.clone(), event_proxy, pty, false, false)?;
-        let notifier = Notifier(pty_loop.channel());
-        // Spawn the reader/parser thread. The handle is detached; the thread
-        // shuts down when it receives `Msg::Shutdown` or the child exits.
-        let _handle = pty_loop.spawn();
+        let loop_term = term.clone();
+        let loop_poller = poller.clone();
+        let loop_images = images.clone();
+        std::thread::Builder::new()
+            .name(format!("glassy-pty-{id}"))
+            .spawn(move || {
+                run_loop(pty, loop_term, event_proxy, rx, loop_poller, loop_images);
+            })?;
 
-        Ok(Pty { term, notifier })
+        Ok(Pty { term, images, tx, poller })
     }
 
-    /// Write raw bytes to the PTY master (keyboard input, paste, mouse reports).
+    fn send(&self, msg: LoopMsg) {
+        if self.tx.send(msg).is_ok() {
+            let _ = self.poller.notify();
+        }
+    }
+
+    /// Write raw bytes to the PTY master (keyboard input, mouse reports).
     pub fn write<B: Into<Cow<'static, [u8]>>>(&self, bytes: B) {
-        self.notifier.notify(bytes);
+        let bytes = bytes.into();
+        if !bytes.is_empty() {
+            self.send(LoopMsg::Input(bytes));
+        }
     }
 
-    /// Paste clipboard text into the child.
-    ///
-    /// When the application has enabled bracketed paste (DECSET 2004), the text
-    /// is wrapped in `ESC[200~` .. `ESC[201~` so the program can distinguish
-    /// pasted content from typed input. Any embedded `ESC[201~` is stripped so a
-    /// hostile clipboard cannot break out of the paste and inject commands.
+    /// Paste clipboard text, wrapping it in bracketed-paste markers when the
+    /// application enabled DECSET 2004 and stripping any embedded end marker.
     pub fn paste(&self, text: &str, bracketed: bool) {
         if text.is_empty() {
             return;
@@ -202,21 +208,104 @@ impl Pty {
             cell_width,
             cell_height,
         };
-        let _ = self.notifier.0.send(Msg::Resize(window_size));
+        self.send(LoopMsg::Resize(window_size));
         self.term.lock().resize(GridSize { cols, rows });
     }
 
-    /// Ask the PTY thread to shut down cleanly.
+    /// Ask the PTY loop to shut down cleanly.
     pub fn shutdown(&self) {
-        let _ = self.notifier.0.send(Msg::Shutdown);
+        self.send(LoopMsg::Shutdown);
     }
 }
 
-impl Drop for Pty {
-    /// Shut the reader/parser thread down when a session is dropped (e.g. a
-    /// background tab or on exit), so its thread exits and the child gets SIGHUP
-    /// rather than lingering until the process ends.
-    fn drop(&mut self) {
-        let _ = self.notifier.0.send(Msg::Shutdown);
+/// PTY read/parse loop: waits on the master fd, drains control messages, reads
+/// available bytes, taps image sequences, and feeds the rest to the VT parser.
+fn run_loop(
+    mut pty: tty::Pty,
+    term: Arc<FairMutex<Term<EventProxy>>>,
+    proxy: EventProxy,
+    rx: Receiver<LoopMsg>,
+    poller: Arc<Poller>,
+    images: Arc<FairMutex<ImageStore>>,
+) {
+    const PTY_KEY: usize = 1;
+    let mut processor: Processor = Processor::new();
+    let mut tap = crate::image::StreamTap::new();
+
+    let fd = pty.reader().as_raw_fd();
+    // alacritty opens the master non-blocking; since we only read after a poll
+    // readiness event (so reads never block) and want writes to never drop input
+    // on EAGAIN, switch the fd to blocking mode for reliable write_all.
+    let _ = rustix::io::ioctl_fionbio(unsafe { BorrowedFd::borrow_raw(fd) }, false);
+    let mode = if poller.supports_level() {
+        PollMode::Level
+    } else {
+        PollMode::Oneshot
+    };
+    // SAFETY: `fd` is owned by `pty`, which this thread owns for the whole loop;
+    // we delete it from the poller before `pty` is dropped at return.
+    if unsafe { poller.add_with_mode(fd, PollEvent::readable(PTY_KEY), mode) }.is_err() {
+        return;
+    }
+
+    let mut events = Events::with_capacity(NonZeroUsize::new(64).unwrap());
+    let mut buf = vec![0u8; 65536];
+    let mut child_exited = true;
+
+    'main: loop {
+        events.clear();
+        if poller.wait(&mut events, None).is_err() {
+            break;
+        }
+
+        // Drain control messages (input/resize/shutdown).
+        loop {
+            match rx.try_recv() {
+                Ok(LoopMsg::Input(b)) => {
+                    let _ = pty.writer().write_all(&b);
+                }
+                Ok(LoopMsg::Resize(ws)) => pty.on_resize(ws),
+                Ok(LoopMsg::Shutdown) => {
+                    child_exited = false;
+                    break 'main;
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    child_exited = false;
+                    break 'main;
+                }
+            }
+        }
+
+        // Read pending output if the fd signalled readable.
+        if events.iter().any(|ev| ev.key == PTY_KEY) {
+            match pty.reader().read(&mut buf) {
+                Ok(0) => break 'main, // EOF: child gone
+                Ok(n) => {
+                    // Tap inline-image (kitty graphics) sequences out of the
+                    // stream; feed everything else to the VT parser.
+                    let passthrough = tap.process(&buf[..n], &images);
+                    let mut term = term.lock();
+                    processor.advance(&mut *term, &passthrough);
+                    drop(term);
+                    proxy.send_event(Event::Wakeup);
+                }
+                Err(ref e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted) => {}
+                Err(_) => break 'main, // e.g. EIO when the child exits
+            }
+        }
+
+        if mode == PollMode::Oneshot {
+            let _ = poller.modify_with_mode(
+                unsafe { BorrowedFd::borrow_raw(fd) },
+                PollEvent::readable(PTY_KEY),
+                PollMode::Oneshot,
+            );
+        }
+    }
+
+    let _ = poller.delete(unsafe { BorrowedFd::borrow_raw(fd) });
+    if child_exited {
+        proxy.send_event(Event::Exit);
     }
 }
