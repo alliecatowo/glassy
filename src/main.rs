@@ -2,6 +2,7 @@ mod app;
 mod bell;
 mod color;
 mod config;
+mod image;
 mod input;
 mod pty;
 mod renderer;

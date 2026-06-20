@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+png = "0.17"
 alacritty_terminal = "0.26.0"
 anyhow = "1.0.102"
 arboard = "3.6.1"
