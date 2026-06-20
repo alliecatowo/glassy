@@ -36,6 +36,7 @@ BINDIR      = $(DESTDIR)$(PREFIX)/bin
 DATADIR     = $(DESTDIR)$(PREFIX)/share
 ICONDIR     = $(DATADIR)/icons/hicolor
 APPDIR      = $(DATADIR)/applications
+MANDIR      = $(DATADIR)/man/man1
 
 # Where the binary expects the bundled color-emoji font at runtime.
 # The binary loads ~/.local/share/glassy/fonts/NotoColorEmoji.ttf, so we
@@ -47,6 +48,7 @@ RELEASE_BIN = target/release/$(BIN)
 ICON_SRC    = assets/icons
 FONT_SRC    = assets/fonts/NotoColorEmoji-CBDT.ttf
 DESKTOP_SRC = extra/glassy.desktop
+MAN_SRC     = extra/glassy.1
 
 # Icon sizes available under $(ICON_SRC) as glassy-<size>.png.
 # The 512 icon is installed into the 512x512 directory.
@@ -106,6 +108,9 @@ install:
 	# Desktop entry.
 	$(INSTALL) -d "$(APPDIR)"
 	$(INSTALL) -m 0644 "$(DESKTOP_SRC)" "$(APPDIR)/$(BIN).desktop"
+	# Man page (section 1).
+	$(INSTALL) -d "$(MANDIR)"
+	$(INSTALL) -m 0644 "$(MAN_SRC)" "$(MANDIR)/$(BIN).1"
 	# Bundled color-emoji font (optional). The binary loads it from
 	# ~/.local/share/glassy/fonts/NotoColorEmoji.ttf at runtime.
 	if [ -f "$(FONT_SRC)" ]; then \
@@ -127,6 +132,7 @@ uninstall:
 		rm -f "$(ICONDIR)/$${sz}x$${sz}/apps/$(BIN).png"; \
 	done
 	rm -f "$(APPDIR)/$(BIN).desktop"
+	rm -f "$(MANDIR)/$(BIN).1"
 	rm -f "$(FONTDIR)/NotoColorEmoji.ttf"
 	@echo "glassy uninstalled from $(DESTDIR)$(PREFIX)"
 

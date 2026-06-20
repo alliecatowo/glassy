@@ -136,6 +136,12 @@ Other flags: `--font-family`, `--padding`, `--scrollback`, `--bell-visual`, `--b
 
 ---
 
+## Benchmarks
+
+Rough, honest numbers (binary size, idle RSS, idle CPU, startup) and how they were measured live in [docs/benchmarks.md](docs/benchmarks.md).
+
+---
+
 ## Architecture
 
 glassy is deliberately a thin stack:

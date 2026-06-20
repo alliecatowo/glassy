@@ -1,0 +1,214 @@
+.\" Man page for glassy -- a minimal GPU-accelerated terminal emulator.
+.\" Render locally with:  man ./extra/glassy.1
+.TH GLASSY 1 "2026-06-19" "glassy 0.1.0" "User Commands"
+.SH NAME
+glassy \- a minimal, GPU-accelerated terminal emulator
+.SH SYNOPSIS
+.B glassy
+.RI [ OPTIONS ]
+.RB [ \-e
+.IR COMMAND " [" ARGS ...]]
+.SH DESCRIPTION
+.B glassy
+is a small, fast, GPU-accelerated terminal emulator written in Rust. It draws
+the grid with an instanced
+.B wgpu
+renderer fed by a dynamic glyph atlas, supports 24-bit truecolor, color emoji
+and CJK fallback, procedural box-drawing, text decorations, mouse reporting,
+selection, clipboard, scrollback, OSC 8 hyperlinks, and tabs.
+.PP
+Rendering is on-demand and damage-based: with nothing changing on screen glassy
+issues no frames and consumes no CPU, and when the screen does change only the
+cells that actually changed are re-rasterized.
+.PP
+Configuration is read from a simple
+.I KEY=VALUE
+file (see
+.B CONFIGURATION
+below); command-line options override the file.
+.SH OPTIONS
+.TP
+.BI \-\-font\-size " PT"
+Font size in points. Must be a positive number.
+.TP
+.BI \-\-font\-family " NAME"
+Font family name, or a path to a font file.
+.TP
+.BI \-\-theme " NAME"
+Color theme. One of
+.B tokyo\-night
+(default) or
+.BR catppuccin\-mocha .
+An unknown name falls back to Tokyo Night with a warning.
+.TP
+.BI \-\-opacity " F"
+Window opacity as a float from
+.B 0.0
+(fully transparent) to
+.B 1.0
+(fully opaque). Values are clamped to that range.
+.TP
+.BI \-\-padding " PX"
+Grid inset padding in logical pixels. Must be \[>=] 0.
+.TP
+.BI \-\-scrollback " N"
+Number of lines of scrollback history to retain.
+.TP
+.BI \-\-bell\-visual " BOOL"
+Flash the window on the terminal bell. Default
+.BR true .
+Accepts
+.BR true / false ", " yes / no ", " on / off ", " 1 / 0 .
+.TP
+.BI \-\-bell\-audible " BOOL"
+Emit a soft beep on the terminal bell. Default
+.BR false .
+Requires a build with the
+.B bell\-audio
+feature. Accepts the same boolean spellings as
+.BR \-\-bell\-visual .
+.TP
+.BI \-e ", " \-\-command " COMMAND " [ ARGS ...]
+Run
+.I COMMAND
+(with the remaining arguments) instead of the login shell. This consumes the
+rest of the command line verbatim, so it must come last.
+.TP
+.BR \-h ", " \-\-help
+Print a usage summary and exit.
+.TP
+.BR \-V ", " \-\-version
+Print the version and exit.
+.SH CONFIGURATION
+.B glassy
+reads
+.I $XDG_CONFIG_HOME/glassy/glassy.conf
+(falling back to
+.IR ~/.config/glassy/glassy.conf ).
+The file is a list of
+.I KEY=VALUE
+lines. Blank lines and lines beginning with
+.B #
+or
+.B ;
+are ignored. Surrounding whitespace and a single layer of matching single or
+double quotes are stripped from values. Command-line options override the file.
+.PP
+Recognized keys:
+.TP
+.B font_family
+Font family name, or a path to a font file.
+.TP
+.B font_size
+Font size in points (positive number). Default
+.BR 14 .
+.TP
+.B theme
+Color theme:
+.B tokyo\-night
+or
+.BR catppuccin\-mocha .
+Default
+.BR tokyo\-night .
+.TP
+.B opacity
+Window opacity from
+.B 0.0
+to
+.BR 1.0 .
+Default
+.BR 0.92 .
+.TP
+.B padding
+Grid inset in logical pixels (\[>=] 0).
+.TP
+.B shell
+Program plus arguments to run instead of the login shell, e.g.
+.IR "/usr/bin/zsh -l" .
+.TP
+.B scrollback
+Lines of scrollback history. Default
+.BR 10000 .
+.TP
+.B bell_visual
+Flash the window on the bell. Default
+.BR true .
+.TP
+.B bell_audible
+Soft beep on the bell. Default
+.BR false " (needs the " bell\-audio " build)."
+.PP
+Example
+.IR glassy.conf :
+.PP
+.RS
+.EX
+font_family  = FiraCode Nerd Font Mono
+font_size    = 14
+theme        = tokyo\-night
+opacity      = 0.92
+padding      = 6
+scrollback   = 10000
+bell_visual  = true
+bell_audible = false
+shell        = /usr/bin/zsh \-l
+.EE
+.RE
+.SH KEYBINDINGS
+.TP
+.B Ctrl+Shift+C
+Copy the current selection to the clipboard.
+.TP
+.B Ctrl+Shift+V
+Paste from the clipboard.
+.TP
+.B Ctrl+Shift+T
+Open a new tab.
+.TP
+.B Ctrl+Shift+W
+Close the current tab.
+.TP
+.B Ctrl+Tab
+Switch to the next tab.
+.TP
+.B Ctrl+Shift+Tab
+Switch to the previous tab.
+.TP
+.B Ctrl++
+Increase the font size.
+.TP
+.B Ctrl+\-
+Decrease the font size.
+.TP
+.B Ctrl+0
+Reset the font size to its configured value.
+.TP
+.B Shift+PageUp ", " Shift+PageDown
+Scroll up / down through the scrollback.
+.TP
+.B Shift+Home ", " Shift+End
+Scroll to the top / bottom of the scrollback.
+.TP
+.B Ctrl+Left\-click
+Open the OSC 8 hyperlink under the pointer.
+.SH FILES
+.TP
+.I $XDG_CONFIG_HOME/glassy/glassy.conf
+Primary configuration file.
+.TP
+.I ~/.config/glassy/glassy.conf
+Configuration file used when
+.B $XDG_CONFIG_HOME
+is unset.
+.TP
+.I ~/.local/share/glassy/fonts/NotoColorEmoji.ttf
+Bundled color-emoji font loaded at runtime, if present.
+.SH AUTHOR
+Written by Allie and contributors.
+.SH SEE ALSO
+.BR xterm (1),
+.BR alacritty (1).
+.PP
+Project home:
+.UR https://github.com/alliecatowo/glassy
+.UE
