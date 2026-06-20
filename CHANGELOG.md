@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Inline images: kitty graphics protocol (PNG incl. 8/16-bit & palette, raw
+  RGBA, chunked, `c=`/`r=` cell sizing, aspect-aware, `a=d` delete) and sixel,
+  drawn on a dedicated GPU atlas; images clear on screen-clear/reset.
+- In-app settings overlay (`Ctrl+,`): live font size / opacity / bell / theme,
+  saved back to the config file (merge-preserving).
+- Help overlay (`F1`): built-in keybinding cheat-sheet.
+- Live theme switching across 8 built-in themes (Tokyo Night, Catppuccin
+  Mocha/Macchiato, Gruvbox, Dracula, Nord, Solarized, Rosé Pine).
+- Header bar: shows the active title with a single tab, a scrollback-position
+  indicator, and activity dots on busy background tabs.
+
+### Changed
+
+- glassy now owns its PTY read loop (so it can tap image escape sequences).
+- Softer, accent-tinted visual bell (was a stark white full-screen flash).
+- Narrow-base emoji (e.g. the trans flag) render at full size.
+
+### Performance
+
+- Allocation-free redraw path (direct glyph-instance push, persistent
+  flush-pass scratch, removed a redundant glyph-cache layer).
+- Skip default-background cell quads; fewer GPU state rebinds for the image
+  pass; dropped the `image` and `regex` dependency stacks (smaller binary).
+
 ## [0.1.0] - 2026-06-19
 
 Initial release.

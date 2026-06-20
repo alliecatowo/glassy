@@ -22,6 +22,11 @@
 
 <img src="docs/inline-images.png" alt="glassy rendering images inline" width="820"/>
 
+<br/>
+<br/>
+
+<img src="docs/settings.png" alt="glassy in-app settings overlay" width="820"/>
+
 </div>
 
 ---
@@ -57,12 +62,15 @@ Accurate, not magic: glassy is fast because it's simple and because it leans on 
 **Interaction**
 - 🖱️ **Mouse reporting** (SGR), hover, **selection**, **clipboard**, and **scrollback**
 - 🔗 **OSC 8 hyperlinks** — Ctrl+click to open
-- 🗂️ **Tabs**
-- 🪟 **Translucency** (configurable opacity)
+- 🗂️ **Tabs** with a slim title/tab bar — scrollback indicator + **activity dots** on busy background tabs
+- 🪟 **Translucency** (configurable opacity, adjustable live)
 
 **Comfort**
-- ⚙️ **Runtime config** + themes (**Tokyo Night**, **Catppuccin Mocha**) and live **font resize**
-- 🔔 **Bell** — visual flash and/or audible beep
+- 🎛️ **In-app settings** (`Ctrl+,`) — live font size / opacity / bell / theme, saved back to your config
+- ❓ **Help overlay** (`F1`) — a built-in keybinding cheat-sheet
+- 🎨 **8 built-in themes** — Tokyo Night, Catppuccin Mocha/Macchiato, Gruvbox, Dracula, Nord, Solarized, Rosé Pine — switchable live
+- ⚙️ **Runtime config** + live **font resize**
+- 🔔 **Bell** — soft visual flash and/or audible beep
 
 ---
 
@@ -105,7 +113,8 @@ font_size    = 14                        # points
 opacity      = 0.92                       # 0.0 (clear) .. 1.0 (opaque)
 padding      = 6                          # grid inset, logical px
 scrollback   = 10000                      # lines of history
-theme        = tokyo-night                # or: catppuccin-mocha
+theme        = tokyo-night                # tokyo-night, catppuccin-mocha, catppuccin-macchiato,
+                                          #   gruvbox-dark, dracula, nord, solarized-dark, rose-pine
 bell_visual  = true                       # flash the window on bell
 bell_audible = false                      # soft beep on bell (needs bell-audio build)
 shell        = /usr/bin/zsh -l            # program + args (defaults to your login shell)
@@ -127,6 +136,8 @@ Other flags: `--font-family`, `--padding`, `--scrollback`, `--bell-visual`, `--b
 
 | Action | Binding |
 | --- | --- |
+| Help overlay | `F1` |
+| Settings | `Ctrl+,` |
 | Copy | `Ctrl+Shift+C` |
 | Paste | `Ctrl+Shift+V` |
 | New tab | `Ctrl+Shift+T` |
@@ -139,6 +150,8 @@ Other flags: `--font-family`, `--padding`, `--scrollback`, `--bell-visual`, `--b
 | Scroll up / down | `Shift+PageUp` / `Shift+PageDown` |
 | Scroll to top / bottom | `Shift+Home` / `Shift+End` |
 | Open hyperlink | `Ctrl`+Left-click |
+
+> Inside **Settings** (`Ctrl+,`): `↑`/`↓` select, `←`/`→` change, `Enter` saves to your config, `Esc` closes.
 
 ---
 
@@ -162,7 +175,7 @@ The honest version: parts of glassy stand on mature crates while the bespoke, fa
 
 ## Status / roadmap
 
-**Working today:** GPU rendering, truecolor + 256, color emoji + CJK fallback, box-drawing, text decorations, cursor shapes/blink, mouse + selection + clipboard, scrollback, OSC 8 hyperlinks, tabs, translucency, themes, runtime config, bell, **inline images (kitty graphics + sixel)**.
+**Working today:** GPU rendering, truecolor + 256, color emoji + CJK fallback, box-drawing, text decorations, cursor shapes/blink, mouse + selection + clipboard, scrollback, OSC 8 hyperlinks, tabs with activity indicators, translucency, **8 live-switchable themes**, **in-app settings (`Ctrl+,`)** + **help overlay (`F1`)**, runtime config, bell, **inline images (kitty graphics + sixel)**.
 
 **Planned:**
 - ⬛ Window splits / panes
