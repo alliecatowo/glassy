@@ -374,6 +374,15 @@ impl App {
         }
     }
 
+    /// Clear transient pointer/selection state. Called when switching tabs so an
+    /// in-progress drag or hovered link from the old tab doesn't bleed into the new.
+    fn reset_pointer_state(&mut self) {
+        self.selecting = false;
+        self.held_button = None;
+        self.hovered_link = None;
+        self.last_click = None;
+    }
+
     /// Open a new tab and make it active, parking the current tab in `background`.
     fn new_tab(&mut self, event_loop: &ActiveEventLoop) {
         let Some(renderer) = self.renderer.as_ref() else {
@@ -409,6 +418,7 @@ impl App {
         self.pty = Some(pty);
         self.active_id = id;
         self.active_title.clear();
+        self.reset_pointer_state();
         self.update_window_title();
         self.mark_dirty(event_loop);
     }
@@ -442,6 +452,7 @@ impl App {
         self.pty = Some(target.pty);
         self.active_id = target.id;
         self.active_title = target.title;
+        self.reset_pointer_state();
         self.update_window_title();
         self.mark_dirty(event_loop);
     }
@@ -456,6 +467,7 @@ impl App {
                 self.pty = Some(next.pty);
                 self.active_id = next.id;
                 self.active_title = next.title;
+                self.reset_pointer_state();
                 self.update_window_title();
                 self.mark_dirty(event_loop);
             }

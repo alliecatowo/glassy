@@ -374,7 +374,8 @@ impl Renderer {
                     .find(|f| *f == wgpu::TextureFormat::Rgba8Unorm)
             })
             .or_else(|| caps.formats.iter().copied().find(|f| !f.is_srgb()))
-            .unwrap_or(caps.formats[0]);
+            .or_else(|| caps.formats.first().copied())
+            .context("GPU adapter reported no compatible surface formats")?;
         let present_mode = [wgpu::PresentMode::Mailbox, wgpu::PresentMode::Immediate]
             .into_iter()
             .find(|m| caps.present_modes.contains(m))
@@ -392,7 +393,10 @@ impl Renderer {
         let alpha_mode = if transparent {
             wgpu::CompositeAlphaMode::PreMultiplied
         } else {
-            caps.alpha_modes[0]
+            caps.alpha_modes
+                .first()
+                .copied()
+                .unwrap_or(wgpu::CompositeAlphaMode::Auto)
         };
 
         // Surface stays unconfigured until `resize()`; start at 1x1 as a placeholder.

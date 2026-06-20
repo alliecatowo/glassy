@@ -211,3 +211,12 @@ impl Pty {
         let _ = self.notifier.0.send(Msg::Shutdown);
     }
 }
+
+impl Drop for Pty {
+    /// Shut the reader/parser thread down when a session is dropped (e.g. a
+    /// background tab or on exit), so its thread exits and the child gets SIGHUP
+    /// rather than lingering until the process ends.
+    fn drop(&mut self) {
+        let _ = self.notifier.0.send(Msg::Shutdown);
+    }
+}
