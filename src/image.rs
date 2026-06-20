@@ -567,8 +567,30 @@ impl ImageStore {
 
     /// Store decoded pixels under `id` without queuing a placement (used by the
     /// sixel path, which displays at the cursor via a separate Display event).
+    ///
+    /// Sixel images get a fresh monotonic id every time and are never redisplayed,
+    /// so without bounding them a sixel animation/video would grow `by_id` forever.
+    /// After inserting, cap the number of retained sixel images (ids in the
+    /// `SIXEL_ID_BASE`+ range) and evict the oldest (lowest ids) plus any
+    /// placements that reference them. Kitty images (lower ids, redisplayable via
+    /// `a=p`) are untouched. The just-inserted image has the highest id, so it is
+    /// never the one evicted.
     pub fn insert_pixels(&mut self, id: u32, image: DecodedImage) {
         self.by_id.insert(id, image);
+        let mut sixel_ids: Vec<u32> = self
+            .by_id
+            .keys()
+            .copied()
+            .filter(|&k| k >= SIXEL_ID_BASE)
+            .collect();
+        if sixel_ids.len() > MAX_SIXEL_IMAGES {
+            sixel_ids.sort_unstable();
+            let evict = sixel_ids.len() - MAX_SIXEL_IMAGES;
+            for &old in &sixel_ids[..evict] {
+                self.by_id.remove(&old);
+                self.placements.retain(|p| p.id != old);
+            }
+        }
         self.revision += 1;
     }
 
@@ -630,6 +652,11 @@ pub struct StreamTap {
 /// Sixel images have no protocol id, so they get synthetic ids from a high range
 /// that cannot collide with app-chosen kitty ids in normal use.
 const SIXEL_ID_BASE: u32 = 0x8000_0000;
+
+/// Max number of decoded sixel images retained at once. Sixels are never
+/// redisplayed, so old ones are evicted oldest-first — bounds memory for sixel
+/// animations/video while keeping plenty of recent frames available.
+const MAX_SIXEL_IMAGES: usize = 64;
 
 /// One ordered item produced by [`StreamTap::process`]: either VT bytes for the
 /// parser, or a point at which an image should be displayed (anchored at the
@@ -1023,6 +1050,33 @@ mod tests {
         assert_eq!(vt_bytes(&events), b"\x1bP$q\"p\x1b\\");
         assert_eq!(display_count(&events), 0);
         assert_eq!(store.lock().len(), 0);
+    }
+
+    #[test]
+    fn sixel_images_are_bounded() {
+        // Inserting many sixel images (as an animation would) must not grow the
+        // store without bound; the newest stays, the oldest are evicted.
+        let mut store = ImageStore::new();
+        let img = || DecodedImage { width: 1, height: 1, rgba: vec![1, 2, 3, 4] };
+        for k in 0..(MAX_SIXEL_IMAGES as u32 + 50) {
+            store.insert_pixels(SIXEL_ID_BASE + k, img());
+        }
+        assert_eq!(store.len(), MAX_SIXEL_IMAGES);
+        // The most recent id is retained; an early one is evicted.
+        assert!(store.image(SIXEL_ID_BASE + MAX_SIXEL_IMAGES as u32 + 49).is_some());
+        assert!(store.image(SIXEL_ID_BASE).is_none());
+    }
+
+    #[test]
+    fn sixel_eviction_keeps_kitty_images() {
+        // Kitty images (low ids) must survive sixel eviction churn.
+        let mut store = ImageStore::new();
+        let img = || DecodedImage { width: 1, height: 1, rgba: vec![9, 9, 9, 9] };
+        store.insert_pixels(7, img()); // a kitty-range id
+        for k in 0..(MAX_SIXEL_IMAGES as u32 + 10) {
+            store.insert_pixels(SIXEL_ID_BASE + k, img());
+        }
+        assert!(store.image(7).is_some());
     }
 
     #[test]
