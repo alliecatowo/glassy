@@ -111,33 +111,18 @@ fn fit_label(t: &str, max: usize) -> String {
     format!("…{tail}")
 }
 
-/// Cells occupied by the left-hand " ◆ " mark before the tab chips. MUST match
-/// the mark pushed in the header renderer.
+/// Cells occupied by the left-hand " ◆ " mark before the tab chips.
 const HEADER_MARK_COLS: usize = 3;
-
-/// Build the tab-strip chip labels in display order (index 0 = the active tab as
-/// "1", then background tabs "2".., each with a ● when it has unseen activity).
-/// Shared by the header renderer and the click hit-test so the drawn chips and
-/// the click targets never disagree.
-fn header_chip_labels(active_title: &str, background: &[(&str, bool)]) -> Vec<String> {
-    let mut labels = vec![format!(" 1 {} ", fit_label(active_title, 16))];
-    for (i, (title, activity)) in background.iter().enumerate() {
-        labels.push(if *activity {
-            format!(" {} {} ● ", i + 2, fit_label(title, 16))
-        } else {
-            format!(" {} {} ", i + 2, fit_label(title, 16))
-        });
-    }
-    labels
-}
 
 /// An interactive item in the inline app toolbar (the strip *under* the native
 /// OS titlebar). Window controls (min/max/close) intentionally live in the
-/// native bar, not here.
+/// native bar, not here. `Tab`/`TabClose` carry the tab's *stable position*.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum StripItem {
-    /// A tab chip: index 0 = active tab, i>=1 = background[i-1].
+    /// A tab chip body at stable display position `pos` (click = activate).
     Tab(usize),
+    /// A tab's ✕ close affordance at stable position `pos`.
+    TabClose(usize),
     NewTab,
     Help,
     Menu,
@@ -155,11 +140,15 @@ struct StripSeg {
 /// Each toolbar control button is this many cells (a glyph padded by a space).
 const STRIP_BTN_W: usize = 3;
 
-/// Lay out the inline toolbar across `cols`: the glassy mark, the active title
-/// (one tab) or tab chips (multiple), a `+` new-tab button, then a `?` help and
-/// `≡` menu button on the right. The gap between is inert. Shared by the renderer
-/// and the click hit-test so the drawn items and click targets always agree.
-fn strip_layout(active_title: &str, background: &[(&str, bool)], cols: usize) -> Vec<StripSeg> {
+/// A tab descriptor in stable display order: (title, is_active, has_activity).
+type TabDesc<'a> = (&'a str, bool, bool);
+
+/// Lay out the inline toolbar across `cols` from tab descriptors in stable order:
+/// the glassy mark, then either the title (one tab) or numbered chips with a per-
+/// chip ✕ (multiple), a `+` new-tab button, and right-aligned `?` help + `≡` menu.
+/// The active tab keeps its position — only its highlight differs. Shared by the
+/// renderer and the click hit-test so drawn items and click targets always agree.
+fn strip_layout(tabs: &[TabDesc], cols: usize) -> Vec<StripSeg> {
     let right_btns = [(StripItem::Help, " ? "), (StripItem::Menu, " ≡ ")];
     let right_w = STRIP_BTN_W * right_btns.len();
     let right_start = cols.saturating_sub(right_w);
@@ -167,20 +156,30 @@ fn strip_layout(active_title: &str, background: &[(&str, bool)], cols: usize) ->
     let mut segs = Vec::new();
     let mut col = HEADER_MARK_COLS; // after the decorative " ◆ " mark
 
-    if background.is_empty() {
+    if tabs.len() <= 1 {
+        // Single tab: just the title (no number, no ✕ — closing it = quit).
+        let title = tabs.first().map(|t| t.0).unwrap_or("");
         let budget = right_start.saturating_sub(col + STRIP_BTN_W + 2).max(8);
-        let label = format!(" {} ", fit_label(active_title, budget));
+        let label = format!(" {} ", fit_label(title, budget));
         let w = label.chars().count().min(right_start.saturating_sub(col));
         segs.push(StripSeg { item: StripItem::Tab(0), label, start: col, end: col + w });
         col += w;
     } else {
-        for (i, label) in header_chip_labels(active_title, background).into_iter().enumerate() {
-            let w = label.chars().count();
-            if col + w > right_start {
-                break;
+        for (i, (title, _active, _activity)) in tabs.iter().enumerate() {
+            let body = format!(" {} {} ", i + 1, fit_label(title, 14));
+            let bw = body.chars().count();
+            if col + bw + 2 > right_start {
+                break; // out of room before the controls
             }
-            segs.push(StripSeg { item: StripItem::Tab(i), label, start: col, end: col + w });
-            col += w;
+            segs.push(StripSeg { item: StripItem::Tab(i), label: body, start: col, end: col + bw });
+            col += bw;
+            segs.push(StripSeg {
+                item: StripItem::TabClose(i),
+                label: "✕ ".to_string(),
+                start: col,
+                end: col + 2,
+            });
+            col += 2;
         }
     }
     if col + STRIP_BTN_W <= right_start {
@@ -475,8 +474,13 @@ pub struct App {
     renderer: Option<Renderer>,
     pty: Option<Pty>,
 
-    // Tabs. The active tab is `pty`; inactive tabs are parked in `background`.
+    // Tabs. The active tab's PTY is `pty`; inactive tabs are parked in
+    // `background` (an unordered pool keyed by id). `tab_order` is the STABLE
+    // left-to-right display order of all tab ids — switching tabs only moves the
+    // highlight, it never reorders or renumbers (drag-reorder mutates this).
     background: Vec<Session>,
+    /// Stable left-to-right display order of all tab ids (active + background).
+    tab_order: Vec<usize>,
     /// Stable id of the active session.
     active_id: usize,
     /// Title reported by the active session (OSC), for the tab strip.
@@ -578,6 +582,7 @@ impl App {
             renderer: None,
             pty: None,
             background: Vec::new(),
+            tab_order: vec![0], // the first tab (spawned in resumed) is id 0
             active_id: 0,
             active_title: String::new(),
             next_id: 1,
@@ -688,17 +693,32 @@ impl App {
             return false;
         }
         // Hit-test against the actual toolbar layout (the same helper the renderer
-        // uses, so click targets match what's drawn).
+        // uses, so click targets match what's drawn). Scope the descriptor borrow
+        // so the dispatch below can take `&mut self`.
         let col = ((x - pad) / m.width as f64).floor().max(0.0) as usize;
-        let bg: Vec<(&str, bool)> = self
-            .background
-            .iter()
-            .map(|s| (s.title.as_str(), s.activity))
-            .collect();
-        let segs = strip_layout(&self.active_title, &bg, self.cols);
-        match strip_item_at(&segs, col) {
-            Some(StripItem::Tab(0)) => {} // active tab — no-op
-            Some(StripItem::Tab(i)) => self.activate_background(i - 1, event_loop),
+        let item = {
+            let descs: Vec<(String, bool, bool)> = self
+                .tab_order
+                .iter()
+                .map(|&id| {
+                    if id == self.active_id {
+                        (self.active_title.clone(), true, false)
+                    } else {
+                        self.background
+                            .iter()
+                            .find(|s| s.id == id)
+                            .map(|s| (s.title.clone(), false, s.activity))
+                            .unwrap_or((String::new(), false, false))
+                    }
+                })
+                .collect();
+            let refs: Vec<(&str, bool, bool)> =
+                descs.iter().map(|(t, a, b)| (t.as_str(), *a, *b)).collect();
+            strip_item_at(&strip_layout(&refs, self.cols), col)
+        };
+        match item {
+            Some(StripItem::Tab(pos)) => self.activate_tab(pos, event_loop),
+            Some(StripItem::TabClose(pos)) => self.close_tab(pos, event_loop),
             Some(StripItem::NewTab) => self.new_tab(event_loop),
             Some(StripItem::Help) => {
                 self.help_open = !self.help_open;
@@ -753,6 +773,8 @@ impl App {
             }
         };
         self.next_id += 1;
+        // Park the current active into the background pool, append the new tab to
+        // the stable order, and make it active.
         if let Some(old) = self.pty.take() {
             self.background.push(Session {
                 id: self.active_id,
@@ -761,65 +783,111 @@ impl App {
                 activity: false,
             });
         }
+        self.tab_order.push(id);
         self.pty = Some(pty);
         self.active_id = id;
         self.active_title.clear();
         self.reset_pointer_state();
         self.update_window_title();
+        self.force_full_redraw = true;
         self.mark_dirty(event_loop);
     }
 
-    /// Switch tabs by `delta` in the ring (active first, then background order).
+    /// Switch to the next/previous tab in the stable order (wrapping).
     fn cycle_tab(&mut self, delta: isize, event_loop: &ActiveEventLoop) {
-        let total = self.tab_count();
-        if total < 2 {
+        let n = self.tab_order.len();
+        if n < 2 {
             return;
         }
-        let target = (((delta % total as isize) + total as isize) % total as isize) as usize;
-        if target != 0 {
-            self.activate_background(target - 1, event_loop);
-        }
+        let pos = self.active_pos();
+        let next = (((pos as isize + delta) % n as isize + n as isize) % n as isize) as usize;
+        self.activate_tab(next, event_loop);
     }
 
-    /// Park the active tab and bring background tab `idx` forward.
-    fn activate_background(&mut self, idx: usize, event_loop: &ActiveEventLoop) {
-        if idx >= self.background.len() {
+    /// Position of the active tab within `tab_order`.
+    fn active_pos(&self) -> usize {
+        self.tab_order
+            .iter()
+            .position(|&id| id == self.active_id)
+            .unwrap_or(0)
+    }
+
+    /// Make the tab at stable position `pos` active. The display order is NOT
+    /// changed — only the highlight moves. No-op if it's already active.
+    fn activate_tab(&mut self, pos: usize, event_loop: &ActiveEventLoop) {
+        let Some(&target_id) = self.tab_order.get(pos) else {
+            return;
+        };
+        if target_id == self.active_id {
             return;
         }
-        let Some(cur) = self.pty.take() else {
+        let Some(bi) = self.background.iter().position(|s| s.id == target_id) else {
             return;
         };
-        let parked = Session {
-            id: self.active_id,
-            pty: cur,
-            title: std::mem::take(&mut self.active_title),
-            activity: false,
-        };
-        let target = std::mem::replace(&mut self.background[idx], parked);
+        // Park the current active, then swap in the target (clearing its activity).
+        if let Some(cur) = self.pty.take() {
+            self.background.push(Session {
+                id: self.active_id,
+                pty: cur,
+                title: std::mem::take(&mut self.active_title),
+                activity: false,
+            });
+        }
+        let bi = self.background.iter().position(|s| s.id == target_id).unwrap_or(bi);
+        let target = self.background.remove(bi);
         self.pty = Some(target.pty);
         self.active_id = target.id;
         self.active_title = target.title;
         self.reset_pointer_state();
         self.update_window_title();
+        // A full repaint so the new tab's grid replaces the old one's persisted
+        // rows (otherwise stale content from the other tab bleeds through).
+        self.force_full_redraw = true;
         self.mark_dirty(event_loop);
     }
 
-    /// Close the active tab; activate another if any remain, else exit.
+    /// Close the active tab; activate the neighbor at its position, else exit.
     fn close_active_tab(&mut self, event_loop: &ActiveEventLoop) {
-        if let Some(pty) = &self.pty {
-            pty.shutdown();
-        }
-        match self.background.pop() {
-            Some(next) => {
+        self.close_tab(self.active_pos(), event_loop);
+    }
+
+    /// Close the tab at stable position `pos`. If it's the active tab, activate
+    /// the neighbor that slides into its slot; if the last tab closes, exit.
+    fn close_tab(&mut self, pos: usize, event_loop: &ActiveEventLoop) {
+        let Some(&id) = self.tab_order.get(pos) else {
+            return;
+        };
+        let was_active = id == self.active_id;
+        self.tab_order.remove(pos);
+
+        if was_active {
+            if let Some(pty) = &self.pty {
+                pty.shutdown();
+            }
+            self.pty = None;
+            self.active_title.clear();
+            if self.tab_order.is_empty() {
+                event_loop.exit();
+                return;
+            }
+            // Activate whatever tab now occupies the closed slot (clamped).
+            let new_pos = pos.min(self.tab_order.len() - 1);
+            let new_id = self.tab_order[new_pos];
+            if let Some(bi) = self.background.iter().position(|s| s.id == new_id) {
+                let next = self.background.remove(bi);
                 self.pty = Some(next.pty);
                 self.active_id = next.id;
                 self.active_title = next.title;
-                self.reset_pointer_state();
-                self.update_window_title();
-                self.mark_dirty(event_loop);
             }
-            None => event_loop.exit(),
+        } else if let Some(bi) = self.background.iter().position(|s| s.id == id) {
+            // Closing a background tab: shut it down and drop it.
+            let s = self.background.remove(bi);
+            s.pty.shutdown();
         }
+        self.reset_pointer_state();
+        self.update_window_title();
+        self.force_full_redraw = true;
+        self.mark_dirty(event_loop);
     }
 
     /// Whether the cursor should currently blink: the child requested a blinking
@@ -1300,18 +1368,34 @@ impl App {
             };
             put(&mut bar, 0, " ◆ ", accent, bar_bg);
 
-            let bg: Vec<(&str, bool)> = self
-                .background
+            // Tab descriptors in STABLE order: the active tab keeps its position,
+            // only the highlight follows it. (Disjoint fields from the renderer
+            // borrow, so this is allowed alongside it.)
+            let descs: Vec<(&str, bool, bool)> = self
+                .tab_order
                 .iter()
-                .map(|s| (s.title.as_str(), s.activity))
+                .map(|&id| {
+                    if id == self.active_id {
+                        (self.active_title.as_str(), true, false)
+                    } else {
+                        self.background
+                            .iter()
+                            .find(|s| s.id == id)
+                            .map(|s| (s.title.as_str(), false, s.activity))
+                            .unwrap_or(("", false, false))
+                    }
+                })
                 .collect();
-            let multi = !bg.is_empty();
-            for seg in strip_layout(&self.active_title, &bg, self.cols) {
+            let multi = descs.len() > 1;
+            for seg in strip_layout(&descs, self.cols) {
                 let (fg, sbg) = match seg.item {
-                    StripItem::Tab(0) if multi => (active_fg, active_bg),
-                    StripItem::Tab(0) => (base_fg, bar_bg), // single-tab title
-                    StripItem::Tab(i) if bg[i - 1].1 => (base_fg, bar_bg), // busy bg tab
+                    // Active tab: inverted highlight. Busy bg tab: bright. Else dim.
+                    StripItem::Tab(i) if descs.get(i).is_some_and(|d| d.1) => (active_fg, active_bg),
+                    StripItem::Tab(_) if !multi => (base_fg, bar_bg), // single-tab title
+                    StripItem::Tab(i) if descs.get(i).is_some_and(|d| d.2) => (base_fg, bar_bg),
                     StripItem::Tab(_) => (dim_fg, bar_bg),
+                    StripItem::TabClose(i) if descs.get(i).is_some_and(|d| d.1) => (active_fg, active_bg),
+                    StripItem::TabClose(_) => (dim_fg, bar_bg),
                     StripItem::NewTab => (accent, bar_bg),
                     _ => (dim_fg, bar_bg),
                 };
@@ -1734,6 +1818,14 @@ impl ApplicationHandler<UserEvent> for App {
         if std::env::var_os("GLASSY_SETTINGS").is_some() {
             self.settings_open = true;
             self.force_full_redraw = true;
+        }
+        // Headless: open N tabs at startup to capture the multi-tab toolbar.
+        if let Ok(n) = std::env::var("GLASSY_TABS")
+            && let Ok(n) = n.parse::<usize>()
+        {
+            for _ in 1..n.min(12) {
+                self.new_tab(event_loop);
+            }
         }
 
         // Draw the first frame, then reveal the window (avoids a white flash).
@@ -2222,19 +2314,22 @@ impl ApplicationHandler<UserEvent> for App {
 #[cfg(test)]
 mod tests {
     use super::{
-        StripItem, WheelAction, header_chip_labels, image_dst_size, motion_button, strip_item_at,
-        strip_layout, wheel_action,
+        StripItem, WheelAction, image_dst_size, motion_button, strip_item_at, strip_layout,
+        wheel_action,
     };
     use alacritty_terminal::term::TermMode;
 
     #[test]
     fn strip_hit_test_matches_layout() {
-        // Two tabs + a + button + right-hand ? / ≡ buttons, on a wide strip.
-        let segs = strip_layout("zsh", &[("vim", false)], 120);
-        // Chip 0 = " 1 zsh " (7) at HEADER_MARK_COLS(3): 3..10; chip 1 = " 2 vim " 10..17.
+        // Two tabs (tab 1 active) + their ✕ + a + button + right-hand ? / ≡.
+        let segs = strip_layout(&[("zsh", true, false), ("vim", false, false)], 120);
+        // Chip 0 body = " 1 zsh " (7) at 3..10, then "✕ " (2) at 10..12;
+        // chip 1 body = " 2 vim " at 12..19, "✕ " at 19..21.
         assert_eq!(strip_item_at(&segs, 4), Some(StripItem::Tab(0)));
-        assert_eq!(strip_item_at(&segs, 12), Some(StripItem::Tab(1)));
-        assert_eq!(strip_item_at(&segs, 18), Some(StripItem::NewTab)); // " + " at 17..20
+        assert_eq!(strip_item_at(&segs, 11), Some(StripItem::TabClose(0)));
+        assert_eq!(strip_item_at(&segs, 14), Some(StripItem::Tab(1)));
+        assert_eq!(strip_item_at(&segs, 20), Some(StripItem::TabClose(1)));
+        assert_eq!(strip_item_at(&segs, 22), Some(StripItem::NewTab)); // " + " 21..24
         // Right buttons are the last 6 cols (114..120): " ? " then " ≡ ".
         assert_eq!(strip_item_at(&segs, 115), Some(StripItem::Help));
         assert_eq!(strip_item_at(&segs, 118), Some(StripItem::Menu));
@@ -2242,10 +2337,23 @@ mod tests {
     }
 
     #[test]
-    fn chip_label_marks_activity() {
-        let labels = header_chip_labels("a", &[("b", true)]);
-        assert!(labels[1].contains('●')); // busy background tab shows a dot
-        assert!(!labels[0].contains('●'));
+    fn single_tab_has_no_number_or_close() {
+        // One tab shows just the title — no "1", no ✕ (closing it = quit).
+        let segs = strip_layout(&[("shell", true, false)], 100);
+        assert!(segs.iter().any(|s| s.item == StripItem::Tab(0)));
+        assert!(!segs.iter().any(|s| matches!(s.item, StripItem::TabClose(_))));
+        let title = &segs.iter().find(|s| s.item == StripItem::Tab(0)).unwrap().label;
+        assert!(title.contains("shell") && !title.contains('1'));
+    }
+
+    #[test]
+    fn strip_layout_numbers_by_stable_position() {
+        // Numbering follows display position, NOT which tab is active: with tab 2
+        // active, chips are still "1 a" then "2 b".
+        let segs = strip_layout(&[("a", false, false), ("b", true, false)], 120);
+        let lbl = |it| segs.iter().find(|s| s.item == it).map(|s| s.label.clone()).unwrap();
+        assert!(lbl(StripItem::Tab(0)).contains("1 a"));
+        assert!(lbl(StripItem::Tab(1)).contains("2 b"));
     }
 
     #[test]
