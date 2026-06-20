@@ -182,6 +182,15 @@ pub struct Config {
     pub bell_audible: bool,
 }
 
+/// One terminal tab. The *active* tab's PTY lives directly in `App::pty` (so all
+/// rendering/input code stays single-session); inactive tabs are parked here and
+/// swapped in on switch.
+struct Session {
+    id: usize,
+    pty: Pty,
+    title: String,
+}
+
 pub struct App {
     proxy: EventLoopProxy<UserEvent>,
     config: Config,
@@ -190,6 +199,15 @@ pub struct App {
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
     pty: Option<Pty>,
+
+    // Tabs. The active tab is `pty`; inactive tabs are parked in `background`.
+    background: Vec<Session>,
+    /// Stable id of the active session.
+    active_id: usize,
+    /// Title reported by the active session (OSC), for the tab strip.
+    active_title: String,
+    /// Next session id to assign.
+    next_id: usize,
 
     cols: usize,
     rows: usize,
@@ -272,6 +290,10 @@ impl App {
             window: None,
             renderer: None,
             pty: None,
+            background: Vec::new(),
+            active_id: 0,
+            active_title: String::new(),
+            next_id: 1,
             cols: 0,
             rows: 0,
             base_font_px: None,
@@ -330,6 +352,116 @@ impl App {
             if let Err(e) = std::process::Command::new("xdg-open").arg(url).spawn() {
                 log::warn!("failed to open {url}: {e}");
             }
+        }
+    }
+
+    /// Total number of open tabs (active + background).
+    fn tab_count(&self) -> usize {
+        self.background.len() + self.pty.is_some() as usize
+    }
+
+    /// Reflect the active tab + tab count in the window title.
+    fn update_window_title(&self) {
+        let Some(window) = self.window.as_ref() else { return };
+        let base = if self.active_title.is_empty() {
+            "glassy"
+        } else {
+            self.active_title.as_str()
+        };
+        let total = self.tab_count();
+        if total > 1 {
+            window.set_title(&format!("{base}  \u{00b7}  {total} tabs"));
+        } else {
+            window.set_title(base);
+        }
+    }
+
+    /// Open a new tab and make it active, parking the current tab in `background`.
+    fn new_tab(&mut self, event_loop: &ActiveEventLoop) {
+        let Some(renderer) = self.renderer.as_ref() else {
+            return;
+        };
+        let m = renderer.cell_metrics();
+        let id = self.next_id;
+        let pty = match Pty::spawn(
+            self.proxy.clone(),
+            id,
+            self.cols,
+            self.rows,
+            m.width.round() as u16,
+            m.height.round() as u16,
+            self.config.shell.clone(),
+            None,
+            self.config.scrollback,
+        ) {
+            Ok(p) => p,
+            Err(e) => {
+                log::error!("failed to spawn tab: {e:#}");
+                return;
+            }
+        };
+        self.next_id += 1;
+        if let Some(old) = self.pty.take() {
+            self.background.push(Session {
+                id: self.active_id,
+                pty: old,
+                title: std::mem::take(&mut self.active_title),
+            });
+        }
+        self.pty = Some(pty);
+        self.active_id = id;
+        self.active_title.clear();
+        self.update_window_title();
+        self.mark_dirty(event_loop);
+    }
+
+    /// Switch tabs by `delta` in the ring (active first, then background order).
+    fn cycle_tab(&mut self, delta: isize, event_loop: &ActiveEventLoop) {
+        let total = self.tab_count();
+        if total < 2 {
+            return;
+        }
+        let target = (((delta % total as isize) + total as isize) % total as isize) as usize;
+        if target != 0 {
+            self.activate_background(target - 1, event_loop);
+        }
+    }
+
+    /// Park the active tab and bring background tab `idx` forward.
+    fn activate_background(&mut self, idx: usize, event_loop: &ActiveEventLoop) {
+        if idx >= self.background.len() {
+            return;
+        }
+        let Some(cur) = self.pty.take() else {
+            return;
+        };
+        let parked = Session {
+            id: self.active_id,
+            pty: cur,
+            title: std::mem::take(&mut self.active_title),
+        };
+        let target = std::mem::replace(&mut self.background[idx], parked);
+        self.pty = Some(target.pty);
+        self.active_id = target.id;
+        self.active_title = target.title;
+        self.update_window_title();
+        self.mark_dirty(event_loop);
+    }
+
+    /// Close the active tab; activate another if any remain, else exit.
+    fn close_active_tab(&mut self, event_loop: &ActiveEventLoop) {
+        if let Some(pty) = &self.pty {
+            pty.shutdown();
+        }
+        match self.background.pop() {
+            Some(next) => {
+                self.pty = Some(next.pty);
+                self.active_id = next.id;
+                self.active_title = next.title;
+                self.update_window_title();
+                self.mark_dirty(event_loop);
+            }
+            None => event_loop.exit(),
         }
     }
 
@@ -860,7 +992,12 @@ impl App {
         if cols != self.cols || rows != self.rows {
             self.cols = cols;
             self.rows = rows;
-            pty.resize(cols, rows, m.width.round() as u16, m.height.round() as u16);
+            let (cw, ch) = (m.width.round() as u16, m.height.round() as u16);
+            pty.resize(cols, rows, cw, ch);
+            // Keep background tabs in sync so switching to one shows correct layout.
+            for s in &self.background {
+                s.pty.resize(cols, rows, cw, ch);
+            }
         }
         // Reproject + repaint the whole grid against the new surface; the per-row
         // storage is resized to match in the next frame's full rebuild.
@@ -978,17 +1115,35 @@ impl ApplicationHandler<UserEvent> for App {
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
-            UserEvent::Title(_id, title) => {
-                if let Some(w) = &self.window {
-                    w.set_title(&title);
+            UserEvent::Title(id, title) => {
+                if id == self.active_id {
+                    self.active_title = title;
+                    self.update_window_title();
+                } else if let Some(s) = self.background.iter_mut().find(|s| s.id == id) {
+                    s.title = title;
                 }
             }
-            UserEvent::ChildExit(_id) => {
-                event_loop.exit();
+            UserEvent::ChildExit(id) => {
+                if id == self.active_id {
+                    self.close_active_tab(event_loop);
+                } else {
+                    self.background.retain(|s| s.id != id);
+                    self.update_window_title();
+                }
                 return;
             }
-            UserEvent::Bell(_id) => self.trigger_bell(),
-            UserEvent::Wakeup(_id) => {}
+            UserEvent::Bell(id) => {
+                if id == self.active_id {
+                    self.trigger_bell();
+                }
+            }
+            // A background tab produced output: its terminal state updated
+            // silently; no redraw needed until it becomes active.
+            UserEvent::Wakeup(id) => {
+                if id != self.active_id {
+                    return;
+                }
+            }
         }
         self.mark_dirty(event_loop);
     }
@@ -1040,8 +1195,25 @@ impl ApplicationHandler<UserEvent> for App {
                                 self.mark_dirty(event_loop);
                                 return;
                             }
+                            "T" | "t" => {
+                                self.new_tab(event_loop);
+                                return;
+                            }
+                            "W" | "w" => {
+                                self.close_active_tab(event_loop);
+                                return;
+                            }
                             _ => {}
                         }
+                    }
+                }
+
+                // Ctrl+Tab / Ctrl+Shift+Tab cycle between tabs.
+                if event.state.is_pressed() && self.mods.control_key() {
+                    if let Key::Named(NamedKey::Tab) = &event.logical_key {
+                        let delta = if self.mods.shift_key() { -1 } else { 1 };
+                        self.cycle_tab(delta, event_loop);
+                        return;
                     }
                 }
 
