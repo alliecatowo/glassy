@@ -138,7 +138,7 @@ fn coverage_blend(color: vec3<f32>, cov: f32) -> vec4<f32> {
         let p = in.uv * in.quad_px - half;
         let r = min(in.radius_px, min(half.x, half.y));
         let d = sdf_rrect(p, half, r);
-        let cov = (1.0 - smoothstep(-0.75, 0.75, d)) * in.color.a;
+        let cov = (1.0 - smoothstep(-1.0, 1.0, d)) * in.color.a;
         return vec4<f32>(in.color.rgb * cov, cov);
     }
     if (in.flags == 2u) {

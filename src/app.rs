@@ -2601,7 +2601,7 @@ impl App {
             // Connector: overpaint the bar's bottom hairline for the chip width.
             renderer.push_overlay_px(r.x, bar_h - 2.0, r.w, 3.0, surface);
             // Top accent rail.
-            renderer.push_overlay_px(r.x, r.y, r.w, 2.0, accent);
+            renderer.push_overlay_px(r.x, r.y, r.w, 3.0, accent);
         } else {
             // Inactive: recessed E1 chip sitting a touch above the bar bottom.
             let rr = gui::Rect::new(r.x, r.y + 2.0, r.w, r.h - 4.0);
@@ -2610,19 +2610,19 @@ impl App {
             } else if hover {
                 gui::state_fill(surface, 0.7, false)
             } else {
-                [surface[0], surface[1], surface[2], surface[3] * 0.75]
+                [surface[0], surface[1], surface[2], surface[3] * 0.55]
             };
             renderer.push_overlay_rrect_px(rr.x, rr.y, rr.w, rr.h, TAB_RADIUS, fill);
             if hover && !held {
                 renderer.push_overlay_px(rr.x, rr.y, rr.w, 1.0, accent);
             }
         }
-        let label_fg = if active { active_fg } else { fg };
+        let label_fg = if active { active_fg } else { fg_dim };
         Self::paint_tab_label(
             renderer, r, cell_h, cell_w, idx, label, active, busy, spinning, spin, label_fg,
             accent, multi,
         );
-        let _ = fg_dim;
+        let _ = fg;
     }
 
     /// Draw a tab chip's status glyph + numbered title, clipped to the chip's text

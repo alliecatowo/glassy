@@ -152,9 +152,9 @@ pub fn any_unsettled(anims: &HashMap<WidgetId, Anim>) -> bool {
 // ---------------------------------------------------------------------------
 
 /// E1 chrome-bar alpha (tab bar, status bar) — matches the existing modal alpha.
-pub const GLASS_BAR_ALPHA: f32 = 0.82;
+pub const GLASS_BAR_ALPHA: f32 = 0.92;
 /// E2 surface alpha (pane bodies, active-tab body, cards).
-pub const GLASS_SURFACE_ALPHA: f32 = 0.92;
+pub const GLASS_SURFACE_ALPHA: f32 = 0.97;
 /// E3 floating alpha (dropdowns, dialogs, drag-ghost).
 pub const GLASS_FLOAT_ALPHA: f32 = 0.96;
 
@@ -187,7 +187,7 @@ pub fn glass_body() -> [f32; 4] {
 
 /// E2 raised surface fill (cards / buttons on glass).
 pub fn glass_raised() -> [f32; 4] {
-    with_alpha(lighten(color::default_bg(), 0.06), GLASS_SURFACE_ALPHA)
+    with_alpha(lighten(color::default_bg(), 0.12), GLASS_SURFACE_ALPHA)
 }
 
 /// E3 floating surface fill (dropdowns / dialogs / drag-ghost).
@@ -227,7 +227,7 @@ pub fn fg() -> [f32; 4] {
 
 /// Dimmed foreground (secondary labels, shortcut hints).
 pub fn fg_dim() -> [f32; 4] {
-    with_alpha(color::default_fg(), 0.55)
+    with_alpha(color::default_fg(), 0.75)
 }
 
 /// Danger / destructive accent.
