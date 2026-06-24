@@ -252,6 +252,7 @@ pub struct Renderer {
 
     bg_pipeline: wgpu::RenderPipeline,
     fg_pipeline: wgpu::RenderPipeline,
+    overlay_pipeline: wgpu::RenderPipeline,
 
     unit_quad: wgpu::Buffer,
 
@@ -280,6 +281,22 @@ pub struct Renderer {
     image_buffer: wgpu::Buffer,
     image_capacity: usize,
     image_count: u32,
+
+    /// Translucent panel quads (modals / dropdown / context menu). Rebuilt every
+    /// frame like the image overlay; drawn last with premultiplied blending so the
+    /// terminal shows through. Empty (zero cost) whenever no panel is open.
+    overlay_quads: Vec<BgInstance>,
+    overlay_buffer: wgpu::Buffer,
+    overlay_capacity: usize,
+    overlay_count: u32,
+    /// Text-on-glass: panel glyphs drawn AFTER the overlay quads (the fg grid pass
+    /// runs before the overlay quads, so panel text pushed as normal cells would be
+    /// occluded by the glass body). Mirrors the image overlay; uses the fg pipeline
+    /// + the text atlas bind group. Rebuilt every frame, empty when no panel open.
+    overlay_text: Vec<FgInstance>,
+    overlay_text_buffer: wgpu::Buffer,
+    overlay_text_capacity: usize,
+    overlay_text_count: u32,
 
     /// Shelf packer for the R8 mask atlas.
     packer: Packer,
@@ -847,6 +864,57 @@ impl Renderer {
             cache: None,
         });
 
+        // Overlay pipeline: same vertex/fragment as bg, but with premultiplied
+        // alpha blending so translucent panel quads (modals, menus) composite over
+        // the terminal pixels already on the surface instead of overwriting them.
+        // `bg_instance_layout` was moved into `bg_pipeline`, so rebuild a fresh bg
+        // instance layout here (identical attrs); `quad_layout` is still in scope.
+        let overlay_instance_attrs = wgpu::vertex_attr_array![
+            1 => Float32x2, // pos
+            2 => Float32x2, // size
+            3 => Float32x4, // color
+        ];
+        let overlay_instance_layout = wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<BgInstance>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Instance,
+            attributes: &overlay_instance_attrs,
+        };
+        // `quad_layout` was moved into `fg_pipeline`; rebuild a fresh unit-quad
+        // vertex layout (identical) for the overlay pipeline's slot 0.
+        let overlay_quad_layout = wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<[f32; 2]>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &wgpu::vertex_attr_array![0 => Float32x2],
+        };
+        let overlay_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("overlay-pipeline"),
+            layout: Some(&bg_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_bg"),
+                buffers: &[overlay_quad_layout, overlay_instance_layout],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_bg"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: Default::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+
         log::info!("  renderer: pipelines/shaders ready {:.1} ms", ms(t));
 
         // --- Instance buffers, created with a small nonzero capacity. ---
@@ -868,6 +936,18 @@ impl Renderer {
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let overlay_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("overlay-instances"),
+            size: (64 * std::mem::size_of::<BgInstance>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let overlay_text_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("overlay-text-instances"),
+            size: (64 * std::mem::size_of::<FgInstance>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
 
         let mut renderer = Renderer {
             _window: window,
@@ -877,6 +957,7 @@ impl Renderer {
             config,
             bg_pipeline,
             fg_pipeline,
+            overlay_pipeline,
             unit_quad,
             uniform_buffer,
             uniform_bind_group,
@@ -891,6 +972,14 @@ impl Renderer {
             image_buffer,
             image_capacity: 64,
             image_count: 0,
+            overlay_quads: Vec::new(),
+            overlay_buffer,
+            overlay_capacity: 64,
+            overlay_count: 0,
+            overlay_text: Vec::new(),
+            overlay_text_buffer,
+            overlay_text_capacity: 64,
+            overlay_text_count: 0,
             packer: Packer::new(ATLAS_SIZE),
             color_packer: Packer::new(COLOR_ATLAS_SIZE),
             atlas_reset: false,
@@ -1054,6 +1143,9 @@ impl Renderer {
         // Image quads are not damage-tracked; they are rebuilt from live
         // placements every frame, so clear last frame's overlay here.
         self.image_overlay.clear();
+        // Panel overlay (modals / menus) is likewise rebuilt every frame.
+        self.overlay_quads.clear();
+        self.overlay_text.clear();
     }
 
     /// Queue an inline image to be drawn this frame at pixel rect
@@ -1388,6 +1480,77 @@ impl Renderer {
                 flags: if g.is_color { 1 } else { 0 },
                 _pad: [0; 3],
             });
+        }
+    }
+
+    /// Queue a translucent overlay quad (panel body, dim backdrop, border rail) in
+    /// PIXEL coordinates. `color` is straight RGBA; it is premultiplied here so the
+    /// overlay pipeline (premultiplied blend) composites it over the terminal.
+    /// Drawn after the grid + images, so it always lands on top.
+    ///
+    /// INVARIANT: callers (modal/menu paint) rely on the terminal grid under the
+    /// panel having been freshly painted this frame. Every modal/menu open+close
+    /// path sets `App::force_full_redraw`, which repaints all rows — so the terminal
+    /// pixels are resident before these quads composite over them. New panel paths
+    /// must keep that contract or the area under the glass may show stale content.
+    pub fn push_overlay_px(&mut self, x: f32, y: f32, w: f32, h: f32, color: [f32; 4]) {
+        if w <= 0.0 || h <= 0.0 {
+            return;
+        }
+        let a = color[3];
+        self.overlay_quads.push(BgInstance {
+            pos: [x, y],
+            size: [w, h],
+            color: [color[0] * a, color[1] * a, color[2] * a, a],
+        });
+    }
+
+    /// Cell-rect convenience for overlay quads: covers `cols` x `rows` cells from
+    /// cell origin (`col`,`row`). Matches `push_cell`'s pixel math.
+    pub fn push_overlay_cells(
+        &mut self,
+        col: usize,
+        row: usize,
+        cols: usize,
+        rows: usize,
+        color: [f32; 4],
+    ) {
+        let cw = self.metrics.width;
+        let ch = self.metrics.height;
+        let pad = self.pad;
+        let x = col as f32 * cw + pad;
+        let y = row as f32 * ch + pad;
+        self.push_overlay_px(x, y, cols as f32 * cw, rows as f32 * ch, color);
+    }
+
+    /// Push a single panel glyph at cell (`col`,`row`) in color `fg`, into the
+    /// text-on-glass channel so it draws AFTER the overlay quads (and stays crisp
+    /// over the glass body). Mirrors `push_cell`'s ordinary glyph path; box/block
+    /// procedural drawing and decorations are intentionally omitted (panel text is
+    /// plain labels). No background quad is emitted (the glass shows through).
+    pub fn push_overlay_glyph(&mut self, col: usize, row: usize, ch: char, fg: [f32; 4]) {
+        if ch == ' ' || ch == '\0' {
+            return;
+        }
+        let cell_w = self.metrics.width;
+        let box_w = cell_w;
+        let cell_h = self.metrics.height;
+        let pad = self.pad;
+        let origin_x = col as f32 * cell_w + pad;
+        let origin_y = row as f32 * cell_h + pad;
+        let baseline = origin_y + self.metrics.ascent;
+        self.ensure_glyphs(ch, false, false);
+        if let Some(glyphs) = self.glyph_cache.get(&(ch, false, false)) {
+            Self::place_glyphs(
+                &mut self.overlay_text,
+                glyphs,
+                fg,
+                origin_x,
+                baseline,
+                cell_w,
+                box_w,
+                cell_h,
+            );
         }
     }
 
@@ -2174,6 +2337,26 @@ impl Renderer {
             pass.set_vertex_buffer(1, self.image_buffer.slice(..));
             pass.draw(0..4, 0..self.image_count);
         }
+        // Translucent panel overlay (modals / menus): drawn last so it composites
+        // over the finished grid + images. Body / backdrop / border rails use the
+        // bg vertex layout with the premultiplied-blend overlay pipeline.
+        if self.overlay_count > 0 {
+            pass.set_pipeline(&self.overlay_pipeline);
+            pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+            pass.set_vertex_buffer(0, self.unit_quad.slice(..));
+            pass.set_vertex_buffer(1, self.overlay_buffer.slice(..));
+            pass.draw(0..4, 0..self.overlay_count);
+        }
+        // Panel text-on-glass: glyphs drawn after the overlay quads so they stay
+        // crisp on top of the translucent body. Reuses the fg pipeline + text atlas.
+        if self.overlay_text_count > 0 {
+            pass.set_pipeline(&self.fg_pipeline);
+            pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+            pass.set_bind_group(1, &self.atlas_bind_group, &[]);
+            pass.set_vertex_buffer(0, self.unit_quad.slice(..));
+            pass.set_vertex_buffer(1, self.overlay_text_buffer.slice(..));
+            pass.draw(0..4, 0..self.overlay_text_count);
+        }
     }
 
     // --- Multi-pane (split) render path ------------------------------------
@@ -2657,6 +2840,36 @@ impl Renderer {
             }
             self.queue
                 .write_buffer(&self.image_buffer, 0, bytemuck::cast_slice(&self.image_overlay));
+        }
+        // Panel overlay quads (modals / menus): same rebuild-every-frame strategy.
+        self.overlay_count = self.overlay_quads.len() as u32;
+        if !self.overlay_quads.is_empty() {
+            if self.overlay_quads.len() > self.overlay_capacity {
+                self.overlay_capacity = self.overlay_quads.len().next_power_of_two();
+                self.overlay_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("overlay-instances"),
+                    size: (self.overlay_capacity * std::mem::size_of::<BgInstance>()) as u64,
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+            }
+            self.queue
+                .write_buffer(&self.overlay_buffer, 0, bytemuck::cast_slice(&self.overlay_quads));
+        }
+        // Panel text-on-glass glyphs: drawn after the overlay quads.
+        self.overlay_text_count = self.overlay_text.len() as u32;
+        if !self.overlay_text.is_empty() {
+            if self.overlay_text.len() > self.overlay_text_capacity {
+                self.overlay_text_capacity = self.overlay_text.len().next_power_of_two();
+                self.overlay_text_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("overlay-text-instances"),
+                    size: (self.overlay_text_capacity * std::mem::size_of::<FgInstance>()) as u64,
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+            }
+            self.queue
+                .write_buffer(&self.overlay_text_buffer, 0, bytemuck::cast_slice(&self.overlay_text));
         }
         self.dirty_rows.clear();
     }
