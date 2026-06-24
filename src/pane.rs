@@ -48,6 +48,21 @@ pub enum Node {
     },
 }
 
+/// A resize handle: the divider of one `Split` node, located by the `path` of
+/// first(false)/second(true) descents from the root. `dir` is the split
+/// direction (a `Vertical` split has a left|right divider dragged horizontally;
+/// a `Horizontal` split stacks and is dragged vertically). `axis_start`/
+/// `axis_len` are the usable extent of the divider's primary axis (x for
+/// vertical, y for horizontal) so the app can map a pointer position back to a
+/// ratio: `ratio = (pointer_axis - axis_start) / axis_len`.
+#[derive(Clone, PartialEq, Debug)]
+pub struct SplitHandle {
+    pub path: Vec<bool>,
+    pub dir: Dir,
+    pub axis_start: i32,
+    pub axis_len: i32,
+}
+
 /// The full layout: a tree plus the currently focused leaf id.
 pub struct Layout {
     root: Node,
@@ -205,6 +220,97 @@ impl Layout {
         self.root.layout(area, gap, &mut out);
         out
     }
+
+    /// Hit-test the resize gutters. Walks the same recursive partition as
+    /// [`rects`], and at each split returns the [`SplitHandle`] whose divider
+    /// band the point `(px, py)` falls within `tol` pixels of (measured on the
+    /// split's primary axis, and inside the divider's cross-axis span). Inner
+    /// (deeper) splits win over outer ones because the descent tests the matching
+    /// child's subtree only. Returns `None` over no gutter.
+    pub fn split_at(&self, area: Rect, gap: i32, px: i32, py: i32, tol: i32) -> Option<SplitHandle> {
+        let mut path = Vec::new();
+        self.root.split_at(area, gap, px, py, tol, &mut path)
+    }
+
+    /// The primary-axis pixel coordinate of the divider of the split addressed by
+    /// `path` (x for a `Vertical` split, y for a `Horizontal` one) — i.e. the left
+    /// edge of the gutter. Mirrors [`rects`]' partition so it matches the drawn
+    /// dividers exactly. Returns `None` if `path` does not name a split node.
+    pub fn divider_pos(&self, area: Rect, gap: i32, path: &[bool]) -> Option<i32> {
+        let mut node = &self.root;
+        let mut area = area;
+        for &go_second in path {
+            let Node::Split { dir, ratio, first, second } = node else {
+                return None;
+            };
+            let ratio = ratio.clamp(0.0, 1.0);
+            match dir {
+                Dir::Vertical => {
+                    let usable = (area.w - gap).max(0);
+                    let fw = ((usable as f32 * ratio).round() as i32).clamp(0, usable);
+                    if go_second {
+                        area = Rect { x: area.x + fw + gap, y: area.y, w: usable - fw, h: area.h };
+                        node = second;
+                    } else {
+                        area = Rect { x: area.x, y: area.y, w: fw, h: area.h };
+                        node = first;
+                    }
+                }
+                Dir::Horizontal => {
+                    let usable = (area.h - gap).max(0);
+                    let fh = ((usable as f32 * ratio).round() as i32).clamp(0, usable);
+                    if go_second {
+                        area = Rect { x: area.x, y: area.y + fh + gap, w: area.w, h: usable - fh };
+                        node = second;
+                    } else {
+                        area = Rect { x: area.x, y: area.y, w: area.w, h: fh };
+                        node = first;
+                    }
+                }
+            }
+        }
+        match node {
+            Node::Split { dir, ratio, .. } => {
+                let ratio = ratio.clamp(0.0, 1.0);
+                match dir {
+                    Dir::Vertical => {
+                        let usable = (area.w - gap).max(0);
+                        let fw = ((usable as f32 * ratio).round() as i32).clamp(0, usable);
+                        Some(area.x + fw)
+                    }
+                    Dir::Horizontal => {
+                        let usable = (area.h - gap).max(0);
+                        let fh = ((usable as f32 * ratio).round() as i32).clamp(0, usable);
+                        Some(area.y + fh)
+                    }
+                }
+            }
+            Node::Leaf(_) => None,
+        }
+    }
+
+    /// Set the divider `ratio` (fraction given to the first child) of the split
+    /// addressed by `path` (a sequence of first(false)/second(true) descents).
+    /// The value is clamped to `[0, 1]`. Returns false if `path` does not name a
+    /// split node.
+    pub fn set_ratio(&mut self, path: &[bool], ratio: f32) -> bool {
+        let mut node = &mut self.root;
+        for &go_second in path {
+            match node {
+                Node::Split { first, second, .. } => {
+                    node = if go_second { second } else { first };
+                }
+                Node::Leaf(_) => return false,
+            }
+        }
+        match node {
+            Node::Split { ratio: r, .. } => {
+                *r = ratio.clamp(0.0, 1.0);
+                true
+            }
+            Node::Leaf(_) => false,
+        }
+    }
 }
 
 /// Overlap of two 1-D intervals [a0, a0+al) and [b0, b0+bl). Negative/zero means
@@ -299,6 +405,100 @@ impl Node {
             }
         }
         None
+    }
+
+    /// Mirror of [`layout`] that, instead of collecting leaf rects, hit-tests the
+    /// divider bands and returns the matching [`SplitHandle`]. `path` accumulates
+    /// the first(false)/second(true) descents taken to reach the current node.
+    fn split_at(
+        &self,
+        area: Rect,
+        gap: i32,
+        px: i32,
+        py: i32,
+        tol: i32,
+        path: &mut Vec<bool>,
+    ) -> Option<SplitHandle> {
+        let Node::Split {
+            dir,
+            ratio,
+            first,
+            second,
+        } = self
+        else {
+            return None;
+        };
+        let ratio = ratio.clamp(0.0, 1.0);
+        match dir {
+            Dir::Vertical => {
+                let usable = (area.w - gap).max(0);
+                let fw = ((usable as f32 * ratio).round() as i32).clamp(0, usable);
+                // Divider band on x: [area.x+fw, area.x+fw+gap), widened by `tol`.
+                let div = area.x + fw;
+                let within_axis = px >= div - tol && px < div + gap + tol;
+                let within_cross = py >= area.y && py < area.y + area.h;
+                if within_axis && within_cross {
+                    return Some(SplitHandle {
+                        path: path.clone(),
+                        dir: Dir::Vertical,
+                        axis_start: area.x,
+                        axis_len: usable,
+                    });
+                }
+                // Otherwise descend into whichever child contains the point.
+                let first_rect = Rect { x: area.x, y: area.y, w: fw, h: area.h };
+                let second_rect = Rect {
+                    x: area.x + fw + gap,
+                    y: area.y,
+                    w: usable - fw,
+                    h: area.h,
+                };
+                path.push(false);
+                if let Some(h) = first.split_at(first_rect, gap, px, py, tol, path) {
+                    return Some(h);
+                }
+                path.pop();
+                path.push(true);
+                if let Some(h) = second.split_at(second_rect, gap, px, py, tol, path) {
+                    return Some(h);
+                }
+                path.pop();
+                None
+            }
+            Dir::Horizontal => {
+                let usable = (area.h - gap).max(0);
+                let fh = ((usable as f32 * ratio).round() as i32).clamp(0, usable);
+                let div = area.y + fh;
+                let within_axis = py >= div - tol && py < div + gap + tol;
+                let within_cross = px >= area.x && px < area.x + area.w;
+                if within_axis && within_cross {
+                    return Some(SplitHandle {
+                        path: path.clone(),
+                        dir: Dir::Horizontal,
+                        axis_start: area.y,
+                        axis_len: usable,
+                    });
+                }
+                let first_rect = Rect { x: area.x, y: area.y, w: area.w, h: fh };
+                let second_rect = Rect {
+                    x: area.x,
+                    y: area.y + fh + gap,
+                    w: area.w,
+                    h: usable - fh,
+                };
+                path.push(false);
+                if let Some(h) = first.split_at(first_rect, gap, px, py, tol, path) {
+                    return Some(h);
+                }
+                path.pop();
+                path.push(true);
+                if let Some(h) = second.split_at(second_rect, gap, px, py, tol, path) {
+                    return Some(h);
+                }
+                path.pop();
+                None
+            }
+        }
     }
 
     /// Recursively partition `area`, appending `(leaf_id, rect)` for each leaf.
@@ -571,6 +771,102 @@ mod tests {
         let mut l = Layout::new(1);
         assert!(!l.focus(42));
         assert!(l.focus(1));
+    }
+
+    #[test]
+    fn split_at_hits_vertical_divider() {
+        let mut l = Layout::new(1);
+        l.split(Dir::Vertical, 2); // (1 | 2) at ratio 0.5
+        let gap = 4;
+        // usable = 996, fw = 498, divider band on x at [498, 502).
+        let h = l.split_at(AREA, gap, 500, 300, 4).expect("on divider");
+        assert_eq!(h.dir, Dir::Vertical);
+        assert_eq!(h.path, vec![] as Vec<bool>); // root split
+        assert_eq!(h.axis_start, 0);
+        assert_eq!(h.axis_len, 996);
+        // Tolerance reaches just outside the raw band.
+        assert!(l.split_at(AREA, gap, 495, 300, 4).is_some());
+        // Far from any divider: miss.
+        assert!(l.split_at(AREA, gap, 100, 300, 4).is_none());
+        assert!(l.split_at(AREA, gap, 900, 300, 4).is_none());
+    }
+
+    #[test]
+    fn split_at_hits_horizontal_divider() {
+        let mut l = Layout::new(1);
+        l.split(Dir::Horizontal, 2); // (1 / 2)
+        let gap = 4;
+        let h = l.split_at(AREA, gap, 500, 300, 4).expect("on divider");
+        assert_eq!(h.dir, Dir::Horizontal);
+        assert_eq!(h.path, vec![] as Vec<bool>);
+        assert_eq!(h.axis_start, 0);
+        assert_eq!(h.axis_len, 596);
+        assert!(l.split_at(AREA, gap, 500, 100, 4).is_none());
+    }
+
+    #[test]
+    fn split_at_inner_divider_has_path() {
+        // (1 | (2 / 3)) — the inner horizontal divider lives under second of root.
+        let mut l = Layout::new(1);
+        l.split(Dir::Vertical, 2); // (1 | 2)
+        l.split(Dir::Horizontal, 3); // splits focused 2 -> (2 / 3)
+        let gap = 4;
+        // Right column spans x in [502, 1000); its inner divider is at y mid.
+        // usable_h there = 596, fh = 298, divider y band [298, 302).
+        let h = l.split_at(AREA, gap, 750, 300, 4).expect("inner divider");
+        assert_eq!(h.dir, Dir::Horizontal);
+        assert_eq!(h.path, vec![true]); // descend into root's second child
+    }
+
+    #[test]
+    fn divider_pos_matches_drawn_dividers() {
+        let mut l = Layout::new(1);
+        l.split(Dir::Vertical, 2);
+        l.split(Dir::Horizontal, 3); // (1 | (2 / 3))
+        let gap = 4;
+        let r = l.rects(AREA, gap);
+        let map: std::collections::HashMap<usize, Rect> = r.into_iter().collect();
+        // Root vertical divider = right edge of leaf 1's rect.
+        let r1 = map[&1];
+        assert_eq!(l.divider_pos(AREA, gap, &[]), Some(r1.x + r1.w));
+        // Inner horizontal divider (path [true]) = bottom edge of leaf 2.
+        let r2 = map[&2];
+        assert_eq!(l.divider_pos(AREA, gap, &[true]), Some(r2.y + r2.h));
+        // A leaf path returns None.
+        assert_eq!(l.divider_pos(AREA, gap, &[false]), None);
+    }
+
+    #[test]
+    fn set_ratio_moves_divider() {
+        let mut l = Layout::new(1);
+        l.split(Dir::Vertical, 2);
+        assert!(l.set_ratio(&[], 0.25));
+        let r = l.rects(AREA, 0);
+        // usable 1000, fw = 250.
+        assert_eq!(r[0].1.w, 250);
+        assert_eq!(r[1].1.w, 750);
+        // Clamps out-of-range.
+        assert!(l.set_ratio(&[], 5.0));
+        let r = l.rects(AREA, 0);
+        assert_eq!(r[0].1.w, 1000);
+        assert_eq!(r[1].1.w, 0);
+    }
+
+    #[test]
+    fn set_ratio_addresses_inner_split() {
+        let mut l = Layout::new(1);
+        l.split(Dir::Vertical, 2); // (1 | 2)
+        l.split(Dir::Horizontal, 3); // (1 | (2 / 3))
+        // Inner split is at path [true]; set its ratio.
+        assert!(l.set_ratio(&[true], 0.25));
+        let r = l.rects(AREA, 0);
+        let map: std::collections::HashMap<usize, Rect> = r.into_iter().collect();
+        // Right column h=600; first(2) gets 150, second(3) gets 450.
+        assert_eq!(map[&2].h, 150);
+        assert_eq!(map[&3].h, 450);
+        // A leaf path is rejected.
+        assert!(!l.set_ratio(&[false], 0.5)); // [false] is leaf 1
+        assert!(!l.set_ratio(&[true, false, true], 0.5)); // too deep
     }
 
     #[test]

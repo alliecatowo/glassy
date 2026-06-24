@@ -770,6 +770,14 @@ pub struct App {
     /// updated as the pointer drags it over other slots (reorders `tab_order`),
     /// cleared on release. `None` when not dragging a tab.
     dragging_tab: Option<usize>,
+    /// While a pane resize gutter is held, the handle being dragged (which split
+    /// divider, and the axis geometry to map the pointer back to a ratio). Set on
+    /// a left-press over a gutter, cleared on release. `None` when not dragging.
+    dragging_gutter: Option<pane::SplitHandle>,
+    /// The gutter currently under the pointer (not yet dragged), so the divider
+    /// can be drawn transiently brighter/fatter as hover feedback. `None` off any
+    /// gutter. Kept distinct from `dragging_gutter` so hover and drag share paint.
+    hovered_gutter: Option<pane::SplitHandle>,
     /// The toolbar item currently under the pointer, for hover highlighting.
     hovered_strip_item: Option<StripItem>,
     /// The toolbar item the left button is currently pressed on, for the PRESSED
@@ -923,6 +931,8 @@ impl App {
             started: Instant::now(),
             first_frame_done: false,
             dragging_tab: None,
+            dragging_gutter: None,
+            hovered_gutter: None,
             hovered_strip_item: None,
             held_strip_item: None,
             tab_scroll_accum: 0.0,
@@ -1308,6 +1318,11 @@ impl App {
         self.hovered_link = None;
         self.last_click = None;
         self.dragging_tab = None;
+        // Drop any gutter drag/hover (layout may have changed) and restore the
+        // default OS cursor; the next CursorMoved re-arms feedback if warranted.
+        if self.dragging_gutter.take().is_some() || self.hovered_gutter.take().is_some() {
+            self.apply_gutter_cursor(None);
+        }
     }
 
     /// Open a new tab and make it active, parking the current tab in `background`.
@@ -1764,6 +1779,72 @@ impl App {
         self.force_full_redraw = true;
         self.mark_dirty(event_loop);
         true
+    }
+
+    /// Pixel tolerance around a 1px gutter for hit-testing / cursor feedback. The
+    /// drawn divider stays crisp at `PANE_GAP`; this widens only the grab zone so a
+    /// ~9px band (±4px) is draggable, matching the "thin line, fat hitbox" pattern.
+    const GUTTER_TOL: i32 = 4;
+
+    /// Minimum pane extents (px) enforced while dragging a gutter, so a drag can
+    /// never crush a pane below a usable size.
+    const PANE_MIN_PX: i32 = 120;
+
+    /// Hit-test the resize gutters of the active split at pointer `(x, y)`,
+    /// returning the handle under it (within [`GUTTER_TOL`]). `None` when not split
+    /// or off any gutter.
+    fn gutter_at(&self, x: f64, y: f64) -> Option<pane::SplitHandle> {
+        if !self.is_split() {
+            return None;
+        }
+        let area = self.content_area()?;
+        let g = self.panes.as_ref()?;
+        g.layout
+            .split_at(area, Self::PANE_GAP, x.round() as i32, y.round() as i32, Self::GUTTER_TOL)
+    }
+
+    /// While `dragging_gutter` is held, map the pointer to a new ratio for that
+    /// divider and re-tile. The ratio is clamped so neither side falls below
+    /// [`PANE_MIN_PX`]. Returns true when the layout changed (caller repaints).
+    fn drag_gutter_to(&mut self, x: f64, y: f64) -> bool {
+        let Some(handle) = self.dragging_gutter.clone() else {
+            return false;
+        };
+        if handle.axis_len <= 0 {
+            return false;
+        }
+        let pointer = match handle.dir {
+            pane::Dir::Vertical => x.round() as i32,
+            pane::Dir::Horizontal => y.round() as i32,
+        };
+        let raw = (pointer - handle.axis_start) as f32 / handle.axis_len as f32;
+        // Clamp in ratio space so both children keep at least PANE_MIN_PX.
+        let min_r = Self::PANE_MIN_PX as f32 / handle.axis_len as f32;
+        let lo = min_r;
+        let hi = 1.0 - min_r;
+        let ratio = if lo <= hi { raw.clamp(lo, hi) } else { 0.5 };
+        let Some(g) = self.panes.as_mut() else { return false };
+        if g.layout.set_ratio(&handle.path, ratio) {
+            self.resize_panes();
+            self.force_full_redraw = true;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Set (or clear) the OS pointer cursor to a resize arrow for a gutter handle.
+    fn apply_gutter_cursor(&self, handle: Option<&pane::SplitHandle>) {
+        let Some(window) = self.window.as_ref() else {
+            return;
+        };
+        use winit::window::CursorIcon;
+        let icon = match handle.map(|h| h.dir) {
+            Some(pane::Dir::Vertical) => CursorIcon::ColResize,
+            Some(pane::Dir::Horizontal) => CursorIcon::RowResize,
+            None => CursorIcon::Default,
+        };
+        window.set_cursor(icon);
     }
 
     /// Find a PTY by its pane/pty id anywhere it might live: the active focused
@@ -3020,6 +3101,28 @@ impl App {
         let blink_on = self.blink_on;
         let hovered_link = self.hovered_link.clone();
         let divider = lighten(color::selection_bg(), 0.18);
+        // The gutter to draw transiently emphasised (drag wins over mere hover).
+        let active_gutter = self
+            .dragging_gutter
+            .clone()
+            .or_else(|| self.hovered_gutter.clone());
+        // Its divider's primary-axis pixel position, derived from the live layout,
+        // so the highlight tracks the exact line being hovered/dragged.
+        let active_div = active_gutter.as_ref().and_then(|h| {
+            // Re-resolve the handle's divider coordinate from the live layout so
+            // the highlight tracks the exact line being hovered/dragged.
+            self.panes
+                .as_ref()?
+                .layout
+                .divider_pos(area, Self::PANE_GAP, &h.path)
+                .map(|pos| (h.dir, pos))
+        });
+        let gutter_glow = {
+            let mut c = color::accent();
+            c[3] = 0.8;
+            c
+        };
+        let gutter_tol = Self::GUTTER_TOL;
 
         // Disjoint field borrows: `renderer` (mut), `panes`/`pty` (shared) are
         // distinct fields, so the borrow checker allows them together as long as
@@ -3060,7 +3163,19 @@ impl App {
                         let y0 = a.y.max(b.y);
                         let y1 = (a.y + a.h).min(b.y + b.h);
                         if y1 > y0 {
-                            renderer.push_divider(a.x + a.w, y0, Self::PANE_GAP, y1 - y0, divider);
+                            let dx = a.x + a.w;
+                            // Hovered/dragged gutter: brighter + fatter (±tol).
+                            if active_div == Some((pane::Dir::Vertical, dx)) {
+                                renderer.push_divider(
+                                    dx - gutter_tol,
+                                    y0,
+                                    Self::PANE_GAP + 2 * gutter_tol,
+                                    y1 - y0,
+                                    gutter_glow,
+                                );
+                            } else {
+                                renderer.push_divider(dx, y0, Self::PANE_GAP, y1 - y0, divider);
+                            }
                         }
                     }
                     // Horizontal gutter: b sits below a, sharing a row.
@@ -3068,7 +3183,18 @@ impl App {
                         let x0 = a.x.max(b.x);
                         let x1 = (a.x + a.w).min(b.x + b.w);
                         if x1 > x0 {
-                            renderer.push_divider(x0, a.y + a.h, x1 - x0, Self::PANE_GAP, divider);
+                            let dy = a.y + a.h;
+                            if active_div == Some((pane::Dir::Horizontal, dy)) {
+                                renderer.push_divider(
+                                    x0,
+                                    dy - gutter_tol,
+                                    x1 - x0,
+                                    Self::PANE_GAP + 2 * gutter_tol,
+                                    gutter_glow,
+                                );
+                            } else {
+                                renderer.push_divider(x0, a.y + a.h, x1 - x0, Self::PANE_GAP, divider);
+                            }
                         }
                     }
                 }
@@ -4014,6 +4140,32 @@ impl ApplicationHandler<UserEvent> for App {
                     return;
                 }
 
+                // Dragging a pane resize gutter: re-tile under the pointer. Takes
+                // priority over hover/selection; repaint so the divider + content
+                // follow. The OS resize cursor stays set for the drag's duration.
+                if self.dragging_gutter.is_some() {
+                    if self.drag_gutter_to(position.x, position.y) {
+                        self.mark_dirty(event_loop);
+                    }
+                    return;
+                }
+
+                // Gutter hover: over a split's divider band, switch the OS cursor to
+                // a resize arrow and draw the divider transiently fat/bright. Only
+                // costs a hit-test on motion; off any gutter restores the default.
+                {
+                    let new_gutter = self.gutter_at(position.x, position.y);
+                    if new_gutter != self.hovered_gutter {
+                        self.apply_gutter_cursor(new_gutter.as_ref());
+                        self.hovered_gutter = new_gutter;
+                        self.mark_dirty(event_loop);
+                    }
+                    // Over a gutter, suppress tab-bar/selection hover handling below.
+                    if self.hovered_gutter.is_some() {
+                        return;
+                    }
+                }
+
                 // Tab-bar hover highlighting: track the item under the pointer (only
                 // while over the bar's pixel band), repaint when it changes.
                 {
@@ -4078,9 +4230,32 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 if !pressed {
                     self.dragging_tab = None; // end any tab drag-reorder on release
+                    // End any gutter drag; re-evaluate the cursor for the spot we
+                    // released over (still a gutter -> resize arrow, else default).
+                    if self.dragging_gutter.take().is_some() {
+                        let g = self.gutter_at(self.mouse_px.0, self.mouse_px.1);
+                        self.apply_gutter_cursor(g.as_ref());
+                        self.hovered_gutter = g;
+                        self.mark_dirty(event_loop);
+                    }
                     // Release any pressed toolbar item so its inset clears.
                     if self.held_strip_item.take().is_some() {
                         self.mark_dirty(event_loop);
+                    }
+                }
+
+                // A left press over a pane resize gutter begins a drag and MUST NOT
+                // start a text selection or focus-swap. Highest priority among
+                // press handlers (the gutter sits in the inter-pane gap, not in any
+                // pane's cell area, so this never steals a content click).
+                if button == MouseButton::Left && pressed {
+                    if let Some(handle) = self.gutter_at(self.mouse_px.0, self.mouse_px.1) {
+                        self.apply_gutter_cursor(Some(&handle));
+                        self.hovered_gutter = Some(handle.clone());
+                        self.dragging_gutter = Some(handle);
+                        self.held_button = None;
+                        self.mark_dirty(event_loop);
+                        return;
                     }
                 }
 
