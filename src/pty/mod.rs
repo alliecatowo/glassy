@@ -13,25 +13,24 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::io::{Read, Write};
-use std::num::NonZeroUsize;
-use std::os::fd::{AsRawFd, BorrowedFd};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
-use std::time::{Duration, Instant};
+use std::sync::mpsc::{Sender, channel};
+use std::time::Instant;
 
-use alacritty_terminal::event::{Event, EventListener, OnResize, WindowSize};
+use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::term::{ClipboardType, Config, Term};
-use alacritty_terminal::tty::{self, EventedReadWrite, Options as PtyOptions, Shell};
-use alacritty_terminal::vte::ansi::Processor;
-use polling::{Event as PollEvent, Events, PollMode, Poller};
+use alacritty_terminal::tty::{self, Options as PtyOptions, Shell};
+use polling::Poller;
 use winit::event_loop::EventLoopProxy;
 
 use crate::image::ImageStore;
 use crate::input::ModifyOtherKeys;
+
+mod scan;
+pub mod r#loop;
 
 // ---- Terminfo availability check ------------------------------------------------
 
@@ -257,15 +256,20 @@ impl std::fmt::Debug for ClipboardFormatter {
 #[derive(Clone)]
 pub struct EventProxy {
     proxy: EventLoopProxy<UserEvent>,
-    id: usize,
+    pub id: usize,
 }
 
 impl EventProxy {
+    /// Create an EventProxy with the given proxy and session id.
+    pub fn new(proxy: EventLoopProxy<UserEvent>, id: usize) -> Self {
+        Self { proxy, id }
+    }
+
     /// Forward a pre-built `UserEvent` (already tagged with this proxy's session
     /// id) straight to the winit loop. Used for events the PTY loop derives itself
     /// rather than receiving from alacritty's `EventListener` (e.g. OSC 7 cwd,
     /// which alacritty's `Event` enum does not model).
-    fn send_user(&self, event: UserEvent) {
+    pub fn send_user(&self, event: UserEvent) {
         let _ = self.proxy.send_event(event);
     }
 }
@@ -397,7 +401,7 @@ impl Dimensions for GridSize {
 }
 
 /// Control messages from the UI thread to the PTY loop.
-enum LoopMsg {
+pub(crate) enum LoopMsg {
     Input(Cow<'static, [u8]>),
     Resize(WindowSize),
     Shutdown,
@@ -481,7 +485,7 @@ impl Pty {
         // unless provided by the environment, since the window may not exist at spawn time.
         // Applications can check for GLASSY_WINDOW_ID to detect running under glassy.
 
-        let event_proxy = EventProxy { proxy, id };
+        let event_proxy = EventProxy::new(proxy, id);
         let grid = GridSize { cols, rows };
         // Merge user-configured word separators with the default set, deduped.
         let semantic_escape_chars = merge_word_separators(
@@ -529,7 +533,7 @@ impl Pty {
         std::thread::Builder::new()
             .name(format!("glassy-pty-{id}"))
             .spawn(move || {
-                run_loop(pty, loop_term, event_proxy, rx, loop_poller, loop_images, loop_prompts);
+                r#loop::run_loop(pty, loop_term, event_proxy, rx, loop_poller, loop_images, loop_prompts);
             })?;
 
         // Read the initial cwd eagerly so the pane header shows the right path on
@@ -612,407 +616,6 @@ impl Pty {
     }
 }
 
-/// Maximum time to hold a synchronized-output buffer before forcibly waking the
-/// UI. 16 ms gives ~1 frame at 60 Hz; applications should close the bracket well
-/// within this, but we never stall longer.
-const SYNC_TIMEOUT: Duration = Duration::from_millis(16);
-
-/// Scan a VT byte run for `CSI > 4 ; N m` (XTMODKEYS modifyOtherKeys).
-///
-/// Returns `Some(level)` if such a sequence is found in `bytes`, where `level`
-/// is the `N` parameter (0=reset, 1=enable-except-well-defined, 2=enable-all).
-/// The caller is responsible for side-effecting application state; the byte run
-/// is still passed to the alacritty VT parser unchanged (alacritty ignores the
-/// sequence since it does not implement it, but we do here).
-fn scan_modify_other_keys(bytes: &[u8]) -> Option<ModifyOtherKeys> {
-    let mut result = None;
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] != 0x1b {
-            i += 1;
-            continue;
-        }
-        // ESC >  (aka DECKPAM-alt / private CSI introducer for xterm private sequences)
-        // CSI > is  ESC [ > ...  — two-byte CSI then '>'
-        if bytes.get(i + 1) == Some(&b'[') && bytes.get(i + 2) == Some(&b'>') {
-            // Scan the parameter list and final byte.
-            let mut j = i + 3;
-            let mut params = Vec::new();
-            let mut cur: Option<u16> = None;
-            while j < bytes.len() {
-                let b = bytes[j];
-                if b.is_ascii_digit() {
-                    cur = Some(cur.unwrap_or(0) * 10 + (b - b'0') as u16);
-                    j += 1;
-                } else if b == b';' {
-                    params.push(cur.unwrap_or(0));
-                    cur = None;
-                    j += 1;
-                } else {
-                    params.push(cur.unwrap_or(0));
-                    j += 1;
-                    // final byte
-                    if b == b'm' && params.len() >= 2 && params[0] == 4 {
-                        // The LAST matching sequence in the buffer wins: an app may
-                        // set then reset the level within a single read; the final
-                        // state is what must be applied.
-                        result = Some(match params[1] {
-                            0 => ModifyOtherKeys::Reset,
-                            1 => ModifyOtherKeys::EnableExceptWellDefined,
-                            2 => ModifyOtherKeys::EnableAll,
-                            _ => ModifyOtherKeys::Reset,
-                        });
-                    }
-                    break;
-                }
-            }
-            i = j;
-            continue;
-        }
-        i += 1;
-    }
-    result
-}
-
-/// Scan a VT byte run for DECSET/DECRST 2026 (synchronized output).
-/// Returns `(begin_count, end_count)` of `?2026h` / `?2026l` sequences found.
-fn scan_sync_2026(bytes: &[u8]) -> (u32, u32) {
-    let mut begin = 0u32;
-    let mut end = 0u32;
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] != 0x1b {
-            i += 1;
-            continue;
-        }
-        if bytes.get(i + 1) == Some(&b'[') && bytes.get(i + 2) == Some(&b'?') {
-            // CSI ? ... h/l — scan param
-            let mut j = i + 3;
-            let mut num: u32 = 0;
-            while j < bytes.len() && bytes[j].is_ascii_digit() {
-                num = num * 10 + (bytes[j] - b'0') as u32;
-                j += 1;
-            }
-            // Skip any trailing sub-params (`?2026;1h`) so the final byte check
-            // below lands on h/l rather than a semicolon.
-            while j < bytes.len() && (bytes[j] == b';' || bytes[j].is_ascii_digit()) {
-                j += 1;
-            }
-            if num == 2026 {
-                match bytes.get(j) {
-                    Some(&b'h') => begin += 1,
-                    Some(&b'l') => end += 1,
-                    _ => {}
-                }
-            }
-            i = if j < bytes.len() { j + 1 } else { j };
-            continue;
-        }
-        i += 1;
-    }
-    (begin, end)
-}
-
-/// Whether a VT byte run contains a full-screen erase (`CSI 2J` or `CSI 3J`) or a
-/// terminal reset (`ESC c`, RIS) — the signals that the screen content (and thus
-/// any inline images anchored to it) is being wiped, e.g. by `clear`/`reset`.
-fn clears_screen(bytes: &[u8]) -> bool {
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == 0x1b {
-            match bytes.get(i + 1) {
-                Some(b'c') => return true, // RIS
-                Some(b'[') => {
-                    // CSI ... J — scan the (numeric) parameter up to the final 'J'.
-                    // Handle variants like CSI 2J, CSI ;2J, or CSI 0;2J.
-                    let mut j = i + 2;
-                    let mut params = String::new();
-                    while j < bytes.len() && (bytes[j].is_ascii_digit() || bytes[j] == b';') {
-                        params.push(bytes[j] as char);
-                        j += 1;
-                    }
-                    if bytes.get(j) == Some(&b'J') {
-                        // Parse parameters numerically: empty or 0 = display,
-                        // 2 = all lines, 3 = scrollback+display. Check for 2 or 3.
-                        let has_erase_all = params.is_empty()
-                            || params.split(';').any(|p| {
-                                p.parse::<u32>().map(|v| v == 2 || v == 3).unwrap_or(false)
-                            });
-                        if has_erase_all {
-                            return true;
-                        }
-                    }
-                    i = j;
-                    continue;
-                }
-                _ => {}
-            }
-        }
-        i += 1;
-    }
-    false
-}
-
-/// PTY read/parse loop: waits on the master fd, drains control messages, reads
-/// available bytes, taps image/OSC sequences, and feeds the rest to the VT parser.
-///
-/// New VT features handled here (beyond alacritty_terminal's own parser):
-///
-/// **modifyOtherKeys** (XTMODKEYS, `CSI > 4 ; N m`): alacritty_terminal 0.26
-/// does not implement `set_modify_other_keys`, so we scan VT byte runs for the
-/// sequence and forward a `UserEvent::ModifyOtherKeys` to the UI thread, which
-/// updates `App::modify_other_keys`; `encode_key` then uses that state.
-///
-/// **Synchronized Output** (DECSET 2026, `CSI ? 2026 h/l`): when an
-/// application opens a synchronized update (`?2026h`) we hold the UI wakeup
-/// until the matching `?2026l` end marker or at most `SYNC_TIMEOUT` (16 ms),
-/// whichever comes first. This avoids waking the renderer mid-frame and tearing
-/// complex full-screen redraws. The VT parser still receives all bytes eagerly
-/// (so terminal state stays up to date) — we only delay the `Wakeup` event.
-fn run_loop(
-    mut pty: tty::Pty,
-    term: Arc<FairMutex<Term<EventProxy>>>,
-    proxy: EventProxy,
-    rx: Receiver<LoopMsg>,
-    poller: Arc<Poller>,
-    images: Arc<FairMutex<ImageStore>>,
-    prompts: Arc<Mutex<PromptTracker>>,
-) {
-    const PTY_KEY: usize = 1;
-    let mut processor: Processor = Processor::new();
-    let mut tap = crate::image::StreamTap::new();
-
-    let fd = pty.reader().as_raw_fd();
-    // alacritty opens the master non-blocking; since we only read after a poll
-    // readiness event (so reads never block) and want writes to never drop input
-    // on EAGAIN, switch the fd to blocking mode for reliable write_all.
-    let _ = rustix::io::ioctl_fionbio(unsafe { BorrowedFd::borrow_raw(fd) }, false);
-    let mode = if poller.supports_level() {
-        PollMode::Level
-    } else {
-        PollMode::Oneshot
-    };
-    // SAFETY: `fd` is owned by `pty`, which this thread owns for the whole loop;
-    // we delete it from the poller before `pty` is dropped at return.
-    if unsafe { poller.add_with_mode(fd, PollEvent::readable(PTY_KEY), mode) }.is_err() {
-        return;
-    }
-
-    let mut events = Events::with_capacity(NonZeroUsize::new(64).unwrap());
-    let mut buf = vec![0u8; 65536];
-    // Set true only on the paths that actually mean the child is gone (EOF / read
-    // error). A transient poller error or a UI-initiated shutdown must NOT report
-    // a child exit, which would wrongly close the session.
-    let mut child_exited = false;
-
-    // ---- Synchronized output state (DECSET 2026) --------------------------------
-    // `sync_depth > 0` means the application has opened a synchronized-output
-    // bracket (`?2026h`) without a matching close (`?2026l`). We suppress the UI
-    // Wakeup while depth > 0, emitting it only when the bracket closes or when
-    // `sync_deadline` elapses (hard cap to avoid stalling the UI indefinitely).
-    let mut sync_depth: u32 = 0;
-    let mut sync_deadline: Option<Instant> = None;
-    // Tracks whether any terminal data was processed in the current sync bracket
-    // (so we know whether to send a Wakeup when the bracket closes).
-    let mut sync_pending_wakeup = false;
-    // ---- End sync state ---------------------------------------------------------
-
-    'main: loop {
-        // Compute the poll timeout: while inside a sync bracket, wake at the
-        // deadline so we never stall the UI longer than SYNC_TIMEOUT even if
-        // `?2026l` never arrives.
-        let timeout = if sync_depth > 0 {
-            sync_deadline.map(|d| d.saturating_duration_since(Instant::now()))
-        } else {
-            None // block until ready
-        };
-
-        events.clear();
-        if poller.wait(&mut events, timeout).is_err() {
-            break;
-        }
-
-        // Check for sync timeout expiry: if the deadline passed and we're still
-        // inside a bracket, force-close it and wake the UI.
-        if sync_depth > 0
-            && sync_deadline.is_some_and(|d| Instant::now() >= d)
-        {
-            sync_depth = 0;
-            sync_deadline = None;
-            if sync_pending_wakeup {
-                sync_pending_wakeup = false;
-                proxy.send_event(Event::Wakeup);
-            }
-        }
-
-        // Drain control messages (input/resize/shutdown).
-        loop {
-            match rx.try_recv() {
-                Ok(LoopMsg::Input(b)) => {
-                    let _ = pty.writer().write_all(&b);
-                }
-                Ok(LoopMsg::Resize(ws)) => pty.on_resize(ws),
-                Ok(LoopMsg::Shutdown) => {
-                    child_exited = false;
-                    break 'main;
-                }
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => {
-                    child_exited = false;
-                    break 'main;
-                }
-            }
-        }
-
-        // Read pending output if the fd signalled readable.
-        if events.iter().any(|ev| ev.key == PTY_KEY) {
-            match pty.reader().read(&mut buf) {
-                Ok(0) => {
-                    child_exited = true; // EOF: child gone
-                    break 'main;
-                }
-                Ok(n) => {
-                    // Tap inline-image (kitty graphics) sequences out of the
-                    // stream, yielding VT byte runs interleaved with image display
-                    // points. Advance the parser for each run, then anchor each
-                    // image at the cursor cell it occupies at that point.
-                    let tap_events = tap.process(&buf[..n], &images);
-                    let mut term = term.lock();
-                    let mut did_process = false;
-
-                    for ev in tap_events {
-                        match ev {
-                            crate::image::TapEvent::Vt(bytes) => {
-                                // ---- modifyOtherKeys interception ----------------
-                                // Scan for `CSI > 4 ; N m` before feeding to the
-                                // alacritty parser (which ignores the sequence).
-                                // Forward the level to the UI thread so encode_key
-                                // can emit the CSI 27 ; mods ; code ~ form.
-                                if let Some(level) = scan_modify_other_keys(&bytes) {
-                                    proxy.send_user(UserEvent::ModifyOtherKeys(proxy.id, level));
-                                }
-
-                                // ---- Synchronized output interception ------------
-                                // Scan for ?2026h (begin) and ?2026l (end) before
-                                // feeding to the parser. The bytes still go to
-                                // alacritty (which handles DECSET/DECRST for its own
-                                // purposes; 2026 is unknown to it and ignored).
-                                let (begin_count, end_count) = scan_sync_2026(&bytes);
-                                if begin_count > 0 {
-                                    if sync_depth == 0 {
-                                        // Arm the deadline on the first open.
-                                        sync_deadline = Some(Instant::now() + SYNC_TIMEOUT);
-                                    }
-                                    sync_depth = sync_depth.saturating_add(begin_count);
-                                }
-                                if end_count > 0 {
-                                    sync_depth = sync_depth.saturating_sub(end_count);
-                                    if sync_depth == 0 {
-                                        sync_deadline = None;
-                                    }
-                                }
-
-                                // A full screen erase (CSI 2J / 3J) or terminal
-                                // reset (RIS, ESC c) wipes the content images sit
-                                // on, so drop placements at that point in the
-                                // stream (ordered: images later in this read
-                                // survive, since the tap split them into their own
-                                // Display events after this Vt run).
-                                if clears_screen(&bytes) {
-                                    images.lock().delete(0);
-                                }
-                                processor.advance(&mut *term, &bytes);
-                                did_process = true;
-                            }
-                            crate::image::TapEvent::Display(p) => {
-                                let (row, col) = {
-                                    let c = term.renderable_content();
-                                    (
-                                        c.cursor.point.line.0 + c.display_offset as i32,
-                                        c.cursor.point.column.0,
-                                    )
-                                };
-                                images.lock().place(p.id, row, col, p.cols, p.rows);
-                                did_process = true;
-                            }
-                            crate::image::TapEvent::Delete(id) => {
-                                images.lock().delete(id);
-                                did_process = true;
-                            }
-                            crate::image::TapEvent::Cwd(path) => {
-                                // OSC 7: surface the shell's cwd to the UI thread so
-                                // new tabs/splits of this session can inherit it.
-                                proxy.send_user(UserEvent::Cwd(proxy.id, path));
-                            }
-                            crate::image::TapEvent::SemanticMark(mark) => {
-                                // OSC 133: record prompt-start rows (mark 'A') in the
-                                // shared PromptTracker so the UI can jump to them via
-                                // Shift+Up/Down. Other marks (B/C/D) are forwarded to
-                                // the UI for potential future use (e.g. command timing).
-                                if mark == 'A' {
-                                    // Capture the current cursor row as an absolute
-                                    // grid offset (display_offset + cursor.line). `term`
-                                    // is already locked (the MutexGuard from above), so
-                                    // read through the guard directly.
-                                    let row = {
-                                        let c = term.renderable_content();
-                                        c.cursor.point.line.0 + c.display_offset as i32
-                                    };
-                                    if let Ok(mut p) = prompts.lock() {
-                                        p.push(row);
-                                    }
-                                }
-                                proxy.send_user(UserEvent::SemanticMark(proxy.id, mark));
-                            }
-                            crate::image::TapEvent::Notification(text) => {
-                                // OSC 9 / OSC 777: forward to the UI thread so it can
-                                // fire a native desktop notification when unfocused.
-                                proxy.send_user(UserEvent::Notification(proxy.id, text));
-                            }
-                            crate::image::TapEvent::Progress(state) => {
-                                // OSC 9;4: progress report — forward to the UI thread
-                                // so it can render the progress indicator in the status
-                                // bar / tab chip.
-                                proxy.send_user(UserEvent::Progress(proxy.id, state));
-                            }
-                        }
-                    }
-                    drop(term);
-
-                    // Wake the UI only when we are outside a synchronized-output
-                    // bracket. Inside the bracket, set `sync_pending_wakeup` so the
-                    // wakeup is sent when the bracket closes (or times out).
-                    if did_process {
-                        if sync_depth == 0 {
-                            proxy.send_event(Event::Wakeup);
-                        } else {
-                            sync_pending_wakeup = true;
-                        }
-                    }
-                }
-                Err(ref e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted) => {}
-                Err(_) => {
-                    child_exited = true; // e.g. EIO when the child exits
-                    break 'main;
-                }
-            }
-        }
-
-        if mode == PollMode::Oneshot {
-            let _ = poller.modify_with_mode(
-                unsafe { BorrowedFd::borrow_raw(fd) },
-                PollEvent::readable(PTY_KEY),
-                PollMode::Oneshot,
-            );
-        }
-    }
-
-    let _ = poller.delete(unsafe { BorrowedFd::borrow_raw(fd) });
-    if child_exited {
-        proxy.send_event(Event::Exit);
-    }
-}
-
 /// Merge extra word-separator characters into alacritty's default
 /// `SEMANTIC_ESCAPE_CHARS` string, deduplicating. Used at `Pty::spawn` time
 /// so the configured separators act as word boundaries for double-click
@@ -1032,90 +635,7 @@ pub fn merge_word_separators(defaults: &str, extras: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{merge_word_separators, scan_modify_other_keys, scan_sync_2026, ModifyOtherKeys};
-
-    // ---- scan_modify_other_keys tests ----------------------------------------
-
-    #[test]
-    fn scan_mok_level2() {
-        // CSI > 4 ; 2 m  (enable-all)
-        let seq = b"\x1b[>4;2m";
-        assert_eq!(scan_modify_other_keys(seq), Some(ModifyOtherKeys::EnableAll));
-    }
-
-    #[test]
-    fn scan_mok_level1() {
-        let seq = b"\x1b[>4;1m";
-        assert_eq!(
-            scan_modify_other_keys(seq),
-            Some(ModifyOtherKeys::EnableExceptWellDefined)
-        );
-    }
-
-    #[test]
-    fn scan_mok_reset() {
-        let seq = b"\x1b[>4;0m";
-        assert_eq!(scan_modify_other_keys(seq), Some(ModifyOtherKeys::Reset));
-    }
-
-    #[test]
-    fn scan_mok_not_found_in_normal_text() {
-        assert_eq!(scan_modify_other_keys(b"hello world"), None);
-    }
-
-    #[test]
-    fn scan_mok_embedded_in_longer_run() {
-        // Normal output before + after the CSI > 4 ; 2 m sequence.
-        let seq = b"abc\x1b[>4;2mdef";
-        assert_eq!(scan_modify_other_keys(seq), Some(ModifyOtherKeys::EnableAll));
-    }
-
-    #[test]
-    fn scan_mok_different_param_not_4_ignored() {
-        // CSI > 5 ; 2 m — different resource (not modifyOtherKeys)
-        let seq = b"\x1b[>5;2m";
-        assert_eq!(scan_modify_other_keys(seq), None);
-    }
-
-    // ---- scan_sync_2026 tests ------------------------------------------------
-
-    #[test]
-    fn scan_sync_begin_only() {
-        let seq = b"\x1b[?2026h";
-        let (begin, end) = scan_sync_2026(seq);
-        assert_eq!(begin, 1);
-        assert_eq!(end, 0);
-    }
-
-    #[test]
-    fn scan_sync_end_only() {
-        let seq = b"\x1b[?2026l";
-        let (begin, end) = scan_sync_2026(seq);
-        assert_eq!(begin, 0);
-        assert_eq!(end, 1);
-    }
-
-    #[test]
-    fn scan_sync_begin_and_end_pair() {
-        // A complete synchronized update bracket in one buffer.
-        let seq = b"\x1b[?2026h...content...\x1b[?2026l";
-        let (begin, end) = scan_sync_2026(seq);
-        assert_eq!(begin, 1);
-        assert_eq!(end, 1);
-    }
-
-    #[test]
-    fn scan_sync_no_match_in_normal_text() {
-        let (begin, end) = scan_sync_2026(b"hello\r\n");
-        assert_eq!((begin, end), (0, 0));
-    }
-
-    #[test]
-    fn scan_sync_other_private_mode_ignored() {
-        // DECSET 1049 (alt screen) must not count.
-        let (begin, end) = scan_sync_2026(b"\x1b[?1049h\x1b[?1049l");
-        assert_eq!((begin, end), (0, 0));
-    }
+    use super::merge_word_separators;
 
     // ---- merge_word_separators tests -----------------------------------------
 
