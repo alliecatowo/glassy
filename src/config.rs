@@ -17,6 +17,7 @@
 //! follow_system = false                # track the OS light/dark color scheme
 //! theme_light = rose-pine-dawn         # theme used in system Light mode
 //! theme_dark  = tokyo-night            # theme used in system Dark mode
+//! status_bar  = false                  # show status bar at the bottom (default off)
 //! ```
 //!
 //! CLI flags override the file: at minimum `--font-size <pt>`, `--opacity <f>`,
@@ -92,6 +93,7 @@ struct RawConfig {
     follow_system: Option<bool>,
     theme_light: Option<String>,
     theme_dark: Option<String>,
+    status_bar: Option<bool>,
 }
 
 impl RawConfig {
@@ -144,6 +146,7 @@ impl RawConfig {
             follow_system,
             theme_light,
             theme_dark,
+            status_bar: self.status_bar.unwrap_or(false),
         };
 
         Ok(Settings { config, theme })
@@ -309,6 +312,9 @@ fn apply_kv(key: &str, value: &str, raw: &mut RawConfig) -> Result<()> {
                 raw.theme_dark = Some(value.to_string());
             }
         }
+        "status_bar" => {
+            raw.status_bar = Some(parse_bool(value, "status_bar")?);
+        }
         other => {
             log::warn!("glassy: ignoring unknown config key '{other}'");
         }
@@ -419,6 +425,10 @@ fn parse_cli(args: impl Iterator<Item = String>, raw: &mut RawConfig) -> Result<
             "--theme-dark" => {
                 raw.theme_dark = Some(next_value(&mut args, "--theme-dark")?);
             }
+            "--status-bar" => {
+                let v = next_value(&mut args, "--status-bar")?;
+                raw.status_bar = Some(parse_bool(&v, "--status-bar")?);
+            }
             // `-e`/`--command`: everything after it is the program + its args
             // (the conventional terminal contract). Consume the rest verbatim.
             "-e" | "--command" => {
@@ -462,6 +472,7 @@ OPTIONS:
     --follow-system <BOOL> Track the OS light/dark color scheme (default false)
     --theme-light <NAME>   Theme used in system Light mode (e.g. rose-pine-dawn)
     --theme-dark <NAME>    Theme used in system Dark mode (e.g. tokyo-night)
+    --status-bar <BOOL>    Show status bar at the bottom (default false)
     -e, --command <CMD>    Run CMD (with the remaining args) instead of the shell
     -h, --help             Print this help and exit
     -V, --version          Print version and exit
@@ -470,7 +481,7 @@ CONFIG FILE:
     $XDG_CONFIG_HOME/glassy/glassy.conf  (or ~/.config/glassy/glassy.conf)
     KEY=VALUE lines: font_family, font_size, theme, opacity, padding,
     shell, scrollback, bell_visual, bell_audible, follow_system,
-    theme_light, theme_dark. CLI flags override the file.",
+    theme_light, theme_dark, status_bar. CLI flags override the file.",
         env!("CARGO_PKG_VERSION")
     );
 }

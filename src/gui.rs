@@ -383,6 +383,8 @@ pub struct SettingsView<'a> {
     pub open: SettingsDrop,
     /// Show the transient "✓ saved" footer label.
     pub saved: bool,
+    /// Show the status bar at the bottom.
+    pub status_bar: bool,
 }
 
 /// Everything the settings form reported this frame. The App applies each
@@ -416,6 +418,8 @@ pub struct SettingsEvents {
     pub close: bool,
     /// The bounding rect of the whole panel (for click-outside dismissal).
     pub panel: Rect,
+    /// Status bar toggle was clicked.
+    pub status_bar_toggle: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -957,7 +961,7 @@ impl<'r> Ui<'r> {
 
         // Centered panel. Width ≈ 40 columns; height grows with the row count.
         let pw = (m.cell_w * 42.0).min(surface.0 - 2.0 * m.pad).max(m.cell_w * 24.0);
-        const ROWS: usize = 7; // font, opacity, bell, theme, font, scrollback, path
+        const ROWS: usize = 8; // font, opacity, bell, theme, font, scrollback, status_bar, path
         let header_h = m.row_h;
         let footer_h = m.row_h + m.gap;
         let body_h = ROWS as f32 * (m.row_h + m.gap);
@@ -1044,6 +1048,15 @@ impl<'r> Ui<'r> {
         row_label(self, y, "Scrollback");
         let sb_txt = format!("{} lines", v.scrollback);
         ev.scrollback_delta = self.stepper(id("settings/scrollback"), ctrl_rect(y, m.ctrl_w), &sb_txt);
+        y += step;
+
+        // -- Status bar (toggle) -----------------------------------------------
+        row_label(self, y, "Status bar");
+        let toggle_rect = Rect::new(ctrl_x, (y + (ctrl_h - m.cell_h) * 0.5).round(), m.cell_h, m.cell_h);
+        let new_status_bar = self.toggle(id("settings/status_bar"), toggle_rect, v.status_bar);
+        if new_status_bar != v.status_bar {
+            ev.status_bar_toggle = true;
+        }
         y += step;
 
         // -- Config path (readonly + copy/open) ------------------------------
@@ -1618,6 +1631,7 @@ fn help_rows() -> Vec<HelpRow<'static>> {
         HelpRow::Binding { keys: "Ctrl  +",         desc: "Font bigger" },
         HelpRow::Binding { keys: "Ctrl  -",         desc: "Font smaller" },
         HelpRow::Binding { keys: "Ctrl  0",         desc: "Font reset" },
+        HelpRow::Binding { keys: "Ctrl+Shift+B",    desc: "Toggle status bar" },
         HelpRow::Binding { keys: "Shift+PgUp",      desc: "Scroll history up" },
         HelpRow::Binding { keys: "Shift+PgDn",      desc: "Scroll history down" },
         HelpRow::Binding { keys: "Shift+Home",      desc: "Scroll to top" },
@@ -1671,6 +1685,7 @@ mod tests {
             id("settings/theme"),
             id("settings/font_family"),
             id("settings/scrollback"),
+            id("settings/status_bar"),
             id("settings/config"),
             id("settings/save"),
             id("settings/close"),

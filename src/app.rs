@@ -566,6 +566,8 @@ pub struct Config {
     /// Theme to use when the system prefers a DARK color scheme (and
     /// `follow_system` is on). Canonical [`color::THEME_NAMES`] entry.
     pub theme_dark: String,
+    /// Show the status bar at the bottom of the window. Default false.
+    pub status_bar: bool,
 }
 
 /// A tab's split layout: the tiling tree (whose leaf ids are pty/pane ids) plus
@@ -882,14 +884,15 @@ impl App {
     /// Compute grid dimensions for a physical surface size and the cell metrics.
     /// The renderer insets the grid by `pad` px on all four sides, so the usable
     /// area is reduced by `2 * pad` in each dimension.
-    fn grid_for(size: PhysicalSize<u32>, cell_w: f32, cell_h: f32, pad: f32) -> (usize, usize) {
+    fn grid_for(size: PhysicalSize<u32>, cell_w: f32, cell_h: f32, pad: f32, status_bar_enabled: bool) -> (usize, usize) {
         let usable_w = (size.width as f32 - 2.0 * pad).max(0.0);
         let usable_h = (size.height as f32 - 2.0 * pad).max(0.0);
         let cols = ((usable_w / cell_w).floor() as usize).max(1);
         // Reserve the GUI tab bar at the top and the status bar at the bottom (both
         // in PIXELS). The tab-bar inset is applied via `Renderer::set_grid_origin_y`;
-        // the status bar simply removes pixels from the available height.
-        let rows = (((usable_h - tab_bar_h(cell_h) - STATUS_BAR_H) / cell_h).floor() as usize)
+        // the status bar simply removes pixels from the available height when enabled.
+        let status_bar_space = if status_bar_enabled { STATUS_BAR_H } else { 0.0 };
+        let rows = (((usable_h - tab_bar_h(cell_h) - status_bar_space) / cell_h).floor() as usize)
             .max(1);
         (cols, rows)
     }
@@ -1521,7 +1524,7 @@ impl App {
         // status bar. Both insets are in pixels; the per-pane `pad` is applied by
         // the pane sizing math independently.
         let strip_bottom = tab_bar_h(m.height).round() as i32;
-        let status_h = STATUS_BAR_H.round() as i32;
+        let status_h = if self.config.status_bar { STATUS_BAR_H.round() as i32 } else { 0 };
         let (sw, sh) = r.surface_size();
         Some(pane::Rect {
             x: 0,
@@ -2742,6 +2745,7 @@ impl App {
             config_path,
             open,
             saved,
+            status_bar: config.status_bar,
         };
         ui.build_settings((sw as f32, sh as f32), &view)
     }
@@ -2800,6 +2804,23 @@ impl App {
         }
         if ev.scrollback_delta != 0 {
             self.adjust_scrollback(ev.scrollback_delta);
+            changed = true;
+        }
+        if ev.status_bar_toggle {
+            self.config.status_bar = !self.config.status_bar;
+            // Resize the grid to reclaim/reserve space for the status bar.
+            if let Some(window) = self.window.as_ref() {
+                let size = window.inner_size();
+                if let Some(r) = self.renderer.as_ref() {
+                    let m = r.cell_metrics();
+                    let (cols, rows) = Self::grid_for(size, m.width, m.height, r.pad(), self.config.status_bar);
+                    self.cols = cols;
+                    self.rows = rows;
+                    if let Some(pty) = self.pty.as_mut() {
+                        pty.resize(cols, rows, m.width.round() as u16, m.height.round() as u16);
+                    }
+                }
+            }
             changed = true;
         }
         if ev.copy_path {
@@ -3276,15 +3297,18 @@ impl App {
 
         // Status bar (§3.4): E1 bar at the very bottom, always above the terminal
         // content because it is an overlay (drawn last, not a reserved cell row).
-        Self::paint_status_bar(
-            renderer,
-            sb_surface_h,
-            sb_mode,
-            sb_disp_off,
-            sb_hist,
-            sb_sel_len,
-            sb_focused,
-        );
+        // Only painted when enabled in the config.
+        if self.config.status_bar {
+            Self::paint_status_bar(
+                renderer,
+                sb_surface_h,
+                sb_mode,
+                sb_disp_off,
+                sb_hist,
+                sb_sel_len,
+                sb_focused,
+            );
+        }
 
         // Modal overlays (help / settings): centered panels over a dimmed backdrop.
         // The settings form is a real GUI panel (§3.5) drawn via the overlay
@@ -3693,15 +3717,18 @@ impl App {
         );
 
         // Status bar (§3.4): same as the single-pane path.
-        Self::paint_status_bar(
-            renderer,
-            sb_surface_h,
-            sb_mode,
-            sb_disp_off,
-            sb_hist,
-            sb_sel_len,
-            sb_focused,
-        );
+        // Only painted when enabled in the config.
+        if self.config.status_bar {
+            Self::paint_status_bar(
+                renderer,
+                sb_surface_h,
+                sb_mode,
+                sb_disp_off,
+                sb_hist,
+                sb_sel_len,
+                sb_focused,
+            );
+        }
 
         // Settings form (§3.5): drawn over the split via the overlay pipeline,
         // events captured here (disjoint `&self.config` borrow) and applied after
@@ -4097,7 +4124,7 @@ impl App {
     /// for Tab / Shift+Tab / Up / Down focus movement (the form itself collects
     /// the live order each paint, but key handling runs between paints so it walks
     /// this fixed list — identical ordering keeps focus stable).
-    fn settings_focus_order() -> [gui::WidgetId; 8] {
+    fn settings_focus_order() -> [gui::WidgetId; 9] {
         [
             gui::id("settings/font_size"),
             gui::id("settings/opacity"),
@@ -4105,6 +4132,7 @@ impl App {
             gui::id("settings/theme"),
             gui::id("settings/font_family"),
             gui::id("settings/scrollback"),
+            gui::id("settings/status_bar"),
             gui::id("settings/config"),
             gui::id("settings/save"),
         ]
@@ -4393,7 +4421,7 @@ impl App {
     }
 
     /// Persist the live-adjustable settings (font size in pt, opacity, bell,
-    /// theme, font family, scrollback) to the config file, preserving every other
+    /// theme, font family, scrollback, status_bar) to the config file, preserving every other
     /// key/comment.
     fn save_settings(&mut self) {
         let scale = self
@@ -4419,6 +4447,7 @@ impl App {
                 self.config.font_family.clone().unwrap_or_default(),
             ),
             ("scrollback", self.config.scrollback.to_string()),
+            ("status_bar", self.config.status_bar.to_string()),
         ];
         match crate::config::save(&updates) {
             Ok(()) => {
@@ -4448,7 +4477,7 @@ impl App {
         if let Some(window) = self.window.as_ref() {
             let size = window.inner_size();
             let m = renderer.cell_metrics();
-            let (cols, rows) = Self::grid_for(size, m.width, m.height, renderer.pad());
+            let (cols, rows) = Self::grid_for(size, m.width, m.height, renderer.pad(), self.config.status_bar);
             self.cols = cols;
             self.rows = rows;
             pty.resize(cols, rows, m.width.round() as u16, m.height.round() as u16);
@@ -4485,7 +4514,7 @@ impl App {
         };
         renderer.resize(size.width, size.height);
         let m = renderer.cell_metrics();
-        let (cols, rows) = Self::grid_for(size, m.width, m.height, renderer.pad());
+        let (cols, rows) = Self::grid_for(size, m.width, m.height, renderer.pad(), self.config.status_bar);
         let (cw, ch) = (m.width.round() as u16, m.height.round() as u16);
 
         if self.panes.is_some() {
@@ -4582,7 +4611,7 @@ impl ApplicationHandler<UserEvent> for App {
         let size = window.inner_size();
         renderer.resize(size.width, size.height);
         let m = renderer.cell_metrics();
-        let (cols, rows) = Self::grid_for(size, m.width, m.height, renderer.pad());
+        let (cols, rows) = Self::grid_for(size, m.width, m.height, renderer.pad(), self.config.status_bar);
         self.cols = cols;
         self.rows = rows;
 
@@ -4955,6 +4984,31 @@ impl ApplicationHandler<UserEvent> for App {
                         self.mark_dirty(event_loop);
                         return;
                     }
+                }
+
+                // Ctrl+Shift+B toggles the status bar.
+                if event.state.is_pressed()
+                    && self.mods.control_key()
+                    && self.mods.shift_key()
+                    && let Key::Character(s) = &event.logical_key
+                    && s.as_str() == "b"
+                {
+                    self.config.status_bar = !self.config.status_bar;
+                    // Resize the grid to reclaim/reserve space for the status bar.
+                    if let Some(window) = self.window.as_ref() {
+                        let size = window.inner_size();
+                        if let Some(r) = self.renderer.as_ref() {
+                            let m = r.cell_metrics();
+                            let (cols, rows) = Self::grid_for(size, m.width, m.height, r.pad(), self.config.status_bar);
+                            self.cols = cols;
+                            self.rows = rows;
+                            if let Some(pty) = self.pty.as_mut() {
+                                pty.resize(cols, rows, m.width.round() as u16, m.height.round() as u16);
+                            }
+                        }
+                    }
+                    self.mark_dirty(event_loop);
+                    return;
                 }
 
                 // Shift + PageUp/PageDown/Home/End drives glassy's own scrollback
@@ -5761,8 +5815,9 @@ mod tests {
         assert_eq!(order[3], gui::id("settings/theme"));
         assert_eq!(order[4], gui::id("settings/font_family"));
         assert_eq!(order[5], gui::id("settings/scrollback"));
-        assert_eq!(order[6], gui::id("settings/config"));
-        assert_eq!(order[7], gui::id("settings/save"));
+        assert_eq!(order[6], gui::id("settings/status_bar"));
+        assert_eq!(order[7], gui::id("settings/config"));
+        assert_eq!(order[8], gui::id("settings/save"));
         for (i, a) in order.iter().enumerate() {
             for b in order.iter().skip(i + 1) {
                 assert_ne!(a, b);
