@@ -303,9 +303,17 @@ fn lighten(c: [f32; 4], amount: f32) -> [f32; 4] {
 /// overlays.
 fn draw_modal(renderer: &mut Renderer, rows: usize, cols: usize, lines: &[&str]) {
     let total_rows = rows + TAB_STRIP_ROWS;
-    let backdrop = darken(color::default_bg(), 0.45);
-    let panel_bg = lighten(color::default_bg(), 0.07);
-    let border_bg = color::accent();
+
+    // Glass palette: a dim full-screen backdrop, a translucent dark panel body, and
+    // a thin accent border. No cream interior, no per-row wipe — the panel composites
+    // over the live terminal via the overlay pipeline (drawn after the grid). Colors
+    // are straight RGBA; `push_overlay_*` premultiplies.
+    let backdrop = [0.0, 0.0, 0.0, 0.30];
+    let body = {
+        let b = color::default_bg();
+        [b[0], b[1], b[2], 0.82]
+    };
+    let border = color::accent();
     let text_fg = color::default_fg();
     let title_fg = lighten(color::accent(), 0.1);
 
@@ -315,28 +323,30 @@ fn draw_modal(renderer: &mut Renderer, rows: usize, cols: usize, lines: &[&str])
     let left = (cols.saturating_sub(panel_w)) / 2;
     let top = (total_rows.saturating_sub(panel_h)) / 2;
 
-    for row in 0..total_rows {
-        renderer.begin_row(row);
-        for col in 0..cols {
-            let in_panel =
-                row >= top && row < top + panel_h && col >= left && col < left + panel_w;
-            let (ch, fg, bg) = if in_panel {
-                let prow = row - top;
-                let pcol = col - left;
-                if prow == 0 || prow == panel_h - 1 || pcol == 0 || pcol == panel_w - 1 {
-                    (' ', text_fg, border_bg) // 1-cell accent border
-                } else {
-                    let li = prow - 1;
-                    let line = lines.get(li).copied().unwrap_or("");
-                    let tcol = pcol - 1; // 1-cell interior pad
-                    let c = line.chars().nth(tcol).unwrap_or(' ');
-                    let fg = if li == 0 { title_fg } else { text_fg };
-                    (c, fg, panel_bg)
-                }
-            } else {
-                (' ', backdrop, backdrop)
-            };
-            renderer.push_cell(col, row, ch, &[], fg, bg, false, false, false, Decorations::default());
+    // 1) Dim the whole screen.
+    renderer.push_overlay_cells(0, 0, cols, total_rows, backdrop);
+    // 2) Translucent panel body.
+    renderer.push_overlay_cells(left, top, panel_w, panel_h, body);
+    // 3) Thin accent border rails (1 cell thick), over the body.
+    renderer.push_overlay_cells(left, top, panel_w, 1, border); // top
+    renderer.push_overlay_cells(left, top + panel_h - 1, panel_w, 1, border); // bottom
+    renderer.push_overlay_cells(left, top, 1, panel_h, border); // left
+    renderer.push_overlay_cells(left + panel_w - 1, top, 1, panel_h, border); // right
+
+    // 4) Panel text — glyphs only, drawn ON TOP of the glass via the overlay-text
+    //    channel so they stay crisp.
+    for (li, line) in lines.iter().enumerate() {
+        let row = top + 1 + li;
+        if row >= top + panel_h - 1 {
+            break;
+        }
+        let fg = if li == 0 { title_fg } else { text_fg };
+        for (ci, ch) in line.chars().enumerate() {
+            let col = left + 1 + ci;
+            if col >= left + panel_w - 1 {
+                break;
+            }
+            renderer.push_overlay_glyph(col, row, ch, fg);
         }
     }
 }
@@ -386,58 +396,51 @@ fn draw_dropdown_menu(
     left: usize,
     top: usize,
 ) {
-    let panel_w = items.iter().map(|a| a.label().len()).max().unwrap_or(0) + 4; // 2 pad each side
-    let panel_h = items.len() + 2; // 1-cell border top + bottom
-
-    let panel_bg = lighten(color::default_bg(), 0.07);
-    let border_bg = color::accent();
+    // Glass dropdown: translucent body + thin accent border, composited over the
+    // live terminal via the overlay pipeline. Unlike a modal, a menu does NOT dim
+    // the whole screen — the terminal stays visible beside it. Straight RGBA here;
+    // `push_overlay_*` premultiplies.
+    let body = {
+        let b = color::default_bg();
+        [b[0], b[1], b[2], 0.82]
+    };
+    let border = color::accent();
     let text_fg = color::default_fg();
-    let sel_bg = lighten(color::default_bg(), 0.18);
+    let sel_bg = {
+        let a = color::accent();
+        [a[0], a[1], a[2], 0.55] // translucent accent highlight on the selected row
+    };
     let sel_fg = lighten(color::accent(), 0.1);
 
-    // Only repaint the rows the panel occupies (the rest keep their content).
-    let row_end = (top + panel_h).min(rows + TAB_STRIP_ROWS);
-    for row in top..row_end {
-        renderer.begin_row(row);
-        for col in 0..cols {
-            let in_panel = col >= left && col < left + panel_w;
-            if !in_panel {
-                // Outside the panel: push a blank so the renderer has a cell for
-                // this column (it may not have been drawn in the terminal pass
-                // because the menu covers terminal rows).
-                renderer.push_cell(
-                    col,
-                    row,
-                    ' ',
-                    &[],
-                    color::default_fg(),
-                    color::default_bg(),
-                    false,
-                    false,
-                    false,
-                    Decorations::default(),
-                );
-                continue;
+    // Clamp the panel to the screen so rails / text stay on-grid.
+    let total_rows = rows + TAB_STRIP_ROWS;
+    let panel_w = (items.iter().map(|a| a.label().len()).max().unwrap_or(0) + 4)
+        .min(cols.saturating_sub(left).max(1));
+    let panel_h = (items.len() + 2).min(total_rows.saturating_sub(top).max(1));
+
+    renderer.push_overlay_cells(left, top, panel_w, panel_h, body);
+    renderer.push_overlay_cells(left, top, panel_w, 1, border); // top
+    renderer.push_overlay_cells(left, top + panel_h - 1, panel_w, 1, border); // bottom
+    renderer.push_overlay_cells(left, top, 1, panel_h, border); // left
+    renderer.push_overlay_cells(left + panel_w - 1, top, 1, panel_h, border); // right
+
+    for (li, item) in items.iter().enumerate() {
+        let row = top + 1 + li;
+        if row >= top + panel_h - 1 {
+            break;
+        }
+        let fg = if li == sel {
+            renderer.push_overlay_cells(left + 1, row, panel_w.saturating_sub(2), 1, sel_bg);
+            sel_fg
+        } else {
+            text_fg
+        };
+        for (ci, ch) in item.label().chars().enumerate() {
+            let col = left + 2 + ci; // 2-cell left pad (matches old layout)
+            if col >= left + panel_w - 1 {
+                break;
             }
-            let prow = row - top;
-            let pcol = col - left;
-            let is_border =
-                prow == 0 || prow == panel_h - 1 || pcol == 0 || pcol == panel_w - 1;
-            let (ch, fg, bg) = if is_border {
-                (' ', text_fg, border_bg)
-            } else {
-                let li = prow - 1; // item index (0-based)
-                let label = items.get(li).map(|a| a.label()).unwrap_or("");
-                let tcol = pcol - 1;
-                let c = label.chars().nth(tcol).unwrap_or(' ');
-                let (fg, bg) = if li == sel {
-                    (sel_fg, sel_bg)
-                } else {
-                    (text_fg, panel_bg)
-                };
-                (c, fg, bg)
-            };
-            renderer.push_cell(col, row, ch, &[], fg, bg, false, false, false, Decorations::default());
+            renderer.push_overlay_glyph(col, row, ch, fg);
         }
     }
 }
