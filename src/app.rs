@@ -603,6 +603,10 @@ struct Session {
     /// it counts as idle again. Re-armed on every PTY wakeup; cleared (back to
     /// `None`) once elapsed in `about_to_wait`. Drives the chip's busy spinner.
     busy_until: Option<Instant>,
+    /// Last working directory reported by this session's focused pane via OSC 7,
+    /// so a new tab/split opened from this tab inherits the cwd. `None` until the
+    /// shell emits OSC 7 (or for shells that never do).
+    last_cwd: Option<std::path::PathBuf>,
 }
 
 pub struct App {
@@ -630,6 +634,10 @@ pub struct App {
     active_id: usize,
     /// Title reported by the active session (OSC), for the tab strip.
     active_title: String,
+    /// Last working directory reported by the active session via OSC 7. New
+    /// tabs/splits inherit it so they open where the user is, not in `$HOME`.
+    /// Parked sessions keep their own in `Session::last_cwd`.
+    active_cwd: Option<std::path::PathBuf>,
     /// Next session id to assign.
     next_id: usize,
 
@@ -771,6 +779,7 @@ impl App {
             tab_order: vec![0], // the first tab (spawned in resumed) is id 0
             active_id: 0,
             active_title: String::new(),
+            active_cwd: None,
             next_id: 1,
             cols: 0,
             rows: 0,
@@ -1168,6 +1177,9 @@ impl App {
         };
         let m = renderer.cell_metrics();
         let id = self.next_id;
+        // Inherit the current tab's cwd (from OSC 7) so the new tab opens where the
+        // user is, not in $HOME.
+        let cwd = self.active_cwd.clone();
         let pty = match Pty::spawn(
             self.proxy.clone(),
             id,
@@ -1176,7 +1188,7 @@ impl App {
             m.width.round() as u16,
             m.height.round() as u16,
             self.config.shell.clone(),
-            None,
+            cwd.clone(),
             self.config.scrollback,
         ) {
             Ok(p) => p,
@@ -1197,6 +1209,7 @@ impl App {
                 activity: false,
                 // Carry the parked session's busy state so its chip keeps spinning.
                 busy_until: self.active_busy_until.take(),
+                last_cwd: self.active_cwd.take(),
             });
         }
         self.tab_order.push(id);
@@ -1204,6 +1217,8 @@ impl App {
         self.active_id = id;
         self.active_title.clear();
         self.active_busy_until = None;
+        // The new tab starts at the inherited cwd; OSC 7 updates it as the user cd's.
+        self.active_cwd = cwd;
         self.reset_pointer_state();
         self.update_window_title();
         self.force_full_redraw = true;
@@ -1262,6 +1277,7 @@ impl App {
                 activity: false,
                 // Carry the parked session's busy state so its chip keeps spinning.
                 busy_until: self.active_busy_until.take(),
+                last_cwd: self.active_cwd.take(),
             });
         }
         let bi = self.background.iter().position(|s| s.id == target_id).unwrap_or(bi);
@@ -1272,6 +1288,8 @@ impl App {
         self.active_title = target.title;
         // Inherit the activated session's busy deadline (it streams in the fg now).
         self.active_busy_until = target.busy_until;
+        // Restore the activated session's cwd so a new tab/split inherits it.
+        self.active_cwd = target.last_cwd;
         // A split tab may have been parked at a different window size; re-tile it.
         if self.panes.is_some() {
             self.resize_panes();
@@ -1310,6 +1328,7 @@ impl App {
             }
             self.pty = None;
             self.active_title.clear();
+            self.active_cwd = None; // the closed tab's cwd is gone
             if self.tab_order.is_empty() {
                 event_loop.exit();
                 return;
@@ -1323,6 +1342,7 @@ impl App {
                 self.panes = next.panes;
                 self.active_id = next.id;
                 self.active_title = next.title;
+                self.active_cwd = next.last_cwd;
                 if self.panes.is_some() {
                     self.resize_panes();
                 }
@@ -1426,6 +1446,8 @@ impl App {
         }
         let new_id = self.next_id;
         let m = self.renderer.as_ref().unwrap().cell_metrics();
+        // The new pane inherits the focused pane's cwd (from OSC 7).
+        let cwd = self.active_cwd.clone();
         let pty = match Pty::spawn(
             self.proxy.clone(),
             new_id,
@@ -1434,7 +1456,7 @@ impl App {
             m.width.round() as u16,
             m.height.round() as u16,
             self.config.shell.clone(),
-            None,
+            cwd,
             self.config.scrollback,
         ) {
             Ok(p) => p,
@@ -3185,6 +3207,49 @@ impl ApplicationHandler<UserEvent> for App {
                 let bytes = text.into_bytes();
                 if let Some(pty) = self.pty_by_id(id) {
                     pty.write(bytes);
+                }
+                return;
+            }
+            UserEvent::Cwd(id, path) => {
+                // OSC 7: record the reporting pane's cwd so new tabs/splits inherit
+                // it. Only a tab's FOCUSED pane drives the inherited cwd (mirrors
+                // the title handling); not a visual change, so no repaint.
+                if self.id_in_active_tab(id) {
+                    if id == self.active_id {
+                        self.active_cwd = Some(path);
+                    }
+                    // A non-focused active-tab pane reports its own cwd; we keep the
+                    // focused pane's as the tab's inherited cwd, so ignore it.
+                } else if let Some(s) = self.background.iter_mut().find(|s| s.id == id) {
+                    s.last_cwd = Some(path);
+                }
+                return;
+            }
+            UserEvent::ClipboardStore(_id, _ty, text) => {
+                // OSC 52 copy: write to the OS clipboard on the UI thread (arboard
+                // must not run on the PTY thread). arboard exposes only the standard
+                // clipboard, so a Selection store also lands there. Not visual.
+                if let Some(cb) = self.clipboard()
+                    && let Err(e) = cb.set_text(text)
+                {
+                    log::debug!("OSC 52 clipboard store failed: {e}");
+                }
+                return;
+            }
+            UserEvent::ClipboardLoad(id, _ty, formatter) => {
+                // OSC 52 read: read the clipboard, format the reply, and write it
+                // back to the requesting pane over the PtyWrite path. Not visual.
+                let text = self.clipboard().and_then(|cb| match cb.get_text() {
+                    Ok(t) => Some(t),
+                    Err(e) => {
+                        log::debug!("OSC 52 clipboard load failed: {e}");
+                        None
+                    }
+                });
+                if let Some(text) = text
+                    && let Some(pty) = self.pty_by_id(id)
+                {
+                    pty.write(formatter.0(&text).into_bytes());
                 }
                 return;
             }
