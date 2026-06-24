@@ -20,6 +20,19 @@ impl App {
                 self.paste_clipboard();
                 self.mark_dirty(event_loop);
             }
+            MenuAction::SelectAll => {
+                self.select_all();
+                self.force_full_redraw = true;
+                self.mark_dirty(event_loop);
+            }
+            MenuAction::ClearScrollback => {
+                self.clear_scrollback();
+                self.force_full_redraw = true;
+                self.mark_dirty(event_loop);
+            }
+            MenuAction::Search => self.open_search(event_loop),
+            MenuAction::SplitRight => self.split_pane(pane::Dir::Vertical, event_loop),
+            MenuAction::SplitDown => self.split_pane(pane::Dir::Horizontal, event_loop),
             MenuAction::NewTab => self.new_tab(event_loop),
             MenuAction::Settings => {
                 self.open_settings();
@@ -42,19 +55,21 @@ impl App {
     /// tab are always present. Settings/Help/CloseTab are omitted from the
     /// context menu (available via the hamburger).
     pub(crate) fn context_menu_items(&self) -> Vec<MenuAction> {
-        let mut v = Vec::new();
-        let has_sel = self
-            .pty
-            .as_ref()
-            .and_then(|p| p.term.lock().selection_to_string())
-            .filter(|s| !s.is_empty())
-            .is_some();
-        if has_sel {
-            v.push(MenuAction::Copy);
-        }
-        v.push(MenuAction::Paste);
-        v.push(MenuAction::NewTab);
-        v
+        // Copy is always listed (greyed out when nothing is selected) so the
+        // menu layout is stable; `actions_to_entries` reads the live selection
+        // state to decide its enabled flag. Groups are separated automatically.
+        vec![
+            MenuAction::Copy,
+            MenuAction::Paste,
+            MenuAction::SelectAll,
+            MenuAction::ClearScrollback,
+            MenuAction::Search,
+            MenuAction::SplitRight,
+            MenuAction::SplitDown,
+            MenuAction::NewTab,
+            MenuAction::Settings,
+            MenuAction::Help,
+        ]
     }
 
     /// Open the right-click context menu anchored at the current pointer position
@@ -71,8 +86,10 @@ impl App {
         let (mx, my) = (self.mouse_px.0 as f32, self.mouse_px.1 as f32);
         let est_panel_w = items.iter().map(|a| a.label().len()).max().unwrap_or(0) as f32
             * 8.0   // approximate cell_w
-            + 80.0; // icon + shortcut + padding
-        let est_panel_h = items.len() as f32 * 22.0 + 8.0;
+            + 120.0; // icon + shortcut + padding
+        // Height accounts for separators (4 group boundaries in the context menu)
+        // so the on-screen clamp keeps the now-taller panel fully visible.
+        let est_panel_h = items.len() as f32 * 24.0 + 5.0 * 5.0 + 8.0;
         let sw = self
             .renderer
             .as_ref()

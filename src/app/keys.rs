@@ -203,6 +203,16 @@ impl App {
             // Fall through: let the keypress reach the child below.
         }
 
+        // While the tab right-click menu is open, Up/Down/Enter/Esc navigate it.
+        if event.state.is_pressed() && self.tab_menu_target.is_some() {
+            let key = &event.logical_key;
+            if self.handle_tab_menu_key(key, event_loop) {
+                return;
+            }
+            // Any other key closes it and falls through to the child.
+            self.close_tab_menu(event_loop);
+        }
+
         // While the pane ⋮ menu is open, Up/Down/Enter/Esc navigate it.
         if event.state.is_pressed() && self.pane_menu_open.is_some() {
             let n = Self::PANE_MENU_ITEMS.len();

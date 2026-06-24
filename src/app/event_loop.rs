@@ -186,6 +186,20 @@ impl ApplicationHandler<UserEvent> for App {
             self.menu_open = true;
             self.force_full_redraw = true;
         }
+        // Headless: open the right-click terminal context menu near top-left so the
+        // full rich menu (Copy/Paste/Select all/Clear/Search/Split/New tab/…) is
+        // captured. Seeds a fake pointer position first.
+        if std::env::var_os("GLASSY_CTXMENU").is_some() {
+            self.mouse_px = (60.0, 80.0);
+            self.open_context_menu(event_loop);
+            self.force_full_redraw = true;
+        }
+        // Headless: open the TAB right-click context menu for tab 0.
+        if std::env::var_os("GLASSY_TABMENU").is_some() {
+            self.mouse_px = (40.0, 8.0);
+            self.open_tab_menu(0, event_loop);
+            self.force_full_redraw = true;
+        }
         // Headless: open the command palette at startup; GLASSY_PALETTE's value (if
         // non-empty) pre-fills the query so the fuzzy filter can be captured.
         if let Some(q) = std::env::var_os("GLASSY_PALETTE") {

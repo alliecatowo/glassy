@@ -303,6 +303,17 @@ pub struct App {
     /// the user returns to where they left off.
     help_state: gui::HelpState,
 
+    // --- Tab right-click context menu ----------------------------------------
+    /// When a tab chip is right-clicked: the stable `tab_order` position the menu
+    /// acts on (Close / Close others / Rename / Duplicate / Move left/right).
+    /// `None` when no tab menu is open. Drawn with `gui::menu`, anchored at the
+    /// pointer in `tab_menu_anchor_px`.
+    tab_menu_target: Option<usize>,
+    /// Currently-highlighted row in the open tab context menu (keyboard nav).
+    tab_menu_sel: usize,
+    /// Pixel anchor (x, y) for the tab context-menu panel.
+    tab_menu_anchor_px: Option<(f32, f32)>,
+
     // --- Pane title-bar ⋮ menu -----------------------------------------------
     /// The pane header currently under the pointer: `(pane id, in ⋮ button)`, or
     /// `None` when the pointer is off every header. Cached so `CursorMoved` only
@@ -449,9 +460,78 @@ pub struct App {
 #[cfg(test)]
 mod tests {
     use super::{
-        StripItem, WheelAction, image_dst_size, motion_button, move_in_order, strip_item_at,
-        strip_layout, wheel_action,
+        MenuAction, StripItem, WheelAction, actions_to_entries, image_dst_size, motion_button,
+        move_in_order, strip_item_at, strip_layout, wheel_action,
     };
+    use crate::gui::MenuEntry;
+
+    #[test]
+    fn context_menu_entries_group_with_separators() {
+        // The rich right-click menu, with no selection: Copy is present but
+        // disabled; separators fall on every group boundary (clipboard | buffer |
+        // layout | app).
+        let items = [
+            MenuAction::Copy,
+            MenuAction::Paste,
+            MenuAction::SelectAll,
+            MenuAction::ClearScrollback,
+            MenuAction::Search,
+            MenuAction::SplitRight,
+            MenuAction::SplitDown,
+            MenuAction::NewTab,
+            MenuAction::Settings,
+            MenuAction::Help,
+        ];
+        let entries = actions_to_entries(&items, false);
+        // Item count preserved; 3 group boundaries among these → 3 separators.
+        let item_count = entries
+            .iter()
+            .filter(|e| matches!(e, MenuEntry::Item { .. }))
+            .count();
+        let sep_count = entries
+            .iter()
+            .filter(|e| matches!(e, MenuEntry::Separator))
+            .count();
+        assert_eq!(item_count, items.len());
+        assert_eq!(sep_count, 3);
+        // First item is Copy, disabled because has_selection=false.
+        match &entries[0] {
+            MenuEntry::Item { label, enabled, .. } => {
+                assert_eq!(*label, "Copy");
+                assert!(!*enabled);
+            }
+            _ => panic!("first entry should be the Copy item"),
+        }
+        // With a selection, Copy is enabled.
+        let entries_sel = actions_to_entries(&items, true);
+        match &entries_sel[0] {
+            MenuEntry::Item { enabled, .. } => assert!(*enabled),
+            _ => panic!("first entry should be the Copy item"),
+        }
+    }
+
+    #[test]
+    fn hamburger_menu_groups_layout_app_and_destructive() {
+        // The hamburger (NewTab, Settings, PaneHeaders, Help, CloseTab) spans the
+        // layout (NewTab), app (Settings/PaneHeaders/Help), and destructive
+        // (CloseTab) groups → a separator at each of the two boundaries.
+        let entries = actions_to_entries(MenuAction::ALL, false);
+        let item_count = entries
+            .iter()
+            .filter(|e| matches!(e, MenuEntry::Item { .. }))
+            .count();
+        let sep_count = entries
+            .iter()
+            .filter(|e| matches!(e, MenuEntry::Separator))
+            .count();
+        assert_eq!(item_count, MenuAction::ALL.len());
+        assert_eq!(sep_count, 2);
+        // The last entry is always the destructive Close-tab item.
+        match entries.last() {
+            Some(MenuEntry::Item { label, .. }) => assert_eq!(*label, "Close tab"),
+            _ => panic!("hamburger must end with Close tab"),
+        }
+    }
 
     #[test]
     fn settings_focus_order_matches_gui_ids_and_is_distinct() {
@@ -464,10 +544,14 @@ mod tests {
         assert_eq!(order[3], gui::id("settings/theme"));
         assert_eq!(order[4], gui::id("settings/font_family"));
         assert_eq!(order[5], gui::id("settings/scrollback"));
-        assert_eq!(order[6], gui::id("settings/status_bar"));
-        assert_eq!(order[7], gui::id("settings/pane_headers"));
-        assert_eq!(order[8], gui::id("settings/config"));
-        assert_eq!(order[9], gui::id("settings/save"));
+        assert_eq!(order[6], gui::id("settings/padding"));
+        assert_eq!(order[7], gui::id("settings/status_bar"));
+        assert_eq!(order[8], gui::id("settings/pane_headers"));
+        assert_eq!(order[9], gui::id("settings/follow_system"));
+        assert_eq!(order[10], gui::id("settings/ligatures"));
+        assert_eq!(order[11], gui::id("settings/restore_session"));
+        assert_eq!(order[12], gui::id("settings/config"));
+        assert_eq!(order[13], gui::id("settings/save"));
         for (i, a) in order.iter().enumerate() {
             for b in order.iter().skip(i + 1) {
                 assert_ne!(a, b);
