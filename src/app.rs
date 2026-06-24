@@ -36,10 +36,38 @@ use crate::renderer::{CursorOverlay, Decorations, Renderer, UnderlineStyle};
 /// scrolling glassy's own scrollback buffer.
 const WHEEL_LINES: i32 = 3;
 
-/// Screen rows reserved at the top for the tab strip. The strip doubles as a
-/// title bar (it always shows, even with one tab), so this is a constant and the
-/// terminal grid simply starts one row down — no resize churn when tabs change.
+/// Legacy cell-row count, retained only by the not-yet-pixelized modal/menu draw
+/// helpers (waves 5/6) for their full-screen sizing math. The terminal grid no
+/// longer reserves a cell row for the strip — it is inset in PIXELS by the GUI
+/// tab bar (`tab_bar_h`) via `Renderer::set_grid_origin_y`.
 const TAB_STRIP_ROWS: usize = 1;
+
+/// Tab-bar height in physical px, derived from the cell height so the chrome
+/// scales with the font (and DPI) exactly like the cell metrics. The bar holds a
+/// row of real tab shapes whose active member connects to the content surface.
+fn tab_bar_h(cell_h: f32) -> f32 {
+    (cell_h * 1.7).round().max(28.0)
+}
+
+/// Top-corner radius of a tab chip (px).
+const TAB_RADIUS: f32 = 5.0;
+/// Minimum / maximum tab width in px (multi-tab mode).
+const TAB_MIN_W: f32 = 120.0;
+const TAB_MAX_W: f32 = 220.0;
+/// Gap between adjacent tab chips (px).
+const TAB_GAP: f32 = 2.0;
+/// Horizontal inner padding of a tab chip (px).
+const TAB_PAD_X: f32 = 10.0;
+/// Close-button hit box inside a tab (px, square).
+const CLOSE_BOX: f32 = 16.0;
+/// Square icon-button size for +/≡/?/⚙ controls (px).
+const CTRL_BTN: f32 = 28.0;
+
+/// Corner radius for tab-bar icon buttons, derived from the cell height like the
+/// GUI metric scale so it tracks the font/DPI.
+fn gui_radius(cell_h: f32) -> f32 {
+    (cell_h * 0.28).round().clamp(4.0, 8.0)
+}
 
 /// What a wheel notch should do, given the terminal's current mode. Pure so it
 /// can be unit-tested without a window or PTY.
@@ -114,12 +142,39 @@ fn fit_label(t: &str, max: usize) -> String {
     format!("…{tail}")
 }
 
-/// Cells occupied by the left-hand " ◆ " mark before the tab chips.
-const HEADER_MARK_COLS: usize = 3;
+/// Reduce an OSC window title to printable ASCII only, so the native (CSD)
+/// titlebar font — which we do not control — can render every character it ever
+/// receives, making "tofu" boxes structurally impossible. Non-ASCII-graphic
+/// chars (CJK, emoji, Nerd-Font icons, dingbats, combining marks) are dropped;
+/// runs of whitespace collapse to a single space; an empty result falls back to
+/// "glassy". The full rich/Unicode title is rendered in OUR tab bar instead
+/// (through the glyph atlas, which renders all of them). Pure for unit testing.
+fn os_title(title: &str) -> String {
+    let mut out = String::with_capacity(title.len());
+    let mut last_space = false;
+    for c in title.chars() {
+        if c.is_ascii_graphic() {
+            out.push(c);
+            last_space = false;
+        } else if c == ' ' || c == '\t' {
+            if !last_space && !out.is_empty() {
+                out.push(' ');
+            }
+            last_space = true;
+        }
+        // everything else (non-ASCII, control) is dropped
+    }
+    let trimmed = out.trim_end();
+    if trimmed.is_empty() {
+        "glassy".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
 
-/// An interactive item in the inline app toolbar (the strip *under* the native
-/// OS titlebar). Window controls (min/max/close) intentionally live in the
-/// native bar, not here. `Tab`/`TabClose` carry the tab's *stable position*.
+/// An interactive item in the real GUI tab bar. Window controls (min/max/close)
+/// live in the native bar, not here. `Tab`/`TabClose` carry the tab's *stable
+/// position*.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum StripItem {
     /// A tab chip body at stable display position `pos` (click = activate).
@@ -128,86 +183,119 @@ enum StripItem {
     TabClose(usize),
     NewTab,
     Help,
+    Settings,
     Menu,
 }
 
-/// One placed strip item with its label and half-open cell range `[start, end)`.
-#[derive(Clone)]
+/// One placed tab-bar item with its pixel rect. The label is carried for the tab
+/// body (it is what gets drawn / measured); control buttons carry an empty label.
+#[derive(Clone, Debug)]
 struct StripSeg {
     item: StripItem,
     label: String,
-    start: usize,
-    end: usize,
+    rect: gui::Rect,
 }
-
-/// Each toolbar control button is this many cells (a glyph padded by a space).
-const STRIP_BTN_W: usize = 3;
 
 /// A tab descriptor in stable display order: (title, is_active, has_activity).
 type TabDesc<'a> = (&'a str, bool, bool);
 
-/// Lay out the inline toolbar across `cols` from tab descriptors in stable order:
-/// the glassy mark, then either the title (one tab) or numbered chips with a per-
-/// chip ✕ (multiple), a `+` new-tab button, and right-aligned `?` help + `≡` menu.
-/// The active tab keeps its position — only its highlight differs. Shared by the
-/// renderer and the click hit-test so drawn items and click targets always agree.
-fn strip_layout(tabs: &[TabDesc], cols: usize) -> Vec<StripSeg> {
-    let right_btns = [(StripItem::Help, " ? "), (StripItem::Menu, " ≡ ")];
-    let right_w = STRIP_BTN_W * right_btns.len();
-    let right_start = cols.saturating_sub(right_w);
-
+/// Lay out the real GUI tab bar across the pixel-wide bar `[0, bar_w)` at height
+/// `bar_h`, from tab descriptors in stable order. Produces, left→right: the glassy
+/// mark slot, a `+` new-tab button, the tab chips (each a body rect + an embedded
+/// close-box rect in multi-tab mode), and right-aligned `?` help, `⚙` settings,
+/// `≡` menu icon buttons. The active tab keeps its position. Pure (pixel math
+/// only) so the painter and the click hit-test agree, and so it is unit-testable.
+fn strip_layout(tabs: &[TabDesc], bar_w: f32, bar_h: f32, cell_w: f32) -> Vec<StripSeg> {
     let mut segs = Vec::new();
-    let mut col = HEADER_MARK_COLS; // after the decorative " ◆ " mark
+    if bar_w <= 0.0 || bar_h <= 0.0 {
+        return segs;
+    }
+    // Tab chips are inset vertically so the active chip's top accent rail and the
+    // inactive chips' recess read clearly against the bar.
+    let chip_y = ((bar_h - bar_h * 0.82) * 0.5).round();
+    let chip_h = (bar_h - chip_y).max(1.0); // flush to the bar bottom (connector)
+    let ctrl_y = ((bar_h - CTRL_BTN) * 0.5).round().max(0.0);
+
+    // Right-aligned control buttons: help, settings, menu (in that visual order).
+    let right_btns = [StripItem::Help, StripItem::Settings, StripItem::Menu];
+    let right_w = CTRL_BTN * right_btns.len() as f32;
+    let right_start = (bar_w - right_w - TAB_GAP).max(0.0);
+
+    // Decorative mark on the far left (the " ◆ " brand), then the + button.
+    let mark_w = (cell_w * 3.0).round();
+    let mut x = mark_w;
+
+    // New-tab button sits right after the mark.
+    let plus = gui::Rect::new(x, ctrl_y, CTRL_BTN, CTRL_BTN);
+    if plus.x + plus.w <= right_start {
+        segs.push(StripSeg { item: StripItem::NewTab, label: String::new(), rect: plus });
+    }
+    x += CTRL_BTN + TAB_GAP * 2.0;
+
+    let tabs_left = x;
+    let avail = (right_start - tabs_left - TAB_GAP).max(0.0);
+    let n = tabs.len().max(1);
 
     if tabs.len() <= 1 {
-        // Single tab: just the title (no number, no ✕ — closing it = quit).
-        let title = tabs.first().map(|t| t.0).unwrap_or("");
-        let budget = right_start.saturating_sub(col + STRIP_BTN_W + 2).max(8);
-        let label = format!(" {} ", fit_label(title, budget));
-        let w = label.chars().count().min(right_start.saturating_sub(col));
-        segs.push(StripSeg { item: StripItem::Tab(0), label, start: col, end: col + w });
-        col += w;
+        // Single tab: one wide chip spanning the available width (no close box —
+        // closing it quits). It still reads as a real connected tab.
+        let w = avail.min(TAB_MAX_W * 1.6).max(0.0);
+        if w > 0.0 {
+            segs.push(StripSeg {
+                item: StripItem::Tab(0),
+                label: tabs.first().map(|t| t.0.to_string()).unwrap_or_default(),
+                rect: gui::Rect::new(tabs_left, chip_y, w, chip_h),
+            });
+        }
     } else {
-        for (i, (title, _active, _activity)) in tabs.iter().enumerate() {
-            let body = format!(" {} {} ", i + 1, fit_label(title, 14));
-            let bw = body.chars().count();
-            // chip body + ✕ + a 1-col gap so chips read as distinct pills.
-            if col + bw + 3 > right_start {
+        // Multi-tab: equal-width chips clamped to [MIN, MAX], each with a close box.
+        let per = ((avail + TAB_GAP) / n as f32 - TAB_GAP).clamp(0.0, TAB_MAX_W);
+        let tw = per.max(TAB_MIN_W.min(per.max(0.0))); // never below MIN unless squeezed
+        let tw = if per < TAB_MIN_W { per } else { tw };
+        let mut tx = tabs_left;
+        for (i, (title, _a, _b)) in tabs.iter().enumerate() {
+            if tx + tw > right_start + 0.5 {
                 break; // out of room before the controls
             }
-            segs.push(StripSeg { item: StripItem::Tab(i), label: body, start: col, end: col + bw });
-            col += bw;
+            let body = gui::Rect::new(tx, chip_y, tw, chip_h);
+            segs.push(StripSeg { item: StripItem::Tab(i), label: title.to_string(), rect: body });
+            // Close box anchored to the chip's right edge, vertically centered.
+            let cb = CLOSE_BOX.min(tw * 0.5);
+            let close = gui::Rect::new(
+                tx + tw - cb - TAB_PAD_X * 0.5,
+                chip_y + (chip_h - cb) * 0.5,
+                cb,
+                cb,
+            );
             segs.push(StripSeg {
                 item: StripItem::TabClose(i),
-                label: "✕ ".to_string(),
-                start: col,
-                end: col + 2,
+                label: String::new(),
+                rect: close,
             });
-            col += 2 + 1; // ✕ (2) + inter-chip gap (1)
+            tx += tw + TAB_GAP;
         }
     }
-    if col + STRIP_BTN_W <= right_start {
+
+    // Right controls.
+    let mut rx = right_start;
+    for item in right_btns {
         segs.push(StripSeg {
-            item: StripItem::NewTab,
-            label: " + ".to_string(),
-            start: col,
-            end: col + STRIP_BTN_W,
+            item,
+            label: String::new(),
+            rect: gui::Rect::new(rx, ctrl_y, CTRL_BTN, CTRL_BTN),
         });
-    }
-    if right_start >= col {
-        let mut rc = right_start;
-        for (item, lbl) in right_btns {
-            segs.push(StripSeg { item, label: lbl.to_string(), start: rc, end: rc + STRIP_BTN_W });
-            rc += STRIP_BTN_W;
-        }
+        rx += CTRL_BTN;
     }
     segs
 }
 
-/// The toolbar item containing `click_col`, if any. Pure for unit testing.
-fn strip_item_at(segs: &[StripSeg], click_col: usize) -> Option<StripItem> {
+/// The tab-bar item containing pixel point `(px, py)`, if any. Close boxes are
+/// tested before their parent tab body (they are pushed after, so iterate in
+/// reverse to let the smaller embedded box win). Pure for unit testing.
+fn strip_item_at(segs: &[StripSeg], px: f32, py: f32) -> Option<StripItem> {
     segs.iter()
-        .find(|s| click_col >= s.start && click_col < s.end)
+        .rev()
+        .find(|s| gui::hit(s.rect, px, py))
         .map(|s| s.item)
 }
 
@@ -283,29 +371,6 @@ fn config_display_path() -> String {
     crate::config::path()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| "~/.config/glassy/glassy.conf".to_string())
-}
-
-/// Darken an RGB color toward black by `f` (0 = black, 1 = unchanged), keeping
-/// alpha. Used for the help-overlay backdrop.
-fn darken(c: [f32; 4], f: f32) -> [f32; 4] {
-    [c[0] * f, c[1] * f, c[2] * f, c[3]]
-}
-
-/// Active-chip fill by interaction state: PRESSED insets (darkens), hover gives
-/// a perceptible shift, idle is the flat accent. On near-white accents (Dracula
-/// cream) `lighten` clamps to no-op, so hover DARKENS instead — guaranteeing the
-/// active chip has live hover tactility on every theme, not just dark accents.
-fn active_chip_bg(active_bg: [f32; 4], hovered: bool, pressed: bool) -> [f32; 4] {
-    if pressed {
-        darken(active_bg, 0.75)
-    } else if hovered {
-        // If the accent is already bright, lifting it further does nothing —
-        // dial it back so the hover always registers; otherwise brighten it.
-        let lum = 0.299 * active_bg[0] + 0.587 * active_bg[1] + 0.114 * active_bg[2];
-        if lum > 0.7 { darken(active_bg, 0.9) } else { lighten(active_bg, 0.08) }
-    } else {
-        active_bg
-    }
 }
 
 /// Lighten an RGB color toward white by `amount`, keeping alpha. Used for the
@@ -910,9 +975,9 @@ impl App {
         let usable_w = (size.width as f32 - 2.0 * pad).max(0.0);
         let usable_h = (size.height as f32 - 2.0 * pad).max(0.0);
         let cols = ((usable_w / cell_w).floor() as usize).max(1);
-        // Reserve the top row(s) for the tab strip; the terminal grid is the rest.
-        let window_rows = (usable_h / cell_h).floor() as usize;
-        let rows = window_rows.saturating_sub(TAB_STRIP_ROWS).max(1);
+        // Reserve the GUI tab bar (in PIXELS) at the top; the terminal grid fills
+        // the rest. The bar is inset via `Renderer::set_grid_origin_y`.
+        let rows = (((usable_h - tab_bar_h(cell_h)) / cell_h).floor() as usize).max(1);
         (cols, rows)
     }
 
@@ -942,53 +1007,19 @@ impl App {
         self.background.len() + self.pty.is_some() as usize
     }
 
-    /// Reflect the active tab + tab count in the window title.
+    /// Reflect the active tab in the native (CSD) window title.
     fn update_window_title(&self) {
         let Some(window) = self.window.as_ref() else {
             return;
         };
-        // Sanitize the OSC title before it reaches the native (CSD) titlebar: the
-        // titlebar uses a plain UI font, so drop the glyph classes it can't render
-        // (they show as a blank "tofu" box) — dingbats like Claude's spinner
-        // (✻ = U+273B), Nerd-Font private-use icons, emoji, and zero-width /
-        // variation-selector marks. (The full rich title lives in our own chrome.)
-        let cleaned: String = self
-            .active_title
-            .chars()
-            .filter(|&c| {
-                if c.is_control() {
-                    return false;
-                }
-                let u = c as u32;
-                !matches!(u,
-                    0x200B..=0x200F | 0x202A..=0x202E | 0x2060..=0x206F | 0xFEFF // zero-width / bidi
-                    | 0xFE00..=0xFE0F                  // variation selectors
-                    | 0x2600..=0x27BF                  // misc symbols + dingbats (✻ = U+273B)
-                    | 0xE000..=0xF8FF                  // private use (Nerd Fonts)
-                    | 0x1F000..=0x1FAFF                // emoji / pictographs
-                    | 0xF0000..=0x10FFFD               // supplementary private use
-                )
-            })
-            .collect();
-        let base = cleaned.trim();
-        let base = if base.is_empty() { "glassy" } else { base };
-        let total = self.tab_count();
-        if total > 1 {
-            window.set_title(&format!("{base}  \u{00b7}  {total} tabs"));
-        } else {
-            window.set_title(base);
-        }
+        window.set_title(&os_title(&self.active_title));
     }
 
-    /// Handle a click in the tab strip (screen row 0). Returns true if the click
-    /// landed in the strip (and was consumed), so the caller skips selection/paste.
-    /// Background tabs are hit-tested by equal-width slots; clicking the active
-    /// tab's slot is a no-op.
-    /// The toolbar item at strip column `col`, built from the live (stable-order)
-    /// tab descriptors. Shared by click + drag-reorder so they agree with render.
-    fn strip_item_at_col(&self, col: usize) -> Option<StripItem> {
-        let descs: Vec<(String, bool, bool)> = self
-            .tab_order
+    /// Tab descriptors in stable display order: (title, is_active, has_activity).
+    /// Shared by the tab-bar painter and the click/drag hit-tests so the drawn
+    /// items and the click targets always agree.
+    fn tab_descs(&self) -> Vec<(String, bool, bool)> {
+        self.tab_order
             .iter()
             .map(|&id| {
                 if id == self.active_id {
@@ -1001,20 +1032,37 @@ impl App {
                         .unwrap_or((String::new(), false, false))
                 }
             })
-            .collect();
-        let refs: Vec<(&str, bool, bool)> =
-            descs.iter().map(|(t, a, b)| (t.as_str(), *a, *b)).collect();
-        strip_item_at(&strip_layout(&refs, self.cols), col)
+            .collect()
     }
 
-    /// While a tab is held (`dragging_tab`), reorder it under the pointer at strip
-    /// column `col`: if the pointer is over a different tab slot, move the dragged
+    /// The live pixel tab-bar layout, built from the current descriptors and the
+    /// renderer's surface width + cell metrics. Empty if the renderer is absent.
+    fn tab_layout(&self) -> Vec<StripSeg> {
+        let Some(r) = self.renderer.as_ref() else {
+            return Vec::new();
+        };
+        let m = r.cell_metrics();
+        let (sw, _sh) = r.surface_size();
+        let descs = self.tab_descs();
+        let refs: Vec<(&str, bool, bool)> =
+            descs.iter().map(|(t, a, b)| (t.as_str(), *a, *b)).collect();
+        strip_layout(&refs, sw as f32, tab_bar_h(m.height), m.width)
+    }
+
+    /// The tab-bar item at physical pixel `(px, py)`, if any. Shared by click +
+    /// drag-reorder so they agree with what's painted.
+    fn strip_item_at_px(&self, px: f32, py: f32) -> Option<StripItem> {
+        strip_item_at(&self.tab_layout(), px, py)
+    }
+
+    /// While a tab is held (`dragging_tab`), reorder it under the pointer at pixel
+    /// `(px, py)`: if the pointer is over a different tab slot, move the dragged
     /// tab there in `tab_order`. Returns true if a reorder happened (repaint).
-    fn drag_tab_to(&mut self, col: usize) -> bool {
+    fn drag_tab_to(&mut self, px: f32, py: f32) -> bool {
         let Some(from) = self.dragging_tab else {
             return false;
         };
-        let to = match self.strip_item_at_col(col) {
+        let to = match self.strip_item_at_px(px, py) {
             Some(StripItem::Tab(p)) | Some(StripItem::TabClose(p)) => p,
             _ => return false,
         };
@@ -1191,16 +1239,14 @@ impl App {
             return false;
         };
         let m = renderer.cell_metrics();
-        let pad = renderer.pad() as f64;
         let (x, y) = self.mouse_px;
-        let screen_row = ((y - pad) / m.height as f64).floor();
-        if !(0.0..TAB_STRIP_ROWS as f64).contains(&screen_row) {
+        // The tab bar occupies the pixel band [0, tab_bar_h).
+        if y >= tab_bar_h(m.height) as f64 {
             return false;
         }
-        // Hit-test against the actual toolbar layout (the same helper the renderer
+        // Hit-test against the pixel tab-bar layout (the same helper the painter
         // uses, so click targets match what's drawn).
-        let col = ((x - pad) / m.width as f64).floor().max(0.0) as usize;
-        let item = self.strip_item_at_col(col);
+        let item = self.strip_item_at_px(x as f32, y as f32);
         // Record the pressed item so the strip draws it inset (released in the
         // MouseInput handler), giving the click visible tactility.
         self.held_strip_item = item;
@@ -1216,6 +1262,15 @@ impl App {
             Some(StripItem::Help) => {
                 self.help_open = !self.help_open;
                 self.settings_open = false;
+                self.menu_open = false;
+                self.force_full_redraw = true;
+                self.mark_dirty(event_loop);
+            }
+            Some(StripItem::Settings) => {
+                self.settings_open = !self.settings_open;
+                self.settings_sel = 0;
+                self.settings_saved = false;
+                self.help_open = false;
                 self.menu_open = false;
                 self.force_full_redraw = true;
                 self.mark_dirty(event_loop);
@@ -1467,8 +1522,9 @@ impl App {
     fn content_area(&self) -> Option<pane::Rect> {
         let r = self.renderer.as_ref()?;
         let m = r.cell_metrics();
-        let pad = r.pad();
-        let strip_bottom = (pad + TAB_STRIP_ROWS as f32 * m.height).round() as i32;
+        // The content (panes/grid) begins below the GUI tab bar. The pixel inset
+        // is the bar height; the per-pane `pad` is applied by the pane sizing math.
+        let strip_bottom = tab_bar_h(m.height).round() as i32;
         let (sw, sh) = r.surface_size();
         Some(pane::Rect {
             x: 0,
@@ -1889,8 +1945,9 @@ impl App {
             return (col, row);
         }
         let col = ((x - pad) / m.width as f64).floor();
-        // Screen rows include the tab strip; terminal rows start below it.
-        let term_row = ((y - pad) / m.height as f64).floor() as i64 - TAB_STRIP_ROWS as i64;
+        // The terminal grid starts below the GUI tab bar: subtract its pixel inset.
+        let grid_top = pad + tab_bar_h(m.height) as f64;
+        let term_row = ((y - grid_top) / m.height as f64).floor() as i64;
         let col = (col.max(0.0) as usize).min(self.cols.saturating_sub(1));
         let row = (term_row.max(0) as usize).min(self.rows.saturating_sub(1));
         (col, row)
@@ -2039,140 +2096,177 @@ impl App {
     /// scrollback-position readout. Returns one `(char, fg, bg)` per column so
     /// both the single-pane and split render paths push an identical strip. Takes
     /// the focused pane's `display_offset`/`history_size` for the % readout.
-    fn build_strip(
-        &self,
-        display_offset: i32,
-        history_size: usize,
-    ) -> Vec<(char, [f32; 4], [f32; 4])> {
-        // Dim the whole strip while the window is unfocused so an idle window
-        // reads as "asleep" — a single scalar applied to every strip color.
-        let fdim = if self.focused { 1.0 } else { 0.6 };
-        let mul = |c: [f32; 4]| [c[0] * fdim, c[1] * fdim, c[2] * fdim, c[3]];
-
-        let bar_bg = mul(color::selection_bg());
-        let base_fg = mul(color::default_fg());
-        let base_bg = mul(color::default_bg());
-        let accent = mul(color::accent());
-        let danger = mul(color::danger());
-        let dim_fg = [base_fg[0] * 0.65, base_fg[1] * 0.65, base_fg[2] * 0.65, base_fg[3]];
-        // Raised chip surfaces: idle chips sit slightly above the bar, the
-        // active chip is an accent fill, hovered chips brighten, and a PRESSED
-        // chip insets (darker than the bar) — giving the inline strip tactile
-        // "chips" instead of a flat run of text.
-        let chip_idle = lighten(bar_bg, 0.09);
-        let chip_hover = lighten(bar_bg, 0.15);
-        // Inset: anchor against the terminal bg, not the already-dim bar, so the
-        // pressed state has real contrast on every theme.
-        let chip_press = darken(color::default_bg(), 0.85);
-        let active_bg = accent;
-        let active_fg = base_bg; // dark text on the accent chip
-
-        // The toolbar's own backdrop is the terminal bg (so the chips read as
-        // raised surfaces against it), with a 1px-feel accent on the mark.
-        let mut bar: Vec<(char, [f32; 4], [f32; 4])> = vec![(' ', base_fg, bar_bg); self.cols];
-        let put = |bar: &mut Vec<(char, [f32; 4], [f32; 4])>, start: usize, s: &str, fg, bg| {
-            for (k, ch) in s.chars().enumerate() {
-                if let Some(cell) = bar.get_mut(start + k) {
-                    *cell = (ch, fg, bg);
-                }
-            }
-        };
-        put(&mut bar, 0, " ◆ ", accent, bar_bg);
-
-        // Tab descriptors in STABLE order: the active tab keeps its position,
-        // only the highlight follows it.
-        let descs: Vec<(&str, bool, bool)> = self
-            .tab_order
+    /// Snapshot the tab state needed by [`paint_tab_bar`] under the live `&self`
+    /// borrow, so the painter (which holds `&mut Renderer`, a split borrow of
+    /// `self.renderer`) needs only owned data. Returns per-tab (title, active,
+    /// busy-dot, spinning) tuples in stable display order.
+    fn tab_bar_snapshot(&self) -> Vec<(String, bool, bool, bool)> {
+        let now = Instant::now();
+        self.tab_order
             .iter()
             .map(|&id| {
                 if id == self.active_id {
-                    (self.active_title.as_str(), true, false)
+                    let spinning = self.active_busy_until.is_some_and(|t| now < t);
+                    (self.active_title.clone(), true, false, spinning)
                 } else {
                     self.background
                         .iter()
                         .find(|s| s.id == id)
-                        .map(|s| (s.title.as_str(), false, s.activity))
-                        .unwrap_or(("", false, false))
+                        .map(|s| {
+                            let spinning = s.busy_until.is_some_and(|t| now < t);
+                            (s.title.clone(), false, s.activity, spinning)
+                        })
+                        .unwrap_or((String::new(), false, false, false))
                 }
             })
-            .collect();
+            .collect()
+    }
+
+    /// Paint the real GUI tab bar (§3.1) into the pixel band `[0, tab_bar_h)`. The
+    /// ACTIVE tab is an E2 raised chip whose top corners are rounded and whose body
+    /// is flush to the bar bottom, with a 3px connector quad that overpaints the
+    /// content hairline so the tab "opens into" the content surface, plus a top
+    /// accent rail. Inactive tabs are recessed E1 chips sitting above the bar
+    /// bottom. The close button fades in on hover with its own danger-tinted
+    /// hover/press state. +/?/⚙/≡ are icon buttons. The rich (Unicode) title is
+    /// drawn through the glyph atlas via `push_overlay_glyph_px` (tofu-proof). A
+    /// held tab is lifted to a drag-ghost following the pointer.
+    ///
+    /// Associated (not `&self`) so it composes with the caller's `&mut Renderer`
+    /// borrow; all `self`-derived data arrives via `snapshot` + scalars.
+    #[allow(clippy::too_many_arguments)]
+    fn paint_tab_bar(
+        renderer: &mut Renderer,
+        snapshot: &[(String, bool, bool, bool)],
+        focused: bool,
+        hovered: Option<StripItem>,
+        held: Option<StripItem>,
+        dragging: Option<usize>,
+        mouse_px: (f32, f32),
+        spinner_frame: usize,
+        tab_count: usize,
+        display_offset: i32,
+        history_size: usize,
+    ) {
+        let m = renderer.cell_metrics();
+        let (sw, _sh) = renderer.surface_size();
+        let bar_w = sw as f32;
+        let bar_h = tab_bar_h(m.height);
+        if bar_w <= 0.0 || bar_h <= 0.0 {
+            return;
+        }
+
+        // Dim the whole bar while unfocused so an idle window reads as "asleep".
+        let fdim = if focused { 1.0 } else { 0.7 };
+        let mul = |c: [f32; 4]| [c[0] * fdim, c[1] * fdim, c[2] * fdim, c[3]];
+
+        let bar_bg = mul(gui::glass_body());
+        let surface = mul(gui::glass_raised());
+        let accent = mul(color::accent());
+        let danger = mul(color::danger());
+        let fg = mul(gui::fg());
+        let fg_dim = mul(gui::fg_dim());
+        let active_fg = mul(color::default_bg()); // dark text on the accent rail tab
+
+        // 1) Bar backdrop (E1) + top accent rail + bottom hairline (content seam).
+        renderer.push_overlay_px(0.0, 0.0, bar_w, bar_h, bar_bg);
+        renderer.push_overlay_px(0.0, 0.0, bar_w, 1.0, mul(gui::rail()));
+        renderer.push_overlay_px(0.0, bar_h - 1.0, bar_w, 1.0, mul(gui::hairline()));
+
+        // 2) Brand mark on the far left.
+        let mark_y = (bar_h - m.height) * 0.5;
+        renderer.push_overlay_glyph_px((m.width).round(), mark_y.round(), '◆', accent);
+
+        // 3) Lay out the bar (pixel rects) and paint each item.
+        let descs: Vec<(&str, bool, bool)> =
+            snapshot.iter().map(|(t, a, b, _)| (t.as_str(), *a, *b)).collect();
+        let segs = strip_layout(&descs, bar_w, bar_h, m.width);
         let multi = descs.len() > 1;
-        let hov = self.hovered_strip_item;
-        let held = self.held_strip_item;
-        // Current spinner glyph + per-tab "actively streaming" flags (in stable
-        // order, parallel to `descs`).
-        let now = Instant::now();
-        let spin = SPINNER_FRAMES[self.spinner_frame % SPINNER_FRAMES.len()];
-        let (active_id, active_busy, bg) =
-            (self.active_id, self.active_busy_until, &self.background);
-        let spinning: Vec<bool> = self
-            .tab_order
-            .iter()
-            .map(|&id| {
-                let until = if id == active_id {
-                    active_busy
-                } else {
-                    bg.iter().find(|s| s.id == id).and_then(|s| s.busy_until)
-                };
-                until.is_some_and(|t| now < t)
-            })
-            .collect();
-        for seg in strip_layout(&descs, self.cols) {
-            let is_active = matches!(seg.item, StripItem::Tab(i) | StripItem::TabClose(i) if descs.get(i).is_some_and(|d| d.1));
-            let is_busy = matches!(seg.item, StripItem::Tab(i) if descs.get(i).is_some_and(|d| d.2));
-            // Whether THIS tab is actively producing output (spinner, not dot).
-            let is_spinning = matches!(seg.item, StripItem::Tab(i)
-                if spinning.get(i).copied().unwrap_or(false));
-            let hovered = hov == Some(seg.item);
-            let pressed = held == Some(seg.item);
-            // Chip surface by precedence: PRESSED (inset/darker) > hover > idle.
-            let surface = |idle: [f32; 4]| {
-                if pressed {
-                    chip_press
-                } else if hovered {
-                    chip_hover
-                } else {
-                    idle
+        let spin = SPINNER_FRAMES[spinner_frame % SPINNER_FRAMES.len()];
+
+        // Helper: state-driven fill for a control/chip surface.
+        let press_fill = |base: [f32; 4]| {
+            [base[0] * 0.85, base[1] * 0.85, base[2] * 0.85, base[3]]
+        };
+        let hover_fill = |base: [f32; 4]| gui::state_fill(base, 0.7, false);
+
+        // Track a held tab so we can defer its drag-ghost to the very top.
+        let mut ghost: Option<(gui::Rect, String, usize)> = None;
+
+        for seg in &segs {
+            let r = seg.rect;
+            let is_hover = hovered == Some(seg.item);
+            let is_held = held == Some(seg.item);
+            match seg.item {
+                StripItem::Tab(i) => {
+                    let (_title, active, busy) = descs.get(i).copied().unwrap_or(("", false, false));
+                    let is_spinning = snapshot.get(i).map(|s| s.3).unwrap_or(false);
+                    // A dragged tab is rendered last as a ghost; reserve it.
+                    if dragging == Some(i) {
+                        ghost = Some((r, seg.label.clone(), i));
+                    }
+                    Self::paint_tab_chip(
+                        renderer, r, m.height, m.width, i, &seg.label, active, busy, is_spinning,
+                        is_hover, is_held, spin, bar_h, surface, accent, active_fg, fg, fg_dim,
+                        dragging == Some(i), multi,
+                    );
                 }
-            };
-            let (fg, sbg) = match seg.item {
-                // Active tab's ✕: must escape the active-chip catch-all below so it
-                // can turn red on hover (the bug fix) and show a dim idle ✕.
-                StripItem::TabClose(_) if is_active => (
-                    if hovered { danger } else { active_fg },
-                    active_chip_bg(active_bg, hovered, pressed),
-                ),
-                // Active chip body: insets while pressed, shifts on hover.
-                _ if is_active => (active_fg, active_chip_bg(active_bg, hovered, pressed)),
-                StripItem::Tab(_) if !multi => (base_fg, surface(chip_idle)), // single-tab: still a chip
-                StripItem::Tab(_) => (
-                    if is_busy { accent } else { base_fg },
-                    surface(chip_idle),
-                ),
-                StripItem::TabClose(_) => (
-                    if hovered { danger } else { dim_fg },
-                    surface(chip_idle),
-                ),
-                StripItem::NewTab => (accent, surface(bar_bg)),
-                StripItem::Help | StripItem::Menu => (
-                    if hovered || pressed { base_fg } else { dim_fg },
-                    surface(bar_bg),
-                ),
-            };
-            put(&mut bar, seg.start, &seg.label, fg, sbg);
-            // Replace the chip's leading pad with a status glyph: a braille
-            // spinner while the session is actively streaming, else a static
-            // activity dot for a background tab that produced output.
-            if is_spinning {
-                let gfg = if is_active { active_fg } else { accent };
-                put(&mut bar, seg.start, &spin.to_string(), gfg, sbg);
-            } else if is_busy && !is_active {
-                put(&mut bar, seg.start, "•", accent, sbg);
+                StripItem::TabClose(i) => {
+                    let active = descs.get(i).map(|d| d.1).unwrap_or(false);
+                    // Close fades in on hover of either the close box or its tab.
+                    let tab_hover = hovered == Some(StripItem::Tab(i)) || is_hover;
+                    if tab_hover && dragging.is_none() {
+                        if is_hover {
+                            let a = if is_held { 0.30 } else { 0.18 };
+                            renderer.push_overlay_rrect_px(
+                                r.x, r.y, r.w, r.h, 3.0,
+                                [danger[0], danger[1], danger[2], a],
+                            );
+                        }
+                        let cfg = if is_hover { danger } else if active { active_fg } else { fg_dim };
+                        let gx = r.x + (r.w - m.width) * 0.5;
+                        let gy = r.center_y() - m.height * 0.5;
+                        renderer.push_overlay_glyph_px(gx.round(), gy.round(), '✕', cfg);
+                    }
+                }
+                StripItem::NewTab | StripItem::Help | StripItem::Settings | StripItem::Menu => {
+                    let glyph = match seg.item {
+                        StripItem::NewTab => '+',
+                        StripItem::Help => '?',
+                        StripItem::Settings => '⚙',
+                        _ => '≡',
+                    };
+                    let base = surface;
+                    if is_held {
+                        renderer.push_overlay_rrect_px(r.x, r.y, r.w, r.h, gui_radius(m.height), press_fill(base));
+                    } else if is_hover {
+                        renderer.push_overlay_rrect_px(r.x, r.y, r.w, r.h, gui_radius(m.height), hover_fill(base));
+                        renderer.push_overlay_px(r.x, r.y, r.w, 1.0, mul(gui::rail()));
+                    }
+                    let nudge = if is_held { 1.0 } else { 0.0 };
+                    let cfg = if is_hover || is_held { fg } else { fg_dim };
+                    let gx = r.x + (r.w - m.width) * 0.5;
+                    let gy = r.center_y() - m.height * 0.5 + nudge;
+                    renderer.push_overlay_glyph_px(gx.round(), gy.round(), glyph, cfg);
+                }
             }
         }
 
-        // Scrollback-position indicator, tucked in left of the buttons. A
-        // FIXED-WIDTH percentage (` ⇡100% `) so the controls never shift.
+        // 4) Drag-ghost: redraw the held tab lifted to the top, following the
+        //    pointer's x, so it visibly floats above its siblings while reordering.
+        if let Some((r, label, i)) = ghost {
+            let gx = (mouse_px.0 - r.w * 0.5).clamp(0.0, bar_w - r.w);
+            let gr = gui::Rect::new(gx, r.y - 2.0, r.w, r.h);
+            renderer.push_overlay_rrect_px(gr.x, gr.y, gr.w, gr.h, TAB_RADIUS, mul(gui::glass_float()));
+            renderer.push_overlay_px(gr.x, gr.y, gr.w, 2.0, accent);
+            Self::paint_tab_label(renderer, gr, m.height, m.width, i, &label, true, false, false, spin, active_fg, active_fg, multi);
+        }
+
+        // 5) Tab-count badge + scrollback %, tucked just left of the right controls
+        //    as dim labels (fixed-width so the controls never shift).
+        let right_ctrl_x = bar_w - CTRL_BTN * 3.0 - TAB_GAP;
+        let mut tag_right = right_ctrl_x - m.width;
+        let ty = ((bar_h - m.height) * 0.5).round();
         if display_offset > 0 {
             let pct = if history_size > 0 {
                 ((display_offset as f32 / history_size as f32) * 100.0).round() as u32
@@ -2180,15 +2274,125 @@ impl App {
                 100
             }
             .min(100);
-            // 7 cells: leading space, ⇡, up to 3 digits (right-aligned), %, space.
-            let s = format!(" ⇡{pct:>3}% ");
-            let n = s.chars().count();
-            let right_w = STRIP_BTN_W * 2;
-            if self.cols > right_w + n + 2 {
-                put(&mut bar, self.cols - right_w - n, &s, accent, bar_bg);
+            let s = format!("⇡{pct:>3}%");
+            let w = renderer.text_width_px(&s);
+            renderer.push_overlay_glyph_px_str((tag_right - w).round(), ty, &s, accent);
+            tag_right -= w + m.width;
+        }
+        if tab_count > 1 {
+            let s = format!("{tab_count} tabs");
+            let w = renderer.text_width_px(&s);
+            renderer.push_overlay_glyph_px_str((tag_right - w).round(), ty, &s, fg_dim);
+        }
+    }
+
+    /// Paint one tab chip's surface (connector + rail for active, recess for
+    /// inactive) and its label. Split out so the drag-ghost can reuse the label
+    /// pass without the surface.
+    #[allow(clippy::too_many_arguments)]
+    fn paint_tab_chip(
+        renderer: &mut Renderer,
+        r: gui::Rect,
+        cell_h: f32,
+        cell_w: f32,
+        idx: usize,
+        label: &str,
+        active: bool,
+        busy: bool,
+        spinning: bool,
+        hover: bool,
+        held: bool,
+        spin: char,
+        bar_h: f32,
+        surface: [f32; 4],
+        accent: [f32; 4],
+        active_fg: [f32; 4],
+        fg: [f32; 4],
+        fg_dim: [f32; 4],
+        is_ghost: bool,
+        multi: bool,
+    ) {
+        if is_ghost {
+            return; // drawn separately as the lifted ghost
+        }
+        let _ = busy;
+        if active {
+            // E2 raised body, top corners rounded, flush to the bar bottom; a 3px
+            // connector quad overpaints the content seam so the tab "opens into"
+            // the content surface, and a top accent rail crowns it.
+            renderer.push_overlay_rrect_px(r.x, r.y, r.w, r.h, TAB_RADIUS, surface);
+            // Square off the bottom so it sits flush (rrect rounds all corners): a
+            // small fill over the bottom band.
+            let bb = TAB_RADIUS;
+            renderer.push_overlay_px(r.x, r.y + r.h - bb, r.w, bb, surface);
+            // Connector: overpaint the bar's bottom hairline for the chip width.
+            renderer.push_overlay_px(r.x, bar_h - 2.0, r.w, 3.0, surface);
+            // Top accent rail.
+            renderer.push_overlay_px(r.x, r.y, r.w, 2.0, accent);
+        } else {
+            // Inactive: recessed E1 chip sitting a touch above the bar bottom.
+            let rr = gui::Rect::new(r.x, r.y + 2.0, r.w, r.h - 4.0);
+            let fill = if held {
+                [surface[0] * 0.85, surface[1] * 0.85, surface[2] * 0.85, surface[3]]
+            } else if hover {
+                gui::state_fill(surface, 0.7, false)
+            } else {
+                [surface[0], surface[1], surface[2], surface[3] * 0.75]
+            };
+            renderer.push_overlay_rrect_px(rr.x, rr.y, rr.w, rr.h, TAB_RADIUS, fill);
+            if hover && !held {
+                renderer.push_overlay_px(rr.x, rr.y, rr.w, 1.0, accent);
             }
         }
-        bar
+        let label_fg = if active { active_fg } else { fg };
+        Self::paint_tab_label(
+            renderer, r, cell_h, cell_w, idx, label, active, busy, spinning, spin, label_fg,
+            accent, multi,
+        );
+        let _ = fg_dim;
+    }
+
+    /// Draw a tab chip's status glyph + numbered title, clipped to the chip's text
+    /// area (leaving room for the close box on the right).
+    #[allow(clippy::too_many_arguments)]
+    fn paint_tab_label(
+        renderer: &mut Renderer,
+        r: gui::Rect,
+        cell_h: f32,
+        cell_w: f32,
+        idx: usize,
+        label: &str,
+        active: bool,
+        busy: bool,
+        spinning: bool,
+        spin: char,
+        label_fg: [f32; 4],
+        accent: [f32; 4],
+        multi: bool,
+    ) {
+        let ty = (r.center_y() - cell_h * 0.5).round();
+        let mut tx = r.x + TAB_PAD_X;
+        // Leading status glyph: spinner while streaming, dot for background activity.
+        if spinning {
+            renderer.push_overlay_glyph_px(tx.round(), ty, spin, if active { label_fg } else { accent });
+            tx += cell_w;
+        } else if busy && !active {
+            renderer.push_overlay_glyph_px(tx.round(), ty, '•', accent);
+            tx += cell_w;
+        }
+        // Fit-to-width title (tail-ellipsized). A numeric prefix is shown only in
+        // multi-tab mode (a lone tab is titled by the window). Reserve room for the
+        // close box on the right when one exists (multi-tab only).
+        let reserve = if multi { CLOSE_BOX + TAB_PAD_X } else { TAB_PAD_X };
+        let text_w = (r.w - (tx - r.x) - reserve).max(0.0);
+        let max_chars = (text_w / cell_w).floor() as usize;
+        let s = if multi {
+            let title = fit_label(label, max_chars.saturating_sub(2).max(1));
+            format!("{} {}", idx + 1, title)
+        } else {
+            fit_label(label, max_chars.max(1))
+        };
+        renderer.push_overlay_glyph_px_str(tx.round(), ty, &s, label_fg);
     }
 
     /// Temporary Wave-0 demo: lay out a button, an icon button, a toggle, a
@@ -2318,10 +2522,9 @@ impl App {
             None
         };
 
-        // Build the toolbar strip cells up-front (a snapshot of `self`'s tab
-        // fields + the focused pane's scroll position), before borrowing the
-        // renderer — so the immutable `&self` borrow in `build_strip` doesn't
-        // collide with the `&mut self.renderer` borrow held across the frame.
+        // Snapshot tab state + scroll position up-front, under the immutable `&self`
+        // borrow, so the tab-bar painter (which holds the live `&mut Renderer`) needs
+        // only owned data and never collides with the renderer borrow.
         let (strip_off, strip_hist) = match self.pty.as_ref() {
             Some(pty) => {
                 let t = pty.term.lock();
@@ -2329,12 +2532,21 @@ impl App {
             }
             None => (0, 0),
         };
-        let strip_bar = self.build_strip(strip_off, strip_hist);
+        let tab_snapshot = self.tab_bar_snapshot();
+        let tab_focused = self.focused;
+        let tab_hovered = self.hovered_strip_item;
+        let tab_held = self.held_strip_item;
+        let tab_dragging = self.dragging_tab;
+        let tab_mouse = (self.mouse_px.0 as f32, self.mouse_px.1 as f32);
+        let tab_spinner = self.spinner_frame;
+        let tab_count = self.tab_count();
 
         let (Some(renderer), Some(pty)) = (self.renderer.as_mut(), self.pty.as_ref()) else {
             return;
         };
         renderer.set_flash(flash);
+        // The single-pane terminal grid is inset below the GUI tab bar in PIXELS.
+        renderer.set_grid_origin_y(tab_bar_h(renderer.cell_metrics().height));
 
         // Hold the terminal lock only long enough to copy out renderable state.
         let mut term = pty.term.lock();
@@ -2421,17 +2633,17 @@ impl App {
         // The renderer keeps per-row instances persistently; on a full rebuild we
         // clear/resize that storage so every row is repushed below.
         if full {
-            // +strip: the renderer grid spans the whole window (strip row + terminal).
-            renderer.resize_grid(rows + TAB_STRIP_ROWS);
+            // The terminal grid spans exactly `rows`; the tab bar is a pixel inset
+            // (grid_origin_y), not a reserved cell row, so no +1 here.
+            renderer.resize_grid(rows);
             for d in dirty.iter_mut() {
                 *d = true;
             }
         }
 
-        // Track which *screen* rows we have begun this frame (terminal content is
-        // offset down by the strip), so a row's first cell triggers `begin_row` and
-        // the cursor overlay can re-target it later.
-        let mut row_started = vec![false; rows + TAB_STRIP_ROWS];
+        // Track which rows we have begun this frame so a row's first cell triggers
+        // `begin_row` and the cursor overlay can re-target it later.
+        let mut row_started = vec![false; rows];
 
         // Collect the visible cells so we can look ahead across cells when
         // reconstructing grapheme clusters (compound emoji span several cells).
@@ -2460,9 +2672,10 @@ impl App {
                 ci += unit_len(&cells, ci);
                 continue;
             }
-            // Screen row = terminal row + strip offset. First cell of a dirty row:
-            // clear it and begin pushing into it.
-            let srow = row_u + TAB_STRIP_ROWS;
+            // First cell of a dirty row: clear it and begin pushing into it. The
+            // tab-bar inset is applied in pixels by the renderer (grid_origin_y),
+            // so the screen row equals the terminal row.
+            let srow = row_u;
             if !row_started[srow] {
                 renderer.begin_row(srow);
                 row_started[srow] = true;
@@ -2573,30 +2786,9 @@ impl App {
             ci += consumed;
         }
 
-        // --- Inline app toolbar (screen row 0): sits UNDER the native OS titlebar
-        // (winit decorations own min/max/close + window drag). Holds the glassy
-        // mark, tab chips (or the title with one tab), a + new-tab button, and
-        // right-aligned help / menu buttons. Drawn from `strip_layout` so the
-        // click hit-test matches exactly. ---
-        {
-            let bar = strip_bar;
-            renderer.begin_row(0);
-            for (col, (ch, cfg, cbg)) in bar.into_iter().enumerate() {
-                renderer.push_cell(
-                    col,
-                    0,
-                    ch,
-                    &[],
-                    cfg,
-                    cbg,
-                    false,
-                    false,
-                    false,
-                    Decorations::default(),
-                );
-            }
-        }
-
+        // The real GUI tab bar is painted as a pixel overlay near the END of the
+        // frame (after the cursor + images), so it composites above everything in
+        // its band; see the `paint_tab_bar` call below.
 
         // Cursor overlay. Drawn after the cells so the bars/outline land on top of
         // the cell background (glyphs still paint over them in the fg pass). The
@@ -2625,7 +2817,7 @@ impl App {
                 // resize) the cursor's row can have no in-bounds cells and so was
                 // never begun this frame — begin it now so the overlay still
                 // paints instead of being dropped for a frame.
-                let scr = cr + TAB_STRIP_ROWS;
+                let scr = cr;
                 if cr < rows {
                     if row_started[scr] {
                         renderer.set_cur_row(scr);
@@ -2656,9 +2848,11 @@ impl App {
                     if screen_vp < 0 || screen_vp >= rows as i32 || p.col >= self.cols {
                         continue;
                     }
-                    let screen_row = screen_vp as usize + TAB_STRIP_ROWS;
+                    let screen_row = screen_vp as usize;
                     let x = p.col as f32 * m.width + pad;
-                    let y = screen_row as f32 * m.height + pad;
+                    // Match push_cell's pixel origin: grid rows are inset below the
+                    // GUI tab bar in pixels (grid_origin_y).
+                    let y = screen_row as f32 * m.height + pad + renderer.grid_origin_y();
                     // Honor the kitty c=/r= display size (in cells); otherwise draw
                     // at the image's native pixel size.
                     let (dst_w, dst_h) =
@@ -2667,6 +2861,23 @@ impl App {
                 }
             }
         }
+
+        // Real GUI tab bar (§3.1): painted over the pixel band [0, tab_bar_h) as
+        // overlay quads + atlas glyphs, so it composites above the grid. Drawn
+        // before any modal so a modal scrim dims it too.
+        Self::paint_tab_bar(
+            renderer,
+            &tab_snapshot,
+            tab_focused,
+            tab_hovered,
+            tab_held,
+            tab_dragging,
+            tab_mouse,
+            tab_spinner,
+            tab_count,
+            strip_off,
+            strip_hist,
+        );
 
         // Modal overlays (help / settings): centered panels over a dimmed backdrop.
         // Rebuild every screen row (cheap — only while open, and the screen is
@@ -2795,11 +3006,19 @@ impl App {
             }
             None => (0, 0),
         };
-        let strip_bar = self.build_strip(strip_off, strip_hist);
+        // Tab-bar state snapshot (owned data) for the pixel-overlay painter, taken
+        // under the immutable `&self` borrow.
+        let tab_snapshot = self.tab_bar_snapshot();
+        let tab_focused = self.focused;
+        let tab_hovered = self.hovered_strip_item;
+        let tab_held = self.held_strip_item;
+        let tab_dragging = self.dragging_tab;
+        let tab_mouse = (self.mouse_px.0 as f32, self.mouse_px.1 as f32);
+        let tab_spinner = self.spinner_frame;
+        let tab_count = self.tab_count();
         let win_focused = self.focused;
         let blink_on = self.blink_on;
         let hovered_link = self.hovered_link.clone();
-        let (sw, _sh) = self.renderer.as_ref().unwrap().surface_size();
         let divider = lighten(color::selection_bg(), 0.18);
 
         // Disjoint field borrows: `renderer` (mut), `panes`/`pty` (shared) are
@@ -2812,19 +3031,10 @@ impl App {
             None => return,
         };
         renderer.set_flash(flash);
+        // Multi-pane: each pane carries its own pixel origin (content_area already
+        // insets below the tab bar), so the per-cell grid_origin_y must be zero.
+        renderer.set_grid_origin_y(0.0);
         renderer.begin_multi_frame(color::default_bg());
-
-        // The tab strip as a full-width pane anchored at the surface origin so its
-        // row-0 cells land exactly where the single-pane path draws them.
-        renderer.begin_pane(
-            pane::Rect { x: 0, y: 0, w: sw as i32, h: area.y.max(1) },
-            false,
-        );
-        renderer.begin_row(0);
-        for (col, (ch, cfg, cbg)) in strip_bar.into_iter().enumerate() {
-            renderer.push_cell(col, 0, ch, &[], cfg, cbg, false, false, false, Decorations::default());
-        }
-        renderer.end_pane();
 
         // Each leaf pane, clipped to its tile.
         for (id, rect, cols, prows) in &pane_specs {
@@ -2864,6 +3074,22 @@ impl App {
                 }
             }
         }
+
+        // Real GUI tab bar over the pixel band [0, tab_bar_h), composited over the
+        // split via the overlay pass added to record_multi_passes.
+        Self::paint_tab_bar(
+            renderer,
+            &tab_snapshot,
+            tab_focused,
+            tab_hovered,
+            tab_held,
+            tab_dragging,
+            tab_mouse,
+            tab_spinner,
+            tab_count,
+            strip_off,
+            strip_hist,
+        );
 
         if let Err(err) = renderer.render_multi() {
             log::debug!("split frame dropped: {err:?}");
@@ -3778,32 +4004,26 @@ impl ApplicationHandler<UserEvent> for App {
                 self.mouse_cell = cell;
 
                 // Drag-to-reorder a tab: while a tab chip is held, move it under
-                // the pointer's column. Takes priority over selection/hover.
+                // the pointer's pixel position and lift it as a drag-ghost. Takes
+                // priority over selection/hover; repaint on any motion so the ghost
+                // tracks the pointer.
                 if self.dragging_tab.is_some() {
-                    if let Some(r) = self.renderer.as_ref() {
-                        let col = ((position.x - r.pad() as f64) / r.cell_metrics().width as f64)
-                            .floor()
-                            .max(0.0) as usize;
-                        if self.drag_tab_to(col) {
-                            self.force_full_redraw = true;
-                            self.mark_dirty(event_loop);
-                        }
-                    }
+                    let _ = self.drag_tab_to(position.x as f32, position.y as f32);
+                    self.force_full_redraw = true;
+                    self.mark_dirty(event_loop);
                     return;
                 }
 
-                // Tab-strip hover highlighting: track the toolbar item under the
-                // pointer (only while over row 0), repaint when it changes.
+                // Tab-bar hover highlighting: track the item under the pointer (only
+                // while over the bar's pixel band), repaint when it changes.
                 {
-                    let (pad, ch_w, ch_h) = self
+                    let bar_h = self
                         .renderer
                         .as_ref()
-                        .map(|r| (r.pad() as f64, r.cell_metrics().width as f64, r.cell_metrics().height as f64))
-                        .unwrap_or((0.0, 1.0, 1.0));
-                    let screen_row = ((position.y - pad) / ch_h).floor();
-                    let new_hover = if (0.0..TAB_STRIP_ROWS as f64).contains(&screen_row) {
-                        let col = ((position.x - pad) / ch_w).floor().max(0.0) as usize;
-                        self.strip_item_at_col(col)
+                        .map(|r| tab_bar_h(r.cell_metrics().height) as f64)
+                        .unwrap_or(0.0);
+                    let new_hover = if position.y < bar_h {
+                        self.strip_item_at_px(position.x as f32, position.y as f32)
                     } else {
                         None
                     };
@@ -3988,13 +4208,12 @@ impl ApplicationHandler<UserEvent> for App {
                 // GESTURE — one tab per swipe, clamped at the ends (no wrap-around
                 // carousel). Horizontal motion is preferred (natural swipe-to-switch).
                 let in_strip = {
-                    let (pad, ch_h) = self
+                    let bar_h = self
                         .renderer
                         .as_ref()
-                        .map(|r| (r.pad() as f64, r.cell_metrics().height as f64))
-                        .unwrap_or((0.0, 1.0));
-                    let row = ((self.mouse_px.1 - pad) / ch_h).floor();
-                    (0.0..TAB_STRIP_ROWS as f64).contains(&row)
+                        .map(|r| tab_bar_h(r.cell_metrics().height) as f64)
+                        .unwrap_or(0.0);
+                    self.mouse_px.1 < bar_h
                 };
                 if in_strip {
                     const STEP: f32 = 24.0; // px of swipe travel to trigger one switch
@@ -4283,42 +4502,72 @@ mod tests {
     }
     use alacritty_terminal::term::TermMode;
 
+    use super::os_title;
+    const CW: f32 = 8.0; // a representative monospace cell width for layout tests
+    const BH: f32 = 34.0; // tab-bar height
+
     #[test]
     fn strip_hit_test_matches_layout() {
-        // Two tabs (tab 1 active) + their ✕ + a + button + right-hand ? / ≡.
-        let segs = strip_layout(&[("zsh", true, false), ("vim", false, false)], 120);
-        // Chip 0 body " 1 zsh " 3..10, "✕ " 10..12, gap@12; chip 1 " 2 vim " 13..20,
-        // "✕ " 20..22, gap@22; then " + " at 23..26.
-        assert_eq!(strip_item_at(&segs, 4), Some(StripItem::Tab(0)));
-        assert_eq!(strip_item_at(&segs, 11), Some(StripItem::TabClose(0)));
-        assert_eq!(strip_item_at(&segs, 12), None); // inter-chip gap
-        assert_eq!(strip_item_at(&segs, 14), Some(StripItem::Tab(1)));
-        assert_eq!(strip_item_at(&segs, 20), Some(StripItem::TabClose(1)));
-        assert_eq!(strip_item_at(&segs, 24), Some(StripItem::NewTab));
-        // Right buttons are the last 6 cols (114..120): " ? " then " ≡ ".
-        assert_eq!(strip_item_at(&segs, 115), Some(StripItem::Help));
-        assert_eq!(strip_item_at(&segs, 118), Some(StripItem::Menu));
-        assert_eq!(strip_item_at(&segs, 60), None); // inert gap
+        // Two tabs (tab 1 active) + their ✕ + a + button + right-hand ?/⚙/≡. The
+        // hit-test resolves to the same items the painter draws (pixel rects).
+        let segs = strip_layout(&[("zsh", true, false), ("vim", false, false)], 1200.0, BH, CW);
+        // Probe each tab body at its center and its close box, plus the controls.
+        let center = |it: StripItem| {
+            segs.iter().find(|s| s.item == it).map(|s| {
+                let r = s.rect;
+                (r.x + r.w * 0.5, r.y + r.h * 0.5)
+            })
+        };
+        let (tx0, ty0) = center(StripItem::Tab(0)).unwrap();
+        assert_eq!(strip_item_at(&segs, tx0, ty0), Some(StripItem::Tab(0)));
+        let (cx0, cy0) = center(StripItem::TabClose(0)).unwrap();
+        // The close box wins over its tab body (tested in reverse order).
+        assert_eq!(strip_item_at(&segs, cx0, cy0), Some(StripItem::TabClose(0)));
+        let (tx1, ty1) = center(StripItem::Tab(1)).unwrap();
+        assert_eq!(strip_item_at(&segs, tx1, ty1), Some(StripItem::Tab(1)));
+        let (nx, ny) = center(StripItem::NewTab).unwrap();
+        assert_eq!(strip_item_at(&segs, nx, ny), Some(StripItem::NewTab));
+        let (hx, hy) = center(StripItem::Help).unwrap();
+        assert_eq!(strip_item_at(&segs, hx, hy), Some(StripItem::Help));
+        let (sx, sy) = center(StripItem::Settings).unwrap();
+        assert_eq!(strip_item_at(&segs, sx, sy), Some(StripItem::Settings));
+        let (mx, my) = center(StripItem::Menu).unwrap();
+        assert_eq!(strip_item_at(&segs, mx, my), Some(StripItem::Menu));
+        // Below the bar there are no items.
+        assert_eq!(strip_item_at(&segs, tx0, BH + 5.0), None);
     }
 
     #[test]
-    fn single_tab_has_no_number_or_close() {
-        // One tab shows just the title — no "1", no ✕ (closing it = quit).
-        let segs = strip_layout(&[("shell", true, false)], 100);
+    fn single_tab_has_no_close() {
+        // One tab is a single wide chip — no ✕ (closing it = quit).
+        let segs = strip_layout(&[("shell", true, false)], 1000.0, BH, CW);
         assert!(segs.iter().any(|s| s.item == StripItem::Tab(0)));
         assert!(!segs.iter().any(|s| matches!(s.item, StripItem::TabClose(_))));
         let title = &segs.iter().find(|s| s.item == StripItem::Tab(0)).unwrap().label;
-        assert!(title.contains("shell") && !title.contains('1'));
+        assert_eq!(title, "shell");
     }
 
     #[test]
-    fn strip_layout_numbers_by_stable_position() {
-        // Numbering follows display position, NOT which tab is active: with tab 2
-        // active, chips are still "1 a" then "2 b".
-        let segs = strip_layout(&[("a", false, false), ("b", true, false)], 120);
+    fn strip_layout_carries_titles_by_position() {
+        // Each chip carries its raw title in stable display position; the numeric
+        // prefix is added at paint time, so the label is just the title here.
+        let segs = strip_layout(&[("a", false, false), ("b", true, false)], 1200.0, BH, CW);
         let lbl = |it| segs.iter().find(|s| s.item == it).map(|s| s.label.clone()).unwrap();
-        assert!(lbl(StripItem::Tab(0)).contains("1 a"));
-        assert!(lbl(StripItem::Tab(1)).contains("2 b"));
+        assert_eq!(lbl(StripItem::Tab(0)), "a");
+        assert_eq!(lbl(StripItem::Tab(1)), "b");
+    }
+
+    #[test]
+    fn os_title_is_printable_ascii_only() {
+        // CJK / emoji / Nerd-Font icons / dingbats are dropped (tofu-proof).
+        assert_eq!(os_title("vim  src/main.rs"), "vim src/main.rs");
+        assert_eq!(os_title("✻ thinking…"), "thinking");
+        assert_eq!(os_title("日本語 build"), "build");
+        assert_eq!(os_title("   "), "glassy");
+        assert_eq!(os_title(""), "glassy");
+        // No char in the output is ever non-ASCII-graphic-or-space.
+        let t = os_title("a\u{f00c}b 😀 c");
+        assert!(t.chars().all(|c| c.is_ascii_graphic() || c == ' '));
     }
 
     #[test]

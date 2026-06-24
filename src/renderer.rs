@@ -1315,9 +1315,11 @@ impl Renderer {
         let cell_w = self.metrics.width;
         let cell_h = self.metrics.height;
         let pad = self.pad;
-        // Grid origin of this cell, offset by the window padding (inset).
+        // Grid origin of this cell, offset by the window padding (inset) and the
+        // GUI tab-bar inset (`grid_origin_y`, zero in the multi-pane path where
+        // each pane carries its own pixel origin).
         let origin_x = col as f32 * cell_w + pad;
-        let origin_y = row as f32 * cell_h + pad;
+        let origin_y = row as f32 * cell_h + pad + self.grid_origin_y;
 
         // A double-width (CJK / wide-emoji) cell occupies two columns: its advance
         // box spans `2 * cell_w`. The grid skips the trailing spacer cell, so we
@@ -1610,6 +1612,18 @@ impl Renderer {
         }
     }
 
+    /// Draw a whole string starting at PIXEL `(x, y)` (top-left of the first
+    /// glyph's cell box), one monospace cell advance per char, in color `fg`.
+    /// Convenience over [`push_overlay_glyph_px`] for GUI labels.
+    pub fn push_overlay_glyph_px_str(&mut self, x: f32, y: f32, s: &str, fg: [f32; 4]) {
+        let cw = self.metrics.width;
+        let mut cx = x;
+        for ch in s.chars() {
+            self.push_overlay_glyph_px(cx, y, ch, fg);
+            cx += cw;
+        }
+    }
+
     /// Width in physical px that `s` occupies when drawn with the panel glyph
     /// path. The font is monospace, so this is exact: one cell advance per char.
     /// Used by the GUI layer for centering / right-alignment of labels.
@@ -1618,9 +1632,11 @@ impl Renderer {
     }
 
     /// Reserve `px` physical pixels above the terminal grid for the GUI tab bar.
-    /// Pass 0 to restore the legacy (no-chrome) layout. Wired into the grid's row
-    /// origin in a later wave; stored here so the renderer owns the single source
-    /// of truth for where cell row 0 begins.
+    /// Pass 0 to restore the legacy (no-chrome) layout. Added to every grid cell's
+    /// (and the cursor's) pixel origin in [`Renderer::push_cell`]/[`push_cursor`],
+    /// so the single-pane terminal starts below the tab bar without any cell-row
+    /// reservation. The multi-pane path leaves this at 0 (each pane carries its own
+    /// pixel origin via `begin_pane`).
     pub fn set_grid_origin_y(&mut self, px: f32) {
         self.grid_origin_y = px.max(0.0);
     }
@@ -1654,7 +1670,7 @@ impl Renderer {
         let cell_w = self.metrics.width;
         let cell_h = self.metrics.height;
         let ox = (col as f32 * cell_w + self.pad).round();
-        let oy = (row as f32 * cell_h + self.pad).round();
+        let oy = (row as f32 * cell_h + self.pad + self.grid_origin_y).round();
         let w = cell_w.round();
         let h = cell_h.round();
         // Bar thickness for beam/underline and the outline rails.
@@ -2467,6 +2483,10 @@ impl Renderer {
     pub fn begin_multi_frame(&mut self, default_bg: [f32; 4]) {
         self.clear_color = self.glass_bg(default_bg);
         self.image_overlay.clear();
+        // GUI chrome (tab bar) + modal/menu overlays are rebuilt every frame in the
+        // split path too, so clear last frame's lists here (mirrors begin_frame).
+        self.overlay_quads.clear();
+        self.overlay_text.clear();
         self.mp.panes.clear();
         self.mp.bg.clear();
         self.mp.fg.clear();
@@ -2622,6 +2642,7 @@ impl Renderer {
             &mut self.mp.fg_capacity,
             "mp-fg-instances",
         );
+        self.upload_overlay_buffers();
 
         let mut encoder = self
             .device
@@ -2713,6 +2734,26 @@ impl Renderer {
                 pass.draw(0..4, p.fg_start..p.fg_end);
             }
         }
+
+        // GUI chrome (tab bar) + modal/menu overlays: drawn full-surface (scissor
+        // reset) AFTER every pane so they composite over the whole split, mirroring
+        // the single-pane path. Same buffers, same pipelines.
+        pass.set_scissor_rect(0, 0, self.config.width, self.config.height);
+        if self.overlay_count > 0 {
+            pass.set_pipeline(&self.overlay_pipeline);
+            pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+            pass.set_vertex_buffer(0, self.unit_quad.slice(..));
+            pass.set_vertex_buffer(1, self.overlay_buffer.slice(..));
+            pass.draw(0..4, 0..self.overlay_count);
+        }
+        if self.overlay_text_count > 0 {
+            pass.set_pipeline(&self.fg_pipeline);
+            pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+            pass.set_bind_group(1, &self.atlas_bind_group, &[]);
+            pass.set_vertex_buffer(0, self.unit_quad.slice(..));
+            pass.set_vertex_buffer(1, self.overlay_text_buffer.slice(..));
+            pass.draw(0..4, 0..self.overlay_text_count);
+        }
     }
 
     /// Render the current frame to an offscreen texture and write it to `path`
@@ -2745,6 +2786,7 @@ impl Renderer {
             &mut self.mp.fg_capacity,
             "mp-fg-instances",
         );
+        self.upload_overlay_buffers();
         self.capture_with(path, |s, view, enc| s.record_multi_passes(view, enc))
     }
 
@@ -2940,6 +2982,41 @@ impl Renderer {
                 .write_buffer(&self.overlay_text_buffer, 0, bytemuck::cast_slice(&self.overlay_text));
         }
         self.dirty_rows.clear();
+    }
+
+    /// Upload the overlay quad + text-on-glass buffers (rebuilt every frame) and
+    /// set their draw counts. Shared by the single-pane `end_frame` path and the
+    /// multi-pane `render_multi`/`capture_multi` paths so GUI chrome composites in
+    /// both. Idempotent; safe to call when the lists are empty.
+    fn upload_overlay_buffers(&mut self) {
+        self.overlay_count = self.overlay_quads.len() as u32;
+        if !self.overlay_quads.is_empty() {
+            if self.overlay_quads.len() > self.overlay_capacity {
+                self.overlay_capacity = self.overlay_quads.len().next_power_of_two();
+                self.overlay_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("overlay-instances"),
+                    size: (self.overlay_capacity * std::mem::size_of::<BgInstance>()) as u64,
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+            }
+            self.queue
+                .write_buffer(&self.overlay_buffer, 0, bytemuck::cast_slice(&self.overlay_quads));
+        }
+        self.overlay_text_count = self.overlay_text.len() as u32;
+        if !self.overlay_text.is_empty() {
+            if self.overlay_text.len() > self.overlay_text_capacity {
+                self.overlay_text_capacity = self.overlay_text.len().next_power_of_two();
+                self.overlay_text_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("overlay-text-instances"),
+                    size: (self.overlay_text_capacity * std::mem::size_of::<FgInstance>()) as u64,
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+            }
+            self.queue
+                .write_buffer(&self.overlay_text_buffer, 0, bytemuck::cast_slice(&self.overlay_text));
+        }
     }
 
     /// Upload a single instance pass (bg or fg), returning the total instance
