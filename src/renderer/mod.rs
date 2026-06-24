@@ -427,6 +427,13 @@ pub struct Renderer {
     text: Text,
     metrics: CellMetrics,
     pad: f32,
+    /// Per-side padding overrides in physical px (from config). When set, these
+    /// override the uniform `pad` for their respective sides. When `None`, the
+    /// uniform `pad` is used.
+    pad_top: Option<f32>,
+    pad_bottom: Option<f32>,
+    pad_left: Option<f32>,
+    pad_right: Option<f32>,
     /// Extra vertical inset (physical px) reserved ABOVE the terminal grid for the
     /// real-GUI tab bar. The grid's first row starts at `pad + grid_origin_y`; the
     /// chrome paints into the band `[0, grid_origin_y)`. Zero when no GUI chrome is

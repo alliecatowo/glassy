@@ -10,7 +10,11 @@
 //! font_size   = 14
 //! theme       = tokyo-night            # or: catppuccin-mocha
 //! opacity     = 0.92                   # 0.0 (clear) .. 1.0 (opaque)
-//! padding     = 6                      # logical px grid inset
+//! padding     = 6                      # logical px grid inset (all sides)
+//! padding_top = 8                      # per-side overrides (optional, override padding)
+//! padding_bottom = 6
+//! padding_left = 4
+//! padding_right = 4
 //! shell       = /usr/bin/zsh -l        # program + args
 //! scrollback  = 10000                  # lines of history
 //! bell_visual = true                   # flash the window on bell
@@ -21,6 +25,7 @@
 //! status_bar  = false                  # show status bar at the bottom (default off)
 //! pane_headers= true                   # show per-pane title bars + accent rail in splits (default on)
 //! ligatures   = false                  # enable OpenType ligature shaping across cells (default off)
+//! font_features = ss01 dlig            # OpenType font features (space/comma-separated tags)
 //! cwd         = /home/me/projects      # working directory for the first tab's shell
 //! restore_session = false              # restore previous tabs/splits/cwds on launch
 //! ```
@@ -119,6 +124,10 @@ struct RawConfig {
     theme: Option<String>,
     opacity: Option<f32>,
     padding: Option<f32>,
+    padding_top: Option<f32>,
+    padding_bottom: Option<f32>,
+    padding_left: Option<f32>,
+    padding_right: Option<f32>,
     shell: Option<Shell>,
     scrollback: Option<usize>,
     bell_visual: Option<bool>,
@@ -130,6 +139,7 @@ struct RawConfig {
     pane_headers: Option<bool>,
     word_separator: Option<String>,
     ligatures: Option<bool>,
+    font_features: Option<String>,
     cwd: Option<String>,
     restore_session: Option<bool>,
     // Custom theme colors (hex format, e.g., "color.fg = #c0caf5")
@@ -214,6 +224,10 @@ impl RawConfig {
             font_size,
             opacity,
             padding: self.padding,
+            padding_top: self.padding_top,
+            padding_bottom: self.padding_bottom,
+            padding_left: self.padding_left,
+            padding_right: self.padding_right,
             scrollback: self.scrollback.unwrap_or(DEFAULT_SCROLLBACK),
             shell: self.shell,
             bell_visual: self.bell_visual.unwrap_or(true),
@@ -226,6 +240,7 @@ impl RawConfig {
             pane_headers: self.pane_headers.unwrap_or(true),
             word_separator: self.word_separator.unwrap_or_default(),
             ligatures: self.ligatures.unwrap_or(false),
+            font_features: self.font_features,
             initial_cwd: self.cwd.filter(|s| !s.is_empty()).map(PathBuf::from),
             restore_session: self.restore_session.unwrap_or(false),
         };
@@ -439,6 +454,42 @@ fn apply_kv(key: &str, value: &str, raw: &mut RawConfig) -> Result<()> {
             }
             raw.padding = Some(p);
         }
+        "padding_top" => {
+            let p: f32 = value
+                .parse()
+                .with_context(|| format!("padding_top: invalid number '{value}'"))?;
+            if p < 0.0 {
+                bail!("padding_top must be >= 0, got {p}");
+            }
+            raw.padding_top = Some(p);
+        }
+        "padding_bottom" => {
+            let p: f32 = value
+                .parse()
+                .with_context(|| format!("padding_bottom: invalid number '{value}'"))?;
+            if p < 0.0 {
+                bail!("padding_bottom must be >= 0, got {p}");
+            }
+            raw.padding_bottom = Some(p);
+        }
+        "padding_left" => {
+            let p: f32 = value
+                .parse()
+                .with_context(|| format!("padding_left: invalid number '{value}'"))?;
+            if p < 0.0 {
+                bail!("padding_left must be >= 0, got {p}");
+            }
+            raw.padding_left = Some(p);
+        }
+        "padding_right" => {
+            let p: f32 = value
+                .parse()
+                .with_context(|| format!("padding_right: invalid number '{value}'"))?;
+            if p < 0.0 {
+                bail!("padding_right must be >= 0, got {p}");
+            }
+            raw.padding_right = Some(p);
+        }
         "shell" => {
             if let Some(shell) = parse_shell(value) {
                 raw.shell = Some(shell);
@@ -480,6 +531,11 @@ fn apply_kv(key: &str, value: &str, raw: &mut RawConfig) -> Result<()> {
         }
         "ligatures" => {
             raw.ligatures = Some(parse_bool(value, "ligatures")?);
+        }
+        "font_features" => {
+            if !value.is_empty() {
+                raw.font_features = Some(value.to_string());
+            }
         }
         "cwd" => {
             if !value.is_empty() {
@@ -886,8 +942,9 @@ CONFIG FILE:
     $XDG_CONFIG_HOME/glassy/glassy.conf  (or ~/.config/glassy/glassy.conf)
     macOS: ~/Library/Application Support/glassy/glassy.conf
     KEY=VALUE lines: font_family, font_size, theme, opacity, padding,
-    shell, scrollback, bell_visual, bell_audible, follow_system,
-    theme_light, theme_dark, status_bar, pane_headers, word_separator, color.*. CLI flags override the file.",
+    padding_top, padding_bottom, padding_left, padding_right, shell, scrollback,
+    bell_visual, bell_audible, follow_system, theme_light, theme_dark, status_bar,
+    pane_headers, word_separator, ligatures, font_features, color.*. CLI flags override the file.",
         env!("CARGO_PKG_VERSION")
     );
 }

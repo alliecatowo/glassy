@@ -32,6 +32,18 @@ impl App {
             return;
         }
 
+        // F10 toggles maximize. Handled early so it works regardless of overlays,
+        // and never reaches the child.
+        if event.state.is_pressed()
+            && matches!(&event.logical_key, Key::Named(NamedKey::F10))
+        {
+            if let Some(w) = self.window.as_ref() {
+                let maximized = w.is_maximized();
+                w.set_maximized(!maximized);
+            }
+            return;
+        }
+
         // The command palette and the find bar own the keyboard while
         // open: every key is routed to them (query edit, list nav, jump,
         // Esc) and never reaches the child or the chrome shortcuts below.
