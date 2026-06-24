@@ -679,4 +679,14 @@ opacity = 0.80
         assert!(settings.config.bell_visual); // default on
         assert!(!settings.config.bell_audible); // default off
     }
+
+    #[test]
+    fn pane_headers_parses_and_defaults_on() {
+        let mut raw = RawConfig::default();
+        parse_config_file("pane_headers = off\n", &mut raw).unwrap();
+        assert_eq!(raw.pane_headers, Some(false));
+        // Default (unset) is on.
+        let settings = RawConfig::default().into_settings().unwrap();
+        assert!(settings.config.pane_headers);
+    }
 }

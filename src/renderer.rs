@@ -359,6 +359,17 @@ pub struct Renderer {
     overlay_text_buffer: wgpu::Buffer,
     overlay_text_capacity: usize,
     overlay_text_count: u32,
+    /// Cached tab-bar overlay instances (quads + text), captured the last time the
+    /// tab bar was rebuilt. On a frame where nothing tab-relevant changed the App
+    /// replays this cache via [`Renderer::replay_tab_overlay`] instead of re-running
+    /// the tab-bar painter (which shapes every tab title glyph). This is the second
+    /// half of the split typing-lag fix: while typing, only the focused pane and its
+    /// cells change, so the tab bar is identical frame-to-frame.
+    tab_overlay_quads: Vec<BgInstance>,
+    tab_overlay_text: Vec<FgInstance>,
+    /// Marks the start offsets of the tab-bar region in the live overlay lists
+    /// while it is being captured (between `begin_tab_overlay` and `commit`).
+    tab_overlay_mark: Option<(usize, usize)>,
 
     /// Shelf packer for the R8 mask atlas.
     packer: Packer,
@@ -469,6 +480,27 @@ struct MultiPane {
     fg_buffer: Option<wgpu::Buffer>,
     bg_capacity: usize,
     fg_capacity: usize,
+    /// Per-pane instance cache, keyed by pane id. A pane whose grid did not change
+    /// this frame is reused verbatim from here (its already-origin-translated bg/fg
+    /// instances) instead of re-locking the term, re-iterating cells and re-shaping
+    /// glyphs — the dominant cost that made typing in a split lag. Only the pane
+    /// whose content changed is rebuilt via `begin_pane`/`push`/`end_pane`.
+    cache: HashMap<usize, CachedPane>,
+    /// True when at least one pane was reused from cache this frame (so the flat
+    /// upload is still required but the expensive CPU rebuild was skipped).
+    reused_any: bool,
+}
+
+/// A finished pane's instances, cached across frames so an unchanged pane is
+/// re-emitted without re-running the (expensive) `push_pane` CPU path.
+#[derive(Default, Clone)]
+struct CachedPane {
+    /// Origin-translated background instances (absolute surface pixels).
+    bg: Vec<BgInstance>,
+    /// Origin-translated foreground instances (absolute surface pixels).
+    fg: Vec<FgInstance>,
+    /// The pane's clamped scissor.
+    scissor: ScissorRect,
 }
 
 /// A finished pane's draw record: the GPU scissor rectangle and the half-open
@@ -485,20 +517,19 @@ struct PaneDraw {
 /// The pane being assembled between `begin_pane` and `end_pane`.
 #[derive(Clone, Copy)]
 struct PaneBuild {
+    /// Pane id (cache key).
+    id: usize,
     /// Absolute pixel origin (top-left) added to every pushed quad.
     origin: [f32; 2],
     /// Clamped scissor for this pane.
     scissor: ScissorRect,
-    /// First bg/fg instance index of this pane in the flat lists.
-    bg_start: u32,
-    fg_start: u32,
     /// Whether to draw the accent focus border for this pane.
     focused: bool,
 }
 
 /// A GPU scissor rectangle in surface pixels: an unsigned origin + extent,
 /// already clamped to the surface so `set_scissor_rect` never rejects it.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 struct ScissorRect {
     x: u32,
     y: u32,
@@ -1128,6 +1159,9 @@ impl Renderer {
             overlay_text_buffer,
             overlay_text_capacity: 64,
             overlay_text_count: 0,
+            tab_overlay_quads: Vec::new(),
+            tab_overlay_text: Vec::new(),
+            tab_overlay_mark: None,
             packer: Packer::new(ATLAS_SIZE),
             color_packer: Packer::new(COLOR_ATLAS_SIZE),
             atlas_reset: false,
@@ -1828,6 +1862,43 @@ impl Renderer {
             flags: 4,
             _pad: [0; 3],
         });
+    }
+
+    /// Begin capturing the tab-bar's overlay instances. Records the current overlay
+    /// list lengths so [`Renderer::commit_tab_overlay`] can snapshot exactly the
+    /// instances the tab-bar painter pushed. The tab bar is always painted first
+    /// (before menus/settings/status), so its captured region is a clean prefix.
+    pub fn begin_tab_overlay(&mut self) {
+        self.tab_overlay_mark = Some((self.overlay_quads.len(), self.overlay_text.len()));
+    }
+
+    /// Finish capturing the tab-bar overlay region: copy the instances pushed since
+    /// [`Renderer::begin_tab_overlay`] into the persistent tab-overlay cache, so a
+    /// later unchanged frame can replay them without re-shaping tab titles.
+    pub fn commit_tab_overlay(&mut self) {
+        let Some((q0, t0)) = self.tab_overlay_mark.take() else {
+            return;
+        };
+        self.tab_overlay_quads.clear();
+        self.tab_overlay_text.clear();
+        self.tab_overlay_quads
+            .extend_from_slice(&self.overlay_quads[q0..]);
+        self.tab_overlay_text
+            .extend_from_slice(&self.overlay_text[t0..]);
+    }
+
+    /// Replay the cached tab-bar overlay instances into this frame's overlay lists,
+    /// skipping the (glyph-shaping) tab-bar painter. Used when nothing tab-relevant
+    /// changed since the last rebuild. A no-op if the cache is empty (the App falls
+    /// back to a full rebuild in that case).
+    pub fn replay_tab_overlay(&mut self) {
+        self.overlay_quads.extend_from_slice(&self.tab_overlay_quads);
+        self.overlay_text.extend_from_slice(&self.tab_overlay_text);
+    }
+
+    /// Whether a tab-bar overlay snapshot is cached and available for replay.
+    pub fn has_tab_overlay(&self) -> bool {
+        !self.tab_overlay_quads.is_empty() || !self.tab_overlay_text.is_empty()
     }
 
     /// Push a single panel glyph at an arbitrary PIXEL position (top-left of the
@@ -2736,6 +2807,40 @@ impl Renderer {
         self.mp.bg.clear();
         self.mp.fg.clear();
         self.mp.cur = None;
+        self.mp.reused_any = false;
+    }
+
+    /// Drop any cached panes whose ids are not in `live` (closed/merged panes), so
+    /// the cache never grows beyond the current split. Call once per split frame
+    /// after collecting the live pane ids. Cheap (a single retain).
+    pub fn retain_panes(&mut self, live: &[usize]) {
+        self.mp.cache.retain(|id, _| live.contains(id));
+    }
+
+    /// Whether pane `id` has cached instances available for reuse this frame.
+    pub fn has_cached_pane(&self, id: usize) -> bool {
+        self.mp.cache.contains_key(&id)
+    }
+
+    /// Re-emit a previously cached pane (unchanged content) into this frame's flat
+    /// instance lists + draw order, skipping the expensive `push_pane` rebuild.
+    /// The caller must have verified [`Renderer::has_cached_pane`] for `id`.
+    pub fn reuse_pane(&mut self, id: usize) {
+        let Some(cached) = self.mp.cache.get(&id) else {
+            return;
+        };
+        let bg_start = self.mp.bg.len() as u32;
+        let fg_start = self.mp.fg.len() as u32;
+        self.mp.bg.extend_from_slice(&cached.bg);
+        self.mp.fg.extend_from_slice(&cached.fg);
+        self.mp.panes.push(PaneDraw {
+            scissor: cached.scissor,
+            bg_start,
+            bg_end: self.mp.bg.len() as u32,
+            fg_start,
+            fg_end: self.mp.fg.len() as u32,
+        });
+        self.mp.reused_any = true;
     }
 
     /// Begin a pane occupying surface-pixel rectangle `rect`. Cells pushed until
@@ -2744,8 +2849,7 @@ impl Renderer {
     /// `focused` requests the subtle accent focus border (drawn by `end_pane`).
     /// The per-pane grid is sized large enough to hold the pane's rows via the
     /// usual `begin_row`; oversized rows are clamped by the scissor.
-    #[allow(dead_code)]
-    pub fn begin_pane(&mut self, rect: crate::pane::Rect, focused: bool) {
+    pub fn begin_pane(&mut self, id: usize, rect: crate::pane::Rect, focused: bool) {
         // Reset the shared scratch rows so this pane starts clean. The pane's
         // grid height is unknown here; `begin_row` grows `self.rows` on demand.
         self.rows.clear();
@@ -2759,10 +2863,9 @@ impl Renderer {
             self.config.height,
         );
         self.mp.cur = Some(PaneBuild {
+            id,
             origin: [rect.x as f32, rect.y as f32],
             scissor,
-            bg_start: self.mp.bg.len() as u32,
-            fg_start: self.mp.fg.len() as u32,
             focused,
         });
     }
@@ -2770,18 +2873,23 @@ impl Renderer {
     /// Finish the current pane: flush its authored rows (offset by the pane's
     /// pixel origin) into the flat instance lists, optionally adding the focus
     /// border, and record the pane's scissored draw range.
-    #[allow(dead_code)]
     pub fn end_pane(&mut self) {
         let Some(build) = self.mp.cur.take() else {
             return;
         };
         let [ox, oy] = build.origin;
-        // Translate every authored bg/fg instance by the pane origin. The cells
-        // were laid out at local pixel coords (col*cell_w + pad, ...), so adding
-        // the pane's top-left gives absolute surface pixels.
+        // Build this pane's origin-translated instances into a fresh CachedPane.
+        // The cells were laid out at local pixel coords (col*cell_w + pad, ...), so
+        // adding the pane's top-left gives absolute surface pixels. Reuse the
+        // previous CachedPane's allocations (clear + refill) to avoid per-frame
+        // Vec churn on the changed pane.
+        let mut cached = self.mp.cache.remove(&build.id).unwrap_or_default();
+        cached.bg.clear();
+        cached.fg.clear();
+        cached.scissor = build.scissor;
         for row in &self.rows {
             for b in &row.bg {
-                self.mp.bg.push(BgInstance {
+                cached.bg.push(BgInstance {
                     pos: [b.pos[0] + ox, b.pos[1] + oy],
                     size: b.size,
                     color: b.color,
@@ -2792,7 +2900,7 @@ impl Renderer {
             for f in &row.fg {
                 let mut f = *f;
                 f.pos = [f.pos[0] + ox, f.pos[1] + oy];
-                self.mp.fg.push(f);
+                cached.fg.push(f);
             }
         }
 
@@ -2800,6 +2908,8 @@ impl Renderer {
         // rect, in the bg pass (after the pane's cell backgrounds, before glyphs)
         // and clipped by this pane's scissor. Downgraded from the former four-rail
         // box now that pane headers carry the primary focus chrome (GUI layer).
+        // Cached with the pane so the focus rail is preserved on reuse; the caller
+        // rebuilds the pane (focus changed ⇒ content/marker changed) on focus moves.
         if build.focused {
             let th = (self.metrics.height / 12.0).round().max(1.0);
             let s = build.scissor;
@@ -2808,17 +2918,24 @@ impl Renderer {
                 let y = s.y as f32;
                 let h = s.h as f32;
                 let c = crate::color::accent();
-                self.mp.bg.push(BgInstance { pos: [x, y], size: [th, h], color: c }); // left
+                cached.bg.push(BgInstance { pos: [x, y], size: [th, h], color: c }); // left
             }
         }
 
+        // Append the freshly-built instances to this frame's flat lists + draw
+        // order, then stash the CachedPane for reuse on subsequent unchanged frames.
+        let bg_start = self.mp.bg.len() as u32;
+        let fg_start = self.mp.fg.len() as u32;
+        self.mp.bg.extend_from_slice(&cached.bg);
+        self.mp.fg.extend_from_slice(&cached.fg);
         self.mp.panes.push(PaneDraw {
             scissor: build.scissor,
-            bg_start: build.bg_start,
+            bg_start,
             bg_end: self.mp.bg.len() as u32,
-            fg_start: build.fg_start,
+            fg_start,
             fg_end: self.mp.fg.len() as u32,
         });
+        self.mp.cache.insert(build.id, cached);
         // Leave `self.rows` cleared so the next pane (or a return to the
         // single-grid path via `resize_grid`) starts fresh.
         self.rows.clear();

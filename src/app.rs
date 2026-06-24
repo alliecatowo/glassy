@@ -180,7 +180,7 @@ fn os_title(title: &str) -> String {
 /// An interactive item in the real GUI tab bar. Window controls (min/max/close)
 /// live in the native bar, not here. `Tab`/`TabClose` carry the tab's *stable
 /// position*.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 enum StripItem {
     /// A tab chip body at stable display position `pos` (click = activate).
     Tab(usize),
@@ -360,6 +360,7 @@ enum MenuAction {
     Paste,
     NewTab,
     Settings,
+    PaneHeaders,
     Help,
     CloseTab,
 }
@@ -367,8 +368,13 @@ enum MenuAction {
 impl MenuAction {
     /// The fixed set shown by the # hamburger dropdown. The right-click context
     /// menu uses a separately-built `Vec<MenuAction>` (see `context_menu_items`).
-    const ALL: &'static [MenuAction] =
-        &[MenuAction::NewTab, MenuAction::Settings, MenuAction::Help, MenuAction::CloseTab];
+    const ALL: &'static [MenuAction] = &[
+        MenuAction::NewTab,
+        MenuAction::Settings,
+        MenuAction::PaneHeaders,
+        MenuAction::Help,
+        MenuAction::CloseTab,
+    ];
 
     fn label(self) -> &'static str {
         match self {
@@ -376,6 +382,7 @@ impl MenuAction {
             MenuAction::Paste => "Paste",
             MenuAction::NewTab => "New tab",
             MenuAction::Settings => "Settings",
+            MenuAction::PaneHeaders => "Pane headers",
             MenuAction::Help => "Help / keys",
             MenuAction::CloseTab => "Close tab",
         }
@@ -388,6 +395,7 @@ impl MenuAction {
             MenuAction::Paste     => '□',
             MenuAction::NewTab    => '+',
             MenuAction::Settings  => '*',
+            MenuAction::PaneHeaders => '▭',
             MenuAction::Help      => '?',
             MenuAction::CloseTab  => '✕',
         }
@@ -401,6 +409,7 @@ impl MenuAction {
             MenuAction::Paste     => Some("Ctrl+Shift+V"),
             MenuAction::NewTab    => Some("Ctrl+Shift+T"),
             MenuAction::Settings  => Some("Ctrl+,"),
+            MenuAction::PaneHeaders => None,
             MenuAction::Help      => Some("F1"),
             MenuAction::CloseTab  => Some("Ctrl+Shift+W"),
         }
@@ -805,6 +814,12 @@ pub struct App {
     /// Set on resize / font change / first frame, where the per-row layout or all
     /// content changes at once.
     force_full_redraw: bool,
+    /// Digest of the tab-bar painter inputs the last time it was rebuilt. The tab
+    /// bar overlay is otherwise re-shaped (every tab title glyph) every frame even
+    /// while only a pane's cells change. When this frame's computed key matches, the
+    /// renderer replays the cached tab-bar overlay instead of repainting. `None`
+    /// forces a rebuild (first frame / cache invalidated).
+    tab_bar_key: Option<u64>,
     /// The cursor cell (col, row) drawn last frame, so we can repaint the row it
     /// vacated (alacritty's own cursor damage covers the terminal cursor move, but
     /// glassy's blink/focus/selection overlays are not part of that damage).
@@ -899,6 +914,7 @@ impl App {
             capture: std::env::var_os("GLASSY_CAPTURE").map(std::path::PathBuf::from),
             capture_deadline: None,
             force_full_redraw: true,
+            tab_bar_key: None,
             prev_cursor: None,
             prev_display_offset: 0,
             prev_has_selection: false,
@@ -1053,6 +1069,10 @@ impl App {
             MenuAction::NewTab => self.new_tab(event_loop),
             MenuAction::Settings => {
                 self.open_settings();
+                self.mark_dirty(event_loop);
+            }
+            MenuAction::PaneHeaders => {
+                self.toggle_pane_headers();
                 self.mark_dirty(event_loop);
             }
             MenuAction::Help => {
@@ -2384,6 +2404,53 @@ impl App {
             .collect()
     }
 
+    /// Hash digest of everything the tab-bar painter reads, so an unchanged frame
+    /// can replay the cached overlay instead of re-shaping every tab title. The
+    /// mouse position is only folded in while a tab is being dragged (the drag-ghost
+    /// follows the pointer); otherwise pointer motion does not change the tab bar's
+    /// appearance (hover is captured by `hovered`). Theme changes flow through
+    /// `force_full_redraw` at the call site, not this key.
+    #[allow(clippy::too_many_arguments)]
+    fn tab_bar_key(
+        snapshot: &[(String, bool, bool, bool)],
+        focused: bool,
+        hovered: Option<StripItem>,
+        held: Option<StripItem>,
+        dragging: Option<usize>,
+        mouse: (f32, f32),
+        spinner: usize,
+        count: usize,
+        strip_off: i32,
+        strip_hist: usize,
+    ) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for (title, active, busy, spinning) in snapshot {
+            title.hash(&mut h);
+            active.hash(&mut h);
+            busy.hash(&mut h);
+            spinning.hash(&mut h);
+        }
+        focused.hash(&mut h);
+        hovered.hash(&mut h);
+        held.hash(&mut h);
+        dragging.hash(&mut h);
+        // Spinner frame only matters while something is spinning; it is already
+        // reflected by the per-tab `spinning` flags above, but the glyph index also
+        // changes the drawn frame, so fold it in.
+        spinner.hash(&mut h);
+        count.hash(&mut h);
+        // The scrollback % readout in the tag area changes the drawn text.
+        strip_off.hash(&mut h);
+        strip_hist.hash(&mut h);
+        // Drag-ghost position: only relevant mid-drag.
+        if dragging.is_some() {
+            (mouse.0.to_bits()).hash(&mut h);
+            (mouse.1.to_bits()).hash(&mut h);
+        }
+        h.finish()
+    }
+
     /// Paint the real GUI tab bar (§3.1) into the pixel band `[0, tab_bar_h)`. The
     /// ACTIVE tab is an E2 raised chip whose top corners are rounded and whose body
     /// is flush to the bar bottom, with a 3px connector quad that overpaints the
@@ -3026,6 +3093,16 @@ impl App {
         let tab_mouse = (self.mouse_px.0 as f32, self.mouse_px.1 as f32);
         let tab_spinner = self.spinner_frame;
         let tab_count = self.tab_count();
+        // Tab-bar incremental decision (single-pane path): rebuild only when the
+        // painter's inputs changed or a full redraw is forced (e.g. theme), else
+        // replay the cached overlay instead of re-shaping every tab title glyph.
+        let new_tab_key = Self::tab_bar_key(
+            &tab_snapshot, tab_focused, tab_hovered, tab_held, tab_dragging, tab_mouse,
+            tab_spinner, tab_count, strip_off, strip_hist,
+        );
+        let tab_bar_rebuild = self.force_full_redraw
+            || self.tab_bar_key != Some(new_tab_key)
+            || !self.renderer.as_ref().map(|r| r.has_tab_overlay()).unwrap_or(false);
 
         // Status-bar snapshot: term mode, scroll position, selection count.
         // Taken here (under the `&self` borrow) before we take `&mut self.renderer`.
@@ -3414,20 +3491,27 @@ impl App {
 
         // Real GUI tab bar (§3.1): painted over the pixel band [0, tab_bar_h) as
         // overlay quads + atlas glyphs, so it composites above the grid. Drawn
-        // before any modal so a modal scrim dims it too.
-        Self::paint_tab_bar(
-            renderer,
-            &tab_snapshot,
-            tab_focused,
-            tab_hovered,
-            tab_held,
-            tab_dragging,
-            tab_mouse,
-            tab_spinner,
-            tab_count,
-            strip_off,
-            strip_hist,
-        );
+        // before any modal so a modal scrim dims it too. Rebuilt only when its
+        // inputs changed; otherwise the cached overlay is replayed.
+        if tab_bar_rebuild {
+            renderer.begin_tab_overlay();
+            Self::paint_tab_bar(
+                renderer,
+                &tab_snapshot,
+                tab_focused,
+                tab_hovered,
+                tab_held,
+                tab_dragging,
+                tab_mouse,
+                tab_spinner,
+                tab_count,
+                strip_off,
+                strip_hist,
+            );
+            renderer.commit_tab_overlay();
+        } else {
+            renderer.replay_tab_overlay();
+        }
 
         // Status bar (§3.4): E1 bar at the very bottom, always above the terminal
         // content because it is an overlay (drawn last, not a reserved cell row).
@@ -3530,6 +3614,7 @@ impl App {
         self.prev_display_offset = display_offset;
         self.prev_has_selection = has_selection;
         self.force_full_redraw = false;
+        self.tab_bar_key = Some(new_tab_key);
         // The chrome paint consumed this frame's click edge; if it was a release
         // edge, also drop the press latch now that the click has been resolved.
         if self.gui_click_edge {
@@ -3746,6 +3831,53 @@ impl App {
             None
         };
 
+        // Damage/incremental decision for each pane, made BEFORE the disjoint
+        // borrows (it locks the panes' terms). A pane is rebuilt only when:
+        //   * a full redraw is forced (layout change / resize / theme / toggle), OR
+        //   * it is the focused pane (it owns the blinking cursor + selection, which
+        //     are NOT part of alacritty's damage and so must repaint every frame), OR
+        //   * it has no cached instances yet (first split frame after a change), OR
+        //   * its child produced output since the last frame (term damage).
+        // Every other pane is reused verbatim from the renderer's per-pane cache,
+        // which skips the expensive term-lock + cell-iterate + glyph-shape rebuild.
+        // `pane_damaged` reads+resets damage, so it must run for every non-focused
+        // pane exactly once per frame regardless of the rebuild decision (otherwise
+        // damage would accumulate and the pane would never settle).
+        let force_full = self.force_full_redraw;
+        // Tab-bar incremental decision: rebuild only when its inputs changed (or a
+        // full redraw is forced, e.g. theme change). Computed here so it can update
+        // `self.tab_bar_key` after the renderer borrow ends.
+        let new_tab_key = Self::tab_bar_key(
+            &tab_snapshot, tab_focused, tab_hovered, tab_held, tab_dragging, tab_mouse,
+            tab_spinner, tab_count, strip_off, strip_hist,
+        );
+        let tab_bar_rebuild = force_full
+            || self.tab_bar_key != Some(new_tab_key)
+            || !self.renderer.as_ref().map(|r| r.has_tab_overlay()).unwrap_or(false);
+        let live_ids: Vec<usize> = pane_specs.iter().map(|(id, ..)| *id).collect();
+        let rebuild: Vec<bool> = {
+            let g = self.panes.as_ref().unwrap();
+            pane_specs
+                .iter()
+                .map(|(id, ..)| {
+                    let is_focused = *id == focused_pane;
+                    let has_cache = self
+                        .renderer
+                        .as_ref()
+                        .map(|r| r.has_cached_pane(*id))
+                        .unwrap_or(false);
+                    // Resolve the pane's pty to read its damage (always, to reset it).
+                    let pty = if is_focused {
+                        self.pty.as_ref()
+                    } else {
+                        g.others.get(id)
+                    };
+                    let damaged = pty.map(Self::pane_damaged).unwrap_or(true);
+                    force_full || is_focused || !has_cache || damaged
+                })
+                .collect()
+        };
+
         // Disjoint field borrows: `renderer` (mut), `panes`/`pty` (shared) are
         // distinct fields, so the borrow checker allows them together as long as
         // we don't route through a whole-`self` method past this point.
@@ -3760,19 +3892,26 @@ impl App {
         // insets below the tab bar), so the per-cell grid_origin_y must be zero.
         renderer.set_grid_origin_y(0.0);
         renderer.begin_multi_frame(color::default_bg());
+        // Evict cache entries for panes that no longer exist (closed/merged).
+        renderer.retain_panes(&live_ids);
 
-        // Each leaf pane, clipped to its body rect (below the header).
-        for (id, _full_rect, body_rect, cols, prows) in &pane_specs {
+        // Each leaf pane, clipped to its body rect (below the header). Changed panes
+        // are rebuilt; unchanged panes are re-emitted from cache (the typing-lag fix).
+        for (i, (id, _full_rect, body_rect, cols, prows)) in pane_specs.iter().enumerate() {
             let is_focused = *id == focused_pane;
-            let pty = if is_focused {
-                focused_pty
+            if rebuild[i] || !renderer.has_cached_pane(*id) {
+                let pty = if is_focused {
+                    focused_pty
+                } else {
+                    g.others.get(id)
+                };
+                let Some(pty) = pty else { continue };
+                renderer.begin_pane(*id, *body_rect, is_focused);
+                Self::push_pane(renderer, pty, *cols, *prows, win_focused, blink_on, hovered_link.as_deref());
+                renderer.end_pane();
             } else {
-                g.others.get(id)
-            };
-            let Some(pty) = pty else { continue };
-            renderer.begin_pane(*body_rect, is_focused);
-            Self::push_pane(renderer, pty, *cols, *prows, win_focused, blink_on, hovered_link.as_deref());
-            renderer.end_pane();
+                renderer.reuse_pane(*id);
+            }
         }
 
         // Dividers in the gutters between adjacent tiles (drawn full-surface
@@ -3824,20 +3963,28 @@ impl App {
         }
 
         // Real GUI tab bar over the pixel band [0, tab_bar_h), composited over the
-        // split via the overlay pass added to record_multi_passes.
-        Self::paint_tab_bar(
-            renderer,
-            &tab_snapshot,
-            tab_focused,
-            tab_hovered,
-            tab_held,
-            tab_dragging,
-            tab_mouse,
-            tab_spinner,
-            tab_count,
-            strip_off,
-            strip_hist,
-        );
+        // split via the overlay pass added to record_multi_passes. Rebuilt only when
+        // its inputs changed; otherwise the cached overlay is replayed (no glyph
+        // re-shaping) — the second half of the split typing-lag fix.
+        if tab_bar_rebuild {
+            renderer.begin_tab_overlay();
+            Self::paint_tab_bar(
+                renderer,
+                &tab_snapshot,
+                tab_focused,
+                tab_hovered,
+                tab_held,
+                tab_dragging,
+                tab_mouse,
+                tab_spinner,
+                tab_count,
+                strip_off,
+                strip_hist,
+            );
+            renderer.commit_tab_overlay();
+        } else {
+            renderer.replay_tab_overlay();
+        }
 
         // Pane title bars: one per leaf, drawn as overlay quads+glyphs so they
         // composite above the cell grid but below the tab bar. Single-pane case
@@ -3933,6 +4080,11 @@ impl App {
             let _ = gui::menu(renderer, m.width, m.height, mouse2, md2, click2, ax2, ay2, entries2, sel2);
         }
 
+        // This frame consumed the forced-full-redraw request (every pane was
+        // rebuilt above when it was set). Clear it so subsequent split frames take
+        // the incremental path; the drop-frame branch below re-arms it on error.
+        self.force_full_redraw = false;
+        self.tab_bar_key = Some(new_tab_key);
         if let Err(err) = renderer.render_multi() {
             log::debug!("split frame dropped: {err:?}");
             self.force_full_redraw = true;
@@ -4122,6 +4274,23 @@ impl App {
     /// selection + cursor overlay. `win_focused`/`blink_on` drive the cursor
     /// style; `hovered_link` underlines the hovered OSC8 link.
     #[allow(clippy::too_many_arguments)]
+    /// Whether a (non-focused) pane's terminal changed since the last split frame.
+    /// Reads and RESETS the term's damage in a brief lock; returns true when the
+    /// child produced any output (Full or Partial damage). Used by `render_split`
+    /// to skip re-running the expensive `push_pane` rebuild for unchanged panes.
+    /// The focused pane is always rebuilt (it owns the blinking cursor + selection,
+    /// which are not part of alacritty's damage), so this is only consulted for the
+    /// non-focused panes.
+    fn pane_damaged(pty: &Pty) -> bool {
+        let mut term = pty.term.lock();
+        let damaged = match term.damage() {
+            alacritty_terminal::term::TermDamage::Full => true,
+            alacritty_terminal::term::TermDamage::Partial(mut it) => it.next().is_some(),
+        };
+        term.reset_damage();
+        damaged
+    }
+
     fn push_pane(
         renderer: &mut Renderer,
         pty: &Pty,
