@@ -75,28 +75,30 @@ pub fn encode_key(
     modify_other_keys: ModifyOtherKeys,
 ) -> Option<Vec<u8>> {
     let pressed = event.state.is_pressed();
-    let repeat  = event.repeat;
+    let repeat = event.repeat;
 
     // Without REPORT_EVENT_TYPES, only forward key-press (including OS repeat).
     if !pressed && !kitty.report_event_types {
         return None;
     }
 
-    let ctrl  = mods.control_key();
-    let alt   = mods.alt_key();
+    let ctrl = mods.control_key();
+    let alt = mods.alt_key();
     let shift = mods.shift_key();
     let super_ = mods.super_key();
 
     // Kitty modifier encoding: 1 + shift + alt*2 + ctrl*4 + super*8.
     // 1 is the base (unmodified = 1, shifted = 2, alt = 3, etc.).
-    let kitty_mods = 1u8
-        + (shift as u8)
-        + (alt as u8) * 2
-        + (ctrl as u8) * 4
-        + (super_ as u8) * 8;
+    let kitty_mods = 1u8 + (shift as u8) + (alt as u8) * 2 + (ctrl as u8) * 4 + (super_ as u8) * 8;
 
     // Kitty event type parameter: 1=press, 2=repeat, 3=release.
-    let event_type: u8 = if !pressed { 3 } else if repeat { 2 } else { 1 };
+    let event_type: u8 = if !pressed {
+        3
+    } else if repeat {
+        2
+    } else {
+        1
+    };
 
     // Build the kitty CSI-u sequence, optionally with event-type, alternate-keys,
     // and associated-text sub-parameters.
@@ -148,16 +150,20 @@ pub fn encode_key(
         // Backspace etc.) goes as CSI-u so the application can distinguish them
         // from their text output. We also force kitty form for any event_type != 1
         // (repeat/release) when REPORT_EVENT_TYPES is set.
-        let force_kitty = kitty.report_all_keys_as_esc
-            || (kitty.report_event_types && !pressed);
+        let force_kitty = kitty.report_all_keys_as_esc || (kitty.report_event_types && !pressed);
 
         if kitty.active() {
             // Try the named-key kitty form first (modified OR forced).
             let has_mods = kitty_mods != 1;
             if (has_mods || force_kitty)
-                && let Some(seq) = kitty_named(named, kitty_mods, event_type,
-                                               kitty.report_event_types,
-                                               kitty.report_all_keys_as_esc) {
+                && let Some(seq) = kitty_named(
+                    named,
+                    kitty_mods,
+                    event_type,
+                    kitty.report_event_types,
+                    kitty.report_all_keys_as_esc,
+                )
+            {
                 return Some(seq);
             }
         }
@@ -165,9 +171,13 @@ pub fn encode_key(
         // For release events under REPORT_EVENT_TYPES (but no kitty form matched),
         // still need to send something for named keys that have a kitty code.
         if kitty.report_event_types && !pressed {
-            if let Some(seq) = kitty_named(named, kitty_mods, event_type,
-                                           kitty.report_event_types,
-                                           kitty.report_all_keys_as_esc) {
+            if let Some(seq) = kitty_named(
+                named,
+                kitty_mods,
+                event_type,
+                kitty.report_event_types,
+                kitty.report_all_keys_as_esc,
+            ) {
                 return Some(seq);
             }
             return None; // no kitty form → nothing on release
@@ -184,25 +194,25 @@ pub fn encode_key(
                 }
             }
             NamedKey::Escape => b"\x1b",
-            NamedKey::ArrowUp    => ss3_or_csi(app_cursor, b"\x1bOA", b"\x1b[A"),
-            NamedKey::ArrowDown  => ss3_or_csi(app_cursor, b"\x1bOB", b"\x1b[B"),
+            NamedKey::ArrowUp => ss3_or_csi(app_cursor, b"\x1bOA", b"\x1b[A"),
+            NamedKey::ArrowDown => ss3_or_csi(app_cursor, b"\x1bOB", b"\x1b[B"),
             NamedKey::ArrowRight => ss3_or_csi(app_cursor, b"\x1bOC", b"\x1b[C"),
-            NamedKey::ArrowLeft  => ss3_or_csi(app_cursor, b"\x1bOD", b"\x1b[D"),
-            NamedKey::Home       => ss3_or_csi(app_cursor, b"\x1bOH", b"\x1b[H"),
-            NamedKey::End        => ss3_or_csi(app_cursor, b"\x1bOF", b"\x1b[F"),
-            NamedKey::PageUp     => b"\x1b[5~",
-            NamedKey::PageDown   => b"\x1b[6~",
-            NamedKey::Delete     => b"\x1b[3~",
-            NamedKey::Insert     => b"\x1b[2~",
-            NamedKey::F1  => b"\x1bOP",
-            NamedKey::F2  => b"\x1bOQ",
-            NamedKey::F3  => b"\x1bOR",
-            NamedKey::F4  => b"\x1bOS",
-            NamedKey::F5  => b"\x1b[15~",
-            NamedKey::F6  => b"\x1b[17~",
-            NamedKey::F7  => b"\x1b[18~",
-            NamedKey::F8  => b"\x1b[19~",
-            NamedKey::F9  => b"\x1b[20~",
+            NamedKey::ArrowLeft => ss3_or_csi(app_cursor, b"\x1bOD", b"\x1b[D"),
+            NamedKey::Home => ss3_or_csi(app_cursor, b"\x1bOH", b"\x1b[H"),
+            NamedKey::End => ss3_or_csi(app_cursor, b"\x1bOF", b"\x1b[F"),
+            NamedKey::PageUp => b"\x1b[5~",
+            NamedKey::PageDown => b"\x1b[6~",
+            NamedKey::Delete => b"\x1b[3~",
+            NamedKey::Insert => b"\x1b[2~",
+            NamedKey::F1 => b"\x1bOP",
+            NamedKey::F2 => b"\x1bOQ",
+            NamedKey::F3 => b"\x1bOR",
+            NamedKey::F4 => b"\x1bOS",
+            NamedKey::F5 => b"\x1b[15~",
+            NamedKey::F6 => b"\x1b[17~",
+            NamedKey::F7 => b"\x1b[18~",
+            NamedKey::F8 => b"\x1b[19~",
+            NamedKey::F9 => b"\x1b[20~",
             NamedKey::F10 => b"\x1b[21~",
             NamedKey::F11 => b"\x1b[23~",
             NamedKey::F12 => b"\x1b[24~",
@@ -245,7 +255,11 @@ pub fn encode_key(
         // REPORT_ALL_KEYS_AS_ESC: unmodified printable keys also go as CSI-u.
         if kitty.active() && kitty.report_all_keys_as_esc && !ctrl {
             let c = text.chars().next()?;
-            let assoc = if kitty.report_associated_text { Some(text.as_str()) } else { None };
+            let assoc = if kitty.report_associated_text {
+                Some(text.as_str())
+            } else {
+                None
+            };
             return Some(kitty_csi_u(c as u32, assoc));
         }
 
@@ -254,7 +268,11 @@ pub fn encode_key(
             // Under kitty DISAMBIGUATE_ESC_CODES (or higher), Ctrl+letter goes as
             // CSI-u so the application can distinguish Ctrl-I from Tab etc.
             if kitty.active() {
-                let assoc = if kitty.report_associated_text { Some(text.as_str()) } else { None };
+                let assoc = if kitty.report_associated_text {
+                    Some(text.as_str())
+                } else {
+                    None
+                };
                 return Some(kitty_csi_u(c as u32, assoc));
             }
 
@@ -271,9 +289,7 @@ pub fn encode_key(
                 };
                 if mok_emit {
                     let mok_mods = xterm_mod_param(shift, alt, ctrl, super_);
-                    return Some(
-                        format!("\x1b[27;{};{}~", mok_mods, byte as u32).into_bytes()
-                    );
+                    return Some(format!("\x1b[27;{};{}~", mok_mods, byte as u32).into_bytes());
                 }
                 let mut out = Vec::with_capacity(2);
                 if alt {
@@ -288,21 +304,20 @@ pub fn encode_key(
                 // to the raw text below.
                 if modify_other_keys != ModifyOtherKeys::Reset {
                     let mok_mods = xterm_mod_param(shift, alt, ctrl, super_);
-                    return Some(
-                        format!("\x1b[27;{};{}~", mok_mods, c as u32).into_bytes()
-                    );
+                    return Some(format!("\x1b[27;{};{}~", mok_mods, c as u32).into_bytes());
                 }
             }
         }
 
         // modifyOtherKeys level 2 for Alt+printable combos not handled by kitty:
         // emit CSI 27 ; mods ; codepoint ~.
-        if !kitty.active() && (alt || (ctrl && shift)) && modify_other_keys == ModifyOtherKeys::EnableAll
-            && let Some(c) = text.chars().next() {
+        if !kitty.active()
+            && (alt || (ctrl && shift))
+            && modify_other_keys == ModifyOtherKeys::EnableAll
+            && let Some(c) = text.chars().next()
+        {
             let mok_mods = xterm_mod_param(shift, alt, ctrl, super_);
-            return Some(
-                format!("\x1b[27;{};{}~", mok_mods, c as u32).into_bytes()
-            );
+            return Some(format!("\x1b[27;{};{}~", mok_mods, c as u32).into_bytes());
         }
 
         let mut out = Vec::with_capacity(text.len() + 1);
@@ -423,34 +438,34 @@ fn kitty_named(
 
     match named {
         // CSI-u functional keys
-        NamedKey::Enter     => Some(csi_u(13)),
-        NamedKey::Tab       => Some(csi_u(9)),
+        NamedKey::Enter => Some(csi_u(13)),
+        NamedKey::Tab => Some(csi_u(9)),
         NamedKey::Backspace => Some(csi_u(127)),
-        NamedKey::Escape    => Some(csi_u(27)),
-        NamedKey::Space     => Some(csi_u(32)),
+        NamedKey::Escape => Some(csi_u(27)),
+        NamedKey::Space => Some(csi_u(32)),
         // Cursor keys: CSI 1 ; mods [final]
-        NamedKey::ArrowUp    => Some(csi_final('A')),
-        NamedKey::ArrowDown  => Some(csi_final('B')),
+        NamedKey::ArrowUp => Some(csi_final('A')),
+        NamedKey::ArrowDown => Some(csi_final('B')),
         NamedKey::ArrowRight => Some(csi_final('C')),
-        NamedKey::ArrowLeft  => Some(csi_final('D')),
-        NamedKey::Home       => Some(csi_final('H')),
-        NamedKey::End        => Some(csi_final('F')),
+        NamedKey::ArrowLeft => Some(csi_final('D')),
+        NamedKey::Home => Some(csi_final('H')),
+        NamedKey::End => Some(csi_final('F')),
         // Tilde keys
-        NamedKey::PageUp   => Some(csi_tilde(5)),
+        NamedKey::PageUp => Some(csi_tilde(5)),
         NamedKey::PageDown => Some(csi_tilde(6)),
-        NamedKey::Insert   => Some(csi_tilde(2)),
-        NamedKey::Delete   => Some(csi_tilde(3)),
+        NamedKey::Insert => Some(csi_tilde(2)),
+        NamedKey::Delete => Some(csi_tilde(3)),
         // Function keys F1-F4 use SS3 form in normal mode but CSI-final in kitty.
-        NamedKey::F1  => Some(csi_final('P')),
-        NamedKey::F2  => Some(csi_final('Q')),
-        NamedKey::F3  => Some(csi_final('R')),
-        NamedKey::F4  => Some(csi_final('S')),
+        NamedKey::F1 => Some(csi_final('P')),
+        NamedKey::F2 => Some(csi_final('Q')),
+        NamedKey::F3 => Some(csi_final('R')),
+        NamedKey::F4 => Some(csi_final('S')),
         // F5-F12 tilde
-        NamedKey::F5  => Some(csi_tilde(15)),
-        NamedKey::F6  => Some(csi_tilde(17)),
-        NamedKey::F7  => Some(csi_tilde(18)),
-        NamedKey::F8  => Some(csi_tilde(19)),
-        NamedKey::F9  => Some(csi_tilde(20)),
+        NamedKey::F5 => Some(csi_tilde(15)),
+        NamedKey::F6 => Some(csi_tilde(17)),
+        NamedKey::F7 => Some(csi_tilde(18)),
+        NamedKey::F8 => Some(csi_tilde(19)),
+        NamedKey::F9 => Some(csi_tilde(20)),
         NamedKey::F10 => Some(csi_tilde(21)),
         NamedKey::F11 => Some(csi_tilde(23)),
         NamedKey::F12 => Some(csi_tilde(24)),
@@ -463,7 +478,7 @@ fn kitty_named(
         NamedKey::F18 => Some(csi_tilde(32)),
         NamedKey::F19 => Some(csi_tilde(33)),
         NamedKey::F20 => Some(csi_tilde(34)),
-        _            => None,
+        _ => None,
     }
 }
 
@@ -489,16 +504,19 @@ fn xterm_mod_param(shift: bool, alt: bool, ctrl: bool, super_: bool) -> u8 {
     1 + (shift as u8) + (alt as u8) * 2 + (ctrl as u8) * 4 + (super_ as u8) * 8
 }
 
-
 #[cfg(test)]
 mod tests {
-    use super::{
-        KittyFlags, ModifyOtherKeys, MouseReport, encode_mouse,
-    };
+    use super::{KittyFlags, ModifyOtherKeys, MouseReport, encode_mouse};
     use winit::keyboard::ModifiersState;
 
     fn rep(button: u8, col: usize, row: usize, pressed: bool, motion: bool) -> MouseReport {
-        MouseReport { button, col, row, pressed, motion }
+        MouseReport {
+            button,
+            col,
+            row,
+            pressed,
+            motion,
+        }
     }
 
     #[test]
@@ -560,7 +578,10 @@ mod tests {
     fn kitty_flags_active_only_when_disambiguate_set() {
         let k = KittyFlags::default();
         assert!(!k.active());
-        let k2 = KittyFlags { disambiguate: true, ..Default::default() };
+        let k2 = KittyFlags {
+            disambiguate: true,
+            ..Default::default()
+        };
         assert!(k2.active());
     }
 
@@ -573,8 +594,8 @@ mod tests {
 
     #[test]
     fn kitty_named_unmodified_returns_none() {
-        use winit::keyboard::NamedKey;
         use super::kitty_named;
+        use winit::keyboard::NamedKey;
         // mods == 1 means unmodified; kitty_named should return None unless forced.
         assert!(kitty_named(NamedKey::Enter, 1, 1, false, false).is_none());
         assert!(kitty_named(NamedKey::ArrowUp, 1, 1, false, false).is_none());
@@ -582,8 +603,8 @@ mod tests {
 
     #[test]
     fn kitty_named_ctrl_enter_is_csi_u() {
-        use winit::keyboard::NamedKey;
         use super::kitty_named;
+        use winit::keyboard::NamedKey;
         // Ctrl = mods 5 (1 + ctrl*4), press = event_type 1.
         let seq = kitty_named(NamedKey::Enter, 5, 1, false, false).unwrap();
         assert_eq!(seq, b"\x1b[13;5u");
@@ -591,8 +612,8 @@ mod tests {
 
     #[test]
     fn kitty_named_shift_alt_arrow_up() {
-        use winit::keyboard::NamedKey;
         use super::kitty_named;
+        use winit::keyboard::NamedKey;
         // Shift+Alt = mods 3 (1 + shift + alt*2).
         let seq = kitty_named(NamedKey::ArrowUp, 3, 1, false, false).unwrap();
         assert_eq!(seq, b"\x1b[1;3A");
@@ -600,8 +621,8 @@ mod tests {
 
     #[test]
     fn kitty_named_report_event_types_release() {
-        use winit::keyboard::NamedKey;
         use super::kitty_named;
+        use winit::keyboard::NamedKey;
         // Ctrl Enter release (event_type 3) with REPORT_EVENT_TYPES.
         let seq = kitty_named(NamedKey::Enter, 5, 3, true, false).unwrap();
         assert_eq!(seq, b"\x1b[13;5:3u");
@@ -609,8 +630,8 @@ mod tests {
 
     #[test]
     fn kitty_named_force_all_keys_unmodified_enter() {
-        use winit::keyboard::NamedKey;
         use super::kitty_named;
+        use winit::keyboard::NamedKey;
         // Unmodified Enter with REPORT_ALL_KEYS_AS_ESC must still emit sequence.
         let seq = kitty_named(NamedKey::Enter, 1, 1, false, true).unwrap();
         assert_eq!(seq, b"\x1b[13;1u");
@@ -618,8 +639,8 @@ mod tests {
 
     #[test]
     fn kitty_named_f5_tilde_modified() {
-        use winit::keyboard::NamedKey;
         use super::kitty_named;
+        use winit::keyboard::NamedKey;
         // Shift F5 = mods 2.
         let seq = kitty_named(NamedKey::F5, 2, 1, false, false).unwrap();
         assert_eq!(seq, b"\x1b[15;2~");

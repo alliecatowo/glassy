@@ -129,7 +129,11 @@ impl Renderer {
                 let y = s.y as f32;
                 let h = s.h as f32;
                 let c = crate::color::accent();
-                cached.bg.push(BgInstance { pos: [x, y], size: [th, h], color: c }); // left
+                cached.bg.push(BgInstance {
+                    pos: [x, y],
+                    size: [th, h],
+                    color: c,
+                }); // left
             }
         }
 
@@ -170,7 +174,14 @@ impl Renderer {
             color,
         });
         self.mp.panes.push(PaneDraw {
-            scissor: clamp_scissor(0, 0, self.config.width as i32, self.config.height as i32, self.config.width, self.config.height),
+            scissor: clamp_scissor(
+                0,
+                0,
+                self.config.width as i32,
+                self.config.height as i32,
+                self.config.width,
+                self.config.height,
+            ),
             bg_start,
             bg_end: self.mp.bg.len() as u32,
             fg_start: 0,
@@ -257,7 +268,11 @@ impl Renderer {
     /// Record the multi-pane passes: clear once, then for each pane set its
     /// scissor and draw its bg + fg instance sub-ranges. The image overlay (if
     /// any) draws full-surface on top, matching the single-grid path.
-    pub(crate) fn record_multi_passes(&self, view: &wgpu::TextureView, encoder: &mut wgpu::CommandEncoder) {
+    pub(crate) fn record_multi_passes(
+        &self,
+        view: &wgpu::TextureView,
+        encoder: &mut wgpu::CommandEncoder,
+    ) {
         let [r, g, b, a] = self.clear_color;
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("grid-pass-mp"),
@@ -328,5 +343,4 @@ impl Renderer {
             pass.draw(0..4, 0..self.overlay_text_count);
         }
     }
-
 }

@@ -53,46 +53,49 @@ impl Renderer {
         // Spawn the GPU init thread. It requests the adapter (GPU selection) and
         // then the logical device; both are async-over-pollster and CPU-bound
         // (driver IPC + validation layer init).
-        let gpu_thread = std::thread::spawn(move || -> anyhow::Result<(wgpu::Adapter, wgpu::Device, wgpu::Queue)> {
-            let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference,
-                force_fallback_adapter: false,
-                compatible_surface: Some(surface_arc_thread.as_ref()),
-            }))
-            .context("requesting GPU adapter")?;
-            // Request PIPELINE_CACHE if the adapter supports it (Vulkan only today).
-            // We leave all other features/limits at defaults so the device request never
-            // fails on a feature-limited adapter.
-            let supports_pipeline_cache = adapter
-                .features()
-                .contains(wgpu::Features::PIPELINE_CACHE);
-            let required_features = if supports_pipeline_cache {
-                wgpu::Features::PIPELINE_CACHE
-            } else {
-                wgpu::Features::empty()
-            };
-            let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-                label: Some("glassy"),
-                required_features,
-                // Keep limits at their default (adapter-reported) values — over-tight
-                // limits can make request_device fail (e.g. max_texture_dimension_2d
-                // below the surface size, or wrong max_vertex_attributes for the fg
-                // layout). The big win is memory_hints, which avoids the Vulkan
-                // sub-allocator pre-reserving large block pools.
-                required_limits: wgpu::Limits::default(),
-                // MemoryUsage tells the wgpu Vulkan/Metal sub-allocators to prefer
-                // smaller pool blocks and release memory eagerly — the single biggest
-                // idle VRAM reduction without changing render behavior.
-                memory_hints: wgpu::MemoryHints::MemoryUsage,
-                ..Default::default() // experimental_features + trace
-            }))
-            .context("requesting GPU device")?;
-            Ok((adapter, device, queue))
-        });
+        let gpu_thread = std::thread::spawn(
+            move || -> anyhow::Result<(wgpu::Adapter, wgpu::Device, wgpu::Queue)> {
+                let adapter =
+                    pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+                        power_preference,
+                        force_fallback_adapter: false,
+                        compatible_surface: Some(surface_arc_thread.as_ref()),
+                    }))
+                    .context("requesting GPU adapter")?;
+                // Request PIPELINE_CACHE if the adapter supports it (Vulkan only today).
+                // We leave all other features/limits at defaults so the device request never
+                // fails on a feature-limited adapter.
+                let supports_pipeline_cache =
+                    adapter.features().contains(wgpu::Features::PIPELINE_CACHE);
+                let required_features = if supports_pipeline_cache {
+                    wgpu::Features::PIPELINE_CACHE
+                } else {
+                    wgpu::Features::empty()
+                };
+                let (device, queue) =
+                    pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+                        label: Some("glassy"),
+                        required_features,
+                        // Keep limits at their default (adapter-reported) values — over-tight
+                        // limits can make request_device fail (e.g. max_texture_dimension_2d
+                        // below the surface size, or wrong max_vertex_attributes for the fg
+                        // layout). The big win is memory_hints, which avoids the Vulkan
+                        // sub-allocator pre-reserving large block pools.
+                        required_limits: wgpu::Limits::default(),
+                        // MemoryUsage tells the wgpu Vulkan/Metal sub-allocators to prefer
+                        // smaller pool blocks and release memory eagerly — the single biggest
+                        // idle VRAM reduction without changing render behavior.
+                        memory_hints: wgpu::MemoryHints::MemoryUsage,
+                        ..Default::default() // experimental_features + trace
+                    }))
+                    .context("requesting GPU device")?;
+                Ok((adapter, device, queue))
+            },
+        );
 
         // Font load runs concurrently with the GPU thread above.
-        let (text, metrics) =
-            Text::load(font_family.as_deref(), font_px, &font_features).context("loading font and cell metrics")?;
+        let (text, metrics) = Text::load(font_family.as_deref(), font_px, &font_features)
+            .context("loading font and cell metrics")?;
         log::info!("  renderer: font loaded {:.1} ms", ms(t));
 
         // Recover the surface from the Arc now that the thread is done (or about to
@@ -128,25 +131,23 @@ impl Renderer {
         // before this change. The cache bytes are saved at program exit via
         // Renderer::save_pipeline_cache(); the caller is responsible for that call.
         let adapter_info = adapter.get_info();
-        let pipeline_cache: Option<wgpu::PipelineCache> = if device
-            .features()
-            .contains(wgpu::Features::PIPELINE_CACHE)
-        {
-            let cache_data = load_pipeline_cache_data(&adapter_info);
-            // SAFETY: the data bytes came from a previous PipelineCache::get_data()
-            // call (or are None).  wgpu validates the data and falls back to an
-            // empty cache (fallback: true) if it is stale/corrupt.
-            let cache = unsafe {
-                device.create_pipeline_cache(&wgpu::PipelineCacheDescriptor {
-                    label: Some("glassy-pipeline-cache"),
-                    data: cache_data.as_deref(),
-                    fallback: true,
-                })
+        let pipeline_cache: Option<wgpu::PipelineCache> =
+            if device.features().contains(wgpu::Features::PIPELINE_CACHE) {
+                let cache_data = load_pipeline_cache_data(&adapter_info);
+                // SAFETY: the data bytes came from a previous PipelineCache::get_data()
+                // call (or are None).  wgpu validates the data and falls back to an
+                // empty cache (fallback: true) if it is stale/corrupt.
+                let cache = unsafe {
+                    device.create_pipeline_cache(&wgpu::PipelineCacheDescriptor {
+                        label: Some("glassy-pipeline-cache"),
+                        data: cache_data.as_deref(),
+                        fallback: true,
+                    })
+                };
+                Some(cache)
+            } else {
+                None
             };
-            Some(cache)
-        } else {
-            None
-        };
 
         // --- Surface format / present-mode selection. ---
         let caps = surface.get_capabilities(&adapter);
@@ -671,9 +672,11 @@ impl Renderer {
             renderer.ensure_glyphs(byte as char, false, false);
             renderer.ensure_glyphs(byte as char, true, false);
         }
-        log::info!("  renderer: ascii prewarm done {:.1} ms (total Renderer::new)", ms(t));
+        log::info!(
+            "  renderer: ascii prewarm done {:.1} ms (total Renderer::new)",
+            ms(t)
+        );
 
         Ok(renderer)
     }
-
 }

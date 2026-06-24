@@ -1,16 +1,16 @@
 //! Theme import from TOML/YAML files (Alacritty-compatible or base16 format).
 
-use anyhow::{Result, Context, bail};
-use crate::color::Theme;
 use crate::color;
+use crate::color::Theme;
+use anyhow::{Context, Result, bail};
 
 /// Import a color theme from a TOML/YAML file (Alacritty-compatible or base16 format).
 /// Supports both inline Alacritty color tables and base16 palette arrays.
 pub fn import_theme_from_file(path: &str) -> Result<Theme> {
     use std::fs;
 
-    let text = fs::read_to_string(path)
-        .with_context(|| format!("could not read theme file '{path}'"))?;
+    let text =
+        fs::read_to_string(path).with_context(|| format!("could not read theme file '{path}'"))?;
 
     // Try to parse as TOML first (covers Alacritty format).
     if let Ok(theme) = import_theme_toml(&text) {

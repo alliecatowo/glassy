@@ -1,8 +1,8 @@
 //! CLI argument parsing.
 
-use anyhow::{Result, Context, bail};
+use anyhow::{Context, Result, bail};
 
-use super::parse::{RawConfig, parse_pos_f32, parse_bool};
+use super::parse::{RawConfig, parse_bool, parse_pos_f32};
 use super::theme_import::import_theme_from_file;
 
 /// Parse CLI arguments, overriding fields in `raw`.
@@ -30,10 +30,22 @@ pub(super) fn parse_cli(args: impl Iterator<Item = String>, raw: &mut RawConfig)
             "--import-theme" => {
                 let path = next_value(&mut args, "--import-theme")?;
                 let theme = import_theme_from_file(&path)?;
-                raw.color_fg = Some(format!("#{:02x}{:02x}{:02x}", theme.fg.r, theme.fg.g, theme.fg.b));
-                raw.color_bg = Some(format!("#{:02x}{:02x}{:02x}", theme.bg.r, theme.bg.g, theme.bg.b));
-                raw.color_cursor = Some(format!("#{:02x}{:02x}{:02x}", theme.cursor.r, theme.cursor.g, theme.cursor.b));
-                raw.color_selection_bg = Some(format!("#{:02x}{:02x}{:02x}", theme.selection_bg.r, theme.selection_bg.g, theme.selection_bg.b));
+                raw.color_fg = Some(format!(
+                    "#{:02x}{:02x}{:02x}",
+                    theme.fg.r, theme.fg.g, theme.fg.b
+                ));
+                raw.color_bg = Some(format!(
+                    "#{:02x}{:02x}{:02x}",
+                    theme.bg.r, theme.bg.g, theme.bg.b
+                ));
+                raw.color_cursor = Some(format!(
+                    "#{:02x}{:02x}{:02x}",
+                    theme.cursor.r, theme.cursor.g, theme.cursor.b
+                ));
+                raw.color_selection_bg = Some(format!(
+                    "#{:02x}{:02x}{:02x}",
+                    theme.selection_bg.r, theme.selection_bg.g, theme.selection_bg.b
+                ));
                 if raw.color_ansi.is_none() {
                     raw.color_ansi = Some(Default::default());
                 }
@@ -110,8 +122,11 @@ pub(super) fn parse_cli(args: impl Iterator<Item = String>, raw: &mut RawConfig)
             "--restore-session" => {
                 // Optional bool value; bare `--restore-session` means true.
                 match args.peek().map(|s| s.as_str()) {
-                    Some(v) if matches!(v.to_ascii_lowercase().as_str(),
-                        "true" | "yes" | "on" | "1" | "false" | "no" | "off" | "0") =>
+                    Some(v)
+                        if matches!(
+                            v.to_ascii_lowercase().as_str(),
+                            "true" | "yes" | "on" | "1" | "false" | "no" | "off" | "0"
+                        ) =>
                     {
                         let v = args.next().unwrap();
                         raw.restore_session = Some(parse_bool(&v, "--restore-session")?);

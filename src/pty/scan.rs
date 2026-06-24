@@ -145,7 +145,7 @@ pub fn clears_screen(bytes: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{scan_modify_other_keys, scan_sync_2026, ModifyOtherKeys};
+    use super::{ModifyOtherKeys, scan_modify_other_keys, scan_sync_2026};
 
     // ---- scan_modify_other_keys tests ----------------------------------------
 
@@ -153,7 +153,10 @@ mod tests {
     fn scan_mok_level2() {
         // CSI > 4 ; 2 m  (enable-all)
         let seq = b"\x1b[>4;2m";
-        assert_eq!(scan_modify_other_keys(seq), Some(ModifyOtherKeys::EnableAll));
+        assert_eq!(
+            scan_modify_other_keys(seq),
+            Some(ModifyOtherKeys::EnableAll)
+        );
     }
 
     #[test]
@@ -180,7 +183,10 @@ mod tests {
     fn scan_mok_embedded_in_longer_run() {
         // Normal output before + after the CSI > 4 ; 2 m sequence.
         let seq = b"abc\x1b[>4;2mdef";
-        assert_eq!(scan_modify_other_keys(seq), Some(ModifyOtherKeys::EnableAll));
+        assert_eq!(
+            scan_modify_other_keys(seq),
+            Some(ModifyOtherKeys::EnableAll)
+        );
     }
 
     #[test]

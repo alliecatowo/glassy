@@ -150,7 +150,12 @@ fn write_node(node: &NodeDesc, s: &mut String) {
             s.push_str(&id.to_string());
             s.push('}');
         }
-        NodeDesc::Split { dir, ratio, first, second } => {
+        NodeDesc::Split {
+            dir,
+            ratio,
+            first,
+            second,
+        } => {
             s.push_str("{\"split\":");
             s.push_str(match dir {
                 Dir::Vertical => "\"v\"",
@@ -158,7 +163,11 @@ fn write_node(node: &NodeDesc, s: &mut String) {
             });
             s.push_str(",\"ratio\":");
             // Finite, reasonable precision; clamp guards against NaN poisoning.
-            let r = if ratio.is_finite() { ratio.clamp(0.0, 1.0) } else { 0.5 };
+            let r = if ratio.is_finite() {
+                ratio.clamp(0.0, 1.0)
+            } else {
+                0.5
+            };
             s.push_str(&format!("{r:.4}"));
             s.push_str(",\"first\":");
             write_node(first, s);
@@ -188,7 +197,10 @@ fn write_str(v: &str, s: &mut String) {
 // --- JSON parsing (minimal recursive-descent over the subset we emit) -------
 
 fn parse(text: &str) -> Result<Session, String> {
-    let mut p = Parser { b: text.as_bytes(), i: 0 };
+    let mut p = Parser {
+        b: text.as_bytes(),
+        i: 0,
+    };
     p.ws();
     let v = p.value()?;
     let obj = v.as_object()?;
@@ -210,7 +222,9 @@ fn parse_tab(v: &Json) -> Result<TabState, String> {
     if let Some(pv) = field(obj, "panes") {
         for p in pv.as_array()? {
             let po = p.as_object()?;
-            let id = field(po, "id").and_then(Json::as_usize).ok_or("pane missing id")?;
+            let id = field(po, "id")
+                .and_then(Json::as_usize)
+                .ok_or("pane missing id")?;
             let cwd = field(po, "cwd").and_then(Json::as_string);
             panes.push(PaneState { id, cwd });
         }
@@ -405,10 +419,7 @@ impl Parser<'_> {
                         b'r' => out.push('\r'),
                         b't' => out.push('\t'),
                         b'u' => {
-                            let hex = self
-                                .b
-                                .get(self.i..self.i + 4)
-                                .ok_or("bad \\u escape")?;
+                            let hex = self.b.get(self.i..self.i + 4).ok_or("bad \\u escape")?;
                             let code = u32::from_str_radix(
                                 std::str::from_utf8(hex).map_err(|_| "bad \\u hex")?,
                                 16,
@@ -447,7 +458,9 @@ impl Parser<'_> {
             }
         }
         let s = std::str::from_utf8(&self.b[start..self.i]).map_err(|_| "bad number")?;
-        s.parse::<f64>().map(Json::Num).map_err(|_| "bad number".into())
+        s.parse::<f64>()
+            .map(Json::Num)
+            .map_err(|_| "bad number".into())
     }
 
     fn boolean(&mut self) -> Result<Json, String> {
@@ -500,7 +513,10 @@ mod tests {
                         root: NodeDesc::Leaf(0),
                         focused: 0,
                     },
-                    panes: vec![PaneState { id: 0, cwd: Some("/home/me".into()) }],
+                    panes: vec![PaneState {
+                        id: 0,
+                        cwd: Some("/home/me".into()),
+                    }],
                     custom_title: Some("build".into()),
                 },
                 TabState {
@@ -514,7 +530,10 @@ mod tests {
                         focused: 1,
                     },
                     panes: vec![
-                        PaneState { id: 0, cwd: Some("/tmp".into()) },
+                        PaneState {
+                            id: 0,
+                            cwd: Some("/tmp".into()),
+                        },
                         PaneState { id: 1, cwd: None },
                     ],
                     custom_title: None,
@@ -536,8 +555,14 @@ mod tests {
         let s = Session {
             active: 0,
             tabs: vec![TabState {
-                layout: LayoutDesc { root: NodeDesc::Leaf(0), focused: 0 },
-                panes: vec![PaneState { id: 0, cwd: Some("a\"b\\c\nd".into()) }],
+                layout: LayoutDesc {
+                    root: NodeDesc::Leaf(0),
+                    focused: 0,
+                },
+                panes: vec![PaneState {
+                    id: 0,
+                    cwd: Some("a\"b\\c\nd".into()),
+                }],
                 custom_title: Some("tab \"one\"".into()),
             }],
         };
@@ -551,7 +576,10 @@ mod tests {
         let s = Session {
             active: 0,
             tabs: vec![TabState {
-                layout: LayoutDesc { root: NodeDesc::Leaf(0), focused: 0 },
+                layout: LayoutDesc {
+                    root: NodeDesc::Leaf(0),
+                    focused: 0,
+                },
                 panes: vec![PaneState { id: 0, cwd: None }],
                 custom_title: Some("日本語 ✻".into()),
             }],
@@ -582,7 +610,10 @@ mod tests {
         let s = Session {
             active: 0,
             tabs: vec![TabState {
-                layout: LayoutDesc { root: root.clone(), focused: 2 },
+                layout: LayoutDesc {
+                    root: root.clone(),
+                    focused: 2,
+                },
                 panes: vec![
                     PaneState { id: 0, cwd: None },
                     PaneState { id: 1, cwd: None },
@@ -614,7 +645,10 @@ mod extra_tests {
     #[test]
     fn empty_session_serializes_and_parse_returns_none() {
         // An empty tab list is considered "no session" on load.
-        let s = Session { tabs: vec![], active: 0 };
+        let s = Session {
+            tabs: vec![],
+            active: 0,
+        };
         let json = s.to_json();
         // parse succeeds but returns an empty session (0 tabs)
         let back = parse(&json).expect("parse of empty session must succeed");
@@ -626,7 +660,10 @@ mod extra_tests {
         let s = Session {
             active: 0,
             tabs: vec![TabState {
-                layout: LayoutDesc { root: NodeDesc::Leaf(0), focused: 0 },
+                layout: LayoutDesc {
+                    root: NodeDesc::Leaf(0),
+                    focused: 0,
+                },
                 panes: vec![PaneState { id: 0, cwd: None }],
                 custom_title: None,
             }],
@@ -640,13 +677,22 @@ mod extra_tests {
         let s = Session {
             active: 0,
             tabs: vec![TabState {
-                layout: LayoutDesc { root: NodeDesc::Leaf(7), focused: 7 },
-                panes: vec![PaneState { id: 7, cwd: Some("/home/user/projects/glassy".into()) }],
+                layout: LayoutDesc {
+                    root: NodeDesc::Leaf(7),
+                    focused: 7,
+                },
+                panes: vec![PaneState {
+                    id: 7,
+                    cwd: Some("/home/user/projects/glassy".into()),
+                }],
                 custom_title: Some("dev".into()),
             }],
         };
         let back = parse(&s.to_json()).expect("parse");
-        assert_eq!(back.tabs[0].panes[0].cwd.as_deref(), Some("/home/user/projects/glassy"));
+        assert_eq!(
+            back.tabs[0].panes[0].cwd.as_deref(),
+            Some("/home/user/projects/glassy")
+        );
         assert_eq!(back.tabs[0].custom_title.as_deref(), Some("dev"));
     }
 
@@ -654,7 +700,10 @@ mod extra_tests {
 
     #[test]
     fn layout_desc_single_leaf_leaves() {
-        let desc = LayoutDesc { root: NodeDesc::Leaf(42), focused: 42 };
+        let desc = LayoutDesc {
+            root: NodeDesc::Leaf(42),
+            focused: 42,
+        };
         assert_eq!(desc.leaves(), vec![42]);
     }
 
@@ -664,7 +713,7 @@ mod extra_tests {
             root: NodeDesc::Split {
                 dir: Dir::Vertical,
                 ratio: 0.5,
-                first:  Box::new(NodeDesc::Leaf(1)),
+                first: Box::new(NodeDesc::Leaf(1)),
                 second: Box::new(NodeDesc::Leaf(2)),
             },
             focused: 1,
@@ -679,11 +728,11 @@ mod extra_tests {
             root: NodeDesc::Split {
                 dir: Dir::Vertical,
                 ratio: 0.4,
-                first:  Box::new(NodeDesc::Leaf(0)),
+                first: Box::new(NodeDesc::Leaf(0)),
                 second: Box::new(NodeDesc::Split {
                     dir: Dir::Horizontal,
                     ratio: 0.5,
-                    first:  Box::new(NodeDesc::Leaf(1)),
+                    first: Box::new(NodeDesc::Leaf(1)),
                     second: Box::new(NodeDesc::Leaf(2)),
                 }),
             },
@@ -699,7 +748,7 @@ mod extra_tests {
         let root = NodeDesc::Split {
             dir: Dir::Horizontal,
             ratio: 0.5,
-            first:  Box::new(NodeDesc::Leaf(0)),
+            first: Box::new(NodeDesc::Leaf(0)),
             second: Box::new(NodeDesc::Leaf(1)),
         };
         let s = Session {
@@ -707,8 +756,14 @@ mod extra_tests {
             tabs: vec![TabState {
                 layout: LayoutDesc { root, focused: 1 },
                 panes: vec![
-                    PaneState { id: 0, cwd: Some("/tmp/a".into()) },
-                    PaneState { id: 1, cwd: Some("/tmp/b".into()) },
+                    PaneState {
+                        id: 0,
+                        cwd: Some("/tmp/a".into()),
+                    },
+                    PaneState {
+                        id: 1,
+                        cwd: Some("/tmp/b".into()),
+                    },
                 ],
                 custom_title: None,
             }],
@@ -729,13 +784,17 @@ mod extra_tests {
     fn session_tab_missing_layout_errors() {
         // A tab object with no 'layout' key must be an error.
         let json = r#"{"version":1,"active":0,"tabs":[{"focused":0,"panes":[]}]}"#;
-        assert!(parse(json).is_err(), "tab without 'layout' must be an error");
+        assert!(
+            parse(json).is_err(),
+            "tab without 'layout' must be an error"
+        );
     }
 
     #[test]
     fn session_corrupt_node_type_errors() {
         // A node that has neither 'leaf' nor 'split' is not valid.
-        let json = r#"{"version":1,"active":0,"tabs":[{"layout":{"bogus":0},"focused":0,"panes":[]}]}"#;
+        let json =
+            r#"{"version":1,"active":0,"tabs":[{"layout":{"bogus":0},"focused":0,"panes":[]}]}"#;
         assert!(parse(json).is_err());
     }
 
@@ -745,7 +804,7 @@ mod extra_tests {
         let root = NodeDesc::Split {
             dir: Dir::Vertical,
             ratio: f32::NAN,
-            first:  Box::new(NodeDesc::Leaf(0)),
+            first: Box::new(NodeDesc::Leaf(0)),
             second: Box::new(NodeDesc::Leaf(1)),
         };
         let s = Session {
@@ -761,7 +820,10 @@ mod extra_tests {
         };
         let json = s.to_json();
         // NaN must not appear in the JSON.
-        assert!(!json.contains("NaN"), "NaN must be clamped in JSON output: {json}");
+        assert!(
+            !json.contains("NaN"),
+            "NaN must be clamped in JSON output: {json}"
+        );
         // The round-trip must succeed.
         let back = parse(&json).expect("parse with clamped ratio");
         // Ratio should be 0.5 (the clamped default for NaN).
@@ -783,10 +845,38 @@ mod extra_tests {
         let s = Session {
             active: 3,
             tabs: vec![
-                TabState { layout: LayoutDesc { root: NodeDesc::Leaf(0), focused: 0 }, panes: vec![PaneState { id: 0, cwd: None }], custom_title: None },
-                TabState { layout: LayoutDesc { root: NodeDesc::Leaf(0), focused: 0 }, panes: vec![PaneState { id: 0, cwd: None }], custom_title: None },
-                TabState { layout: LayoutDesc { root: NodeDesc::Leaf(0), focused: 0 }, panes: vec![PaneState { id: 0, cwd: None }], custom_title: None },
-                TabState { layout: LayoutDesc { root: NodeDesc::Leaf(0), focused: 0 }, panes: vec![PaneState { id: 0, cwd: None }], custom_title: None },
+                TabState {
+                    layout: LayoutDesc {
+                        root: NodeDesc::Leaf(0),
+                        focused: 0,
+                    },
+                    panes: vec![PaneState { id: 0, cwd: None }],
+                    custom_title: None,
+                },
+                TabState {
+                    layout: LayoutDesc {
+                        root: NodeDesc::Leaf(0),
+                        focused: 0,
+                    },
+                    panes: vec![PaneState { id: 0, cwd: None }],
+                    custom_title: None,
+                },
+                TabState {
+                    layout: LayoutDesc {
+                        root: NodeDesc::Leaf(0),
+                        focused: 0,
+                    },
+                    panes: vec![PaneState { id: 0, cwd: None }],
+                    custom_title: None,
+                },
+                TabState {
+                    layout: LayoutDesc {
+                        root: NodeDesc::Leaf(0),
+                        focused: 0,
+                    },
+                    panes: vec![PaneState { id: 0, cwd: None }],
+                    custom_title: None,
+                },
             ],
         };
         let back = parse(&s.to_json()).expect("parse");
@@ -799,8 +889,14 @@ mod extra_tests {
         let s = Session {
             active: 0,
             tabs: vec![TabState {
-                layout: LayoutDesc { root: NodeDesc::Leaf(0), focused: 0 },
-                panes: vec![PaneState { id: 0, cwd: Some(tricky_cwd.into()) }],
+                layout: LayoutDesc {
+                    root: NodeDesc::Leaf(0),
+                    focused: 0,
+                },
+                panes: vec![PaneState {
+                    id: 0,
+                    cwd: Some(tricky_cwd.into()),
+                }],
                 custom_title: None,
             }],
         };
@@ -815,15 +911,22 @@ mod extra_tests {
         let s = Session {
             active: 0,
             tabs: vec![TabState {
-                layout: LayoutDesc { root: NodeDesc::Leaf(0), focused: 0 },
+                layout: LayoutDesc {
+                    root: NodeDesc::Leaf(0),
+                    focused: 0,
+                },
                 panes: vec![PaneState { id: 0, cwd: None }],
                 custom_title: Some(title.into()),
             }],
         };
         let json = s.to_json();
         // Must not contain raw control chars.
-        assert!(!json.chars().any(|c| (c as u32) < 0x20 && c != '\n' && c != '\r' && c != '\t'),
-            "control chars must be escaped in JSON: {json:?}");
+        assert!(
+            !json
+                .chars()
+                .any(|c| (c as u32) < 0x20 && c != '\n' && c != '\r' && c != '\t'),
+            "control chars must be escaped in JSON: {json:?}"
+        );
         let back = parse(&json).expect("parse");
         assert_eq!(back.tabs[0].custom_title.as_deref(), Some(title));
     }

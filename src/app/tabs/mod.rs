@@ -96,16 +96,26 @@ impl App {
     /// Compute grid dimensions for a physical surface size and the cell metrics.
     /// The renderer insets the grid by `pad` px on all four sides, so the usable
     /// area is reduced by `2 * pad` in each dimension.
-    pub(crate) fn grid_for(size: PhysicalSize<u32>, cell_w: f32, cell_h: f32, pad: f32, status_bar_enabled: bool) -> (usize, usize) {
+    pub(crate) fn grid_for(
+        size: PhysicalSize<u32>,
+        cell_w: f32,
+        cell_h: f32,
+        pad: f32,
+        status_bar_enabled: bool,
+    ) -> (usize, usize) {
         let usable_w = (size.width as f32 - 2.0 * pad).max(0.0);
         let usable_h = (size.height as f32 - 2.0 * pad).max(0.0);
         let cols = ((usable_w / cell_w).floor() as usize).max(1);
         // Reserve the GUI tab bar at the top and the status bar at the bottom (both
         // in PIXELS). The tab-bar inset is applied via `Renderer::set_grid_origin_y`;
         // the status bar simply removes pixels from the available height when enabled.
-        let status_bar_space = if status_bar_enabled { STATUS_BAR_H } else { 0.0 };
-        let rows = (((usable_h - tab_bar_h(cell_h) - status_bar_space) / cell_h).floor() as usize)
-            .max(1);
+        let status_bar_space = if status_bar_enabled {
+            STATUS_BAR_H
+        } else {
+            0.0
+        };
+        let rows =
+            (((usable_h - tab_bar_h(cell_h) - status_bar_space) / cell_h).floor() as usize).max(1);
         (cols, rows)
     }
 
@@ -138,9 +148,7 @@ impl App {
         } else {
             false
         };
-        if allowed
-            && let Err(e) = std::process::Command::new("xdg-open").arg(url).spawn()
-        {
+        if allowed && let Err(e) = std::process::Command::new("xdg-open").arg(url).spawn() {
             log::warn!("failed to open {url}: {e}");
         }
     }
@@ -363,7 +371,11 @@ impl App {
                 pane_cwds: std::mem::take(&mut self.active_pane_cwds),
             });
         }
-        let bi = self.background.iter().position(|s| s.id == target_id).unwrap_or(bi);
+        let bi = self
+            .background
+            .iter()
+            .position(|s| s.id == target_id)
+            .unwrap_or(bi);
         let target = self.background.remove(bi);
         self.pty = Some(target.pty);
         self.panes = target.panes;

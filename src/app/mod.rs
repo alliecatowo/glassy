@@ -32,24 +32,24 @@ use crate::pane;
 use crate::pty::{Pty, UserEvent};
 use crate::renderer::{CursorOverlay, Decorations, LigatureCell, Renderer, UnderlineStyle};
 
-mod helpers;
-mod tabs;
-mod panes;
-mod input;
 mod chrome;
-mod render;
-mod multipane;
-mod settings;
 mod event_loop;
+mod helpers;
+mod input;
 mod keys;
 mod mouse;
-mod search;
+mod multipane;
 mod palette;
+mod panes;
+mod render;
+mod search;
 mod selection;
+mod settings;
+mod tabs;
 
 pub(crate) use helpers::*;
-pub(crate) use search::SearchState;
 pub(crate) use palette::PaletteState;
+pub(crate) use search::SearchState;
 
 /// A runtime font-size adjustment requested via Ctrl +/-/0.
 #[derive(Clone, Copy)]
@@ -434,7 +434,6 @@ pub struct App {
     active_progress: Option<crate::image::ProgressState>,
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::{
@@ -486,7 +485,12 @@ mod tests {
     fn strip_hit_test_matches_layout() {
         // Two tabs (tab 1 active) + their ✕ + a + button + right-hand ?/*/#. The
         // hit-test resolves to the same items the painter draws (pixel rects).
-        let segs = strip_layout(&[("zsh", true, false), ("vim", false, false)], 1200.0, BH, CW);
+        let segs = strip_layout(
+            &[("zsh", true, false), ("vim", false, false)],
+            1200.0,
+            BH,
+            CW,
+        );
         // Probe each tab body at its center and its close box, plus the controls.
         let center = |it: StripItem| {
             segs.iter().find(|s| s.item == it).map(|s| {
@@ -518,8 +522,16 @@ mod tests {
         // One tab is a single wide chip — no ✕ (closing it = quit).
         let segs = strip_layout(&[("shell", true, false)], 1000.0, BH, CW);
         assert!(segs.iter().any(|s| s.item == StripItem::Tab(0)));
-        assert!(!segs.iter().any(|s| matches!(s.item, StripItem::TabClose(_))));
-        let title = &segs.iter().find(|s| s.item == StripItem::Tab(0)).unwrap().label;
+        assert!(
+            !segs
+                .iter()
+                .any(|s| matches!(s.item, StripItem::TabClose(_)))
+        );
+        let title = &segs
+            .iter()
+            .find(|s| s.item == StripItem::Tab(0))
+            .unwrap()
+            .label;
         assert_eq!(title, "shell");
     }
 
@@ -528,7 +540,12 @@ mod tests {
         // Each chip carries its raw title in stable display position; the numeric
         // prefix is added at paint time, so the label is just the title here.
         let segs = strip_layout(&[("a", false, false), ("b", true, false)], 1200.0, BH, CW);
-        let lbl = |it| segs.iter().find(|s| s.item == it).map(|s| s.label.clone()).unwrap();
+        let lbl = |it| {
+            segs.iter()
+                .find(|s| s.item == it)
+                .map(|s| s.label.clone())
+                .unwrap()
+        };
         assert_eq!(lbl(StripItem::Tab(0)), "a");
         assert_eq!(lbl(StripItem::Tab(1)), "b");
     }

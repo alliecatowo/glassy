@@ -1,9 +1,9 @@
 //! Configuration file parsing: RawConfig accumulation, file I/O, and value parsing.
 
+use alacritty_terminal::tty::Shell;
+use anyhow::{Context, Result, bail};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use anyhow::{Result, Context, bail};
-use alacritty_terminal::tty::Shell;
 
 use crate::app::Config;
 use crate::color;
@@ -50,7 +50,6 @@ pub(super) struct RawConfig {
     pub keybinding_overrides: Vec<(String, String)>,
 }
 
-
 impl RawConfig {
     pub fn into_settings(self) -> Result<super::Settings> {
         let theme_input = self.theme.as_deref().unwrap_or("tokyo-night");
@@ -89,14 +88,11 @@ impl RawConfig {
         }
 
         let follow_system = self.follow_system.unwrap_or(false);
-        let theme_dark = color::canonical_name(
-            self.theme_dark.as_deref().unwrap_or(&theme_name),
-        )
-        .to_string();
-        let theme_light = color::canonical_name(
-            self.theme_light.as_deref().unwrap_or("rose-pine-dawn"),
-        )
-        .to_string();
+        let theme_dark =
+            color::canonical_name(self.theme_dark.as_deref().unwrap_or(&theme_name)).to_string();
+        let theme_light =
+            color::canonical_name(self.theme_light.as_deref().unwrap_or("rose-pine-dawn"))
+                .to_string();
 
         let opacity = self.opacity.unwrap_or(DEFAULT_OPACITY);
         let opacity = if opacity.is_finite() {
@@ -145,11 +141,10 @@ impl RawConfig {
     /// after the file load and before CLI overrides, so the CLI still wins.
     pub fn activate_profile(&mut self, name: &str) -> Result<()> {
         let key = name.to_ascii_lowercase();
-        let pairs = self
-            .profiles
-            .get(&key)
-            .cloned()
-            .with_context(|| format!("unknown profile '{name}' (no [profile.{name}] section)"))?;
+        let pairs =
+            self.profiles.get(&key).cloned().with_context(|| {
+                format!("unknown profile '{name}' (no [profile.{name}] section)")
+            })?;
         for (k, v) in &pairs {
             apply_kv(k, v, self).with_context(|| format!("in [profile.{name}]"))?;
         }
@@ -223,10 +218,7 @@ fn config_path() -> Option<PathBuf> {
     #[cfg(target_os = "macos")]
     {
         let home = std::env::var_os("HOME")?;
-        return Some(
-            PathBuf::from(home)
-                .join("Library/Application Support/glassy/glassy.conf")
-        );
+        return Some(PathBuf::from(home).join("Library/Application Support/glassy/glassy.conf"));
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -268,7 +260,11 @@ pub(super) fn parse_config_file(text: &str, raw: &mut RawConfig) -> Result<()> {
                 Section::Keybindings
             } else if let Some(profile_name) = name.strip_prefix("profile.") {
                 let n = profile_name.trim().to_ascii_lowercase();
-                if n.is_empty() { Section::Unknown } else { Section::Profile(n) }
+                if n.is_empty() {
+                    Section::Unknown
+                } else {
+                    Section::Profile(n)
+                }
             } else {
                 Section::Unknown
             };
@@ -318,12 +314,12 @@ pub(super) fn parse_hex_color(s: &str) -> Result<alacritty_terminal::vte::ansi::
     if hex.len() != 6 {
         bail!("color must be a 6-digit hex value, got '{s}'");
     }
-    let r = u8::from_str_radix(&hex[0..2], 16)
-        .with_context(|| format!("invalid hex color '{s}'"))?;
-    let g = u8::from_str_radix(&hex[2..4], 16)
-        .with_context(|| format!("invalid hex color '{s}'"))?;
-    let b = u8::from_str_radix(&hex[4..6], 16)
-        .with_context(|| format!("invalid hex color '{s}'"))?;
+    let r =
+        u8::from_str_radix(&hex[0..2], 16).with_context(|| format!("invalid hex color '{s}'"))?;
+    let g =
+        u8::from_str_radix(&hex[2..4], 16).with_context(|| format!("invalid hex color '{s}'"))?;
+    let b =
+        u8::from_str_radix(&hex[4..6], 16).with_context(|| format!("invalid hex color '{s}'"))?;
     Ok(alacritty_terminal::vte::ansi::Rgb { r, g, b })
 }
 
@@ -480,7 +476,8 @@ pub(super) fn apply_kv(key: &str, value: &str, raw: &mut RawConfig) -> Result<()
             raw.color_selection_bg = Some(value.to_string());
         }
         k if k.starts_with("color.ansi") => {
-            let ansi_idx = k.strip_prefix("color.ansi")
+            let ansi_idx = k
+                .strip_prefix("color.ansi")
                 .and_then(|s| s.parse::<usize>().ok())
                 .filter(|&idx| idx < 16);
             if let Some(idx) = ansi_idx {

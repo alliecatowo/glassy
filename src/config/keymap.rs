@@ -1,7 +1,7 @@
 //! Keybinding types and parsing: chords, actions, and the keymap.
 
-use std::collections::HashMap;
 use anyhow::{Result, bail};
+use std::collections::HashMap;
 
 /// A key chord: modifier flags + a canonical key identifier (lowercase key name
 /// or named-key label). Used as the map key in [`KeyMap`].
@@ -26,25 +26,33 @@ impl Chord {
     /// Human-readable display label, e.g. `"Ctrl+Shift+T"`.
     pub fn display(&self) -> String {
         let mut parts: Vec<&str> = Vec::new();
-        if self.ctrl  { parts.push("Ctrl"); }
-        if self.alt   { parts.push("Alt"); }
-        if self.meta  { parts.push("Super"); }
-        if self.shift { parts.push("Shift"); }
+        if self.ctrl {
+            parts.push("Ctrl");
+        }
+        if self.alt {
+            parts.push("Alt");
+        }
+        if self.meta {
+            parts.push("Super");
+        }
+        if self.shift {
+            parts.push("Shift");
+        }
         let key_label = match self.key.as_str() {
-            "tab"    => "Tab",
-            "space"  => "Space",
-            "enter"  => "Enter",
+            "tab" => "Tab",
+            "space" => "Space",
+            "enter" => "Enter",
             "escape" => "Esc",
             "backspace" => "Backspace",
             "delete" => "Delete",
-            "home"   => "Home",
-            "end"    => "End",
+            "home" => "Home",
+            "end" => "End",
             "pageup" => "PgUp",
             "pagedown" => "PgDn",
-            "arrowup"   | "up"    => "Up",
-            "arrowdown" | "down"  => "Down",
-            "arrowleft" | "left"  => "Left",
-            "arrowright"| "right" => "Right",
+            "arrowup" | "up" => "Up",
+            "arrowdown" | "down" => "Down",
+            "arrowleft" | "left" => "Left",
+            "arrowright" | "right" => "Right",
             k if k.starts_with('f') && k[1..].parse::<u32>().is_ok() => {
                 // Return the uppercase F-key, e.g. "f11" → "F11".
                 // We can't borrow from a local string here in a `match` arm that
@@ -111,7 +119,13 @@ pub fn parse_chord(s: &str) -> Result<Chord> {
         bail!("chord has no key: '{s}'");
     }
     let key = key_part.to_string();
-    Ok(Chord { ctrl, shift, alt, meta, key })
+    Ok(Chord {
+        ctrl,
+        shift,
+        alt,
+        meta,
+        key,
+    })
 }
 
 /// An action that can be bound to a chord.
@@ -146,28 +160,28 @@ impl KeyAction {
     pub fn description(self) -> &'static str {
         use KeyAction::*;
         match self {
-            NewTab           => "New tab",
-            ClosePane        => "Close pane / tab",
-            NextTab          => "Next tab",
-            PrevTab          => "Previous tab",
-            SplitVertical    => "Split vertical",
-            SplitHorizontal  => "Split horizontal",
+            NewTab => "New tab",
+            ClosePane => "Close pane / tab",
+            NextTab => "Next tab",
+            PrevTab => "Previous tab",
+            SplitVertical => "Split vertical",
+            SplitHorizontal => "Split horizontal",
             ToggleFullscreen => "Toggle fullscreen",
-            ToggleMaximize   => "Toggle maximize",
-            Settings         => "Settings",
-            Help             => "Help (this panel)",
-            Search           => "Find in terminal",
-            CommandPalette   => "Command palette",
-            Copy             => "Copy selection",
-            Paste            => "Paste",
-            ToggleStatusBar  => "Toggle status bar",
-            FontIncrease     => "Font bigger",
-            FontDecrease     => "Font smaller",
-            FontReset        => "Font reset",
-            ScrollUp         => "Scroll history up",
-            ScrollDown       => "Scroll history down",
-            ScrollTop        => "Scroll to top",
-            ScrollBottom     => "Scroll to bottom",
+            ToggleMaximize => "Toggle maximize",
+            Settings => "Settings",
+            Help => "Help (this panel)",
+            Search => "Find in terminal",
+            CommandPalette => "Command palette",
+            Copy => "Copy selection",
+            Paste => "Paste",
+            ToggleStatusBar => "Toggle status bar",
+            FontIncrease => "Font bigger",
+            FontDecrease => "Font smaller",
+            FontReset => "Font reset",
+            ScrollUp => "Scroll history up",
+            ScrollDown => "Scroll history down",
+            ScrollTop => "Scroll to top",
+            ScrollBottom => "Scroll to bottom",
         }
     }
 
@@ -192,28 +206,28 @@ pub(crate) fn parse_action(s: &str) -> Result<Option<KeyAction>> {
     use KeyAction::*;
     Ok(Some(match s.trim().to_ascii_lowercase().as_str() {
         "none" | "disabled" | "disable" => return Ok(None),
-        "new_tab"            => NewTab,
-        "close_pane"         => ClosePane,
-        "next_tab"           => NextTab,
-        "prev_tab"           => PrevTab,
-        "split_vertical"     => SplitVertical,
-        "split_horizontal"   => SplitHorizontal,
-        "toggle_fullscreen"  => ToggleFullscreen,
-        "toggle_maximize"    => ToggleMaximize,
-        "settings"           => Settings,
-        "help"               => Help,
-        "search"             => Search,
-        "command_palette"    => CommandPalette,
-        "copy"               => Copy,
-        "paste"              => Paste,
-        "toggle_status_bar"  => ToggleStatusBar,
-        "font_increase"      => FontIncrease,
-        "font_decrease"      => FontDecrease,
-        "font_reset"         => FontReset,
-        "scroll_up"          => ScrollUp,
-        "scroll_down"        => ScrollDown,
-        "scroll_top"         => ScrollTop,
-        "scroll_bottom"      => ScrollBottom,
+        "new_tab" => NewTab,
+        "close_pane" => ClosePane,
+        "next_tab" => NextTab,
+        "prev_tab" => PrevTab,
+        "split_vertical" => SplitVertical,
+        "split_horizontal" => SplitHorizontal,
+        "toggle_fullscreen" => ToggleFullscreen,
+        "toggle_maximize" => ToggleMaximize,
+        "settings" => Settings,
+        "help" => Help,
+        "search" => Search,
+        "command_palette" => CommandPalette,
+        "copy" => Copy,
+        "paste" => Paste,
+        "toggle_status_bar" => ToggleStatusBar,
+        "font_increase" => FontIncrease,
+        "font_decrease" => FontDecrease,
+        "font_reset" => FontReset,
+        "scroll_up" => ScrollUp,
+        "scroll_down" => ScrollDown,
+        "scroll_top" => ScrollTop,
+        "scroll_bottom" => ScrollBottom,
         other => bail!("unrecognized keybinding action '{other}'"),
     }))
 }
@@ -227,34 +241,36 @@ pub type KeyMap = HashMap<Chord, KeyAction>;
 pub fn default_keymap() -> KeyMap {
     use KeyAction::*;
     let defaults: &[(&str, KeyAction)] = &[
-        ("ctrl+shift+t",   NewTab),
-        ("ctrl+shift+w",   ClosePane),
-        ("ctrl+tab",       NextTab),
+        ("ctrl+shift+t", NewTab),
+        ("ctrl+shift+w", ClosePane),
+        ("ctrl+tab", NextTab),
         ("ctrl+shift+tab", PrevTab),
-        ("ctrl+shift+e",   SplitVertical),
-        ("ctrl+shift+o",   SplitHorizontal),
-        ("f11",            ToggleFullscreen),
-        ("f10",            ToggleMaximize),
-        ("ctrl+,",         Settings),
-        ("f1",             Help),
-        ("ctrl+shift+f",   Search),
-        ("ctrl+shift+p",   CommandPalette),
-        ("ctrl+shift+c",   Copy),
-        ("ctrl+shift+v",   Paste),
-        ("ctrl+shift+b",   ToggleStatusBar),
-        ("ctrl++",         FontIncrease),
-        ("ctrl+=",         FontIncrease),
-        ("ctrl+-",         FontDecrease),
-        ("ctrl+0",         FontReset),
-        ("shift+pageup",   ScrollUp),
+        ("ctrl+shift+e", SplitVertical),
+        ("ctrl+shift+o", SplitHorizontal),
+        ("f11", ToggleFullscreen),
+        ("f10", ToggleMaximize),
+        ("ctrl+,", Settings),
+        ("f1", Help),
+        ("ctrl+shift+f", Search),
+        ("ctrl+shift+p", CommandPalette),
+        ("ctrl+shift+c", Copy),
+        ("ctrl+shift+v", Paste),
+        ("ctrl+shift+b", ToggleStatusBar),
+        ("ctrl++", FontIncrease),
+        ("ctrl+=", FontIncrease),
+        ("ctrl+-", FontDecrease),
+        ("ctrl+0", FontReset),
+        ("shift+pageup", ScrollUp),
         ("shift+pagedown", ScrollDown),
-        ("shift+home",     ScrollTop),
-        ("shift+end",      ScrollBottom),
+        ("shift+home", ScrollTop),
+        ("shift+end", ScrollBottom),
     ];
     let mut map = KeyMap::new();
     for (chord_str, action) in defaults {
         match parse_chord(chord_str) {
-            Ok(c) => { map.insert(c, *action); }
+            Ok(c) => {
+                map.insert(c, *action);
+            }
             Err(e) => log::warn!("glassy: bad default chord '{chord_str}': {e}"),
         }
     }
@@ -276,8 +292,12 @@ pub(crate) fn build_keymap(mut base: KeyMap, overrides: &[(String, String)]) -> 
             }
         };
         match parse_action(action_str) {
-            Ok(Some(action)) => { base.insert(chord, action); }
-            Ok(None) => { base.remove(&chord); } // "none" disables the default
+            Ok(Some(action)) => {
+                base.insert(chord, action);
+            }
+            Ok(None) => {
+                base.remove(&chord);
+            } // "none" disables the default
             Err(e) => {
                 log::warn!("glassy: ignoring bad keybinding action '{action_str}': {e}");
             }

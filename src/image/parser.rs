@@ -63,10 +63,12 @@ impl KittyParser {
         // pending map is already full, evict the oldest entry first so we never
         // exceed MAX_PENDING_STREAMS. Do this before touching `entry` so the
         // borrow checker doesn't see two mutable borrows of `self.pending`.
-        if !self.pending.contains_key(&id) && self.pending.len() >= MAX_PENDING_STREAMS
-            && let Some(&oldest) = self.pending.keys().min() {
-                self.pending.remove(&oldest);
-            }
+        if !self.pending.contains_key(&id)
+            && self.pending.len() >= MAX_PENDING_STREAMS
+            && let Some(&oldest) = self.pending.keys().min()
+        {
+            self.pending.remove(&oldest);
+        }
 
         // Append to (or start) the pending buffer for this id.
         let entry = self.pending.entry(id).or_insert_with(|| Pending {
@@ -75,7 +77,9 @@ impl KittyParser {
         });
         // Clamp per-stream payload to avoid OOM from an oversized i=1 flood.
         let remaining = MAX_PENDING_PAYLOAD_BYTES.saturating_sub(entry.payload.len());
-        entry.payload.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+        entry
+            .payload
+            .extend_from_slice(&chunk[..chunk.len().min(remaining)]);
 
         if more {
             return None; // wait for further chunks
@@ -92,7 +96,6 @@ impl KittyParser {
         })
     }
 }
-
 
 /// Decode reassembled payload bytes into RGBA per the declared format.
 pub(crate) fn decode_payload(controls: &Controls, payload: &[u8]) -> Option<DecodedImage> {
@@ -126,7 +129,11 @@ pub(crate) fn decode_payload(controls: &Controls, payload: &[u8]) -> Option<Deco
             for px in payload.chunks_exact(3) {
                 rgba.extend_from_slice(&[px[0], px[1], px[2], 255]);
             }
-            Some(DecodedImage { width: w, height: h, rgba })
+            Some(DecodedImage {
+                width: w,
+                height: h,
+                rgba,
+            })
         }
     }
 }
@@ -138,7 +145,9 @@ pub(crate) fn decode_png(bytes: &[u8]) -> Option<DecodedImage> {
     // strip 16-bit down to 8 so the color-type match below always sees 8bpp.
     decoder.set_transformations(png::Transformations::normalize_to_color8());
     // Limit total bytes the decoder may allocate to prevent OOM from crafted PNGs.
-    decoder.set_limits(png::Limits { bytes: MAX_IMAGE_BYTES });
+    decoder.set_limits(png::Limits {
+        bytes: MAX_IMAGE_BYTES,
+    });
     let mut reader = decoder.read_info().ok()?;
     // Validate header dimensions before allocating the output buffer.
     {
@@ -180,7 +189,11 @@ pub(crate) fn decode_png(bytes: &[u8]) -> Option<DecodedImage> {
         }
         png::ColorType::Indexed => return None, // expansion not requested; skip
     };
-    Some(DecodedImage { width: w, height: h, rgba })
+    Some(DecodedImage {
+        width: w,
+        height: h,
+        rgba,
+    })
 }
 
 /// Minimal standard-base64 decoder (RFC 4648, no padding required). Kept
@@ -288,8 +301,7 @@ pub fn decode_sixel(data: &[u8]) -> Option<DecodedImage> {
                         let c = palette[color];
                         // Clamp the run so x can't advance far past the canvas cap
                         // (bounds the loop against a malicious huge repeat count).
-                        let reps = (count.max(1) as usize)
-                            .min(SIXEL_MAX_DIM.saturating_sub(x) + 1);
+                        let reps = (count.max(1) as usize).min(SIXEL_MAX_DIM.saturating_sub(x) + 1);
                         for _ in 0..reps {
                             for bit in 0..6 {
                                 if bits & (1 << bit) != 0 {
@@ -347,7 +359,11 @@ pub fn decode_sixel(data: &[u8]) -> Option<DecodedImage> {
             rgba.extend_from_slice(&px);
         }
     }
-    Some(DecodedImage { width, height, rgba })
+    Some(DecodedImage {
+        width,
+        height,
+        rgba,
+    })
 }
 
 /// Parse a leading base-10 unsigned integer, returning `(value, bytes_consumed)`.
@@ -379,7 +395,11 @@ fn hls_to_rgb(h: f32, l: f32, s: f32) -> (u8, u8, u8) {
         let v = (l * 255.0).round() as u8;
         return (v, v, v);
     }
-    let q = if l < 0.5 { l * (1.0 + s) } else { l + s - l * s };
+    let q = if l < 0.5 {
+        l * (1.0 + s)
+    } else {
+        l + s - l * s
+    };
     let p = 2.0 * l - q;
     let hk = (h / 360.0).rem_euclid(1.0);
     let conv = |t: f32| {
@@ -427,4 +447,3 @@ fn default_sixel_palette() -> Vec<[u8; 4]> {
     }
     p
 }
-

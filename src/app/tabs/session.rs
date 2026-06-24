@@ -29,7 +29,12 @@ impl App {
                 )
             } else {
                 match self.background.iter().find(|s| s.id == tab_id) {
-                    Some(s) => (s.panes.as_ref(), s.custom_title.clone(), s.last_cwd.clone(), &s.pane_cwds),
+                    Some(s) => (
+                        s.panes.as_ref(),
+                        s.custom_title.clone(),
+                        s.last_cwd.clone(),
+                        &s.pane_cwds,
+                    ),
                     None => continue,
                 }
             };
@@ -40,9 +45,8 @@ impl App {
                 Some(g) => g.layout.leaves(),
                 None => vec![tab_id], // single-pane tab: sole leaf is the tab id
             };
-            let session_id = |live: usize| -> usize {
-                leaves.iter().position(|&l| l == live).unwrap_or(0)
-            };
+            let session_id =
+                |live: usize| -> usize { leaves.iter().position(|&l| l == live).unwrap_or(0) };
 
             let layout = match panes_group {
                 Some(g) => g.layout.to_desc(&session_id),
@@ -96,7 +100,11 @@ impl App {
     /// its persisted cwd; the layout tree and focus are rebuilt; custom titles are
     /// reapplied. Best-effort: a tab that fails to spawn any pane is skipped, and an
     /// empty result leaves the initial tab untouched. Called once at startup.
-    pub(crate) fn restore_session(&mut self, saved: crate::session::Session, event_loop: &ActiveEventLoop) {
+    pub(crate) fn restore_session(
+        &mut self,
+        saved: crate::session::Session,
+        event_loop: &ActiveEventLoop,
+    ) {
         if saved.tabs.is_empty() || self.renderer.is_none() {
             return;
         }
@@ -126,9 +134,11 @@ impl App {
             // Map each session-relative leaf id to a freshly-allocated live id, and
             // spawn a pane PTY per leaf in its saved cwd.
             let leaves = tab.layout.leaves();
-            let mut live_of: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+            let mut live_of: std::collections::HashMap<usize, usize> =
+                std::collections::HashMap::new();
             let mut ptys: std::collections::HashMap<usize, Pty> = std::collections::HashMap::new();
-            let mut cwd_of: std::collections::HashMap<usize, std::path::PathBuf> = std::collections::HashMap::new();
+            let mut cwd_of: std::collections::HashMap<usize, std::path::PathBuf> =
+                std::collections::HashMap::new();
             for &sess_id in &leaves {
                 let live = self.next_id;
                 self.next_id += 1;
@@ -208,7 +218,11 @@ impl App {
                 for &live in live_of.values() {
                     others_titles.entry(live).or_insert_with(String::new);
                 }
-                Some(PaneGroup { layout, others: ptys, others_titles })
+                Some(PaneGroup {
+                    layout,
+                    others: ptys,
+                    others_titles,
+                })
             };
 
             // Per-pane cwds for non-focused panes (for re-persisting later).
@@ -274,7 +288,9 @@ impl App {
 
     /// Spawn a single fresh tab as id 0 (used when session restore fails entirely).
     pub(super) fn spawn_fallback_tab(&mut self) {
-        let Some(r) = self.renderer.as_ref() else { return };
+        let Some(r) = self.renderer.as_ref() else {
+            return;
+        };
         let m = r.cell_metrics();
         if let Ok(pty) = Pty::spawn(
             self.proxy.clone(),

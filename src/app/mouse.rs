@@ -28,8 +28,7 @@ impl App {
         // row actually changes — not every pixel of motion across the panel.
         if self.menu_open && !self.settings_open && !self.help_open {
             if let Some(action) = self.menu_hit_test(position.x, position.y) {
-                let items: &[MenuAction] =
-                    self.menu_items.as_deref().unwrap_or(MenuAction::ALL);
+                let items: &[MenuAction] = self.menu_items.as_deref().unwrap_or(MenuAction::ALL);
                 if let Some(idx) = items.iter().position(|&a| a == action)
                     && idx != self.menu_sel
                 {
@@ -139,7 +138,8 @@ impl App {
                 // with no OSC 8 annotation we fall back to the
                 // plain-text URL/path scanner.
                 let (c, r) = self.mouse_cell;
-                let link = self.cell_hyperlink(c, r)
+                let link = self
+                    .cell_hyperlink(c, r)
                     .or_else(|| self.plain_link_at(c, r));
                 if link != self.hovered_link {
                     self.hovered_link = link;
@@ -294,24 +294,24 @@ impl App {
         // start a text selection or focus-swap. Highest priority among
         // press handlers (the gutter sits in the inter-pane gap, not in any
         // pane's cell area, so this never steals a content click).
-        if button == MouseButton::Left && pressed
-            && let Some(handle) = self.gutter_at(self.mouse_px.0, self.mouse_px.1) {
-                self.apply_gutter_cursor(Some(&handle));
-                self.hovered_gutter = Some(handle.clone());
-                self.dragging_gutter = Some(handle);
-                self.held_button = None;
-                self.mark_dirty(event_loop);
-                return;
-            }
+        if button == MouseButton::Left
+            && pressed
+            && let Some(handle) = self.gutter_at(self.mouse_px.0, self.mouse_px.1)
+        {
+            self.apply_gutter_cursor(Some(&handle));
+            self.hovered_gutter = Some(handle.clone());
+            self.dragging_gutter = Some(handle);
+            self.held_button = None;
+            self.mark_dirty(event_loop);
+            return;
+        }
 
         // A click anywhere while the dropdown is open: invoke the selected item on
         // the left RELEASE edge (consistent with the immediate-mode chrome, which
         // resolves on button-up), dismiss on a press outside the panel, and always
         // close on a right-click. The whole event is consumed either way so it
         // never falls through to start a text selection beneath the menu.
-        if self.menu_open
-            && (button == MouseButton::Left || button == MouseButton::Right)
-        {
+        if self.menu_open && (button == MouseButton::Left || button == MouseButton::Right) {
             let (mx, my) = self.mouse_px;
             if button == MouseButton::Right {
                 // Right-click while menu is open: close without invoking.
@@ -379,7 +379,8 @@ impl App {
         // take priority; plain-text URLs/paths are the fallback.
         if button == MouseButton::Left && pressed && self.mods.control_key() {
             let (c, r) = self.mouse_cell;
-            let uri = self.cell_hyperlink(c, r)
+            let uri = self
+                .cell_hyperlink(c, r)
                 .or_else(|| self.plain_link_at(c, r));
             if let Some(uri) = uri {
                 Self::open_url(&uri);
@@ -416,8 +417,7 @@ impl App {
                 let now = Instant::now();
                 let count = match self.last_click {
                     Some((cell, n, t))
-                        if cell == self.mouse_cell
-                            && now.duration_since(t) < MULTI_CLICK =>
+                        if cell == self.mouse_cell && now.duration_since(t) < MULTI_CLICK =>
                     {
                         (n % 3) + 1
                     }

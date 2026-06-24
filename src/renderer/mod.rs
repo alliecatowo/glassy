@@ -17,16 +17,16 @@ use winit::window::Window;
 
 use crate::text::{CellMetrics, Text};
 
+mod cell;
+mod frame;
 mod geometry;
 mod init;
-mod cell;
-mod overlay;
-mod frame;
 mod multipane;
+mod overlay;
 mod pipeline;
 
 // Re-export geometry helpers so `use super::*` in sibling modules keeps working.
-pub(crate) use geometry::{clamp_scissor, Packer, ScissorRect};
+pub(crate) use geometry::{Packer, ScissorRect, clamp_scissor};
 
 #[cfg(test)]
 mod tests;
@@ -69,7 +69,11 @@ fn save_pipeline_cache(cache: &wgpu::PipelineCache, adapter_info: &wgpu::Adapter
         let _ = std::fs::remove_file(&tmp);
         return;
     }
-    log::info!("glassy: pipeline cache saved ({} B) → {:?}", data.len(), path);
+    log::info!(
+        "glassy: pipeline cache saved ({} B) → {:?}",
+        data.len(),
+        path
+    );
 }
 
 /// Load raw pipeline cache bytes from disk (returns `None` on any error).
@@ -78,7 +82,11 @@ fn load_pipeline_cache_data(adapter_info: &wgpu::AdapterInfo) -> Option<Vec<u8>>
     let path = pipeline_cache_dir().join(&key);
     std::fs::read(&path)
         .inspect(|d| {
-            log::info!("glassy: pipeline cache loaded ({} B) from {:?}", d.len(), path);
+            log::info!(
+                "glassy: pipeline cache loaded ({} B) from {:?}",
+                d.len(),
+                path
+            );
         })
         .ok()
 }
@@ -538,4 +546,3 @@ struct PaneBuild {
     /// Whether to draw the accent focus border for this pane.
     focused: bool,
 }
-

@@ -49,8 +49,12 @@ impl App {
     /// Cells that already carry an OSC 8 annotation are skipped.
     /// Returns all detected `PlainLink` spans for that row.
     pub(crate) fn scan_row_for_links(&self, row: usize) -> Vec<PlainLink> {
-        let Some(pty) = self.pty.as_ref() else { return Vec::new() };
-        if row >= self.rows { return Vec::new(); }
+        let Some(pty) = self.pty.as_ref() else {
+            return Vec::new();
+        };
+        if row >= self.rows {
+            return Vec::new();
+        }
 
         let display_offset = pty.term.lock().grid().display_offset() as i32;
         let point_line = alacritty_terminal::index::Line(row as i32 - display_offset);
@@ -92,9 +96,11 @@ impl App {
     /// Only called when `cell_hyperlink(col, row)` returns `None`.
     pub(crate) fn plain_link_at(&self, col: usize, row: usize) -> Option<String> {
         let links = self.scan_row_for_links(row);
-        links.into_iter().find(|l| col >= l.col_start && col < l.col_end).map(|l| l.uri)
+        links
+            .into_iter()
+            .find(|l| col >= l.col_start && col < l.col_end)
+            .map(|l| l.uri)
     }
-
 }
 
 // ---------------------------------------------------------------------------
@@ -141,7 +147,11 @@ pub(crate) fn scan_plain_links(text: &str, col_map: &[usize]) -> Vec<PlainLink> 
                 let uri = format!("{}{}", uri_kind, body);
                 let col_start = col_map[start_char];
                 let col_end = col_map[end_char - 1] + 1;
-                links.push(PlainLink { uri, col_start, col_end });
+                links.push(PlainLink {
+                    uri,
+                    col_start,
+                    col_end,
+                });
             }
             i = end_char;
             continue;
@@ -181,7 +191,11 @@ pub(crate) fn scan_plain_links(text: &str, col_map: &[usize]) -> Vec<PlainLink> 
                     } else {
                         format!("file://{}", super::percent_encode_path(&raw_path))
                     };
-                    links.push(PlainLink { uri, col_start, col_end });
+                    links.push(PlainLink {
+                        uri,
+                        col_start,
+                        col_end,
+                    });
                 }
                 i = end_char;
                 continue;
@@ -200,41 +214,68 @@ pub(crate) fn scan_plain_links(text: &str, col_map: &[usize]) -> Vec<PlainLink> 
 fn match_scheme(chars: &[char], i: usize) -> Option<(usize, &'static str)> {
     let remaining = &chars[i..];
     // Check for "https://"
-    if starts_with_ci(remaining, &['h','t','t','p','s',':','/','/']) {
+    if starts_with_ci(remaining, &['h', 't', 't', 'p', 's', ':', '/', '/']) {
         return Some((8, "https://"));
     }
     // Check for "http://" (must not already be "https://")
-    if starts_with_ci(remaining, &['h','t','t','p',':','/','/']) {
+    if starts_with_ci(remaining, &['h', 't', 't', 'p', ':', '/', '/']) {
         return Some((7, "http://"));
     }
     // Check for "file://"
-    if starts_with_ci(remaining, &['f','i','l','e',':','/','/']) {
+    if starts_with_ci(remaining, &['f', 'i', 'l', 'e', ':', '/', '/']) {
         return Some((7, "file://"));
     }
     None
 }
 
 fn starts_with_ci(chars: &[char], prefix: &[char]) -> bool {
-    if chars.len() < prefix.len() { return false; }
-    chars[..prefix.len()].iter().zip(prefix.iter()).all(|(a, b)| a.to_ascii_lowercase() == *b)
+    if chars.len() < prefix.len() {
+        return false;
+    }
+    chars[..prefix.len()]
+        .iter()
+        .zip(prefix.iter())
+        .all(|(a, b)| a.to_ascii_lowercase() == *b)
 }
 
 /// Characters allowed inside a URL body (RFC 3986 unreserved + reserved,
 /// minus whitespace and bare `<>`).
 fn is_url_char(c: char) -> bool {
     c.is_ascii_alphanumeric()
-        || matches!(c,
-            '-' | '_' | '.' | '~' | '%' | '+' | '='
-            | '?' | '#' | '@' | '!' | '$' | '&'
-            | '\'' | '*' | ',' | ';' | ':' | '['
-            | ']' | '(' | ')' | '/'
+        || matches!(
+            c,
+            '-' | '_'
+                | '.'
+                | '~'
+                | '%'
+                | '+'
+                | '='
+                | '?'
+                | '#'
+                | '@'
+                | '!'
+                | '$'
+                | '&'
+                | '\''
+                | '*'
+                | ','
+                | ';'
+                | ':'
+                | '['
+                | ']'
+                | '('
+                | ')'
+                | '/'
         )
 }
 
 /// Characters allowed in a bare path (more restrictive: no `?`, `#`, `@`, etc.)
 fn is_path_char(c: char) -> bool {
     c.is_ascii_alphanumeric()
-        || matches!(c, '-' | '_' | '.' | '~' | '%' | '+' | '/' | '=' | ':' | '@' | ',')
+        || matches!(
+            c,
+            '-' | '_' | '.' | '~' | '%' | '+' | '/' | '=' | ':' | '@' | ','
+        )
         || (!c.is_ascii() && c != '\0')
 }
 
@@ -438,7 +479,11 @@ mod tests {
         let links = scan_plain_links(text, &col_map);
         assert_eq!(links.len(), 1);
         // The URI must be a file:// form.
-        assert!(links[0].uri.starts_with("file://"), "tilde path must be file:// URI: {}", links[0].uri);
+        assert!(
+            links[0].uri.starts_with("file://"),
+            "tilde path must be file:// URI: {}",
+            links[0].uri
+        );
     }
 
     #[test]
@@ -493,7 +538,10 @@ mod tests {
         let text = "http\0://example.com";
         let col_map = col_map_identity(text.chars().count());
         let links = scan_plain_links(text, &col_map);
-        assert!(links.is_empty(), "null sentinel must break the scheme match");
+        assert!(
+            links.is_empty(),
+            "null sentinel must break the scheme match"
+        );
     }
 
     #[test]

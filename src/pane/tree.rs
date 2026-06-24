@@ -145,7 +145,12 @@ impl Node {
                     });
                 }
                 // Otherwise descend into whichever child contains the point.
-                let first_rect = Rect { x: area.x, y: area.y, w: fw, h: area.h };
+                let first_rect = Rect {
+                    x: area.x,
+                    y: area.y,
+                    w: fw,
+                    h: area.h,
+                };
                 let second_rect = Rect {
                     x: area.x + fw + gap,
                     y: area.y,
@@ -178,7 +183,12 @@ impl Node {
                         axis_len: usable,
                     });
                 }
-                let first_rect = Rect { x: area.x, y: area.y, w: area.w, h: fh };
+                let first_rect = Rect {
+                    x: area.x,
+                    y: area.y,
+                    w: area.w,
+                    h: fh,
+                };
                 let second_rect = Rect {
                     x: area.x,
                     y: area.y + fh + gap,
@@ -262,7 +272,12 @@ impl Node {
     pub(super) fn to_desc(&self, id_of: &impl Fn(usize) -> usize) -> NodeDesc {
         match self {
             Node::Leaf(l) => NodeDesc::Leaf(id_of(*l)),
-            Node::Split { dir, ratio, first, second } => NodeDesc::Split {
+            Node::Split {
+                dir,
+                ratio,
+                first,
+                second,
+            } => NodeDesc::Split {
                 dir: *dir,
                 ratio: *ratio,
                 first: Box::new(first.to_desc(id_of)),
@@ -274,7 +289,12 @@ impl Node {
     pub(super) fn from_desc(desc: &NodeDesc, id_of: &impl Fn(usize) -> usize) -> Node {
         match desc {
             NodeDesc::Leaf(l) => Node::Leaf(id_of(*l)),
-            NodeDesc::Split { dir, ratio, first, second } => Node::Split {
+            NodeDesc::Split {
+                dir,
+                ratio,
+                first,
+                second,
+            } => Node::Split {
                 dir: *dir,
                 ratio: *ratio,
                 first: Box::new(Node::from_desc(first, id_of)),

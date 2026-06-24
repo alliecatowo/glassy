@@ -4,8 +4,8 @@
 use std::io::{Read, Write};
 use std::num::NonZeroUsize;
 use std::os::fd::{AsRawFd, BorrowedFd};
-use std::sync::{Arc, Mutex};
 use std::sync::mpsc::{Receiver, TryRecvError};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use alacritty_terminal::event::{Event, EventListener, OnResize};
@@ -15,9 +15,9 @@ use alacritty_terminal::tty::{self, EventedReadWrite};
 use alacritty_terminal::vte::ansi::Processor;
 use polling::{Event as PollEvent, Events, PollMode, Poller};
 
+use super::scan;
 use crate::image::ImageStore;
 use crate::pty::{EventProxy, LoopMsg, PromptTracker};
-use super::scan;
 
 /// Maximum time to hold a synchronized-output buffer before forcibly waking the
 /// UI. 16 ms gives ~1 frame at 60 Hz; applications should close the bracket well
@@ -105,9 +105,7 @@ pub fn run_loop(
 
         // Check for sync timeout expiry: if the deadline passed and we're still
         // inside a bracket, force-close it and wake the UI.
-        if sync_depth > 0
-            && sync_deadline.is_some_and(|d| Instant::now() >= d)
-        {
+        if sync_depth > 0 && sync_deadline.is_some_and(|d| Instant::now() >= d) {
             sync_depth = 0;
             sync_deadline = None;
             if sync_pending_wakeup {
@@ -160,7 +158,9 @@ pub fn run_loop(
                                 // Forward the level to the UI thread so encode_key
                                 // can emit the CSI 27 ; mods ; code ~ form.
                                 if let Some(level) = scan::scan_modify_other_keys(&bytes) {
-                                    proxy.send_user(crate::pty::UserEvent::ModifyOtherKeys(proxy.id, level));
+                                    proxy.send_user(crate::pty::UserEvent::ModifyOtherKeys(
+                                        proxy.id, level,
+                                    ));
                                 }
 
                                 // ---- Synchronized output interception ------------
@@ -233,12 +233,14 @@ pub fn run_loop(
                                         p.push(row);
                                     }
                                 }
-                                proxy.send_user(crate::pty::UserEvent::SemanticMark(proxy.id, mark));
+                                proxy
+                                    .send_user(crate::pty::UserEvent::SemanticMark(proxy.id, mark));
                             }
                             crate::image::TapEvent::Notification(text) => {
                                 // OSC 9 / OSC 777: forward to the UI thread so it can
                                 // fire a native desktop notification when unfocused.
-                                proxy.send_user(crate::pty::UserEvent::Notification(proxy.id, text));
+                                proxy
+                                    .send_user(crate::pty::UserEvent::Notification(proxy.id, text));
                             }
                             crate::image::TapEvent::Progress(state) => {
                                 // OSC 9;4: progress report — forward to the UI thread
@@ -261,7 +263,11 @@ pub fn run_loop(
                         }
                     }
                 }
-                Err(ref e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted) => {}
+                Err(ref e)
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                    ) => {}
                 Err(_) => {
                     child_exited = true; // e.g. EIO when the child exits
                     break 'main;

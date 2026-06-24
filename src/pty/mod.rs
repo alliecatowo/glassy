@@ -14,13 +14,13 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
 use std::sync::mpsc::{Sender, channel};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use alacritty_terminal::event::{Event, EventListener, WindowSize};
-use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::grid::Dimensions;
+use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::{ClipboardType, Config, Term};
 use alacritty_terminal::tty::{self, Options as PtyOptions, Shell};
 use polling::Poller;
@@ -29,8 +29,8 @@ use winit::event_loop::EventLoopProxy;
 use crate::image::ImageStore;
 use crate::input::ModifyOtherKeys;
 
-mod scan;
 pub mod r#loop;
+mod scan;
 
 // ---- Terminfo availability check ------------------------------------------------
 
@@ -104,10 +104,12 @@ impl PaneInfo {
         let foreground_comm = read_foreground_comm(shell_pid);
         // Resolve the git branch once per refresh (not per frame); the walk + HEAD
         // read is cheap at the 2 s cadence but a measurable idle-CPU cost at 60 Hz.
-        let git_branch = cwd
-            .as_deref()
-            .and_then(crate::app::read_git_branch);
-        Self { cwd, foreground_comm, git_branch }
+        let git_branch = cwd.as_deref().and_then(crate::app::read_git_branch);
+        Self {
+            cwd,
+            foreground_comm,
+            git_branch,
+        }
     }
 }
 
@@ -173,7 +175,9 @@ fn read_foreground_comm(shell_pid: u32) -> Option<String> {
                 // unparseable entry; skip to the next pid instead.
                 let Some(after) = s.rfind(')') else { continue };
                 let tokens: Vec<&str> = s[after + 1..].split_whitespace().collect();
-                let Some(Ok(pg)) = tokens.get(2).map(|t| t.parse::<u32>()) else { continue };
+                let Some(Ok(pg)) = tokens.get(2).map(|t| t.parse::<u32>()) else {
+                    continue;
+                };
                 if pg == tpgid
                     && let Ok(comm) = std::fs::read_to_string(format!("/proc/{pid}/comm"))
                 {
@@ -295,12 +299,12 @@ impl EventListener for EventProxy {
             }
             // OSC 52 clipboard. arboard must run on the UI thread (as app.rs does),
             // not here on the PTY thread, so forward both store and load to it.
-            Event::ClipboardStore(ty, text) => {
-                Some(UserEvent::ClipboardStore(self.id, ty, text))
-            }
-            Event::ClipboardLoad(ty, formatter) => {
-                Some(UserEvent::ClipboardLoad(self.id, ty, ClipboardFormatter(formatter)))
-            }
+            Event::ClipboardStore(ty, text) => Some(UserEvent::ClipboardStore(self.id, ty, text)),
+            Event::ClipboardLoad(ty, formatter) => Some(UserEvent::ClipboardLoad(
+                self.id,
+                ty,
+                ClipboardFormatter(formatter),
+            )),
             // TextAreaSizeRequest needs the cell-pixel + grid geometry, which the
             // EventProxy doesn't carry; left unanswered (not needed for the color
             // queries this fixes).
@@ -497,7 +501,11 @@ impl Pty {
             semantic_escape_chars,
             ..Config::default()
         };
-        let term = Arc::new(FairMutex::new(Term::new(config, &grid, event_proxy.clone())));
+        let term = Arc::new(FairMutex::new(Term::new(
+            config,
+            &grid,
+            event_proxy.clone(),
+        )));
 
         // Safely convert cols/rows from usize to u16, capping at u16::MAX if needed.
         let window_size = WindowSize {
@@ -533,13 +541,30 @@ impl Pty {
         std::thread::Builder::new()
             .name(format!("glassy-pty-{id}"))
             .spawn(move || {
-                r#loop::run_loop(pty, loop_term, event_proxy, rx, loop_poller, loop_images, loop_prompts);
+                r#loop::run_loop(
+                    pty,
+                    loop_term,
+                    event_proxy,
+                    rx,
+                    loop_poller,
+                    loop_images,
+                    loop_prompts,
+                );
             })?;
 
         // Read the initial cwd eagerly so the pane header shows the right path on
         // the first frame (before the shell emits its first OSC 7).
         let pane_info = PaneInfo::read(shell_pid);
-        Ok(Pty { term, images, prompts, shell_pid, pane_info, pane_info_at: Instant::now(), tx, poller })
+        Ok(Pty {
+            term,
+            images,
+            prompts,
+            shell_pid,
+            pane_info,
+            pane_info_at: Instant::now(),
+            tx,
+            poller,
+        })
     }
 
     fn send(&self, msg: LoopMsg) {

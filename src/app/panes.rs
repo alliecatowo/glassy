@@ -15,7 +15,11 @@ impl App {
         // status bar. Both insets are in pixels; the per-pane `pad` is applied by
         // the pane sizing math independently.
         let strip_bottom = tab_bar_h(m.height).round() as i32;
-        let status_h = if self.config.status_bar { STATUS_BAR_H.round() as i32 } else { 0 };
+        let status_h = if self.config.status_bar {
+            STATUS_BAR_H.round() as i32
+        } else {
+            0
+        };
         let (sw, sh) = r.surface_size();
         Some(pane::Rect {
             x: 0,
@@ -44,17 +48,25 @@ impl App {
     /// cell math keep using the focused pane's grid); the others are sized to
     /// their own rects directly. A no-op (single-pane handling) when not split.
     pub(crate) fn resize_panes(&mut self) {
-        let Some(area) = self.content_area() else { return };
+        let Some(area) = self.content_area() else {
+            return;
+        };
         // Collect rects first to drop the immutable `self` borrow before mutating.
         let rects: Vec<(usize, pane::Rect)> = match self.panes.as_ref() {
             Some(g) => g.layout.rects(area, Self::PANE_GAP),
             None => return,
         };
-        let Some(r) = self.renderer.as_ref() else { return };
+        let Some(r) = self.renderer.as_ref() else {
+            return;
+        };
         let m = r.cell_metrics();
         let (cw, ch) = (m.width.round() as u16, m.height.round() as u16);
         let focused = self.panes.as_ref().unwrap().layout.focused();
-        let hdr_h = if self.config.pane_headers { Self::PANE_HEADER_H } else { 0 };
+        let hdr_h = if self.config.pane_headers {
+            Self::PANE_HEADER_H
+        } else {
+            0
+        };
         for (id, rect) in rects {
             // Mirror render_split's body rect: the cell grid starts below the
             // (optional) pane header, so the PTY must be sized to that body height.
@@ -131,7 +143,9 @@ impl App {
         }
         // Seed the previous focused pane's current title so its header displays
         // immediately (OSC updates will overwrite as the shell prompts).
-        g.others_titles.entry(prev_focus).or_insert_with(|| self.active_title.clone());
+        g.others_titles
+            .entry(prev_focus)
+            .or_insert_with(|| self.active_title.clone());
         // The new pane starts with the same title; it will update via OSC once
         // the shell emits one.
         g.others_titles.entry(new_id).or_default();
@@ -146,7 +160,9 @@ impl App {
     /// Move focus to the neighbouring pane in direction `m` (Alt+Arrow). Swaps
     /// `self.pty` with the newly-focused pane's parked PTY. No-op when not split.
     pub(crate) fn focus_pane(&mut self, m: pane::Move, event_loop: &ActiveEventLoop) {
-        let Some(area) = self.content_area() else { return };
+        let Some(area) = self.content_area() else {
+            return;
+        };
         let Some(g) = self.panes.as_mut() else { return };
         let prev = g.layout.focused();
         let Some(next) = g.layout.focus_move(m, area, Self::PANE_GAP) else {
@@ -265,7 +281,9 @@ impl App {
         let Some((id, _)) = self.pane_at(x, y) else {
             return false;
         };
-        let Some(g) = self.panes.as_mut() else { return false };
+        let Some(g) = self.panes.as_mut() else {
+            return false;
+        };
         let prev = g.layout.focused();
         if id == prev {
             return false;
@@ -304,8 +322,13 @@ impl App {
         }
         let area = self.content_area()?;
         let g = self.panes.as_ref()?;
-        g.layout
-            .split_at(area, Self::PANE_GAP, x.round() as i32, y.round() as i32, Self::GUTTER_TOL)
+        g.layout.split_at(
+            area,
+            Self::PANE_GAP,
+            x.round() as i32,
+            y.round() as i32,
+            Self::GUTTER_TOL,
+        )
     }
 
     /// Hit-test the pane headers in the current split. Returns `(pane_id, in_menu_btn)`
@@ -338,7 +361,12 @@ impl App {
 
     /// Handle a left-click on a pane header. Returns `true` if the click was
     /// consumed (so the caller should skip further mouse processing).
-    pub(crate) fn pane_header_click(&mut self, x: f64, y: f64, event_loop: &ActiveEventLoop) -> bool {
+    pub(crate) fn pane_header_click(
+        &mut self,
+        x: f64,
+        y: f64,
+        event_loop: &ActiveEventLoop,
+    ) -> bool {
         let Some((id, in_menu_btn)) = self.pane_header_at(x, y) else {
             return false;
         };
@@ -375,7 +403,11 @@ impl App {
         let menu_btn_w = hdr_h;
         let ax = r.x as f32 + r.w as f32 - menu_btn_w;
         let ay = r.y as f32 + hdr_h;
-        let max_label = Self::PANE_MENU_ITEMS.iter().map(|s| s.len()).max().unwrap_or(4) as f32;
+        let max_label = Self::PANE_MENU_ITEMS
+            .iter()
+            .map(|s| s.len())
+            .max()
+            .unwrap_or(4) as f32;
         let panel_w = (max_label * m.width + 24.0).ceil();
         let row_h = (m.height + 6.0).ceil();
         let xi = x as f32;
@@ -420,7 +452,9 @@ impl App {
         let lo = min_r;
         let hi = 1.0 - min_r;
         let ratio = if lo <= hi { raw.clamp(lo, hi) } else { 0.5 };
-        let Some(g) = self.panes.as_mut() else { return false };
+        let Some(g) = self.panes.as_mut() else {
+            return false;
+        };
         if g.layout.set_ratio(&handle.path, ratio) {
             self.resize_panes();
             self.force_full_redraw = true;
@@ -487,7 +521,10 @@ impl App {
     pub(crate) fn id_in_active_tab(&self, id: usize) -> bool {
         id == self.active_id
             || id == self.active_focused_id()
-            || self.panes.as_ref().is_some_and(|g| g.others.contains_key(&id))
+            || self
+                .panes
+                .as_ref()
+                .is_some_and(|g| g.others.contains_key(&id))
     }
 
     /// The display position (in `tab_order`) of the tab that owns pane `id`, where
@@ -508,5 +545,4 @@ impl App {
         }
         None
     }
-
 }

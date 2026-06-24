@@ -23,17 +23,16 @@
 
 use std::collections::HashMap;
 
-use crate::color::{self, lighten, darken, luma};
+use crate::color::{self, darken, lighten, luma};
 use crate::renderer::Renderer;
 
-
-mod widgets;
 mod chrome;
 mod help;
+mod widgets;
 
-pub use widgets::*;
 pub use chrome::*;
 pub use help::*;
+pub use widgets::*;
 
 /// Combine a base widget id with a sub-index (segments / stepper buttons).
 pub(crate) fn id_combine(base: WidgetId, sub: u64) -> WidgetId {
@@ -125,7 +124,10 @@ pub struct Anim {
 
 impl Anim {
     pub fn new(start: f32) -> Self {
-        Anim { value: start, target: start }
+        Anim {
+            value: start,
+            target: start,
+        }
     }
 
     /// Lerp `value` toward `target` by `rate` per second over `dt` seconds.
@@ -180,7 +182,6 @@ fn with_alpha(mut c: [f32; 4], a: f32) -> [f32; 4] {
     c[3] = a;
     c
 }
-
 
 /// E1 chrome bar fill.
 pub fn glass_body() -> [f32; 4] {

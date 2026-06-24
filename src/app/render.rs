@@ -78,12 +78,24 @@ impl App {
         // painter's inputs changed or a full redraw is forced (e.g. theme), else
         // replay the cached overlay instead of re-shaping every tab title glyph.
         let new_tab_key = Self::tab_bar_key(
-            &tab_snapshot, tab_focused, tab_hovered, tab_held, tab_dragging, tab_mouse,
-            tab_spinner, tab_count, strip_off, strip_hist,
+            &tab_snapshot,
+            tab_focused,
+            tab_hovered,
+            tab_held,
+            tab_dragging,
+            tab_mouse,
+            tab_spinner,
+            tab_count,
+            strip_off,
+            strip_hist,
         );
         let tab_bar_rebuild = self.force_full_redraw
             || self.tab_bar_key != Some(new_tab_key)
-            || !self.renderer.as_ref().map(|r| r.has_tab_overlay()).unwrap_or(false);
+            || !self
+                .renderer
+                .as_ref()
+                .map(|r| r.has_tab_overlay())
+                .unwrap_or(false);
 
         // Status-bar snapshot: term mode, scroll position, selection count.
         // Taken here (under the `&self` borrow) before we take `&mut self.renderer`.
@@ -93,7 +105,8 @@ impl App {
                 let mode = *t.mode();
                 let disp = t.grid().display_offset() as i32;
                 let hist = t.grid().history_size();
-                let sel = t.selection_to_string()
+                let sel = t
+                    .selection_to_string()
                     .map(|s| s.chars().count())
                     .unwrap_or(0);
                 (mode, disp, hist, sel)
@@ -101,16 +114,24 @@ impl App {
             None => (TermMode::empty(), 0, 0, 0),
         };
         let sb_focused = self.focused;
-        let sb_surface_h = self.renderer.as_ref().map(|r| r.surface_size().1).unwrap_or(0);
+        let sb_surface_h = self
+            .renderer
+            .as_ref()
+            .map(|r| r.surface_size().1)
+            .unwrap_or(0);
         // Status-bar cwd + git branch: read from the active PTY's cached PaneInfo.
         // Evaluated here (before the renderer borrow) once per frame; PaneInfo is
         // refreshed at most every 2 s (PROC_REFRESH_INTERVAL) by about_to_wait.
-        let sb_cwd: Option<std::path::PathBuf> = self.pty.as_ref()
+        let sb_cwd: Option<std::path::PathBuf> = self
+            .pty
+            .as_ref()
             .and_then(|p| p.pane_info.cwd.clone())
             .or_else(|| self.active_cwd.clone()); // fallback to OSC 7 path
         // Branch is precomputed in PaneInfo (refreshed on the 2 s proc poll), so
         // the render path does no filesystem walk.
-        let sb_git_branch: Option<String> = self.pty.as_ref()
+        let sb_git_branch: Option<String> = self
+            .pty
+            .as_ref()
             .and_then(|p| p.pane_info.git_branch.clone());
         let sb_progress = self.active_progress;
 
@@ -134,7 +155,9 @@ impl App {
 
         // Menu/help overlay inputs snapshotted before the renderer borrow.
         // `has_selection` lets Copy be greyed when nothing is selected.
-        let has_selection_for_menu = self.pty.as_ref()
+        let has_selection_for_menu = self
+            .pty
+            .as_ref()
             .and_then(|p| p.term.lock().selection_to_string())
             .map(|s| !s.is_empty())
             .unwrap_or(false);
@@ -152,19 +175,22 @@ impl App {
                     (left as f32 * 8.0, top as f32 * 16.0)
                 }
             });
-            Some((entries, ax, ay, self.menu_sel,
+            Some((
+                entries,
+                ax,
+                ay,
+                self.menu_sel,
                 (self.mouse_px.0 as f32, self.mouse_px.1 as f32),
                 self.held_button == Some(0),
-                self.gui_click_edge))
+                self.gui_click_edge,
+            ))
         } else {
             None
         };
 
         // Find-bar (search) inputs snapshotted before the disjoint renderer/pty
         // borrows. `search_highlights` + `search_readout` both lock the term.
-        let search_inputs = self
-            .search_readout()
-            .map(|r| (r, self.search_highlights()));
+        let search_inputs = self.search_readout().map(|r| (r, self.search_highlights()));
         // Command-palette inputs snapshotted before the borrow.
         let palette_inputs = self.palette_snapshot();
 
@@ -307,8 +333,16 @@ impl App {
                         let lc = &run_cells[0];
                         let ch = run_text.chars().next().unwrap_or(' ');
                         renderer.push_cell(
-                            lc.col, run_row, ch, &[], lc.fg, lc.bg,
-                            run_bold, run_italic, lc.wide, lc.decorations,
+                            lc.col,
+                            run_row,
+                            ch,
+                            &[],
+                            lc.fg,
+                            lc.bg,
+                            run_bold,
+                            run_italic,
+                            lc.wide,
+                            lc.decorations,
                         );
                     } else {
                         renderer.push_ligature_run(
@@ -419,13 +453,14 @@ impl App {
             // OSC 8 links: match by URI stored in the cell's hyperlink field.
             // Plain-text links: match by pre-computed col range on the hovered row.
             if !hidden && matches!(decorations.underline, UnderlineStyle::None) {
-                let is_hovered_osc8 = hovered_link.as_deref()
+                let is_hovered_osc8 = hovered_link
+                    .as_deref()
                     .is_some_and(|hov| cell.hyperlink().is_some_and(|h| h.uri() == hov));
                 let is_hovered_plain = !plain_link_spans.is_empty()
                     && row_u == hovered_cell_row
-                    && plain_link_spans.iter().any(|s|
-                        (col as usize) >= s.col_start && (col as usize) < s.col_end
-                    );
+                    && plain_link_spans
+                        .iter()
+                        .any(|s| (col as usize) >= s.col_start && (col as usize) < s.col_end);
                 if is_hovered_osc8 || is_hovered_plain {
                     decorations.underline = UnderlineStyle::Single;
                 }
@@ -463,7 +498,8 @@ impl App {
                 && !hidden
                 && combiners.is_empty()
                 && !wide
-                && ch != ' ' && ch != '\0'
+                && ch != ' '
+                && ch != '\0'
                 && !is_box_or_block;
 
             if liga_eligible {
@@ -582,7 +618,9 @@ impl App {
                 let m = renderer.cell_metrics();
                 let pad = renderer.pad();
                 for p in store.placements() {
-                    let Some(img) = store.image(p.id) else { continue };
+                    let Some(img) = store.image(p.id) else {
+                        continue;
+                    };
                     let screen_vp = p.row - display_offset;
                     if screen_vp < 0 || screen_vp >= rows as i32 || p.col >= self.cols {
                         continue;
@@ -677,8 +715,14 @@ impl App {
             let mouse = (self.mouse_px.0 as f32, self.mouse_px.1 as f32);
             let row_refs: Vec<(&str, Option<&str>)> =
                 rows.iter().map(|(l, h)| (l.as_str(), *h)).collect();
-            self.palette_rows =
-                Self::paint_palette(renderer, (sw as f32, sh as f32), query, &row_refs, *sel, mouse);
+            self.palette_rows = Self::paint_palette(
+                renderer,
+                (sw as f32, sh as f32),
+                query,
+                &row_refs,
+                *sel,
+                mouse,
+            );
         }
 
         // Modal overlays (help / settings): centered panels over a dimmed backdrop.
@@ -724,7 +768,8 @@ impl App {
             let mouse = (self.mouse_px.0 as f32, self.mouse_px.1 as f32);
             let help_result = gui::build_help(
                 renderer,
-                m.width, m.height,
+                m.width,
+                m.height,
                 (sw as f32, sh as f32),
                 mouse,
                 self.held_button == Some(0),
@@ -744,23 +789,30 @@ impl App {
         // Real GUI menu (§3.6): drawn AFTER the scrim-bearing overlays so it always
         // floats on top. Captured into a local so we can invoke the action after the
         // renderer borrow ends (invoking mutates `self`).
-        let menu_clicked_action: Option<MenuAction> =
-            if let Some((ref entries, ax, ay, sel_item, mouse, mouse_down, click)) = menu_snapshot {
-                let m = renderer.cell_metrics();
-                let item_idx = gui::menu(
-                    renderer,
-                    m.width, m.height,
-                    mouse, mouse_down, click,
-                    ax, ay,
-                    entries,
-                    sel_item,
-                );
-                item_idx.and_then(|i| {
-                    self.menu_items.as_deref().unwrap_or(MenuAction::ALL).get(i).copied()
-                })
-            } else {
-                None
-            };
+        let menu_clicked_action: Option<MenuAction> = if let Some((
+            ref entries,
+            ax,
+            ay,
+            sel_item,
+            mouse,
+            mouse_down,
+            click,
+        )) = menu_snapshot
+        {
+            let m = renderer.cell_metrics();
+            let item_idx = gui::menu(
+                renderer, m.width, m.height, mouse, mouse_down, click, ax, ay, entries, sel_item,
+            );
+            item_idx.and_then(|i| {
+                self.menu_items
+                    .as_deref()
+                    .unwrap_or(MenuAction::ALL)
+                    .get(i)
+                    .copied()
+            })
+        } else {
+            None
+        };
 
         // Record the state this frame drew from, so the next frame can repaint only
         // what changed (the cursor's old/new row, selection, scroll position).
@@ -822,5 +874,4 @@ impl App {
         // `menu_hit_test` (which now uses pixel coordinates matching the drawn panel).
         let _ = menu_clicked_action;
     }
-
 }

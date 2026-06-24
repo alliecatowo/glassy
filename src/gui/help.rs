@@ -48,18 +48,18 @@ pub struct HelpResult {
 /// keymap; the displayed rows are derived from it so custom bindings are shown.
 #[allow(clippy::too_many_arguments)]
 pub fn build_help(
-    renderer:   &mut Renderer,
-    cell_w:     f32,
-    cell_h:     f32,
-    surface:    (f32, f32),
-    mouse:      (f32, f32),
+    renderer: &mut Renderer,
+    cell_w: f32,
+    cell_h: f32,
+    surface: (f32, f32),
+    mouse: (f32, f32),
     mouse_down: bool,
-    clicked:    bool,
-    pressed:    &mut Option<WidgetId>,
-    focused:    &mut Option<WidgetId>,
-    anims:      &mut HashMap<WidgetId, Anim>,
-    state:      &mut HelpState,
-    keymap:     &KeyMap,
+    clicked: bool,
+    pressed: &mut Option<WidgetId>,
+    focused: &mut Option<WidgetId>,
+    anims: &mut HashMap<WidgetId, Anim>,
+    state: &mut HelpState,
+    keymap: &KeyMap,
 ) -> HelpResult {
     let mut result = HelpResult::default();
     let m = Metrics::new(cell_w, cell_h);
@@ -72,7 +72,9 @@ pub fn build_help(
     }
 
     // Panel sizing: ≈ 50 columns wide, tall enough for visible rows (capped at 80%).
-    let pw = (cell_w * 50.0).min(surface.0 - 2.0 * m.pad).max(cell_w * 28.0);
+    let pw = (cell_w * 50.0)
+        .min(surface.0 - 2.0 * m.pad)
+        .max(cell_w * 28.0);
     let max_ph = (surface.1 * 0.82).round();
     let header_h = m.row_h;
     let footer_h = 0.0; // no footer — ✕ in the header suffices
@@ -83,11 +85,14 @@ pub fn build_help(
     let row_h = m.row_h;
     let sep_h = 6.0;
     let section_h = (m.cell_h + 4.0).round();
-    let content_h: f32 = rows.iter().map(|r| match r {
-        HelpRow::Section(_) => section_h + sep_h,
-        HelpRow::Binding { .. } => row_h,
-        HelpRow::Gap => (m.cell_h * 0.5).round(),
-    }).sum();
+    let content_h: f32 = rows
+        .iter()
+        .map(|r| match r {
+            HelpRow::Section(_) => section_h + sep_h,
+            HelpRow::Binding { .. } => row_h,
+            HelpRow::Gap => (m.cell_h * 0.5).round(),
+        })
+        .sum();
 
     let scrollbar_w = (m.gap.max(6.0)).round();
     let body_h = content_h.min(max_ph - header_h - 2.0 * m.pad);
@@ -102,7 +107,14 @@ pub fn build_help(
     }
 
     // Draw panel background + left accent rail.
-    renderer.push_overlay_rrect_px(panel.x, panel.y, panel.w, panel.h, m.card_radius, glass_raised());
+    renderer.push_overlay_rrect_px(
+        panel.x,
+        panel.y,
+        panel.w,
+        panel.h,
+        m.card_radius,
+        glass_raised(),
+    );
     renderer.push_overlay_px(panel.x, panel.y, 1.0, panel.h, rail());
 
     // Header: title + ✕ button.
@@ -117,20 +129,33 @@ pub fn build_help(
     }
 
     // ✕ close button.
-    let close_r = Rect::new(panel.x + panel.w - header_h, panel.y + m.pad * 0.5, header_h, header_h);
+    let close_r = Rect::new(
+        panel.x + panel.w - header_h,
+        panel.y + m.pad * 0.5,
+        header_h,
+        header_h,
+    );
     {
         let wid = id("help/close");
         let over = hit(close_r, mouse.0, mouse.1);
         if over {
             renderer.push_overlay_rrect_px(
-                close_r.x + 2.0, close_r.y + 2.0,
-                close_r.w - 4.0, close_r.h - 4.0,
-                3.0, state_fill(glass_raised(), 1.0, false),
+                close_r.x + 2.0,
+                close_r.y + 2.0,
+                close_r.w - 4.0,
+                close_r.h - 4.0,
+                3.0,
+                state_fill(glass_raised(), 1.0, false),
             );
         }
         let gx = close_r.x + (close_r.w - cell_w) * 0.5;
         let gy = close_r.y + (close_r.h - cell_h) * 0.5;
-        renderer.push_overlay_glyph_px(gx.round(), gy.round(), '✕', if over { fg() } else { fg_dim() });
+        renderer.push_overlay_glyph_px(
+            gx.round(),
+            gy.round(),
+            '✕',
+            if over { fg() } else { fg_dim() },
+        );
         if clicked && over {
             result.close = true;
         }
@@ -144,9 +169,9 @@ pub fn build_help(
     renderer.push_overlay_px(panel.x, sep_y, panel.w, 1.0, hairline());
 
     // Scrollable body region.
-    let body_top  = sep_y + 1.0;
+    let body_top = sep_y + 1.0;
     let body_left = panel.x + m.pad;
-    let body_w    = panel.w - m.pad * 2.0 - scrollbar_w - 4.0;
+    let body_w = panel.w - m.pad * 2.0 - scrollbar_w - 4.0;
     let _body_rect = Rect::new(body_left, body_top, body_w, body_h);
 
     // Clamp scroll.
@@ -159,9 +184,18 @@ pub fn build_help(
     let chip_radius = 3.0;
 
     // Left column: chips width (fixed, based on longest key string).
-    let max_key_chars = rows.iter().filter_map(|r| {
-        if let HelpRow::Binding { keys, .. } = r { Some(keys.len()) } else { None }
-    }).max().unwrap_or(8).min(18); // cap so chips don't eat the whole panel
+    let max_key_chars = rows
+        .iter()
+        .filter_map(|r| {
+            if let HelpRow::Binding { keys, .. } = r {
+                Some(keys.len())
+            } else {
+                None
+            }
+        })
+        .max()
+        .unwrap_or(8)
+        .min(18); // cap so chips don't eat the whole panel
     let chip_col_w = (max_key_chars as f32 * cell_w + chip_pad_x * 2.0).round();
     let desc_x = body_left + chip_col_w + m.gap;
 
@@ -192,7 +226,13 @@ pub fn build_help(
                 // Separator below the section title.
                 let sep_line = (ry + section_h + 1.0).round();
                 if sep_line >= body_top && sep_line < body_top + body_h {
-                    renderer.push_overlay_px(body_left, sep_line, body_w + scrollbar_w + 4.0, 1.0, hairline());
+                    renderer.push_overlay_px(
+                        body_left,
+                        sep_line,
+                        body_w + scrollbar_w + 4.0,
+                        1.0,
+                        hairline(),
+                    );
                 }
             }
             HelpRow::Binding { keys, desc } => {
@@ -203,11 +243,27 @@ pub fn build_help(
                     let chip_w = (keys.chars().count() as f32 * cell_w + chip_pad_x * 2.0).round();
                     let chip_y = ry + (row_h - chip_h) * 0.5;
                     renderer.push_overlay_rrect_px(
-                        body_left, chip_y, chip_w, chip_h, chip_radius,
+                        body_left,
+                        chip_y,
+                        chip_w,
+                        chip_h,
+                        chip_radius,
                         with_alpha(color::default_fg(), 0.12),
                     );
-                    renderer.push_overlay_px(body_left, chip_y, chip_w, 1.0, with_alpha(color::default_fg(), 0.25));
-                    renderer.push_overlay_px(body_left, chip_y + chip_h - 1.0, chip_w, 1.0, with_alpha(color::default_bg(), 0.35));
+                    renderer.push_overlay_px(
+                        body_left,
+                        chip_y,
+                        chip_w,
+                        1.0,
+                        with_alpha(color::default_fg(), 0.25),
+                    );
+                    renderer.push_overlay_px(
+                        body_left,
+                        chip_y + chip_h - 1.0,
+                        chip_w,
+                        1.0,
+                        with_alpha(color::default_bg(), 0.35),
+                    );
 
                     // Key text inside chip.
                     let kx = body_left + chip_pad_x;
@@ -241,17 +297,35 @@ pub fn build_help(
         let track = Rect::new(sb_x, sb_y, scrollbar_w, sb_h);
         let thumb_ratio = (body_h / content_h).min(1.0);
         let thumb_h = (sb_h * thumb_ratio).max(m.row_h * 0.5);
-        let thumb_t  = if max_scroll > 0.0 { state.scroll / max_scroll } else { 0.0 };
-        let thumb_y  = sb_y + (sb_h - thumb_h) * thumb_t;
+        let thumb_t = if max_scroll > 0.0 {
+            state.scroll / max_scroll
+        } else {
+            0.0
+        };
+        let thumb_y = sb_y + (sb_h - thumb_h) * thumb_t;
 
-        renderer.push_overlay_rrect_px(track.x, track.y, track.w, track.h, track.w * 0.5, track_off());
+        renderer.push_overlay_rrect_px(
+            track.x,
+            track.y,
+            track.w,
+            track.h,
+            track.w * 0.5,
+            track_off(),
+        );
         let thumb_over = hit(track, mouse.0, mouse.1);
         let thumb_col = if thumb_over || mouse_down {
             state_fill(with_alpha(fg(), 0.35), 1.0, mouse_down && thumb_over)
         } else {
             with_alpha(fg(), 0.25)
         };
-        renderer.push_overlay_rrect_px(track.x, thumb_y, track.w, thumb_h, track.w * 0.5, thumb_col);
+        renderer.push_overlay_rrect_px(
+            track.x,
+            thumb_y,
+            track.w,
+            thumb_h,
+            track.w * 0.5,
+            thumb_col,
+        );
 
         // Drag the scrollbar with a press-latch: a press inside the track claims
         // the widget; the drag then continues for as long as the button is held,
@@ -262,7 +336,8 @@ pub fn build_help(
                 *pressed = Some(wid);
             }
             if *pressed == Some(wid) {
-                let t = ((mouse.1 - sb_y - thumb_h * 0.5) / (sb_h - thumb_h).max(1.0)).clamp(0.0, 1.0);
+                let t =
+                    ((mouse.1 - sb_y - thumb_h * 0.5) / (sb_h - thumb_h).max(1.0)).clamp(0.0, 1.0);
                 state.scroll = t * max_scroll;
             }
         }
@@ -326,10 +401,8 @@ fn help_rows_from_keymap(keymap: &KeyMap) -> Vec<HelpRow<'static>> {
         std::collections::HashMap::new();
 
     // Collect all chords, sort them so output is deterministic.
-    let mut entries: Vec<(crate::config::Chord, KeyAction)> = keymap
-        .iter()
-        .map(|(c, &a)| (c.clone(), a))
-        .collect();
+    let mut entries: Vec<(crate::config::Chord, KeyAction)> =
+        keymap.iter().map(|(c, &a)| (c.clone(), a)).collect();
     // Sort: fewer modifiers first, then alphabetical key name.
     entries.sort_by_key(|(c, _)| {
         let mods = (c.ctrl as u8) + (c.alt as u8) + (c.meta as u8) + (c.shift as u8);
@@ -337,14 +410,18 @@ fn help_rows_from_keymap(keymap: &KeyMap) -> Vec<HelpRow<'static>> {
     });
     for (chord, action) in entries {
         // Keep the first (fewest-modifier) chord per action.
-        action_chord.entry(action).or_insert_with(|| chord.display());
+        action_chord
+            .entry(action)
+            .or_insert_with(|| chord.display());
     }
 
     let mut rows: Vec<HelpRow<'static>> = Vec::new();
     let mut last_section: &'static str = "";
 
     for &action in HELP_ACTION_ORDER {
-        let Some(chord_str) = action_chord.get(&action) else { continue };
+        let Some(chord_str) = action_chord.get(&action) else {
+            continue;
+        };
         let section = action.section();
         if section != last_section {
             rows.push(HelpRow::Gap);
@@ -368,12 +445,23 @@ fn help_rows_from_keymap(keymap: &KeyMap) -> Vec<HelpRow<'static>> {
     // Simpler: append at end as a separate block.
     rows.push(HelpRow::Gap);
     rows.push(HelpRow::Section("Navigation"));
-    rows.push(HelpRow::Binding { keys: "Alt+Arrow",   desc: "Focus adjacent pane" });
-    rows.push(HelpRow::Binding { keys: "Ctrl+Click",  desc: "Open hyperlink" });
-    rows.push(HelpRow::Binding { keys: "Right-click", desc: "Context menu" });
-    rows.push(HelpRow::Binding { keys: "F1 / Esc",    desc: "Close this panel" });
+    rows.push(HelpRow::Binding {
+        keys: "Alt+Arrow",
+        desc: "Focus adjacent pane",
+    });
+    rows.push(HelpRow::Binding {
+        keys: "Ctrl+Click",
+        desc: "Open hyperlink",
+    });
+    rows.push(HelpRow::Binding {
+        keys: "Right-click",
+        desc: "Context menu",
+    });
+    rows.push(HelpRow::Binding {
+        keys: "F1 / Esc",
+        desc: "Close this panel",
+    });
     rows.push(HelpRow::Gap);
 
     rows
 }
-

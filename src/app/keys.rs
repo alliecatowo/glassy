@@ -10,60 +10,72 @@ use crate::config::{Chord, KeyAction};
 /// Convert a winit key event + current modifiers into a [`Chord`] for keymap
 /// lookup. Returns `None` for modifier-only keypresses (the key IS a modifier).
 fn chord_from_event(event: &winit::event::KeyEvent, mods: ModifiersState) -> Option<Chord> {
-    let ctrl  = mods.control_key();
+    let ctrl = mods.control_key();
     let shift = mods.shift_key();
-    let alt   = mods.alt_key();
-    let meta  = mods.super_key();
+    let alt = mods.alt_key();
+    let meta = mods.super_key();
 
     let key = match &event.logical_key {
         Key::Character(s) => s.to_lowercase(),
         Key::Named(n) => named_key_to_str(n)?.to_string(),
         _ => return None,
     };
-    Some(Chord { ctrl, shift, alt, meta, key })
+    Some(Chord {
+        ctrl,
+        shift,
+        alt,
+        meta,
+        key,
+    })
 }
 
 /// Map a winit `NamedKey` to the lowercase string used in chord parsing.
 /// Returns `None` for keys that are purely modifiers (Shift, Ctrl, etc.).
 fn named_key_to_str(key: &NamedKey) -> Option<&'static str> {
     Some(match key {
-        NamedKey::Tab        => "tab",
-        NamedKey::Space      => "space",
-        NamedKey::Enter      => "enter",
-        NamedKey::Escape     => "escape",
-        NamedKey::Backspace  => "backspace",
-        NamedKey::Delete     => "delete",
-        NamedKey::Home       => "home",
-        NamedKey::End        => "end",
-        NamedKey::PageUp     => "pageup",
-        NamedKey::PageDown   => "pagedown",
-        NamedKey::ArrowUp    => "arrowup",
-        NamedKey::ArrowDown  => "arrowdown",
-        NamedKey::ArrowLeft  => "arrowleft",
+        NamedKey::Tab => "tab",
+        NamedKey::Space => "space",
+        NamedKey::Enter => "enter",
+        NamedKey::Escape => "escape",
+        NamedKey::Backspace => "backspace",
+        NamedKey::Delete => "delete",
+        NamedKey::Home => "home",
+        NamedKey::End => "end",
+        NamedKey::PageUp => "pageup",
+        NamedKey::PageDown => "pagedown",
+        NamedKey::ArrowUp => "arrowup",
+        NamedKey::ArrowDown => "arrowdown",
+        NamedKey::ArrowLeft => "arrowleft",
         NamedKey::ArrowRight => "arrowright",
-        NamedKey::F1         => "f1",
-        NamedKey::F2         => "f2",
-        NamedKey::F3         => "f3",
-        NamedKey::F4         => "f4",
-        NamedKey::F5         => "f5",
-        NamedKey::F6         => "f6",
-        NamedKey::F7         => "f7",
-        NamedKey::F8         => "f8",
-        NamedKey::F9         => "f9",
-        NamedKey::F10        => "f10",
-        NamedKey::F11        => "f11",
-        NamedKey::F12        => "f12",
-        NamedKey::F13        => "f13",
-        NamedKey::F14        => "f14",
-        NamedKey::F15        => "f15",
-        NamedKey::F16        => "f16",
-        NamedKey::F17        => "f17",
-        NamedKey::F18        => "f18",
-        NamedKey::F19        => "f19",
-        NamedKey::F20        => "f20",
+        NamedKey::F1 => "f1",
+        NamedKey::F2 => "f2",
+        NamedKey::F3 => "f3",
+        NamedKey::F4 => "f4",
+        NamedKey::F5 => "f5",
+        NamedKey::F6 => "f6",
+        NamedKey::F7 => "f7",
+        NamedKey::F8 => "f8",
+        NamedKey::F9 => "f9",
+        NamedKey::F10 => "f10",
+        NamedKey::F11 => "f11",
+        NamedKey::F12 => "f12",
+        NamedKey::F13 => "f13",
+        NamedKey::F14 => "f14",
+        NamedKey::F15 => "f15",
+        NamedKey::F16 => "f16",
+        NamedKey::F17 => "f17",
+        NamedKey::F18 => "f18",
+        NamedKey::F19 => "f19",
+        NamedKey::F20 => "f20",
         // Modifier-only keys: skip.
-        NamedKey::Shift | NamedKey::Control | NamedKey::Alt | NamedKey::Super
-        | NamedKey::Hyper | NamedKey::Meta | NamedKey::CapsLock | NamedKey::NumLock
+        NamedKey::Shift
+        | NamedKey::Control
+        | NamedKey::Alt
+        | NamedKey::Super
+        | NamedKey::Hyper
+        | NamedKey::Meta
+        | NamedKey::CapsLock
+        | NamedKey::NumLock
         | NamedKey::ScrollLock => return None,
         _ => return None,
     })
@@ -145,8 +157,10 @@ impl App {
             // app handle Shift+Page keys itself).
             let is_scroll = matches!(
                 action,
-                KeyAction::ScrollUp | KeyAction::ScrollDown
-                | KeyAction::ScrollTop | KeyAction::ScrollBottom
+                KeyAction::ScrollUp
+                    | KeyAction::ScrollDown
+                    | KeyAction::ScrollTop
+                    | KeyAction::ScrollBottom
             );
             if !is_scroll || !self.term_mode().contains(TermMode::ALT_SCREEN) {
                 self.run_key_action(action, event_loop);
@@ -228,8 +242,8 @@ impl App {
         // above; the close-overlay path below is overlay-navigation-specific.
         if event.state.is_pressed() && (self.help_open || self.settings_open) {
             let key = &event.logical_key;
-            let toggle_settings = self.mods.control_key()
-                && matches!(key, Key::Character(s) if s.as_str() == ",");
+            let toggle_settings =
+                self.mods.control_key() && matches!(key, Key::Character(s) if s.as_str() == ",");
             // Esc inside settings closes an open dropdown first; only a
             // second Esc (or F1 / Ctrl+,) closes the whole panel.
             if self.settings_open
@@ -241,9 +255,7 @@ impl App {
                 self.mark_dirty(event_loop);
                 return;
             }
-            if matches!(key, Key::Named(NamedKey::Escape | NamedKey::F1))
-                || toggle_settings
-            {
+            if matches!(key, Key::Named(NamedKey::Escape | NamedKey::F1)) || toggle_settings {
                 self.help_open = false;
                 self.settings_open = false;
                 self.settings_drop = gui::SettingsDrop::None;
@@ -263,9 +275,9 @@ impl App {
         // the all-keys-as-esc form required by Helix, Neovim, etc.
         let mode = self.term_mode();
         let kitty = KittyFlags {
-            disambiguate:           mode.contains(TermMode::DISAMBIGUATE_ESC_CODES),
-            report_event_types:     mode.contains(TermMode::REPORT_EVENT_TYPES),
-            report_alternate_keys:  mode.contains(TermMode::REPORT_ALTERNATE_KEYS),
+            disambiguate: mode.contains(TermMode::DISAMBIGUATE_ESC_CODES),
+            report_event_types: mode.contains(TermMode::REPORT_EVENT_TYPES),
+            report_alternate_keys: mode.contains(TermMode::REPORT_ALTERNATE_KEYS),
             report_all_keys_as_esc: mode.contains(TermMode::REPORT_ALL_KEYS_AS_ESC),
             report_associated_text: mode.contains(TermMode::REPORT_ASSOCIATED_TEXT),
         };
@@ -275,7 +287,9 @@ impl App {
         // forbids the ambiguous SS3 form for cursor keys, so suppress app-cursor
         // mode when kitty is active — those keys then fall to unambiguous CSI.
         let app_cursor = mode.contains(TermMode::APP_CURSOR) && !kitty.active();
-        if let Some(bytes) = encode_key(&event, self.mods, kitty, app_cursor, self.modify_other_keys) {
+        if let Some(bytes) =
+            encode_key(&event, self.mods, kitty, app_cursor, self.modify_other_keys)
+        {
             // Typing resets the blink to solid-on so the cursor doesn't
             // wink out mid-keystroke, matching every mainstream terminal.
             self.reset_blink();

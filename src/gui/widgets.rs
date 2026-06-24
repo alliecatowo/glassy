@@ -105,7 +105,8 @@ impl<'r> Ui<'r> {
     }
 
     pub(crate) fn rrect(&mut self, r: Rect, radius: f32, color: [f32; 4]) {
-        self.r.push_overlay_rrect_px(r.x, r.y, r.w, r.h, radius, color);
+        self.r
+            .push_overlay_rrect_px(r.x, r.y, r.w, r.h, radius, color);
     }
 
     /// Edge-lit signature: a 1px `rail` on the TOP edge + a 1px `hairline` on the
@@ -197,7 +198,14 @@ impl<'r> Ui<'r> {
     pub fn button(&mut self, wid: WidgetId, rect: Rect, text: &str) -> Interaction {
         let it = self.interact(wid, rect, true);
         let st = self.wstate(wid, &it, true);
-        let hover_t = self.anim(wid, if matches!(st, WState::Hover | WState::Press) { 1.0 } else { 0.0 });
+        let hover_t = self.anim(
+            wid,
+            if matches!(st, WState::Hover | WState::Press) {
+                1.0
+            } else {
+                0.0
+            },
+        );
         let fill = state_fill(glass_raised(), hover_t, it.pressed);
         self.rrect(rect, self.m.radius, fill);
         if hover_t > 0.0 && !it.pressed {
@@ -217,7 +225,14 @@ impl<'r> Ui<'r> {
     pub fn icon_button(&mut self, wid: WidgetId, rect: Rect, glyph: char) -> Interaction {
         let it = self.interact(wid, rect, true);
         let st = self.wstate(wid, &it, true);
-        let hover_t = self.anim(wid, if matches!(st, WState::Hover | WState::Press) { 1.0 } else { 0.0 });
+        let hover_t = self.anim(
+            wid,
+            if matches!(st, WState::Hover | WState::Press) {
+                1.0
+            } else {
+                0.0
+            },
+        );
         if hover_t > 0.0 || it.pressed {
             let fill = state_fill(glass_raised(), hover_t, it.pressed);
             self.rrect(rect, self.m.radius, fill);
@@ -228,7 +243,8 @@ impl<'r> Ui<'r> {
         let nudge = if it.pressed { 1.0 } else { 0.0 };
         let cx = rect.x + (rect.w - self.m.cell_w) * 0.5;
         let cy = rect.center_y() - self.m.cell_h * 0.5 + nudge;
-        self.r.push_overlay_glyph_px(cx.round(), cy.round(), glyph, fg());
+        self.r
+            .push_overlay_glyph_px(cx.round(), cy.round(), glyph, fg());
         it
     }
 
@@ -282,7 +298,11 @@ impl<'r> Ui<'r> {
             if i == sel {
                 self.rrect(seg.inset(2.0), self.m.radius - 1.0, fill_on());
             } else if it.hovered {
-                self.rrect(seg.inset(2.0), self.m.radius - 1.0, state_fill(track_off(), 1.0, false));
+                self.rrect(
+                    seg.inset(2.0),
+                    self.m.radius - 1.0,
+                    state_fill(track_off(), 1.0, false),
+                );
             }
             let tc = if i == sel { color::default_bg() } else { fg() };
             self.label_centered(seg, opt, tc);
@@ -295,7 +315,15 @@ impl<'r> Ui<'r> {
 
     /// A horizontal slider. Returns the (possibly dragged) value, snapped to
     /// `step` and clamped to `[min, max]`.
-    pub fn slider(&mut self, wid: WidgetId, rect: Rect, value: f32, min: f32, max: f32, step: f32) -> f32 {
+    pub fn slider(
+        &mut self,
+        wid: WidgetId,
+        rect: Rect,
+        value: f32,
+        min: f32,
+        max: f32,
+        step: f32,
+    ) -> f32 {
         let it = self.interact(wid, rect, true);
         let mut v = value.clamp(min, max);
         if it.pressed && max > min {
@@ -308,14 +336,22 @@ impl<'r> Ui<'r> {
             }
             .clamp(min, max);
         }
-        let t = if max > min { (v - min) / (max - min) } else { 0.0 };
+        let t = if max > min {
+            (v - min) / (max - min)
+        } else {
+            0.0
+        };
         // Track.
         let mid = rect.center_y();
         let th = 4.0;
         let track = Rect::new(rect.x, mid - th * 0.5, rect.w, th);
         self.rrect(track, th * 0.5, track_off());
         // Filled portion.
-        self.rrect(Rect::new(rect.x, mid - th * 0.5, rect.w * t, th), th * 0.5, fill_on());
+        self.rrect(
+            Rect::new(rect.x, mid - th * 0.5, rect.w * t, th),
+            th * 0.5,
+            fill_on(),
+        );
         // Knob.
         let k = rect.h * 0.6;
         let kx = rect.x + rect.w * t - k * 0.5;
@@ -365,7 +401,11 @@ impl<'r> Ui<'r> {
         let st = self.wstate(wid, &it, true);
         let hover_t = self.anim(
             wid,
-            if open || matches!(st, WState::Hover | WState::Press) { 1.0 } else { 0.0 },
+            if open || matches!(st, WState::Hover | WState::Press) {
+                1.0
+            } else {
+                0.0
+            },
         );
         let fill = state_fill(glass_raised(), hover_t, it.pressed || open);
         self.rrect(rect, self.m.radius, fill);
@@ -389,7 +429,8 @@ impl<'r> Ui<'r> {
         // Chevron flips appearance via glyph: ▴ when open, ▾ when closed.
         let chev = if open { '▴' } else { '▾' };
         let cx = rect.x + rect.w - pad - self.m.cell_w;
-        self.r.push_overlay_glyph_px(cx.round(), ty.round(), chev, fg_dim());
+        self.r
+            .push_overlay_glyph_px(cx.round(), ty.round(), chev, fg_dim());
         if it.clicked {
             DropdownEvt::Toggle
         } else {
@@ -480,7 +521,11 @@ impl<'r> Ui<'r> {
             if i == sel {
                 self.rrect(rr.inset(1.0), self.m.radius - 1.0, sel_bg());
             } else if it.hovered {
-                self.rrect(rr.inset(1.0), self.m.radius - 1.0, state_fill(track_off(), 1.0, false));
+                self.rrect(
+                    rr.inset(1.0),
+                    self.m.radius - 1.0,
+                    state_fill(track_off(), 1.0, false),
+                );
             }
             let ty = rr.center_y() - self.m.cell_h * 0.5;
             self.label((rr.x + self.m.pad).round(), ty.round(), label, fg());
@@ -519,7 +564,11 @@ impl<'r> Ui<'r> {
             let t = ((self.mouse.1 - track.y - thumb_h * 0.5) / span).clamp(0.0, 1.0);
             s = t * max_scroll;
         }
-        let t = if max_scroll > 0.0 { s / max_scroll } else { 0.0 };
+        let t = if max_scroll > 0.0 {
+            s / max_scroll
+        } else {
+            0.0
+        };
         let ty = track.y + span * t;
         let thumb = Rect::new(track.x, ty, track.w, thumb_h);
         let hover_t = self.anim(wid, if it.hovered || it.pressed { 1.0 } else { 0.0 });
@@ -527,5 +576,4 @@ impl<'r> Ui<'r> {
         self.rrect(thumb, track.w * 0.5, fill);
         s
     }
-
 }

@@ -18,10 +18,15 @@ impl<'r> Ui<'r> {
         let m = self.m;
 
         // Full-screen scrim (dim the chrome + terminal beneath).
-        self.quad(Rect::new(0.0, 0.0, surface.0, surface.1), [0.0, 0.0, 0.0, 0.5]);
+        self.quad(
+            Rect::new(0.0, 0.0, surface.0, surface.1),
+            [0.0, 0.0, 0.0, 0.5],
+        );
 
         // Centered panel. Width ≈ 40 columns; height grows with the row count.
-        let pw = (m.cell_w * 42.0).min(surface.0 - 2.0 * m.pad).max(m.cell_w * 24.0);
+        let pw = (m.cell_w * 42.0)
+            .min(surface.0 - 2.0 * m.pad)
+            .max(m.cell_w * 24.0);
         const ROWS: usize = 9; // font, opacity, bell, theme, font, scrollback, status_bar, pane_headers, path
         let header_h = m.row_h;
         let footer_h = m.row_h + m.gap;
@@ -67,7 +72,12 @@ impl<'r> Ui<'r> {
         if (nv - v.opacity).abs() > f32::EPSILON {
             ev.opacity = Some(nv);
         }
-        self.label_right(ctrl_x + ctrl_w, (y + (m.row_h - m.cell_h) * 0.5).round(), &format!("{nv:.2}"), fg());
+        self.label_right(
+            ctrl_x + ctrl_w,
+            (y + (m.row_h - m.cell_h) * 0.5).round(),
+            &format!("{nv:.2}"),
+            fg(),
+        );
         y += step;
 
         // -- Bell (segmented) ------------------------------------------------
@@ -88,8 +98,13 @@ impl<'r> Ui<'r> {
         let theme_rect = ctrl_rect(y, ctrl_w);
         let theme_name = v.theme_names.get(v.theme_idx).copied().unwrap_or("");
         let swatch = v.theme_swatches.get(v.theme_idx).copied();
-        if self.dropdown(id("settings/theme"), theme_rect, theme_name, v.open == SettingsDrop::Theme, swatch)
-            == DropdownEvt::Toggle
+        if self.dropdown(
+            id("settings/theme"),
+            theme_rect,
+            theme_name,
+            v.open == SettingsDrop::Theme,
+            swatch,
+        ) == DropdownEvt::Toggle
         {
             ev.theme_toggle = true;
         }
@@ -98,8 +113,13 @@ impl<'r> Ui<'r> {
         // -- Font family (dropdown) ------------------------------------------
         row_label(self, y, "Font");
         let font_rect = ctrl_rect(y, ctrl_w);
-        if self.dropdown(id("settings/font_family"), font_rect, v.font_family, v.open == SettingsDrop::Font, None)
-            == DropdownEvt::Toggle
+        if self.dropdown(
+            id("settings/font_family"),
+            font_rect,
+            v.font_family,
+            v.open == SettingsDrop::Font,
+            None,
+        ) == DropdownEvt::Toggle
         {
             ev.font_toggle = true;
         }
@@ -108,7 +128,8 @@ impl<'r> Ui<'r> {
         // -- Scrollback (stepper) --------------------------------------------
         row_label(self, y, "Scrollback");
         let sb_txt = format!("{} lines", v.scrollback);
-        ev.scrollback_delta = self.stepper(id("settings/scrollback"), ctrl_rect(y, m.ctrl_w), &sb_txt);
+        ev.scrollback_delta =
+            self.stepper(id("settings/scrollback"), ctrl_rect(y, m.ctrl_w), &sb_txt);
         y += step;
 
         // -- Status bar (toggle) -----------------------------------------------
@@ -136,7 +157,8 @@ impl<'r> Ui<'r> {
             toggle_w,
             toggle_h,
         );
-        let new_pane_headers = self.toggle(id("settings/pane_headers"), ph_toggle_rect, v.pane_headers);
+        let new_pane_headers =
+            self.toggle(id("settings/pane_headers"), ph_toggle_rect, v.pane_headers);
         if new_pane_headers != v.pane_headers {
             ev.pane_headers_toggle = true;
         }
@@ -145,7 +167,8 @@ impl<'r> Ui<'r> {
         // -- Config path (readonly + copy/open) ------------------------------
         row_label(self, y, "Config");
         let field_rect = ctrl_rect(y, ctrl_w);
-        match self.text_field_readonly(id("settings/config"), field_rect, v.config_path, true, true) {
+        match self.text_field_readonly(id("settings/config"), field_rect, v.config_path, true, true)
+        {
             FieldEvt::Copy => ev.copy_path = true,
             FieldEvt::Open => ev.open_path = true,
             FieldEvt::None => {}
@@ -159,10 +182,16 @@ impl<'r> Ui<'r> {
         let bw = (m.cell_w * 9.0).round();
         let close_btn = Rect::new(inner.x + inner.w - bw, fy, bw, m.row_h);
         let save_btn = Rect::new(close_btn.x - bw - m.gap, fy, bw, m.row_h);
-        if self.accent_button(id("settings/save"), save_btn, "Save").clicked {
+        if self
+            .accent_button(id("settings/save"), save_btn, "Save")
+            .clicked
+        {
             ev.save = true;
         }
-        if self.button(id("settings/close_btn"), close_btn, "Close").clicked {
+        if self
+            .button(id("settings/close_btn"), close_btn, "Close")
+            .clicked
+        {
             ev.close = true;
         }
         if v.saved {
@@ -206,7 +235,14 @@ impl<'r> Ui<'r> {
     pub fn accent_button(&mut self, wid: WidgetId, rect: Rect, text: &str) -> Interaction {
         let it = self.interact(wid, rect, true);
         let st = self.wstate(wid, &it, true);
-        let hover_t = self.anim(wid, if matches!(st, WState::Hover | WState::Press) { 1.0 } else { 0.0 });
+        let hover_t = self.anim(
+            wid,
+            if matches!(st, WState::Hover | WState::Press) {
+                1.0
+            } else {
+                0.0
+            },
+        );
         let fill = state_fill(fill_on(), hover_t, it.pressed);
         self.rrect(rect, self.m.radius, fill);
         if matches!(st, WState::Focus) {
@@ -257,7 +293,11 @@ impl<'r> Ui<'r> {
             if i == sel {
                 self.rrect(rr.inset(1.0), m.radius - 1.0, sel_bg());
             } else if it.hovered {
-                self.rrect(rr.inset(1.0), m.radius - 1.0, state_fill(track_off(), 1.0, false));
+                self.rrect(
+                    rr.inset(1.0),
+                    m.radius - 1.0,
+                    state_fill(track_off(), 1.0, false),
+                );
             }
             let mut tx = rr.x + m.pad;
             let ty = (rr.center_y() - m.cell_h * 0.5).round();
@@ -301,13 +341,13 @@ pub enum MenuEntry<'a> {
     /// An actionable menu row.
     Item {
         /// Single-character icon drawn to the left of the label (e.g. `'+'`).
-        icon:     char,
+        icon: char,
         /// Row label shown in the primary foreground colour (or greyed if disabled).
-        label:    &'a str,
+        label: &'a str,
         /// Optional right-aligned shortcut hint (e.g. `"Ctrl+T"`), drawn dim.
-        hint:     Option<&'a str>,
+        hint: Option<&'a str>,
         /// `false` → row is drawn greyed and never fires a click.
-        enabled:  bool,
+        enabled: bool,
     },
     /// A 1 px hairline dividing groups (not selectable, skipped by keyboard nav).
     Separator,
@@ -326,57 +366,84 @@ pub enum MenuEntry<'a> {
 /// `ax`/`ay` is the top-left anchor in physical pixels.
 #[allow(clippy::too_many_arguments)]
 pub fn menu(
-    renderer:   &mut Renderer,
-    cell_w:     f32,
-    cell_h:     f32,
-    mouse:      (f32, f32),
+    renderer: &mut Renderer,
+    cell_w: f32,
+    cell_h: f32,
+    mouse: (f32, f32),
     mouse_down: bool,
-    clicked:    bool,
-    ax:         f32,
-    ay:         f32,
-    entries:    &[MenuEntry<'_>],
-    sel_item:   usize,
+    clicked: bool,
+    ax: f32,
+    ay: f32,
+    entries: &[MenuEntry<'_>],
+    sel_item: usize,
 ) -> Option<usize> {
-    let row_h   = (cell_h * 1.4).round().max(cell_h + 4.0);
-    let sep_h   = 5.0; // 1 px hairline + 2 px padding each side
-    let pad_x   = (cell_w * 1.2).round();
-    let icon_w  = cell_w + 4.0;
+    let row_h = (cell_h * 1.4).round().max(cell_h + 4.0);
+    let sep_h = 5.0; // 1 px hairline + 2 px padding each side
+    let pad_x = (cell_w * 1.2).round();
+    let icon_w = cell_w + 4.0;
     let hint_gap = (cell_w * 2.0).round();
 
     // Measure the widest label + widest hint to size the panel.
     let label_chars = entries
         .iter()
-        .filter_map(|e| if let MenuEntry::Item { label, .. } = e { Some(label.len()) } else { None })
+        .filter_map(|e| {
+            if let MenuEntry::Item { label, .. } = e {
+                Some(label.len())
+            } else {
+                None
+            }
+        })
         .max()
         .unwrap_or(4);
     let hint_chars = entries
         .iter()
         .filter_map(|e| {
-            if let MenuEntry::Item { hint: Some(h), .. } = e { Some(h.len()) } else { None }
+            if let MenuEntry::Item { hint: Some(h), .. } = e {
+                Some(h.len())
+            } else {
+                None
+            }
         })
         .max()
         .unwrap_or(0);
     let panel_w = (icon_w
         + label_chars as f32 * cell_w
-        + if hint_chars > 0 { hint_gap + hint_chars as f32 * cell_w } else { 0.0 }
+        + if hint_chars > 0 {
+            hint_gap + hint_chars as f32 * cell_w
+        } else {
+            0.0
+        }
         + pad_x * 2.0)
         .max(cell_w * 8.0)
         .ceil();
 
     // Compute total panel height.
-    let item_count = entries.iter().filter(|e| matches!(e, MenuEntry::Item { .. })).count();
-    let sep_count  = entries.iter().filter(|e| matches!(e, MenuEntry::Separator)).count();
-    let panel_h    = (item_count as f32 * row_h + sep_count as f32 * sep_h + 4.0).ceil();
+    let item_count = entries
+        .iter()
+        .filter(|e| matches!(e, MenuEntry::Item { .. }))
+        .count();
+    let sep_count = entries
+        .iter()
+        .filter(|e| matches!(e, MenuEntry::Separator))
+        .count();
+    let panel_h = (item_count as f32 * row_h + sep_count as f32 * sep_h + 4.0).ceil();
 
     // E3 floating panel with a 1 px accent rrect border (outer minus inner so
     // the border follows the rounded shape and does not bleed into corners).
-    let float_fill  = glass_float();
-    let border_col  = with_alpha(color::accent(), 0.5);
-    let hairline_c  = hairline();
+    let float_fill = glass_float();
+    let border_col = with_alpha(color::accent(), 0.5);
+    let hairline_c = hairline();
     let menu_radius = 4.0_f32;
     // Border: outer rrect in accent, then inner rrect in glass to carve out the fill.
     renderer.push_overlay_rrect_px(ax, ay, panel_w, panel_h, menu_radius, border_col);
-    renderer.push_overlay_rrect_px(ax + 1.0, ay + 1.0, panel_w - 2.0, panel_h - 2.0, (menu_radius - 1.0).max(0.0), float_fill);
+    renderer.push_overlay_rrect_px(
+        ax + 1.0,
+        ay + 1.0,
+        panel_w - 2.0,
+        panel_h - 2.0,
+        (menu_radius - 1.0).max(0.0),
+        float_fill,
+    );
 
     let mut result: Option<usize> = None;
     let mut item_idx: usize = 0; // index among non-separator entries
@@ -390,16 +457,19 @@ pub fn menu(
                 renderer.push_overlay_px(ax + 4.0, y, panel_w - 8.0, 1.0, hairline_c);
                 y += 3.0;
             }
-            MenuEntry::Item { icon, label, hint, enabled } => {
+            MenuEntry::Item {
+                icon,
+                label,
+                hint,
+                enabled,
+            } => {
                 let rr = Rect::new(ax + 1.0, y, panel_w - 2.0, row_h);
                 let over = hit(rr, mouse.0, mouse.1) && *enabled;
                 let is_sel = item_idx == sel_item && *enabled;
 
                 // Highlight: keyboard selection OR hover.
                 if over || is_sel {
-                    renderer.push_overlay_rrect_px(
-                        rr.x, rr.y, rr.w, rr.h, 3.0, sel_bg(),
-                    );
+                    renderer.push_overlay_rrect_px(rr.x, rr.y, rr.w, rr.h, 3.0, sel_bg());
                 }
 
                 let text_col = if *enabled { fg() } else { fg_dim() };
@@ -407,7 +477,12 @@ pub fn menu(
 
                 // Left icon.
                 let ix = ax + pad_x;
-                renderer.push_overlay_glyph_px(ix.round(), ty, *icon, if *enabled { fg() } else { fg_dim() });
+                renderer.push_overlay_glyph_px(
+                    ix.round(),
+                    ty,
+                    *icon,
+                    if *enabled { fg() } else { fg_dim() },
+                );
 
                 // Label.
                 let lx = ix + icon_w;
@@ -441,4 +516,3 @@ pub fn menu(
     let _ = mouse_down; // retained for future press-highlight; clicks are the gate
     result
 }
-

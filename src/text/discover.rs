@@ -22,10 +22,7 @@ use cosmic_text::fontdb;
 fn fc_cache_path() -> Option<PathBuf> {
     let base = std::env::var_os("XDG_CACHE_HOME")
         .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME")
-                .map(|h| PathBuf::from(h).join(".cache"))
-        })?;
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))?;
     Some(base.join("glassy/fc-cache.tsv"))
 }
 
@@ -44,9 +41,11 @@ pub(super) fn fc_cache_load() -> std::collections::HashMap<String, String> {
     };
     for line in text.lines() {
         if let Some((k, v)) = line.split_once('\t')
-            && !k.is_empty() && !v.is_empty() {
-                map.insert(k.to_string(), v.to_string());
-            }
+            && !k.is_empty()
+            && !v.is_empty()
+        {
+            map.insert(k.to_string(), v.to_string());
+        }
     }
     map
 }
@@ -61,14 +60,19 @@ pub(super) fn fc_cache_insert(pattern: &str, file_path: &str) {
         None => return,
     };
     if let Some(parent) = path.parent()
-        && let Err(e) = std::fs::create_dir_all(parent) {
-            log::debug!("glassy: fc-cache dir create failed: {e}");
-            return;
-        }
+        && let Err(e) = std::fs::create_dir_all(parent)
+    {
+        log::debug!("glassy: fc-cache dir create failed: {e}");
+        return;
+    }
     // Append-only: one line per entry. The cache grows monotonically; a stale
     // entry is harmless because lookup also validates the path still exists.
     use std::io::Write;
-    match std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+    match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
         Ok(mut f) => {
             if let Err(e) = writeln!(f, "{pattern}\t{file_path}") {
                 log::debug!("glassy: fc-cache write failed: {e}");
@@ -132,7 +136,10 @@ pub(super) struct LoadedFont {
 /// handful of fontconfig-resolved fallback files are loaded.
 ///
 /// Returns `None` if the primary bytes contained no usable face.
-pub(super) fn build_font_system(bytes: Vec<u8>, primary_path: Option<PathBuf>) -> Option<LoadedFont> {
+pub(super) fn build_font_system(
+    bytes: Vec<u8>,
+    primary_path: Option<PathBuf>,
+) -> Option<LoadedFont> {
     let mut db = fontdb::Database::new();
     let ids = db.load_font_source(fontdb::Source::Binary(Arc::new(bytes)));
 
@@ -223,17 +230,24 @@ fn load_fallback_fonts(
         // Phase 1: for each pattern, either return a cache hit or a join handle.
         enum Resolution<'scope, 'env> {
             Cached(Option<String>),
-            Spawned(std::thread::ScopedJoinHandle<'scope, Option<String>>, std::marker::PhantomData<&'env ()>),
+            Spawned(
+                std::thread::ScopedJoinHandle<'scope, Option<String>>,
+                std::marker::PhantomData<&'env ()>,
+            ),
         }
         let work: Vec<(&str, Resolution<'_, '_>)> = FALLBACK_PATTERNS
             .iter()
             .map(|pattern| {
                 if let Some(cached_path) = cache.get(*pattern)
-                    && Path::new(cached_path).exists() {
-                        return (*pattern, Resolution::Cached(Some(cached_path.clone())));
-                    }
+                    && Path::new(cached_path).exists()
+                {
+                    return (*pattern, Resolution::Cached(Some(cached_path.clone())));
+                }
                 let handle = s.spawn(move || fc_match_file_live(pattern));
-                (*pattern, Resolution::Spawned(handle, std::marker::PhantomData))
+                (
+                    *pattern,
+                    Resolution::Spawned(handle, std::marker::PhantomData),
+                )
             })
             .collect();
         // Phase 2: join all handles (cache hits pass through directly).
@@ -295,9 +309,10 @@ fn load_primary_styles(
             .map(|pattern| {
                 // Cache hit: no thread needed.
                 if let Some(cached_path) = cache.get(pattern)
-                    && Path::new(cached_path).exists() {
-                        return (pattern.clone(), Ok(Some(cached_path.clone())));
-                    }
+                    && Path::new(cached_path).exists()
+                {
+                    return (pattern.clone(), Ok(Some(cached_path.clone())));
+                }
                 let pattern_clone = pattern.clone();
                 let handle = s.spawn(move || fc_match_file_live(&pattern_clone));
                 (pattern.clone(), Err(handle))
@@ -407,10 +422,11 @@ fn fc_match_file_cached(
 ) -> Option<String> {
     // Check the disk cache first — a valid hit avoids the subprocess.
     if let Some(cached_path) = cache.get(pattern)
-        && Path::new(cached_path).exists() {
-            log::debug!("glassy: fc-cache hit for '{pattern}': {cached_path}");
-            return Some(cached_path.clone());
-        }
+        && Path::new(cached_path).exists()
+    {
+        log::debug!("glassy: fc-cache hit for '{pattern}': {cached_path}");
+        return Some(cached_path.clone());
+    }
     fc_match_file_live(pattern)
 }
 
@@ -613,10 +629,11 @@ fn fc_match_family_cached(
     // collisions with bare `fc_match_file` pattern keys.
     let key = format!("family:{family}");
     if let Some(cached_path) = cache.get(&key)
-        && Path::new(cached_path).exists() {
-            log::debug!("glassy: fc-cache hit for family '{family}': {cached_path}");
-            return Some(cached_path.clone());
-        }
+        && Path::new(cached_path).exists()
+    {
+        log::debug!("glassy: fc-cache hit for family '{family}': {cached_path}");
+        return Some(cached_path.clone());
+    }
     fc_match_family_live(family)
 }
 
@@ -656,15 +673,14 @@ fn fc_match_family_live(family: &str) -> Option<String> {
 
 /// Query fontconfig for the resolved monospace font file path.
 #[cfg(target_os = "linux")]
-fn fc_match_monospace_cached(
-    cache: &std::collections::HashMap<String, String>,
-) -> Option<String> {
+fn fc_match_monospace_cached(cache: &std::collections::HashMap<String, String>) -> Option<String> {
     let key = "monospace";
     if let Some(cached_path) = cache.get(key)
-        && Path::new(cached_path).exists() {
-            log::debug!("glassy: fc-cache hit for monospace: {cached_path}");
-            return Some(cached_path.clone());
-        }
+        && Path::new(cached_path).exists()
+    {
+        log::debug!("glassy: fc-cache hit for monospace: {cached_path}");
+        return Some(cached_path.clone());
+    }
     let output = Command::new("fc-match")
         .args(["-f", "%{file}", "monospace"])
         .output()

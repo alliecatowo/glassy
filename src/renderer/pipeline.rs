@@ -9,7 +9,9 @@ impl Renderer {
         self.end_frame();
         let bg_count = self.bg_count;
         let fg_count = self.fg_count;
-        self.capture_with(path, |s, view, enc| s.record_passes(view, enc, bg_count, fg_count))
+        self.capture_with(path, |s, view, enc| {
+            s.record_passes(view, enc, bg_count, fg_count)
+        })
     }
 
     /// Capture the last-built MULTI-PANE frame to a PPM (headless verification of
@@ -195,8 +197,11 @@ impl Renderer {
                     mapped_at_creation: false,
                 });
             }
-            self.queue
-                .write_buffer(&self.image_buffer, 0, bytemuck::cast_slice(&self.image_overlay));
+            self.queue.write_buffer(
+                &self.image_buffer,
+                0,
+                bytemuck::cast_slice(&self.image_overlay),
+            );
         }
         // Panel overlay quads (modals / menus): same rebuild-every-frame strategy.
         self.overlay_count = self.overlay_quads.len() as u32;
@@ -210,8 +215,11 @@ impl Renderer {
                     mapped_at_creation: false,
                 });
             }
-            self.queue
-                .write_buffer(&self.overlay_buffer, 0, bytemuck::cast_slice(&self.overlay_quads));
+            self.queue.write_buffer(
+                &self.overlay_buffer,
+                0,
+                bytemuck::cast_slice(&self.overlay_quads),
+            );
         }
         // Panel text-on-glass glyphs: drawn after the overlay quads.
         self.overlay_text_count = self.overlay_text.len() as u32;
@@ -225,8 +233,11 @@ impl Renderer {
                     mapped_at_creation: false,
                 });
             }
-            self.queue
-                .write_buffer(&self.overlay_text_buffer, 0, bytemuck::cast_slice(&self.overlay_text));
+            self.queue.write_buffer(
+                &self.overlay_text_buffer,
+                0,
+                bytemuck::cast_slice(&self.overlay_text),
+            );
         }
         self.dirty_rows.clear();
     }
@@ -247,8 +258,11 @@ impl Renderer {
                     mapped_at_creation: false,
                 });
             }
-            self.queue
-                .write_buffer(&self.overlay_buffer, 0, bytemuck::cast_slice(&self.overlay_quads));
+            self.queue.write_buffer(
+                &self.overlay_buffer,
+                0,
+                bytemuck::cast_slice(&self.overlay_quads),
+            );
         }
         self.overlay_text_count = self.overlay_text.len() as u32;
         if !self.overlay_text.is_empty() {
@@ -261,8 +275,11 @@ impl Renderer {
                     mapped_at_creation: false,
                 });
             }
-            self.queue
-                .write_buffer(&self.overlay_text_buffer, 0, bytemuck::cast_slice(&self.overlay_text));
+            self.queue.write_buffer(
+                &self.overlay_text_buffer,
+                0,
+                bytemuck::cast_slice(&self.overlay_text),
+            );
         }
     }
 

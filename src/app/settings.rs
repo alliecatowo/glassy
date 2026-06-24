@@ -49,7 +49,10 @@ impl App {
     /// [`Self::settings_focus_order`], wrapping at the ends.
     pub(crate) fn settings_move_focus(&mut self, dir: i32) {
         let order = Self::settings_focus_order();
-        let cur = order.iter().position(|&w| Some(w) == self.gui_focused).unwrap_or(0);
+        let cur = order
+            .iter()
+            .position(|&w| Some(w) == self.gui_focused)
+            .unwrap_or(0);
         let n = order.len() as i32;
         let next = (cur as i32 + dir).rem_euclid(n) as usize;
         self.gui_focused = Some(order[next]);
@@ -87,7 +90,11 @@ impl App {
         self.settings_saved = false;
         let f = self.gui_focused;
         if f == Some(gui::id("settings/font_size")) {
-            self.resize_font(if dir > 0 { FontStep::Inc } else { FontStep::Dec });
+            self.resize_font(if dir > 0 {
+                FontStep::Inc
+            } else {
+                FontStep::Dec
+            });
         } else if f == Some(gui::id("settings/opacity")) {
             let o = (self.config.opacity + dir as f32 * 0.05).clamp(0.0, 1.0);
             self.config.opacity = o;
@@ -312,7 +319,10 @@ impl App {
     /// live (swap the global theme + full redraw).
     pub(crate) fn cycle_theme(&mut self, dir: i32) {
         let names = color::THEME_NAMES;
-        let cur = names.iter().position(|&n| n == self.config.theme).unwrap_or(0);
+        let cur = names
+            .iter()
+            .position(|&n| n == self.config.theme)
+            .unwrap_or(0);
         let next = (cur as i32 + dir).rem_euclid(names.len() as i32) as usize;
         let name = names[next];
         if let Some(theme) = color::theme_by_name(name) {
@@ -327,7 +337,9 @@ impl App {
     /// Install the theme at absolute index `idx` within `color::THEME_NAMES`,
     /// applying it live (settings theme-dropdown click). No-op if out of range.
     pub(crate) fn set_theme_by_idx(&mut self, idx: usize) {
-        let Some(&name) = color::THEME_NAMES.get(idx) else { return };
+        let Some(&name) = color::THEME_NAMES.get(idx) else {
+            return;
+        };
         if let Some(theme) = color::theme_by_name(name) {
             color::set_theme(theme);
             self.config.theme = name.to_string();
@@ -422,7 +434,13 @@ impl App {
         if let Some(window) = self.window.as_ref() {
             let size = window.inner_size();
             let m = renderer.cell_metrics();
-            let (cols, rows) = Self::grid_for(size, m.width, m.height, renderer.pad(), self.config.status_bar);
+            let (cols, rows) = Self::grid_for(
+                size,
+                m.width,
+                m.height,
+                renderer.pad(),
+                self.config.status_bar,
+            );
             self.cols = cols;
             self.rows = rows;
             pty.resize(cols, rows, m.width.round() as u16, m.height.round() as u16);
@@ -436,7 +454,12 @@ impl App {
     /// phase boundary and/or the visual-bell flash deadline, whichever is sooner.
     /// `None` means nothing is pending and the loop can park on `ControlFlow::Wait`
     /// (0% idle).
-    pub(crate) fn next_wake(&self, blink_active: bool, flash_active: bool, spin_active: bool) -> Option<Instant> {
+    pub(crate) fn next_wake(
+        &self,
+        blink_active: bool,
+        flash_active: bool,
+        spin_active: bool,
+    ) -> Option<Instant> {
         let blink = blink_active.then_some(self.blink_at);
         let flash = flash_active.then_some(self.bell_flash_until).flatten();
         let spin = spin_active.then_some(self.spinner_at);
@@ -447,7 +470,10 @@ impl App {
     /// animating (a finite, self-extending wakeup); when false we return to `Wait`.
     pub(crate) fn any_tab_busy(&self, now: Instant) -> bool {
         self.active_busy_until.is_some_and(|t| now < t)
-            || self.background.iter().any(|s| s.busy_until.is_some_and(|t| now < t))
+            || self
+                .background
+                .iter()
+                .any(|s| s.busy_until.is_some_and(|t| now < t))
     }
 
     pub(crate) fn handle_resize(&mut self, event_loop: &ActiveEventLoop, size: PhysicalSize<u32>) {
@@ -459,7 +485,13 @@ impl App {
         };
         renderer.resize(size.width, size.height);
         let m = renderer.cell_metrics();
-        let (cols, rows) = Self::grid_for(size, m.width, m.height, renderer.pad(), self.config.status_bar);
+        let (cols, rows) = Self::grid_for(
+            size,
+            m.width,
+            m.height,
+            renderer.pad(),
+            self.config.status_bar,
+        );
         let (cw, ch) = (m.width.round() as u16, m.height.round() as u16);
 
         if self.panes.is_some() {

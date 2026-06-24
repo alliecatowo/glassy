@@ -77,12 +77,12 @@
 //! and `-e <cmd> [args…]` (run a command instead of the shell). `--help` and
 //! `--version` print and exit.
 
+mod cli;
 pub mod keymap;
 pub mod parse;
 pub mod theme_import;
-mod cli;
 
-use anyhow::{Result, Context};
+use anyhow::{Context, Result};
 
 pub use keymap::{Chord, KeyAction, KeyMap};
 pub use parse::{path, save};
@@ -109,7 +109,8 @@ impl Settings {
 
         // 2. Load config file if it exists.
         if let Some(path) = parse::path()
-            && let Ok(text) = std::fs::read_to_string(&path) {
+            && let Ok(text) = std::fs::read_to_string(&path)
+        {
             parse::parse_config_file(&text, &mut raw)
                 .with_context(|| format!("parsing {}", path.display()))?;
         }
@@ -132,9 +133,9 @@ impl Settings {
 
 #[cfg(test)]
 mod tests {
-    use super::keymap::{KeyAction, build_keymap, default_keymap, parse_chord, parse_action};
-    use super::parse::{parse_config_file, RawConfig, parse_bool};
     use super::cli::profile_from_args;
+    use super::keymap::{KeyAction, build_keymap, default_keymap, parse_action, parse_chord};
+    use super::parse::{RawConfig, parse_bool, parse_config_file};
 
     // -----------------------------------------------------------------------
     // Settings + RawConfig tests
@@ -156,12 +157,9 @@ mod tests {
     // merge_config tests
     // -----------------------------------------------------------------------
 
-    use super::parse::path;
-
     #[test]
     fn merge_updates_in_place_and_appends() {
-        use super::parse as p;
-        let existing = "\
+        let _existing = "\
 # my config
 theme = dracula
 font_size = 14
@@ -169,7 +167,7 @@ opacity = 0.80
 ";
         // merge_config is private but tested indirectly via save()
         // For direct access, we'd need to expose it or test via integration
-        let updates = [
+        let _updates = [
             ("font_size", "20".to_string()),
             ("opacity", "0.95".to_string()),
             ("bell_visual", "false".to_string()),
@@ -228,7 +226,10 @@ opacity = 0.80
         assert_eq!(raw.cwd.as_deref(), Some("/home/me/work"));
         let s = raw.into_settings().unwrap();
         assert_eq!(s.config.font_size, 18.0);
-        assert_eq!(s.config.initial_cwd.as_deref().map(|p| p.to_str().unwrap()), Some("/home/me/work"));
+        assert_eq!(
+            s.config.initial_cwd.as_deref().map(|p| p.to_str().unwrap()),
+            Some("/home/me/work")
+        );
     }
 
     #[test]
@@ -275,7 +276,10 @@ opacity = 0.80
         let mut raw = RawConfig::default();
         parse_config_file("cwd = /tmp/here\n", &mut raw).unwrap();
         let s = raw.into_settings().unwrap();
-        assert_eq!(s.config.initial_cwd.as_deref().map(|p| p.to_str().unwrap()), Some("/tmp/here"));
+        assert_eq!(
+            s.config.initial_cwd.as_deref().map(|p| p.to_str().unwrap()),
+            Some("/tmp/here")
+        );
     }
 
     #[test]
@@ -292,10 +296,22 @@ opacity = 0.80
     fn font_features_parses_comma_separated() {
         let mut raw = RawConfig::default();
         parse_config_file("font_features = ss01, calt=0, dlig\n", &mut raw).unwrap();
-        let feats = raw.font_features.as_ref().expect("font_features should be set");
-        assert!(feats.contains(&"ss01".to_string()), "ss01 should be present");
-        assert!(feats.contains(&"calt=0".to_string()), "calt=0 should be present");
-        assert!(feats.contains(&"dlig".to_string()), "dlig should be present");
+        let feats = raw
+            .font_features
+            .as_ref()
+            .expect("font_features should be set");
+        assert!(
+            feats.contains(&"ss01".to_string()),
+            "ss01 should be present"
+        );
+        assert!(
+            feats.contains(&"calt=0".to_string()),
+            "calt=0 should be present"
+        );
+        assert!(
+            feats.contains(&"dlig".to_string()),
+            "dlig should be present"
+        );
     }
 
     #[test]
@@ -311,7 +327,10 @@ opacity = 0.80
     fn font_features_space_separated_also_works() {
         let mut raw = RawConfig::default();
         parse_config_file("font_features = liga ss01\n", &mut raw).unwrap();
-        let feats = raw.font_features.as_ref().expect("font_features should be set");
+        let feats = raw
+            .font_features
+            .as_ref()
+            .expect("font_features should be set");
         assert_eq!(feats.len(), 2);
         assert!(feats.contains(&"liga".to_string()));
         assert!(feats.contains(&"ss01".to_string()));
@@ -365,7 +384,10 @@ opacity = 0.80
     #[test]
     fn parse_action_known_values() {
         assert_eq!(parse_action("new_tab").unwrap(), Some(KeyAction::NewTab));
-        assert_eq!(parse_action("close_pane").unwrap(), Some(KeyAction::ClosePane));
+        assert_eq!(
+            parse_action("close_pane").unwrap(),
+            Some(KeyAction::ClosePane)
+        );
         assert_eq!(parse_action("none").unwrap(), None);
         assert_eq!(parse_action("disabled").unwrap(), None);
     }
@@ -558,17 +580,35 @@ f11 = none\n\
     #[test]
     fn parse_action_all_known_actions() {
         let known = [
-            "new_tab", "close_pane", "next_tab", "prev_tab",
-            "split_vertical", "split_horizontal",
-            "toggle_fullscreen", "toggle_maximize",
-            "settings", "help", "search", "command_palette",
-            "copy", "paste", "toggle_status_bar",
-            "font_increase", "font_decrease", "font_reset",
-            "scroll_up", "scroll_down", "scroll_top", "scroll_bottom",
+            "new_tab",
+            "close_pane",
+            "next_tab",
+            "prev_tab",
+            "split_vertical",
+            "split_horizontal",
+            "toggle_fullscreen",
+            "toggle_maximize",
+            "settings",
+            "help",
+            "search",
+            "command_palette",
+            "copy",
+            "paste",
+            "toggle_status_bar",
+            "font_increase",
+            "font_decrease",
+            "font_reset",
+            "scroll_up",
+            "scroll_down",
+            "scroll_top",
+            "scroll_bottom",
         ];
         for name in &known {
             let r = parse_action(name);
-            assert!(r.is_ok() && r.unwrap().is_some(), "'{name}' must parse to Some(action)");
+            assert!(
+                r.is_ok() && r.unwrap().is_some(),
+                "'{name}' must parse to Some(action)"
+            );
         }
     }
 
@@ -581,7 +621,10 @@ f11 = none\n\
 
     #[test]
     fn parse_action_case_insensitive() {
-        assert_eq!(parse_action("NEW_TAB").unwrap(), Some(super::keymap::KeyAction::NewTab));
+        assert_eq!(
+            parse_action("NEW_TAB").unwrap(),
+            Some(super::keymap::KeyAction::NewTab)
+        );
         assert_eq!(parse_action("NONE").unwrap(), None);
     }
 
@@ -622,25 +665,25 @@ f11 = none\n\
     fn default_keymap_has_expected_defaults() {
         let km = default_keymap();
         let checks: &[(&str, super::keymap::KeyAction)] = &[
-            ("ctrl+shift+w",   super::keymap::KeyAction::ClosePane),
-            ("ctrl+tab",       super::keymap::KeyAction::NextTab),
+            ("ctrl+shift+w", super::keymap::KeyAction::ClosePane),
+            ("ctrl+tab", super::keymap::KeyAction::NextTab),
             ("ctrl+shift+tab", super::keymap::KeyAction::PrevTab),
-            ("ctrl+shift+e",   super::keymap::KeyAction::SplitVertical),
-            ("ctrl+shift+o",   super::keymap::KeyAction::SplitHorizontal),
-            ("ctrl+,",         super::keymap::KeyAction::Settings),
-            ("f1",             super::keymap::KeyAction::Help),
-            ("ctrl+shift+f",   super::keymap::KeyAction::Search),
-            ("ctrl+shift+p",   super::keymap::KeyAction::CommandPalette),
-            ("ctrl+shift+c",   super::keymap::KeyAction::Copy),
-            ("ctrl+shift+v",   super::keymap::KeyAction::Paste),
-            ("ctrl+shift+b",   super::keymap::KeyAction::ToggleStatusBar),
-            ("ctrl++",         super::keymap::KeyAction::FontIncrease),
-            ("ctrl+-",         super::keymap::KeyAction::FontDecrease),
-            ("ctrl+0",         super::keymap::KeyAction::FontReset),
-            ("shift+pageup",   super::keymap::KeyAction::ScrollUp),
+            ("ctrl+shift+e", super::keymap::KeyAction::SplitVertical),
+            ("ctrl+shift+o", super::keymap::KeyAction::SplitHorizontal),
+            ("ctrl+,", super::keymap::KeyAction::Settings),
+            ("f1", super::keymap::KeyAction::Help),
+            ("ctrl+shift+f", super::keymap::KeyAction::Search),
+            ("ctrl+shift+p", super::keymap::KeyAction::CommandPalette),
+            ("ctrl+shift+c", super::keymap::KeyAction::Copy),
+            ("ctrl+shift+v", super::keymap::KeyAction::Paste),
+            ("ctrl+shift+b", super::keymap::KeyAction::ToggleStatusBar),
+            ("ctrl++", super::keymap::KeyAction::FontIncrease),
+            ("ctrl+-", super::keymap::KeyAction::FontDecrease),
+            ("ctrl+0", super::keymap::KeyAction::FontReset),
+            ("shift+pageup", super::keymap::KeyAction::ScrollUp),
             ("shift+pagedown", super::keymap::KeyAction::ScrollDown),
-            ("shift+home",     super::keymap::KeyAction::ScrollTop),
-            ("shift+end",      super::keymap::KeyAction::ScrollBottom),
+            ("shift+home", super::keymap::KeyAction::ScrollTop),
+            ("shift+end", super::keymap::KeyAction::ScrollBottom),
         ];
         for (chord_str, expected_action) in checks {
             let chord = parse_chord(chord_str).unwrap();
@@ -659,7 +702,11 @@ f11 = none\n\
     #[test]
     fn profile_override_does_not_affect_other_keys() {
         let mut raw = RawConfig::default();
-        parse_config_file("scrollback = 5000\n[profile.compact]\nfont_size = 10\n", &mut raw).unwrap();
+        parse_config_file(
+            "scrollback = 5000\n[profile.compact]\nfont_size = 10\n",
+            &mut raw,
+        )
+        .unwrap();
         // Before activation: scrollback was set, font_size not.
         assert_eq!(raw.scrollback, Some(5000));
         assert_eq!(raw.font_size, None);

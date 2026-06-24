@@ -73,8 +73,16 @@ impl App {
             * 8.0   // approximate cell_w
             + 80.0; // icon + shortcut + padding
         let est_panel_h = items.len() as f32 * 22.0 + 8.0;
-        let sw = self.renderer.as_ref().map(|r| r.surface_size().0 as f32).unwrap_or(800.0);
-        let sh = self.renderer.as_ref().map(|r| r.surface_size().1 as f32).unwrap_or(600.0);
+        let sw = self
+            .renderer
+            .as_ref()
+            .map(|r| r.surface_size().0 as f32)
+            .unwrap_or(800.0);
+        let sh = self
+            .renderer
+            .as_ref()
+            .map(|r| r.surface_size().1 as f32)
+            .unwrap_or(600.0);
         let ax = mx.min(sw - est_panel_w).max(0.0);
         let ay = my.min(sh - est_panel_h).max(0.0);
 
@@ -117,7 +125,11 @@ impl App {
     /// item list so navigation wraps correctly for both the hamburger (fixed 4
     /// items) and the context menu (variable length).
     pub(crate) fn handle_menu_key(&mut self, key: &Key, event_loop: &ActiveEventLoop) -> bool {
-        let n = self.menu_items.as_ref().map(|v| v.len()).unwrap_or(MenuAction::ALL.len());
+        let n = self
+            .menu_items
+            .as_ref()
+            .map(|v| v.len())
+            .unwrap_or(MenuAction::ALL.len());
         match key {
             Key::Named(NamedKey::ArrowUp) => {
                 self.menu_sel = (self.menu_sel + n - 1) % n;
@@ -168,7 +180,9 @@ impl App {
         };
 
         let items: &[MenuAction] = self.menu_items.as_deref().unwrap_or(MenuAction::ALL);
-        let has_sel = self.pty.as_ref()
+        let has_sel = self
+            .pty
+            .as_ref()
             .and_then(|p| p.term.lock().selection_to_string())
             .map(|s| !s.is_empty())
             .unwrap_or(false);
@@ -178,17 +192,26 @@ impl App {
         let cell_h = m.height;
         let cell_w = m.width;
         let row_h = (cell_h * 1.4).round().max(cell_h + 4.0);
-        let sep_h  = 5.0_f32;
+        let sep_h = 5.0_f32;
         // Panel width estimation (mirrors gui::menu — just needs to be wide enough
         // that hits inside it are valid; exact width used for x-clamping).
         let label_chars = items.iter().map(|a| a.label().len()).max().unwrap_or(4);
-        let hint_chars  = items.iter().filter_map(|a| a.shortcut()).map(|h| h.len()).max().unwrap_or(0);
+        let hint_chars = items
+            .iter()
+            .filter_map(|a| a.shortcut())
+            .map(|h| h.len())
+            .max()
+            .unwrap_or(0);
         let pad_x = (cell_w * 1.2).round();
         let icon_w = cell_w + 4.0;
         let hint_gap = (cell_w * 2.0).round();
         let panel_w = (icon_w
             + label_chars as f32 * cell_w
-            + if hint_chars > 0 { hint_gap + hint_chars as f32 * cell_w } else { 0.0 }
+            + if hint_chars > 0 {
+                hint_gap + hint_chars as f32 * cell_w
+            } else {
+                0.0
+            }
             + pad_x * 2.0)
             .max(cell_w * 8.0)
             .ceil();
@@ -289,8 +312,11 @@ impl App {
                 if self.menu_open {
                     // Hamburger: uses MenuAction::ALL; anchor top-right below strip.
                     self.menu_items = None;
-                    let label_w =
-                        MenuAction::ALL.iter().map(|a| a.label().len()).max().unwrap_or(0);
+                    let label_w = MenuAction::ALL
+                        .iter()
+                        .map(|a| a.label().len())
+                        .max()
+                        .unwrap_or(0);
                     let panel_w = label_w + 4;
                     self.menu_anchor = Some((self.cols.saturating_sub(panel_w), TAB_STRIP_ROWS));
                     // Pixel anchor: below the # button, at the right of the window.
@@ -303,8 +329,11 @@ impl App {
                         // hardcoded 220px estimate that drifts with DPI/font.
                         let m = r.cell_metrics();
                         let cell_w = m.width;
-                        let label_chars =
-                            MenuAction::ALL.iter().map(|a| a.label().len()).max().unwrap_or(4);
+                        let label_chars = MenuAction::ALL
+                            .iter()
+                            .map(|a| a.label().len())
+                            .max()
+                            .unwrap_or(4);
                         let hint_chars = MenuAction::ALL
                             .iter()
                             .filter_map(|a| a.shortcut().map(|h| h.len()))

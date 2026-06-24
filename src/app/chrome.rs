@@ -70,16 +70,16 @@ impl App {
         renderer.push_overlay_glyph_px((m.width).round(), mark_y.round(), '◆', accent);
 
         // 3) Lay out the bar (pixel rects) and paint each item.
-        let descs: Vec<(&str, bool, bool)> =
-            snapshot.iter().map(|(t, a, b, _)| (t.as_str(), *a, *b)).collect();
+        let descs: Vec<(&str, bool, bool)> = snapshot
+            .iter()
+            .map(|(t, a, b, _)| (t.as_str(), *a, *b))
+            .collect();
         let segs = strip_layout(&descs, bar_w, bar_h, m.width);
         let multi = descs.len() > 1;
         let spin = SPINNER_FRAMES[spinner_frame % SPINNER_FRAMES.len()];
 
         // Helper: state-driven fill for a control/chip surface.
-        let press_fill = |base: [f32; 4]| {
-            [base[0] * 0.85, base[1] * 0.85, base[2] * 0.85, base[3]]
-        };
+        let press_fill = |base: [f32; 4]| [base[0] * 0.85, base[1] * 0.85, base[2] * 0.85, base[3]];
         let hover_fill = |base: [f32; 4]| gui::state_fill(base, 0.7, false);
 
         // Track a held tab so we can defer its drag-ghost to the very top.
@@ -91,16 +91,35 @@ impl App {
             let is_held = held == Some(seg.item);
             match seg.item {
                 StripItem::Tab(i) => {
-                    let (_title, active, busy) = descs.get(i).copied().unwrap_or(("", false, false));
+                    let (_title, active, busy) =
+                        descs.get(i).copied().unwrap_or(("", false, false));
                     let is_spinning = snapshot.get(i).map(|s| s.3).unwrap_or(false);
                     // A dragged tab is rendered last as a ghost; reserve it.
                     if dragging == Some(i) {
                         ghost = Some((r, seg.label.clone(), i));
                     }
                     Self::paint_tab_chip(
-                        renderer, r, m.height, m.width, i, &seg.label, active, busy, is_spinning,
-                        is_hover, is_held, spin, bar_h, surface, active_surface, accent, active_fg, fg, fg_dim,
-                        dragging == Some(i), multi,
+                        renderer,
+                        r,
+                        m.height,
+                        m.width,
+                        i,
+                        &seg.label,
+                        active,
+                        busy,
+                        is_spinning,
+                        is_hover,
+                        is_held,
+                        spin,
+                        bar_h,
+                        surface,
+                        active_surface,
+                        accent,
+                        active_fg,
+                        fg,
+                        fg_dim,
+                        dragging == Some(i),
+                        multi,
                     );
                 }
                 StripItem::TabClose(i) => {
@@ -111,11 +130,21 @@ impl App {
                         if is_hover {
                             let a = if is_held { 0.30 } else { 0.18 };
                             renderer.push_overlay_rrect_px(
-                                r.x, r.y, r.w, r.h, 3.0,
+                                r.x,
+                                r.y,
+                                r.w,
+                                r.h,
+                                3.0,
                                 [danger[0], danger[1], danger[2], a],
                             );
                         }
-                        let cfg = if is_hover { danger } else if active { active_fg } else { fg_dim };
+                        let cfg = if is_hover {
+                            danger
+                        } else if active {
+                            active_fg
+                        } else {
+                            fg_dim
+                        };
                         let gx = r.x + (r.w - m.width) * 0.5;
                         let gy = r.center_y() - m.height * 0.5;
                         renderer.push_overlay_glyph_px(gx.round(), gy.round(), '✕', cfg);
@@ -138,9 +167,23 @@ impl App {
                     };
                     let base = surface;
                     if is_held {
-                        renderer.push_overlay_rrect_px(r.x, r.y, r.w, r.h, gui_radius(m.height), press_fill(base));
+                        renderer.push_overlay_rrect_px(
+                            r.x,
+                            r.y,
+                            r.w,
+                            r.h,
+                            gui_radius(m.height),
+                            press_fill(base),
+                        );
                     } else if is_hover {
-                        renderer.push_overlay_rrect_px(r.x, r.y, r.w, r.h, gui_radius(m.height), hover_fill(base));
+                        renderer.push_overlay_rrect_px(
+                            r.x,
+                            r.y,
+                            r.w,
+                            r.h,
+                            gui_radius(m.height),
+                            hover_fill(base),
+                        );
                         renderer.push_overlay_px(r.x, r.y, r.w, 1.0, mul(gui::rail()));
                     }
                     let nudge = if is_held { 1.0 } else { 0.0 };
@@ -157,9 +200,19 @@ impl App {
         if let Some((r, label, i)) = ghost {
             let gx = (mouse_px.0 - r.w * 0.5).clamp(0.0, bar_w - r.w);
             let gr = gui::Rect::new(gx, r.y - 2.0, r.w, r.h);
-            renderer.push_overlay_rrect_px(gr.x, gr.y, gr.w, gr.h, TAB_RADIUS, mul(gui::glass_float()));
+            renderer.push_overlay_rrect_px(
+                gr.x,
+                gr.y,
+                gr.w,
+                gr.h,
+                TAB_RADIUS,
+                mul(gui::glass_float()),
+            );
             renderer.push_overlay_px(gr.x, gr.y, gr.w, 2.0, accent);
-            Self::paint_tab_label(renderer, gr, m.height, m.width, i, &label, true, false, false, spin, active_fg, active_fg, multi);
+            Self::paint_tab_label(
+                renderer, gr, m.height, m.width, i, &label, true, false, false, spin, active_fg,
+                active_fg, multi,
+            );
         }
 
         // 5) Tab-count badge + scrollback %, tucked just left of the right controls
@@ -229,9 +282,9 @@ impl App {
         let mul = |c: [f32; 4]| [c[0] * fdim, c[1] * fdim, c[2] * fdim, c[3]];
 
         let bar_bg = mul(gui::glass_body());
-        let accent  = mul(color::accent());
-        let fg_dim  = mul(gui::fg_dim());
-        let fg      = mul(gui::fg());
+        let accent = mul(color::accent());
+        let fg_dim = mul(gui::fg_dim());
+        let fg = mul(gui::fg());
 
         // 1) Bar backdrop + top hairline (mirrors the tab bar's bottom seam).
         renderer.push_overlay_px(0.0, bar_y, bar_w, bar_h, bar_bg);
@@ -285,7 +338,7 @@ impl App {
 
         // Mode flags (ALT / MOUSE) — shown only when non-standard.
         {
-            let alt   = term_mode.contains(TermMode::ALT_SCREEN);
+            let alt = term_mode.contains(TermMode::ALT_SCREEN);
             let mouse = term_mode.intersects(TermMode::MOUSE_MODE);
             if alt || mouse {
                 let tag = if alt { "ALT" } else { "MOUSE" };
@@ -311,9 +364,11 @@ impl App {
                     let components: Vec<_> = path.components().collect();
                     let n = components.len();
                     if n >= 2 {
-                        format!("{}/{}",
+                        format!(
+                            "{}/{}",
                             components[n - 2].as_os_str().to_string_lossy(),
-                            components[n - 1].as_os_str().to_string_lossy())
+                            components[n - 1].as_os_str().to_string_lossy()
+                        )
                     } else if n == 1 {
                         components[0].as_os_str().to_string_lossy().to_string()
                     } else {
@@ -484,11 +539,23 @@ impl App {
             // Bottom groove anchors inactive chip visually.
             if !hover && !held {
                 let h = gui::hairline();
-                renderer.push_overlay_px(rr.x, rr.y + rr.h - 1.0, rr.w, 1.0, [h[0], h[1], h[2], h[3] * 0.4]);
+                renderer.push_overlay_px(
+                    rr.x,
+                    rr.y + rr.h - 1.0,
+                    rr.w,
+                    1.0,
+                    [h[0], h[1], h[2], h[3] * 0.4],
+                );
             }
             // Hover accent rail (dim) signals interactability.
             if hover && !held {
-                renderer.push_overlay_px(rr.x, rr.y, rr.w, 1.0, [accent[0], accent[1], accent[2], accent[3] * 0.6]);
+                renderer.push_overlay_px(
+                    rr.x,
+                    rr.y,
+                    rr.w,
+                    1.0,
+                    [accent[0], accent[1], accent[2], accent[3] * 0.6],
+                );
             }
         }
         let label_fg = if active { active_fg } else { fg_dim };
@@ -521,7 +588,12 @@ impl App {
         let mut tx = r.x + TAB_PAD_X;
         // Leading status glyph: spinner while streaming, dot for background activity.
         if spinning {
-            renderer.push_overlay_glyph_px(tx.round(), ty, spin, if active { label_fg } else { accent });
+            renderer.push_overlay_glyph_px(
+                tx.round(),
+                ty,
+                spin,
+                if active { label_fg } else { accent },
+            );
             tx += cell_w;
         } else if busy && !active {
             renderer.push_overlay_glyph_px(tx.round(), ty, '•', accent);
@@ -530,7 +602,11 @@ impl App {
         // Fit-to-width title (tail-ellipsized). A numeric prefix is shown only in
         // multi-tab mode (a lone tab is titled by the window). Reserve room for the
         // close box on the right when one exists (multi-tab only).
-        let reserve = if multi { CLOSE_BOX + TAB_PAD_X } else { TAB_PAD_X };
+        let reserve = if multi {
+            CLOSE_BOX + TAB_PAD_X
+        } else {
+            TAB_PAD_X
+        };
         let text_w = (r.w - (tx - r.x) - reserve).max(0.0);
         let max_chars = (text_w / cell_w).floor() as usize;
         let s = if multi {
@@ -715,5 +791,4 @@ impl App {
             }
         }
     }
-
 }

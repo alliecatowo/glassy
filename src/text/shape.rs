@@ -9,9 +9,7 @@ use cosmic_text::{
     SwashCache, SwashContent, Weight, fontdb,
 };
 
-use super::discover::{
-    FamilyOwned, build_font_system, discover_font_producers,
-};
+use super::discover::{FamilyOwned, build_font_system, discover_font_producers};
 
 /// Per-cell layout metrics, all in physical pixels.
 #[derive(Clone, Copy, Debug)]
@@ -86,7 +84,12 @@ pub struct Text {
 
 /// Build shaping attributes for the given style against the resolved family,
 /// applying any caller-supplied font features (OpenType feature overrides).
-fn build_attrs<'a>(family: Family<'a>, bold: bool, italic: bool, features: &FontFeatures) -> Attrs<'a> {
+fn build_attrs<'a>(
+    family: Family<'a>,
+    bold: bool,
+    italic: bool,
+    features: &FontFeatures,
+) -> Attrs<'a> {
     let mut attrs = Attrs::new();
     attrs.family = family;
     attrs.weight = if bold { Weight::BOLD } else { Weight::NORMAL };
@@ -154,7 +157,11 @@ impl Text {
     /// non-empty, each feature is parsed and applied to every shaping call so
     /// callers do not need to post-process `Attrs` themselves. `None` / empty
     /// slice means "use the font's defaults" (nothing forced on or off).
-    pub fn load(family: Option<&str>, font_px: f32, font_features: &[String]) -> Result<(Text, CellMetrics)> {
+    pub fn load(
+        family: Option<&str>,
+        font_px: f32,
+        font_features: &[String],
+    ) -> Result<(Text, CellMetrics)> {
         // Gather candidate *producers* in priority order (explicit override,
         // requested family, curated families verified via fontconfig, generic
         // monospace, known paths). Each producer is a closure that only runs its
@@ -359,7 +366,12 @@ impl Text {
     /// sequences resolve to their single combined glyph. Used only for cells that
     /// actually carry combiners; the common single-character path stays on
     /// `rasterize`. Uncached for the same reason as [`Text::rasterize`].
-    pub fn rasterize_cluster(&mut self, cluster: &str, bold: bool, italic: bool) -> Vec<RasterizedGlyph> {
+    pub fn rasterize_cluster(
+        &mut self,
+        cluster: &str,
+        bold: bool,
+        italic: bool,
+    ) -> Vec<RasterizedGlyph> {
         self.build_glyphs(cluster, bold, italic)
     }
 
@@ -450,16 +462,10 @@ impl Text {
         // We need to map shaped output glyphs back to input character positions.
         // Each LayoutGlyph carries `start`/`end` byte offsets into the input string.
         // Build a byte_offset → char_index lookup for all scalar boundaries.
-        let char_starts: Vec<usize> = text
-            .char_indices()
-            .map(|(byte_off, _)| byte_off)
-            .collect();
+        let char_starts: Vec<usize> = text.char_indices().map(|(byte_off, _)| byte_off).collect();
         // Map byte offset → char index. We'll do a linear search since runs are short.
         let byte_to_char = |byte_off: usize| -> usize {
-            char_starts
-                .iter()
-                .position(|&b| b == byte_off)
-                .unwrap_or(0)
+            char_starts.iter().position(|&b| b == byte_off).unwrap_or(0)
         };
 
         // Allocate output slots — one per input character.
@@ -562,11 +568,7 @@ impl Text {
         self.buffer.set_text("fi", &attrs, Shaping::Advanced, None);
         self.buffer.shape_until_scroll(&mut self.font_system, false);
 
-        let glyph_count: usize = self
-            .buffer
-            .layout_runs()
-            .map(|r| r.glyphs.len())
-            .sum();
+        let glyph_count: usize = self.buffer.layout_runs().map(|r| r.glyphs.len()).sum();
         // "fi" has 2 input characters; a liga font collapses them into 1 glyph.
         glyph_count < 2
     }

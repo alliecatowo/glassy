@@ -48,21 +48,23 @@ impl ImageStore {
             self.by_id.insert(cmd.id, image);
             // Cap kitty images (below SIXEL_ID_BASE) at MAX_KITTY_IMAGES. Evict
             // numerically-lowest id (oldest) plus any placements that reference it.
-            let kitty_count =
-                self.by_id.keys().filter(|&&k| k < SIXEL_ID_BASE).count();
+            let kitty_count = self.by_id.keys().filter(|&&k| k < SIXEL_ID_BASE).count();
             if kitty_count > MAX_KITTY_IMAGES
-                && let Some(&oldest) =
-                    self.by_id.keys().filter(|&&k| k < SIXEL_ID_BASE).min()
-                {
-                    self.by_id.remove(&oldest);
-                    self.placements.retain(|p| p.id != oldest);
-                }
+                && let Some(&oldest) = self.by_id.keys().filter(|&&k| k < SIXEL_ID_BASE).min()
+            {
+                self.by_id.remove(&oldest);
+                self.placements.retain(|p| p.id != oldest);
+            }
             self.revision += 1;
         }
         match cmd.action {
             Action::Delete => Some(TapEvent::Delete(cmd.id)),
             Action::TransmitAndDisplay | Action::Display => {
-                Some(TapEvent::Display(PendingDisplay { id: cmd.id, cols: cmd.cols, rows: cmd.rows }))
+                Some(TapEvent::Display(PendingDisplay {
+                    id: cmd.id,
+                    cols: cmd.cols,
+                    rows: cmd.rows,
+                }))
             }
             _ => None,
         }
@@ -118,7 +120,13 @@ impl ImageStore {
         if self.placements.len() >= MAX_PLACEMENTS {
             self.placements.remove(0);
         }
-        self.placements.push(Placement { id, row, col, cols, rows });
+        self.placements.push(Placement {
+            id,
+            row,
+            col,
+            cols,
+            rows,
+        });
         self.revision += 1;
     }
 
@@ -165,8 +173,6 @@ pub struct StreamTap {
     /// Next id to assign to a decoded sixel image (which carry no kitty id).
     next_sixel_id: u32,
 }
-
-
 
 /// OSC 9;4 progress state. Mirrors the ConEmu/Windows Terminal progress-state API.
 /// The sequence is `ESC ] 9 ; 4 ; <state> ; <pct> ST` where `pct` is 0-100.
@@ -422,7 +428,10 @@ impl StreamTap {
         let q = self.dcs.iter().position(|&b| b == b'q')?;
         // Sixel params are digits and ';' only; anything else (e.g. DECRQSS `$q`)
         // means this is not sixel.
-        if !self.dcs[..q].iter().all(|&b| b.is_ascii_digit() || b == b';') {
+        if !self.dcs[..q]
+            .iter()
+            .all(|&b| b.is_ascii_digit() || b == b';')
+        {
             return None;
         }
         let image = decode_sixel(&self.dcs[q + 1..])?;
@@ -430,7 +439,11 @@ impl StreamTap {
         self.next_sixel_id = self.next_sixel_id.wrapping_add(1).max(SIXEL_ID_BASE);
         store.lock().insert_pixels(id, image);
         self.dcs.clear();
-        Some(TapEvent::Display(PendingDisplay { id, cols: 0, rows: 0 }))
+        Some(TapEvent::Display(PendingDisplay {
+            id,
+            cols: 0,
+            rows: 0,
+        }))
     }
 
     /// Finish a buffered OSC. Dispatches to specialised parsers for:
@@ -587,7 +600,9 @@ fn host_is_local(host: &str) -> bool {
         .is_some_and(|h| {
             // Match either the full hostname or its short (pre-dot) form.
             h.eq_ignore_ascii_case(host)
-                || h.split('.').next().is_some_and(|s| s.eq_ignore_ascii_case(host))
+                || h.split('.')
+                    .next()
+                    .is_some_and(|s| s.eq_ignore_ascii_case(host))
         })
 }
 
@@ -613,4 +628,3 @@ fn percent_decode(s: &str) -> Vec<u8> {
     }
     out
 }
-

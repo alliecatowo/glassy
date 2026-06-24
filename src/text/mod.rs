@@ -80,7 +80,8 @@ mod tests {
         };
         let slots = text.rasterize_run("fi", false, false, metrics.width);
         assert_eq!(
-            slots.len(), 2,
+            slots.len(),
+            2,
             "rasterize_run of \"fi\" must yield 2 slots (one per input char)"
         );
     }
@@ -92,7 +93,11 @@ mod tests {
         let r1 = Text::load(None, 14.0, &[]);
         let r2 = Text::load(None, 14.0, &[]);
         // Both must either both succeed or both fail (no font).
-        assert_eq!(r1.is_ok(), r2.is_ok(), "empty features must not change load outcome");
+        assert_eq!(
+            r1.is_ok(),
+            r2.is_ok(),
+            "empty features must not change load outcome"
+        );
     }
 
     /// Font features with a valid tag list must parse and load without error.
@@ -101,9 +106,9 @@ mod tests {
     #[test]
     fn font_features_valid_tags_loads() {
         let features = vec![
-            "ss01".to_string(),       // bare tag → enabled
-            "calt=0".to_string(),     // explicit disable
-            "liga=1".to_string(),     // explicit enable
+            "ss01".to_string(),   // bare tag → enabled
+            "calt=0".to_string(), // explicit disable
+            "liga=1".to_string(), // explicit enable
         ];
         match Text::load(None, 14.0, &features) {
             Ok(_) => {} // expected
@@ -136,7 +141,8 @@ mod tests {
             assert!(
                 g.advance <= metrics.width * 2.0,
                 "advance {} should not be wildly larger than cell_w {}",
-                g.advance, metrics.width
+                g.advance,
+                metrics.width
             );
         }
     }

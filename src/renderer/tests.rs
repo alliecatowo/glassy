@@ -252,7 +252,10 @@ fn packer_overflow_returns_none() {
             panic!("packer never returned None — infinite loop guard hit");
         }
     }
-    assert!(allocs > 0, "must have succeeded at least once before overflow");
+    assert!(
+        allocs > 0,
+        "must have succeeded at least once before overflow"
+    );
 }
 
 #[test]
@@ -325,19 +328,23 @@ fn packer_uv_coords_stay_in_0_1_after_pack_sequence() {
         let uv_max = [(x + glyph_w) as f32 * inv, (y + glyph_h) as f32 * inv];
         assert!(
             uv_min[0] >= 0.0 && uv_min[0] <= 1.0,
-            "uv_min.x={} out of [0,1]", uv_min[0]
+            "uv_min.x={} out of [0,1]",
+            uv_min[0]
         );
         assert!(
             uv_min[1] >= 0.0 && uv_min[1] <= 1.0,
-            "uv_min.y={} out of [0,1]", uv_min[1]
+            "uv_min.y={} out of [0,1]",
+            uv_min[1]
         );
         assert!(
             uv_max[0] >= 0.0 && uv_max[0] <= 1.0,
-            "uv_max.x={} out of [0,1]", uv_max[0]
+            "uv_max.x={} out of [0,1]",
+            uv_max[0]
         );
         assert!(
             uv_max[1] >= 0.0 && uv_max[1] <= 1.0,
-            "uv_max.y={} out of [0,1]", uv_max[1]
+            "uv_max.y={} out of [0,1]",
+            uv_max[1]
         );
         count += 1;
         if count > 10_000 {
@@ -367,22 +374,22 @@ fn atlas_overflow_repack_uvs_are_valid_after_reset() {
 
     // Fill until overflow.
     let mut pre_reset_last: Option<(u32, u32)> = None;
-    loop {
-        match p.alloc(glyph_w, glyph_h) {
-            Some(o) => {
-                pre_reset_last = Some(o);
-            }
-            None => break,
-        }
+    while let Some(o) = p.alloc(glyph_w, glyph_h) {
+        pre_reset_last = Some(o);
     }
     let pre_uvs = pre_reset_last.map(|(x, y)| {
-        [x as f32 * inv, y as f32 * inv,
-         (x + glyph_w) as f32 * inv, (y + glyph_h) as f32 * inv]
+        [
+            x as f32 * inv,
+            y as f32 * inv,
+            (x + glyph_w) as f32 * inv,
+            (y + glyph_h) as f32 * inv,
+        ]
     });
 
     // Simulate repack: reset + re-alloc the same glyph.
     p.reset();
-    let post_origin = p.alloc(glyph_w, glyph_h)
+    let post_origin = p
+        .alloc(glyph_w, glyph_h)
         .expect("first alloc after reset must succeed");
     let post_uvs = [
         post_origin.0 as f32 * inv,
@@ -393,11 +400,15 @@ fn atlas_overflow_repack_uvs_are_valid_after_reset() {
 
     // Post-reset UVs must be in [0,1].
     for &uv in &post_uvs {
-        assert!(uv >= 0.0 && uv <= 1.0, "post-reset UV {uv} out of [0,1]");
+        assert!((0.0..=1.0).contains(&uv), "post-reset UV {uv} out of [0,1]");
     }
     // Post-reset origin must be (0,0) — the cache was cleared and repacking
     // starts fresh, so the first glyph always lands at the atlas origin.
-    assert_eq!(post_origin, (0, 0), "post-reset first alloc must land at (0,0)");
+    assert_eq!(
+        post_origin,
+        (0, 0),
+        "post-reset first alloc must land at (0,0)"
+    );
     // If the pre-reset packer had placed at least one glyph, the pre-reset
     // and post-reset UVs must differ (stale UVs from before the reset are
     // invalid; this is why atlas_reset triggers a full row rebuild).
@@ -440,25 +451,20 @@ fn atlas_repack_does_not_lose_capacity() {
 /// GPU adapter is available in the test environment (CI without GPU). The
 /// tests that call this skip gracefully in that case.
 fn headless_device() -> Option<(wgpu::Device, wgpu::Queue)> {
-    let instance = wgpu::Instance::new(
-        wgpu::InstanceDescriptor::new_without_display_handle(),
-    );
-    let adapter = pollster::block_on(instance.request_adapter(
-        &wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::None,
-            force_fallback_adapter: false,
-            compatible_surface: None,
-        },
-    )).ok()?;
-    let (device, queue) = pollster::block_on(adapter.request_device(
-        &wgpu::DeviceDescriptor {
-            label: Some("glassy-test"),
-            required_features: wgpu::Features::empty(),
-            required_limits: wgpu::Limits::downlevel_defaults(),
-            memory_hints: wgpu::MemoryHints::MemoryUsage,
-            ..Default::default()
-        },
-    ))
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        power_preference: wgpu::PowerPreference::None,
+        force_fallback_adapter: false,
+        compatible_surface: None,
+    }))
+    .ok()?;
+    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        label: Some("glassy-test"),
+        required_features: wgpu::Features::empty(),
+        required_limits: wgpu::Limits::downlevel_defaults(),
+        memory_hints: wgpu::MemoryHints::MemoryUsage,
+        ..Default::default()
+    }))
     .ok()?;
     Some((device, queue))
 }
@@ -468,16 +474,12 @@ fn headless_wgpu_device_init_succeeds() {
     // Gate: verify the wgpu adapter + device pipeline can be constructed
     // without a window surface. This is the prerequisite for all GPU tests.
     // If no hardware adapter is available we skip (don't fail).
-    let instance = wgpu::Instance::new(
-        wgpu::InstanceDescriptor::new_without_display_handle(),
-    );
-    let adapter = pollster::block_on(instance.request_adapter(
-        &wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::None,
-            force_fallback_adapter: false,
-            compatible_surface: None,
-        },
-    ));
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        power_preference: wgpu::PowerPreference::None,
+        force_fallback_adapter: false,
+        compatible_surface: None,
+    }));
     let Ok(adapter) = adapter else {
         // No GPU in this environment; skip.
         return;
@@ -485,15 +487,13 @@ fn headless_wgpu_device_init_succeeds() {
     let info = adapter.get_info();
     // Adapter must report a non-empty name and a known backend.
     assert!(!info.name.is_empty(), "adapter name must be non-empty");
-    let result = pollster::block_on(adapter.request_device(
-        &wgpu::DeviceDescriptor {
-            label: Some("glassy-headless-gate"),
-            required_features: wgpu::Features::empty(),
-            required_limits: wgpu::Limits::downlevel_defaults(),
-            memory_hints: wgpu::MemoryHints::MemoryUsage,
-            ..Default::default()
-        },
-    ));
+    let result = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        label: Some("glassy-headless-gate"),
+        required_features: wgpu::Features::empty(),
+        required_limits: wgpu::Limits::downlevel_defaults(),
+        memory_hints: wgpu::MemoryHints::MemoryUsage,
+        ..Default::default()
+    }));
     assert!(result.is_ok(), "headless device creation must succeed");
 }
 
@@ -502,7 +502,9 @@ fn headless_device_can_create_atlas_textures() {
     // Verify that the two atlas texture descriptors (R8Unorm mask and
     // Rgba8Unorm color) can be created on the headless device. A wgpu 31
     // format-enum or Extent3d API change would fail here first.
-    let Some((device, _queue)) = headless_device() else { return };
+    let Some((device, _queue)) = headless_device() else {
+        return;
+    };
 
     let _mask = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("test-mask-atlas"),
@@ -541,7 +543,9 @@ fn headless_device_can_create_instance_buffers() {
     // Verify that the bg (BgInstance) and fg (FgInstance) instance buffers
     // can be created at the initial capacity. A wgpu 31 BufferDescriptor API
     // change would break here.
-    let Some((device, _queue)) = headless_device() else { return };
+    let Some((device, _queue)) = headless_device() else {
+        return;
+    };
 
     let _bg = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("test-bg-instances"),
@@ -564,14 +568,24 @@ fn flush_pass_full_upload_on_layout_change() {
     // two rows, call flush_pass once to establish the layout, change the
     // instance count of row 0 to shift the layout, and verify that the
     // returned total is the new total (not the old one).
-    let Some((device, queue)) = headless_device() else { return };
+    let Some((device, queue)) = headless_device() else {
+        return;
+    };
 
     // Build two rows: row 0 has 2 bg instances, row 1 has 1 bg instance.
     let mut rows: Vec<RowInstances> = vec![RowInstances::default(), RowInstances::default()];
     for _ in 0..2 {
-        rows[0].bg.push(BgInstance { pos: [0.0, 0.0], size: [8.0, 16.0], color: [0.0; 4] });
+        rows[0].bg.push(BgInstance {
+            pos: [0.0, 0.0],
+            size: [8.0, 16.0],
+            color: [0.0; 4],
+        });
     }
-    rows[1].bg.push(BgInstance { pos: [8.0, 0.0], size: [8.0, 16.0], color: [0.0; 4] });
+    rows[1].bg.push(BgInstance {
+        pos: [8.0, 0.0],
+        size: [8.0, 16.0],
+        color: [0.0; 4],
+    });
 
     let stride = std::mem::size_of::<BgInstance>();
     let initial_cap = 16usize;
@@ -588,24 +602,42 @@ fn flush_pass_full_upload_on_layout_change() {
 
     // First call: establishes layout [0, 2, 3].
     let total1 = Renderer::flush_pass::<BgInstance>(
-        &device, &queue,
-        &rows, |r| &r.bg,
-        &mut flat, &mut offsets, &mut scratch,
-        &[], &mut buffer, &mut capacity, "test-bg",
+        &device,
+        &queue,
+        &rows,
+        |r| &r.bg,
+        &mut flat,
+        &mut offsets,
+        &mut scratch,
+        &[],
+        &mut buffer,
+        &mut capacity,
+        "test-bg",
     );
     assert_eq!(total1, 3, "total after first call must be 3");
     assert_eq!(offsets, &[0, 2, 3], "offsets must be prefix sums");
 
     // Mutate: give row 0 one MORE instance — this changes the layout.
-    rows[0].bg.push(BgInstance { pos: [16.0, 0.0], size: [8.0, 16.0], color: [0.0; 4] });
+    rows[0].bg.push(BgInstance {
+        pos: [16.0, 0.0],
+        size: [8.0, 16.0],
+        color: [0.0; 4],
+    });
     let mut dirty = vec![0usize]; // row 0 was rebuilt
 
     // Second call: layout must detect the shift and reflatten.
     let total2 = Renderer::flush_pass::<BgInstance>(
-        &device, &queue,
-        &rows, |r| &r.bg,
-        &mut flat, &mut offsets, &mut scratch,
-        &dirty, &mut buffer, &mut capacity, "test-bg",
+        &device,
+        &queue,
+        &rows,
+        |r| &r.bg,
+        &mut flat,
+        &mut offsets,
+        &mut scratch,
+        &dirty,
+        &mut buffer,
+        &mut capacity,
+        "test-bg",
     );
     assert_eq!(total2, 4, "total after layout change must be 4");
     assert_eq!(offsets, &[0, 3, 4], "offsets must reflect the new layout");
@@ -617,10 +649,17 @@ fn flush_pass_full_upload_on_layout_change() {
     // Reset dirty for a stable-layout call.
     dirty.clear();
     let total3 = Renderer::flush_pass::<BgInstance>(
-        &device, &queue,
-        &rows, |r| &r.bg,
-        &mut flat, &mut offsets, &mut scratch,
-        &dirty, &mut buffer, &mut capacity, "test-bg",
+        &device,
+        &queue,
+        &rows,
+        |r| &r.bg,
+        &mut flat,
+        &mut offsets,
+        &mut scratch,
+        &dirty,
+        &mut buffer,
+        &mut capacity,
+        "test-bg",
     );
     // Same layout, no dirty rows: fast path returns the same total.
     assert_eq!(total3, 4, "no-dirty fast path must return same total");
@@ -630,13 +669,17 @@ fn flush_pass_full_upload_on_layout_change() {
 fn flush_pass_grows_buffer_when_capacity_exceeded() {
     // Create a buffer that is too small for the total instances, verify
     // flush_pass creates a new (larger) buffer and returns the correct total.
-    let Some((device, queue)) = headless_device() else { return };
+    let Some((device, queue)) = headless_device() else {
+        return;
+    };
 
     let n_instances = INITIAL_INSTANCES + 1; // one more than the initial buffer
     let mut rows: Vec<RowInstances> = vec![RowInstances::default()];
     for _ in 0..n_instances {
         rows[0].bg.push(BgInstance {
-            pos: [0.0, 0.0], size: [1.0, 1.0], color: [0.0; 4],
+            pos: [0.0, 0.0],
+            size: [1.0, 1.0],
+            color: [0.0; 4],
         });
     }
 
@@ -654,12 +697,22 @@ fn flush_pass_grows_buffer_when_capacity_exceeded() {
     let mut flat: Vec<BgInstance> = Vec::new();
 
     let total = Renderer::flush_pass::<BgInstance>(
-        &device, &queue,
-        &rows, |r| &r.bg,
-        &mut flat, &mut offsets, &mut scratch,
-        &[0], &mut buffer, &mut capacity, "test-tiny",
+        &device,
+        &queue,
+        &rows,
+        |r| &r.bg,
+        &mut flat,
+        &mut offsets,
+        &mut scratch,
+        &[0],
+        &mut buffer,
+        &mut capacity,
+        "test-tiny",
     );
-    assert_eq!(total as usize, n_instances, "total must equal instance count");
+    assert_eq!(
+        total as usize, n_instances,
+        "total must equal instance count"
+    );
     assert!(
         capacity >= n_instances,
         "capacity must have grown to at least {n_instances}, got {capacity}"
@@ -678,11 +731,21 @@ fn flush_pass_fast_path_skips_unchanged_rows() {
     // cached total without any write (we can't assert no write without a
     // mock queue, but we can assert the returned total and offsets are
     // stable across back-to-back calls with empty dirty_rows).
-    let Some((device, queue)) = headless_device() else { return };
+    let Some((device, queue)) = headless_device() else {
+        return;
+    };
 
     let mut rows = vec![RowInstances::default(), RowInstances::default()];
-    rows[0].bg.push(BgInstance { pos: [0.0,0.0], size:[8.0,16.0], color:[0.0;4] });
-    rows[1].bg.push(BgInstance { pos: [8.0,0.0], size:[8.0,16.0], color:[0.0;4] });
+    rows[0].bg.push(BgInstance {
+        pos: [0.0, 0.0],
+        size: [8.0, 16.0],
+        color: [0.0; 4],
+    });
+    rows[1].bg.push(BgInstance {
+        pos: [8.0, 0.0],
+        size: [8.0, 16.0],
+        color: [0.0; 4],
+    });
 
     let stride = std::mem::size_of::<BgInstance>();
     let mut buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -698,25 +761,46 @@ fn flush_pass_fast_path_skips_unchanged_rows() {
 
     // First call establishes the layout.
     Renderer::flush_pass::<BgInstance>(
-        &device, &queue, &rows, |r| &r.bg,
-        &mut flat, &mut offsets, &mut scratch,
-        &[0, 1], &mut buffer, &mut capacity, "test-stable",
+        &device,
+        &queue,
+        &rows,
+        |r| &r.bg,
+        &mut flat,
+        &mut offsets,
+        &mut scratch,
+        &[0, 1],
+        &mut buffer,
+        &mut capacity,
+        "test-stable",
     );
     let offsets_after_first = offsets.clone();
 
     // Second call: same content, no dirty rows.
     let total = Renderer::flush_pass::<BgInstance>(
-        &device, &queue, &rows, |r| &r.bg,
-        &mut flat, &mut offsets, &mut scratch,
-        &[], &mut buffer, &mut capacity, "test-stable",
+        &device,
+        &queue,
+        &rows,
+        |r| &r.bg,
+        &mut flat,
+        &mut offsets,
+        &mut scratch,
+        &[],
+        &mut buffer,
+        &mut capacity,
+        "test-stable",
     );
     assert_eq!(total, 2, "total unchanged");
-    assert_eq!(offsets, offsets_after_first, "offsets unchanged on fast path");
+    assert_eq!(
+        offsets, offsets_after_first,
+        "offsets unchanged on fast path"
+    );
 }
 
 #[test]
 fn flush_pass_empty_rows_returns_zero() {
-    let Some((device, queue)) = headless_device() else { return };
+    let Some((device, queue)) = headless_device() else {
+        return;
+    };
 
     let stride = std::mem::size_of::<BgInstance>();
     let mut buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -732,9 +816,17 @@ fn flush_pass_empty_rows_returns_zero() {
     let mut flat: Vec<BgInstance> = Vec::new();
 
     let total = Renderer::flush_pass::<BgInstance>(
-        &device, &queue, &rows, |r| &r.bg,
-        &mut flat, &mut offsets, &mut scratch,
-        &[], &mut buffer, &mut capacity, "test-empty",
+        &device,
+        &queue,
+        &rows,
+        |r| &r.bg,
+        &mut flat,
+        &mut offsets,
+        &mut scratch,
+        &[],
+        &mut buffer,
+        &mut capacity,
+        "test-empty",
     );
     assert_eq!(total, 0);
     assert_eq!(offsets, &[0u32]);
@@ -750,10 +842,10 @@ fn flush_pass_empty_rows_returns_zero() {
 fn scissor_multi_pane_two_panes_side_by_side_no_overlap() {
     // Two panes split at x=400 in an 800×600 surface: left [0,0,400,600]
     // and right [400,0,400,600]. The two scissor rects must not overlap.
-    let left  = clamp_scissor(0,   0, 400, 600, 800, 600);
+    let left = clamp_scissor(0, 0, 400, 600, 800, 600);
     let right = clamp_scissor(400, 0, 400, 600, 800, 600);
 
-    assert_eq!((left.x, left.y, left.w, left.h),   (0,   0, 400, 600));
+    assert_eq!((left.x, left.y, left.w, left.h), (0, 0, 400, 600));
     assert_eq!((right.x, right.y, right.w, right.h), (400, 0, 400, 600));
 
     // Verify no horizontal overlap.
@@ -781,18 +873,22 @@ fn scissor_multi_pane_partial_overlap_with_surface_edge_is_clamped() {
 fn scissor_multi_pane_three_horizontal_strips_tile_surface() {
     // Three equal-height horizontal panes in a 800×600 surface:
     // top [0,0,800,200], mid [0,200,800,200], bot [0,400,800,200].
-    let top = clamp_scissor(0,   0, 800, 200, 800, 600);
+    let top = clamp_scissor(0, 0, 800, 200, 800, 600);
     let mid = clamp_scissor(0, 200, 800, 200, 800, 600);
     let bot = clamp_scissor(0, 400, 800, 200, 800, 600);
 
-    assert_eq!((top.x, top.y, top.w, top.h), (0,   0, 800, 200));
+    assert_eq!((top.x, top.y, top.w, top.h), (0, 0, 800, 200));
     assert_eq!((mid.x, mid.y, mid.w, mid.h), (0, 200, 800, 200));
     assert_eq!((bot.x, bot.y, bot.w, bot.h), (0, 400, 800, 200));
 
     // Panes must tile without overlap or gap.
     assert_eq!(top.y + top.h, mid.y, "no gap between top and mid");
     assert_eq!(mid.y + mid.h, bot.y, "no gap between mid and bot");
-    assert_eq!(bot.y + bot.h, 600, "bottom of last pane must reach surface_h");
+    assert_eq!(
+        bot.y + bot.h,
+        600,
+        "bottom of last pane must reach surface_h"
+    );
 }
 
 #[test]

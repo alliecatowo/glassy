@@ -7,8 +7,8 @@
 //! app doesn't drive it yet, so silence dead-code noise until it's hooked up.
 #![allow(dead_code)]
 
-mod tree;
 mod layout;
+mod tree;
 
 pub use layout::Layout;
 pub use tree::{LayoutDesc, NodeDesc};
@@ -81,8 +81,30 @@ mod tests {
         assert!(l.split(Dir::Vertical, 2));
         let r = l.rects(AREA, 0);
         // first 0..500, second 500..1000, full height, no gaps.
-        assert_eq!(r[0], (1, Rect { x: 0, y: 0, w: 500, h: 600 }));
-        assert_eq!(r[1], (2, Rect { x: 500, y: 0, w: 500, h: 600 }));
+        assert_eq!(
+            r[0],
+            (
+                1,
+                Rect {
+                    x: 0,
+                    y: 0,
+                    w: 500,
+                    h: 600
+                }
+            )
+        );
+        assert_eq!(
+            r[1],
+            (
+                2,
+                Rect {
+                    x: 500,
+                    y: 0,
+                    w: 500,
+                    h: 600
+                }
+            )
+        );
         // Together they cover the whole width.
         assert_eq!(r[0].1.w + r[1].1.w, AREA.w);
     }
@@ -92,8 +114,30 @@ mod tests {
         let mut l = Layout::new(1);
         assert!(l.split(Dir::Horizontal, 2));
         let r = l.rects(AREA, 0);
-        assert_eq!(r[0], (1, Rect { x: 0, y: 0, w: 1000, h: 300 }));
-        assert_eq!(r[1], (2, Rect { x: 0, y: 300, w: 1000, h: 300 }));
+        assert_eq!(
+            r[0],
+            (
+                1,
+                Rect {
+                    x: 0,
+                    y: 0,
+                    w: 1000,
+                    h: 300
+                }
+            )
+        );
+        assert_eq!(
+            r[1],
+            (
+                2,
+                Rect {
+                    x: 0,
+                    y: 300,
+                    w: 1000,
+                    h: 300
+                }
+            )
+        );
         assert_eq!(r[0].1.h + r[1].1.h, AREA.h);
     }
 
@@ -104,8 +148,24 @@ mod tests {
         let gap = 10;
         let r = l.rects(AREA, gap);
         // usable = 990, first = 495, second = 495, gap of 10 between.
-        assert_eq!(r[0].1, Rect { x: 0, y: 0, w: 495, h: 600 });
-        assert_eq!(r[1].1, Rect { x: 505, y: 0, w: 495, h: 600 });
+        assert_eq!(
+            r[0].1,
+            Rect {
+                x: 0,
+                y: 0,
+                w: 495,
+                h: 600
+            }
+        );
+        assert_eq!(
+            r[1].1,
+            Rect {
+                x: 505,
+                y: 0,
+                w: 495,
+                h: 600
+            }
+        );
         // The second starts exactly `gap` px after the first ends.
         assert_eq!(r[1].1.x - (r[0].1.x + r[0].1.w), gap);
         // Total consumed width == area width.
@@ -116,7 +176,12 @@ mod tests {
     fn odd_extent_rounds_and_remainder_goes_to_second() {
         let mut l = Layout::new(1);
         l.split(Dir::Vertical, 2);
-        let area = Rect { x: 0, y: 0, w: 1001, h: 100 };
+        let area = Rect {
+            x: 0,
+            y: 0,
+            w: 1001,
+            h: 100,
+        };
         let r = l.rects(area, 0);
         // 1001 * 0.5 = 500.5 -> rounds to 501 for first, 500 for second.
         assert_eq!(r[0].1.w, 501);
@@ -135,9 +200,33 @@ mod tests {
 
         let r = l.rects(AREA, 0);
         let map: std::collections::HashMap<usize, Rect> = r.into_iter().collect();
-        assert_eq!(map[&1], Rect { x: 0, y: 0, w: 500, h: 600 });
-        assert_eq!(map[&2], Rect { x: 500, y: 0, w: 500, h: 300 });
-        assert_eq!(map[&3], Rect { x: 500, y: 300, w: 500, h: 300 });
+        assert_eq!(
+            map[&1],
+            Rect {
+                x: 0,
+                y: 0,
+                w: 500,
+                h: 600
+            }
+        );
+        assert_eq!(
+            map[&2],
+            Rect {
+                x: 500,
+                y: 0,
+                w: 500,
+                h: 300
+            }
+        );
+        assert_eq!(
+            map[&3],
+            Rect {
+                x: 500,
+                y: 300,
+                w: 500,
+                h: 300
+            }
+        );
     }
 
     #[test]
@@ -179,8 +268,24 @@ mod tests {
         let r = l.rects(AREA, 0);
         let map: std::collections::HashMap<usize, Rect> = r.into_iter().collect();
         // The (2/3) subtree now owns the full area.
-        assert_eq!(map[&2], Rect { x: 0, y: 0, w: 1000, h: 300 });
-        assert_eq!(map[&3], Rect { x: 0, y: 300, w: 1000, h: 300 });
+        assert_eq!(
+            map[&2],
+            Rect {
+                x: 0,
+                y: 0,
+                w: 1000,
+                h: 300
+            }
+        );
+        assert_eq!(
+            map[&3],
+            Rect {
+                x: 0,
+                y: 300,
+                w: 1000,
+                h: 300
+            }
+        );
     }
 
     #[test]
@@ -428,7 +533,7 @@ mod tests {
             root: NodeDesc::Split {
                 dir: Dir::Vertical,
                 ratio: 0.5,
-                first:  Box::new(NodeDesc::Leaf(0)),
+                first: Box::new(NodeDesc::Leaf(0)),
                 second: Box::new(NodeDesc::Leaf(1)),
             },
             focused: 99, // does not exist
@@ -447,7 +552,7 @@ mod tests {
         let desc = l.to_desc(&|x| x); // identity remap
         let rebuilt = Layout::from_desc(&desc, &|x| x);
         let orig = l.rects(AREA, 0);
-        let new  = rebuilt.rects(AREA, 0);
+        let new = rebuilt.rects(AREA, 0);
         assert_eq!(orig, new);
     }
 
@@ -455,7 +560,12 @@ mod tests {
     fn layout_with_zero_area_produces_zero_size_rects() {
         let mut l = Layout::new(1);
         l.split(Dir::Vertical, 2);
-        let zero_area = Rect { x: 0, y: 0, w: 0, h: 0 };
+        let zero_area = Rect {
+            x: 0,
+            y: 0,
+            w: 0,
+            h: 0,
+        };
         let r = l.rects(zero_area, 0);
         for (_, rc) in &r {
             assert_eq!(rc.w, 0);

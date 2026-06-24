@@ -164,16 +164,31 @@ impl App {
     fn palette_registry(&self) -> Vec<PaletteEntry> {
         use PaletteCmd::*;
         let mut cmds: Vec<PaletteCmd> = vec![
-            NewTab, CloseTab, NextTab, PrevTab,
-            SplitVertical, SplitHorizontal, ClosePane,
-            OpenSettings, OpenHelp, OpenSearch,
-            Copy, Paste,
+            NewTab,
+            CloseTab,
+            NextTab,
+            PrevTab,
+            SplitVertical,
+            SplitHorizontal,
+            ClosePane,
+            OpenSettings,
+            OpenHelp,
+            OpenSearch,
+            Copy,
+            Paste,
             ToggleFullscreen,
-            FontIncrease, FontDecrease, FontReset,
-            ToggleStatusBar, TogglePaneHeaders,
-            BellOff, BellVisual, BellAudible,
-            ScrollbackIncrease, ScrollbackDecrease,
-            NextTheme, PrevTheme,
+            FontIncrease,
+            FontDecrease,
+            FontReset,
+            ToggleStatusBar,
+            TogglePaneHeaders,
+            BellOff,
+            BellVisual,
+            BellAudible,
+            ScrollbackIncrease,
+            ScrollbackDecrease,
+            NextTheme,
+            PrevTheme,
         ];
         for i in 0..color::THEME_NAMES.len() {
             cmds.push(SetTheme(i));
@@ -186,7 +201,12 @@ impl App {
                 };
                 let display = format!("{}  {}", cmd.category(), label);
                 let haystack = display.to_lowercase();
-                PaletteEntry { cmd, display, haystack, hint: cmd.hint() }
+                PaletteEntry {
+                    cmd,
+                    display,
+                    haystack,
+                    hint: cmd.hint(),
+                }
             })
             .collect()
     }
@@ -197,7 +217,12 @@ impl App {
         if self.palette.is_none() {
             let all = self.palette_registry();
             let filtered: Vec<usize> = (0..all.len()).collect();
-            self.palette = Some(PaletteState { query: String::new(), all, filtered, sel: 0 });
+            self.palette = Some(PaletteState {
+                query: String::new(),
+                all,
+                filtered,
+                sel: 0,
+            });
         }
         self.force_full_redraw = true;
         self.mark_dirty(event_loop);
@@ -215,7 +240,9 @@ impl App {
     /// first and clamping the selection. With an empty query the whole registry
     /// is shown in declaration order.
     pub(crate) fn refilter_palette(&mut self) {
-        let Some(p) = self.palette.as_mut() else { return };
+        let Some(p) = self.palette.as_mut() else {
+            return;
+        };
         let q = p.query.to_lowercase();
         if q.is_empty() {
             p.filtered = (0..p.all.len()).collect();
@@ -306,7 +333,10 @@ impl App {
     /// palette. A no-op (just closes) when the filtered list is empty.
     pub(crate) fn palette_activate_sel(&mut self, event_loop: &ActiveEventLoop) {
         let cmd = self.palette.as_ref().and_then(|p| {
-            p.filtered.get(p.sel).and_then(|&i| p.all.get(i)).map(|e| e.cmd)
+            p.filtered
+                .get(p.sel)
+                .and_then(|&i| p.all.get(i))
+                .map(|e| e.cmd)
         });
         // Close first so re-entrant overlays (Settings/Help/Search) open cleanly.
         self.close_palette(event_loop);
@@ -318,7 +348,10 @@ impl App {
     /// Activate the palette row at filtered index `idx` (mouse click).
     pub(crate) fn palette_activate_index(&mut self, idx: usize, event_loop: &ActiveEventLoop) {
         let cmd = self.palette.as_ref().and_then(|p| {
-            p.filtered.get(idx).and_then(|&i| p.all.get(i)).map(|e| e.cmd)
+            p.filtered
+                .get(idx)
+                .and_then(|&i| p.all.get(i))
+                .map(|e| e.cmd)
         });
         self.close_palette(event_loop);
         if let Some(cmd) = cmd {
@@ -470,7 +503,9 @@ impl App {
         renderer.push_overlay_px(0.0, 0.0, surface.0, surface.1, [0.0, 0.0, 0.0, 0.5]);
 
         // Centered panel. Width ~ 60 cols, capped to the surface.
-        let pw = (cell_w * 60.0).min(surface.0 - 2.0 * pad).max(cell_w * 28.0);
+        let pw = (cell_w * 60.0)
+            .min(surface.0 - 2.0 * pad)
+            .max(cell_w * 28.0);
         let field_h = row_h;
         // Show up to 12 list rows; the rest scroll into view around the selection.
         let max_visible = 12usize;
@@ -483,7 +518,14 @@ impl App {
         let panel = gui::Rect::new(px, py, pw, ph);
 
         // Panel body (E3 floating surface) + accent top rail.
-        renderer.push_overlay_rrect_px(panel.x, panel.y, panel.w, panel.h, radius + 2.0, gui::glass_float());
+        renderer.push_overlay_rrect_px(
+            panel.x,
+            panel.y,
+            panel.w,
+            panel.h,
+            radius + 2.0,
+            gui::glass_float(),
+        );
         renderer.push_overlay_rrect_px(panel.x, panel.y, panel.w, 2.0, radius + 2.0, gui::rail());
 
         let inner_x = panel.x + pad;
@@ -491,7 +533,14 @@ impl App {
 
         // --- Query field --------------------------------------------------------
         let field = gui::Rect::new(inner_x, panel.y + pad, inner_w, field_h);
-        renderer.push_overlay_rrect_px(field.x, field.y, field.w, field.h, radius, [0.0, 0.0, 0.0, 0.35]);
+        renderer.push_overlay_rrect_px(
+            field.x,
+            field.y,
+            field.w,
+            field.h,
+            radius,
+            [0.0, 0.0, 0.0, 0.35],
+        );
         let ty = (field.y + (field.h - cell_h) * 0.5).round();
         let mut cx = field.x + pad;
         // Leading prompt chevron.
@@ -552,7 +601,12 @@ impl App {
             let mx = inner_x + pad;
             let mut cxn = mx;
             for ch in msg.chars() {
-                renderer.push_overlay_glyph_px(cxn.round(), (list_y + (row_h - cell_h) * 0.5).round(), ch, gui::fg_dim());
+                renderer.push_overlay_glyph_px(
+                    cxn.round(),
+                    (list_y + (row_h - cell_h) * 0.5).round(),
+                    ch,
+                    gui::fg_dim(),
+                );
                 cxn += cell_w;
             }
         }
@@ -667,7 +721,11 @@ mod tests {
         // Both match "tab"; the shorter haystack should outscore the longer one
         // (the -len/32 penalty slightly penalizes the longer haystack).
         let short = fuzzy_score("new tab", "tab").unwrap();
-        let long_hay = fuzzy_score("this very long string has a tab word in it somewhere", "tab").unwrap();
+        let long_hay = fuzzy_score(
+            "this very long string has a tab word in it somewhere",
+            "tab",
+        )
+        .unwrap();
         // The short haystack has a stronger tighter-match score.
         assert!(
             short >= long_hay,
@@ -688,7 +746,10 @@ mod tests {
     fn fuzzy_dash_separator_bonus() {
         // '-' also triggers word-start bonus.
         let score = fuzzy_score("tokyo-night", "n").unwrap();
-        assert!(score > 1, "dash-separated word start should get bonus score");
+        assert!(
+            score > 1,
+            "dash-separated word start should get bonus score"
+        );
     }
 
     #[test]
@@ -697,15 +758,18 @@ mod tests {
         // "Tab  New tab" hits word-start N in "New" and then t in "tab"
         // vs some non-word-start match — the palette ranking should order the best match first.
         let new_tab = fuzzy_score("tab  new tab", "nt").unwrap();
-        let buried   = fuzzy_score("abcntxyz", "nt").unwrap();
-        assert!(new_tab > buried, "word-start match should rank higher than buried");
+        let buried = fuzzy_score("abcntxyz", "nt").unwrap();
+        assert!(
+            new_tab > buried,
+            "word-start match should rank higher than buried"
+        );
     }
 
     #[test]
     fn fuzzy_single_char_needle() {
         // Single-char needle at word start gets word-start bonus.
         let word_start = fuzzy_score("new tab", "n").unwrap();
-        let buried     = fuzzy_score("xnew", "n").unwrap();
+        let buried = fuzzy_score("xnew", "n").unwrap();
         assert!(word_start > buried);
     }
 
@@ -714,20 +778,41 @@ mod tests {
         // Every non-SetTheme PaletteCmd should have a non-empty label.
         use PaletteCmd::*;
         let cmds = [
-            NewTab, CloseTab, NextTab, PrevTab,
-            SplitVertical, SplitHorizontal, ClosePane,
-            OpenSettings, OpenHelp, OpenSearch,
-            Copy, Paste,
+            NewTab,
+            CloseTab,
+            NextTab,
+            PrevTab,
+            SplitVertical,
+            SplitHorizontal,
+            ClosePane,
+            OpenSettings,
+            OpenHelp,
+            OpenSearch,
+            Copy,
+            Paste,
             ToggleFullscreen,
-            FontIncrease, FontDecrease, FontReset,
-            ToggleStatusBar, TogglePaneHeaders,
-            BellOff, BellVisual, BellAudible,
-            ScrollbackIncrease, ScrollbackDecrease,
-            NextTheme, PrevTheme,
+            FontIncrease,
+            FontDecrease,
+            FontReset,
+            ToggleStatusBar,
+            TogglePaneHeaders,
+            BellOff,
+            BellVisual,
+            BellAudible,
+            ScrollbackIncrease,
+            ScrollbackDecrease,
+            NextTheme,
+            PrevTheme,
         ];
         for cmd in cmds {
-            assert!(!cmd.label().is_empty(), "{cmd:?} should have a non-empty label");
-            assert!(!cmd.category().is_empty(), "{cmd:?} should have a non-empty category");
+            assert!(
+                !cmd.label().is_empty(),
+                "{cmd:?} should have a non-empty label"
+            );
+            assert!(
+                !cmd.category().is_empty(),
+                "{cmd:?} should have a non-empty category"
+            );
         }
     }
 

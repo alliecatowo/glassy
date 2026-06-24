@@ -588,7 +588,10 @@ mod query_index_tests {
         assert!(lum(dawn.bg) > lum(dawn.fg));
         // Every THEME_NAMES entry resolves (catches typos / missing arms).
         for name in THEME_NAMES {
-            assert!(theme_by_name(name).is_some(), "{name} in THEME_NAMES resolves");
+            assert!(
+                theme_by_name(name).is_some(),
+                "{name} in THEME_NAMES resolves"
+            );
         }
     }
 }

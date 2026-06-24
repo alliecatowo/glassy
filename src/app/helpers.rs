@@ -204,7 +204,11 @@ pub(crate) fn strip_layout(tabs: &[TabDesc], bar_w: f32, bar_h: f32, cell_w: f32
     // New-tab button sits right after the mark.
     let plus = gui::Rect::new(x, ctrl_y, CTRL_BTN, CTRL_BTN);
     if plus.x + plus.w <= right_start {
-        segs.push(StripSeg { item: StripItem::NewTab, label: String::new(), rect: plus });
+        segs.push(StripSeg {
+            item: StripItem::NewTab,
+            label: String::new(),
+            rect: plus,
+        });
     }
     x += CTRL_BTN + TAB_GAP * 2.0;
 
@@ -234,7 +238,11 @@ pub(crate) fn strip_layout(tabs: &[TabDesc], bar_w: f32, bar_h: f32, cell_w: f32
                 break; // out of room before the controls
             }
             let body = gui::Rect::new(tx, chip_y, tw, chip_h);
-            segs.push(StripSeg { item: StripItem::Tab(i), label: title.to_string(), rect: body });
+            segs.push(StripSeg {
+                item: StripItem::Tab(i),
+                label: title.to_string(),
+                rect: body,
+            });
             // Close box anchored to the chip's right edge, vertically centered.
             let cb = CLOSE_BOX.min(tw * 0.5);
             let close = gui::Rect::new(
@@ -300,14 +308,21 @@ pub(crate) fn config_display_path() -> String {
 pub(crate) fn percent_encode_path(path: &str) -> String {
     let mut out = String::with_capacity(path.len());
     for &b in path.as_bytes() {
-        let keep = b.is_ascii_alphanumeric()
-            || matches!(b, b'/' | b'-' | b'_' | b'.' | b'~');
+        let keep = b.is_ascii_alphanumeric() || matches!(b, b'/' | b'-' | b'_' | b'.' | b'~');
         if keep {
             out.push(b as char);
         } else {
             out.push('%');
-            out.push(char::from_digit((b >> 4) as u32, 16).unwrap().to_ascii_uppercase());
-            out.push(char::from_digit((b & 0xf) as u32, 16).unwrap().to_ascii_uppercase());
+            out.push(
+                char::from_digit((b >> 4) as u32, 16)
+                    .unwrap()
+                    .to_ascii_uppercase(),
+            );
+            out.push(
+                char::from_digit((b & 0xf) as u32, 16)
+                    .unwrap()
+                    .to_ascii_uppercase(),
+            );
         }
     }
     out
@@ -353,13 +368,13 @@ impl MenuAction {
     /// Left-column icon glyph for the real GUI menu (§3.6).
     pub(crate) fn icon(self) -> char {
         match self {
-            MenuAction::Copy      => '◻',
-            MenuAction::Paste     => '□',
-            MenuAction::NewTab    => '+',
-            MenuAction::Settings  => '*',
+            MenuAction::Copy => '◻',
+            MenuAction::Paste => '□',
+            MenuAction::NewTab => '+',
+            MenuAction::Settings => '*',
             MenuAction::PaneHeaders => '▭',
-            MenuAction::Help      => '?',
-            MenuAction::CloseTab  => '✕',
+            MenuAction::Help => '?',
+            MenuAction::CloseTab => '✕',
         }
     }
 
@@ -367,13 +382,13 @@ impl MenuAction {
     /// actions that have no keybinding shown in the menu.
     pub(crate) fn shortcut(self) -> Option<&'static str> {
         match self {
-            MenuAction::Copy      => Some("Ctrl+Shift+C"),
-            MenuAction::Paste     => Some("Ctrl+Shift+V"),
-            MenuAction::NewTab    => Some("Ctrl+Shift+T"),
-            MenuAction::Settings  => Some("Ctrl+,"),
+            MenuAction::Copy => Some("Ctrl+Shift+C"),
+            MenuAction::Paste => Some("Ctrl+Shift+V"),
+            MenuAction::NewTab => Some("Ctrl+Shift+T"),
+            MenuAction::Settings => Some("Ctrl+,"),
             MenuAction::PaneHeaders => None,
-            MenuAction::Help      => Some("F1"),
-            MenuAction::CloseTab  => Some("Ctrl+Shift+W"),
+            MenuAction::Help => Some("F1"),
+            MenuAction::CloseTab => Some("Ctrl+Shift+W"),
         }
     }
 }
@@ -382,7 +397,10 @@ impl MenuAction {
 /// `MenuAction`s. Context menus with Copy+Paste get a separator between the
 /// clipboard group and the navigation group; the hamburger menu has its own
 /// separator after Settings (before CloseTab). Pure for testing.
-pub(crate) fn actions_to_entries(actions: &[MenuAction], has_selection: bool) -> Vec<gui::MenuEntry<'static>> {
+pub(crate) fn actions_to_entries(
+    actions: &[MenuAction],
+    has_selection: bool,
+) -> Vec<gui::MenuEntry<'static>> {
     let mut v: Vec<gui::MenuEntry<'static>> = Vec::with_capacity(actions.len() + 2);
     // We need to detect group boundaries and insert separators.
     // Simple rule: insert a separator before NewTab when Copy/Paste precede it
@@ -401,14 +419,14 @@ pub(crate) fn actions_to_entries(actions: &[MenuAction], has_selection: bool) ->
             v.push(gui::MenuEntry::Separator);
         }
         let enabled = match a {
-            MenuAction::Copy  => has_selection,
+            MenuAction::Copy => has_selection,
             MenuAction::Paste => true,
-            _                 => true,
+            _ => true,
         };
         v.push(gui::MenuEntry::Item {
-            icon:    a.icon(),
-            label:   a.label(),
-            hint:    a.shortcut(),
+            icon: a.icon(),
+            label: a.label(),
+            hint: a.shortcut(),
             enabled,
         });
         prev = Some(a);
@@ -480,7 +498,11 @@ pub(crate) fn unit_len(cells: &[Indexed<&Cell>], start: usize) -> usize {
 /// anything; a leading emoji modifier / variation selector / second regional
 /// indicator also joins). Returns the code points to append after the base cell's
 /// char and the number of `cells` entries the whole cluster consumed (>= 1).
-pub(crate) fn build_grapheme(cells: &[Indexed<&Cell>], start: usize, line: i32) -> (Vec<char>, usize) {
+pub(crate) fn build_grapheme(
+    cells: &[Indexed<&Cell>],
+    start: usize,
+    line: i32,
+) -> (Vec<char>, usize) {
     let base = cells[start].cell;
     let mut combiners: Vec<char> = base.zerowidth().unwrap_or(&[]).to_vec();
     let mut consumed = unit_len(cells, start);
@@ -678,8 +700,7 @@ pub(crate) fn read_git_branch(cwd: &std::path::Path) -> Option<String> {
 
 /// How often (minimum) to re-read `/proc` for pane info. 2 seconds is cheap
 /// enough to feel live but never blocks idle frames at 0% CPU.
-pub(super) const PROC_REFRESH_INTERVAL: std::time::Duration =
-    std::time::Duration::from_secs(2);
+pub(super) const PROC_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
 
 impl App {
     /// Refresh the cached `/proc` pane info for a single PTY when the cache is
@@ -701,15 +722,17 @@ pub(super) fn spawn_config_watcher(
     config_path: std::path::PathBuf,
     proxy: winit::event_loop::EventLoopProxy<crate::pty::UserEvent>,
 ) {
-    use notify::{Watcher, RecursiveMode, Result as NotifyResult};
     use notify::recommended_watcher;
+    use notify::{RecursiveMode, Result as NotifyResult, Watcher};
     use std::sync::{Arc, Mutex};
-    use std::time::{Duration, Instant};
     use std::thread;
+    use std::time::{Duration, Instant};
 
     thread::spawn(move || {
         let last_reload = Arc::new(Mutex::new(Instant::now() - Duration::from_secs(10)));
-        let config_dir = config_path.parent().unwrap_or_else(|| std::path::Path::new("."));
+        let config_dir = config_path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."));
         let config_filename = config_path.file_name().unwrap_or_default().to_owned();
         let (tx, rx) = std::sync::mpsc::channel();
 
@@ -754,4 +777,3 @@ pub(super) fn spawn_config_watcher(
         }
     });
 }
-

@@ -608,7 +608,13 @@ impl Renderer {
             let y0 = y0.max(top).min(bot);
             let y1 = y1.max(top).min(bot);
             if x1 > x0 && y1 > y0 {
-                this.push_solid(x0 as f32, y0 as f32, (x1 - x0) as f32, (y1 - y0) as f32, color);
+                this.push_solid(
+                    x0 as f32,
+                    y0 as f32,
+                    (x1 - x0) as f32,
+                    (y1 - y0) as f32,
+                    color,
+                );
             }
         };
 
@@ -851,5 +857,4 @@ impl Renderer {
     // translates those instances by the pane's pixel origin into the flat
     // per-pane lists. So all the box-drawing / decoration / glyph / cursor logic
     // is shared with zero duplication.
-
 }

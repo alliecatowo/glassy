@@ -16,7 +16,6 @@ use std::collections::HashMap;
 
 use alacritty_terminal::sync::FairMutex;
 
-
 mod parser;
 mod store;
 
@@ -108,7 +107,6 @@ struct Pending {
     payload: Vec<u8>, // accumulated base64-decoded bytes
 }
 
-
 // Shared structs used by parser and store
 
 /// Parsed `key=value,key=value` control block of a graphics command.
@@ -156,10 +154,18 @@ impl Controls {
                 _ => {}
             }
         }
-        Controls { action, format, id, width, height, cols, rows, more }
+        Controls {
+            action,
+            format,
+            id,
+            width,
+            height,
+            cols,
+            rows,
+            more,
+        }
     }
 }
-
 
 // Shared constants
 
@@ -200,9 +206,9 @@ const MAX_PLACEMENTS: usize = 1024;
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use super::parser::{b64_decode, decode_png, decode_payload};
+    use super::parser::{b64_decode, decode_payload, decode_png};
     use super::store::parse_osc7_cwd;
+    use super::*;
 
     #[test]
     fn base64_roundtrip_known_vectors() {
@@ -227,7 +233,9 @@ mod tests {
     fn decodes_raw_rgba_command() {
         // 1x1 red pixel, RGBA, base64 of [255,0,0,255] = "/wAA/w=="
         let mut p = KittyParser::new();
-        let cmd = p.feed(b"a=T,f=32,s=1,v=1;/wAA/w==").expect("complete command");
+        let cmd = p
+            .feed(b"a=T,f=32,s=1,v=1;/wAA/w==")
+            .expect("complete command");
         assert_eq!(cmd.action, Action::TransmitAndDisplay);
         let img = cmd.image.expect("decoded image");
         assert_eq!((img.width, img.height), (1, 1));
@@ -262,7 +270,9 @@ mod tests {
         let mut p = KittyParser::new();
         // pixel 1 = white, pixel 2 = black: [255,255,255,255, 0,0,0,255]
         assert!(p.feed(b"a=T,f=32,s=1,v=2,i=9,m=1;/////w==").is_none());
-        let cmd = p.feed(b"i=9,m=0;AAAA/w==").expect("complete after final chunk");
+        let cmd = p
+            .feed(b"i=9,m=0;AAAA/w==")
+            .expect("complete after final chunk");
         let img = cmd.image.expect("image");
         assert_eq!((img.width, img.height), (1, 2));
         assert_eq!(img.rgba, vec![255, 255, 255, 255, 0, 0, 0, 255]);
@@ -280,7 +290,10 @@ mod tests {
     }
 
     fn display_count(events: &[TapEvent]) -> usize {
-        events.iter().filter(|e| matches!(e, TapEvent::Display(_))).count()
+        events
+            .iter()
+            .filter(|e| matches!(e, TapEvent::Display(_)))
+            .count()
     }
 
     #[test]
@@ -304,14 +317,16 @@ mod tests {
         // advanced past it before the image is anchored.
         let store = FairMutex::new(ImageStore::new());
         let mut tap = StreamTap::new();
-        let events =
-            tap.process(b"hi\x1b_Ga=T,f=32,s=1,v=1;/wAA/w==\x1b\\rest", &store);
+        let events = tap.process(b"hi\x1b_Ga=T,f=32,s=1,v=1;/wAA/w==\x1b\\rest", &store);
         match (&events[0], &events[1], &events[2]) {
             (TapEvent::Vt(a), TapEvent::Display(_), TapEvent::Vt(b)) => {
                 assert_eq!(a, b"hi");
                 assert_eq!(b, b"rest");
             }
-            _ => panic!("expected Vt, Display, Vt ordering, got {} events", events.len()),
+            _ => panic!(
+                "expected Vt, Display, Vt ordering, got {} events",
+                events.len()
+            ),
         }
     }
 
@@ -473,7 +488,10 @@ mod tests {
         let mut tap = StreamTap::new();
         let events = tap.process(b"a\x1b]7;file:///tmp/work\x07b", &store);
         assert_eq!(vt_bytes(&events), b"a\x1b]7;file:///tmp/work\x07b");
-        assert_eq!(first_cwd(&events), Some(std::path::PathBuf::from("/tmp/work")));
+        assert_eq!(
+            first_cwd(&events),
+            Some(std::path::PathBuf::from("/tmp/work"))
+        );
     }
 
     #[test]
@@ -515,13 +533,21 @@ mod tests {
         // Inserting many sixel images (as an animation would) must not grow the
         // store without bound; the newest stays, the oldest are evicted.
         let mut store = ImageStore::new();
-        let img = || DecodedImage { width: 1, height: 1, rgba: vec![1, 2, 3, 4] };
+        let img = || DecodedImage {
+            width: 1,
+            height: 1,
+            rgba: vec![1, 2, 3, 4],
+        };
         for k in 0..(MAX_SIXEL_IMAGES as u32 + 50) {
             store.insert_pixels(SIXEL_ID_BASE + k, img());
         }
         assert_eq!(store.len(), MAX_SIXEL_IMAGES);
         // The most recent id is retained; an early one is evicted.
-        assert!(store.image(SIXEL_ID_BASE + MAX_SIXEL_IMAGES as u32 + 49).is_some());
+        assert!(
+            store
+                .image(SIXEL_ID_BASE + MAX_SIXEL_IMAGES as u32 + 49)
+                .is_some()
+        );
         assert!(store.image(SIXEL_ID_BASE).is_none());
     }
 
@@ -529,7 +555,11 @@ mod tests {
     fn sixel_eviction_keeps_kitty_images() {
         // Kitty images (low ids) must survive sixel eviction churn.
         let mut store = ImageStore::new();
-        let img = || DecodedImage { width: 1, height: 1, rgba: vec![9, 9, 9, 9] };
+        let img = || DecodedImage {
+            width: 1,
+            height: 1,
+            rgba: vec![9, 9, 9, 9],
+        };
         store.insert_pixels(7, img()); // a kitty-range id
         for k in 0..(MAX_SIXEL_IMAGES as u32 + 10) {
             store.insert_pixels(SIXEL_ID_BASE + k, img());
@@ -540,7 +570,11 @@ mod tests {
     #[test]
     fn delete_removes_placements_keeps_pixels() {
         let mut store = ImageStore::new();
-        let img = DecodedImage { width: 1, height: 1, rgba: vec![1, 2, 3, 4] };
+        let img = DecodedImage {
+            width: 1,
+            height: 1,
+            rgba: vec![1, 2, 3, 4],
+        };
         store.by_id.insert(5, img);
         store.place(5, 0, 0, 0, 0);
         assert_eq!(store.placements().len(), 1);
@@ -555,29 +589,47 @@ mod tests {
         // Each is a 1x1 RGBA pixel: red then green.
         let mut p = KittyParser::new();
         // Red pixel: base64 of [255,0,0,255] = "/wAA/w=="
-        let cmd1 = p.feed(b"a=T,f=32,s=1,v=1,i=0;/wAA/w==").expect("first command");
+        let cmd1 = p
+            .feed(b"a=T,f=32,s=1,v=1,i=0;/wAA/w==")
+            .expect("first command");
         // Green pixel: base64 of [0,255,0,255] = "AP8A/w=="
-        let cmd2 = p.feed(b"a=T,f=32,s=1,v=1,i=0;AP8A/w==").expect("second command");
+        let cmd2 = p
+            .feed(b"a=T,f=32,s=1,v=1,i=0;AP8A/w==")
+            .expect("second command");
         // The ids assigned must be distinct.
-        assert_ne!(cmd1.id, cmd2.id, "i=0 images must get distinct synthetic ids");
+        assert_ne!(
+            cmd1.id, cmd2.id,
+            "i=0 images must get distinct synthetic ids"
+        );
         let img1 = cmd1.image.expect("first image decoded");
         let img2 = cmd2.image.expect("second image decoded");
         assert_eq!(img1.rgba, vec![255, 0, 0, 255], "first image should be red");
-        assert_eq!(img2.rgba, vec![0, 255, 0, 255], "second image should be green");
+        assert_eq!(
+            img2.rgba,
+            vec![0, 255, 0, 255],
+            "second image should be green"
+        );
     }
 
     #[test]
     fn placements_are_bounded() {
         // Placements must not grow past MAX_PLACEMENTS; old ones are dropped.
         let mut store = ImageStore::new();
-        let img = DecodedImage { width: 1, height: 1, rgba: vec![1, 2, 3, 4] };
+        let img = DecodedImage {
+            width: 1,
+            height: 1,
+            rgba: vec![1, 2, 3, 4],
+        };
         store.by_id.insert(1, img);
         for i in 0..(MAX_PLACEMENTS + 10) as i32 {
             store.place(1, i, 0, 0, 0);
         }
         assert_eq!(store.placements().len(), MAX_PLACEMENTS);
         // The most recently placed row must be present; the very first must be gone.
-        assert_eq!(store.placements().last().unwrap().row, MAX_PLACEMENTS as i32 + 9);
+        assert_eq!(
+            store.placements().last().unwrap().row,
+            MAX_PLACEMENTS as i32 + 9
+        );
     }
 
     #[test]
@@ -595,7 +647,10 @@ mod tests {
             let row = vec![0u8; (MAX_IMAGE_DIM as usize + 1) * 4];
             w.write_image_data(&row).unwrap();
         }
-        assert!(decode_png(&png_bytes).is_none(), "oversized PNG must be rejected");
+        assert!(
+            decode_png(&png_bytes).is_none(),
+            "oversized PNG must be rejected"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -612,10 +667,13 @@ mod tests {
 
     /// Helper: extract all SemanticMark chars.
     fn all_marks(events: &[TapEvent]) -> Vec<char> {
-        events.iter().filter_map(|e| match e {
-            TapEvent::SemanticMark(c) => Some(*c),
-            _ => None,
-        }).collect()
+        events
+            .iter()
+            .filter_map(|e| match e {
+                TapEvent::SemanticMark(c) => Some(*c),
+                _ => None,
+            })
+            .collect()
     }
 
     #[test]

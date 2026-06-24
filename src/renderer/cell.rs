@@ -129,13 +129,14 @@ impl Renderer {
         if (font_px - self.font_px).abs() < 0.01 {
             return;
         }
-        let (text, metrics) = match Text::load(self.font_family.as_deref(), font_px, &self.font_features) {
-            Ok(loaded) => loaded,
-            Err(e) => {
-                log::warn!("glassy: font resize to {font_px:.1}px failed: {e:#}");
-                return;
-            }
-        };
+        let (text, metrics) =
+            match Text::load(self.font_family.as_deref(), font_px, &self.font_features) {
+                Ok(loaded) => loaded,
+                Err(e) => {
+                    log::warn!("glassy: font resize to {font_px:.1}px failed: {e:#}");
+                    return;
+                }
+            };
         self.text = text;
         self.metrics = metrics;
         self.pad = self.pad_override.unwrap_or_else(|| pad_for(metrics.height));
@@ -688,5 +689,4 @@ impl Renderer {
             });
         }
     }
-
 }

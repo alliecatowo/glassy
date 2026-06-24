@@ -2,8 +2,8 @@
 //! rect computation, gutter hit-testing, and ratio mutation. Delegates all
 //! recursive tree work to [`super::tree::Node`].
 
-use super::{Dir, Move, Rect, SplitHandle};
 use super::tree::{LayoutDesc, Node};
+use super::{Dir, Move, Rect, SplitHandle};
 
 /// The full layout: a tree plus the currently focused leaf id.
 pub struct Layout {
@@ -139,11 +139,7 @@ impl Layout {
                 None => key,
                 Some(b) => {
                     // Closer in the primary axis wins; tie-break on larger overlap.
-                    if (key.1, key.2) < (b.1, b.2) {
-                        key
-                    } else {
-                        b
-                    }
+                    if (key.1, key.2) < (b.1, b.2) { key } else { b }
                 }
             });
         }
@@ -169,7 +165,14 @@ impl Layout {
     /// split's primary axis, and inside the divider's cross-axis span). Inner
     /// (deeper) splits win over outer ones because the descent tests the matching
     /// child's subtree only. Returns `None` over no gutter.
-    pub fn split_at(&self, area: Rect, gap: i32, px: i32, py: i32, tol: i32) -> Option<SplitHandle> {
+    pub fn split_at(
+        &self,
+        area: Rect,
+        gap: i32,
+        px: i32,
+        py: i32,
+        tol: i32,
+    ) -> Option<SplitHandle> {
         let mut path = Vec::new();
         self.root.split_at(area, gap, px, py, tol, &mut path)
     }
@@ -182,7 +185,13 @@ impl Layout {
         let mut node = &self.root;
         let mut area = area;
         for &go_second in path {
-            let Node::Split { dir, ratio, first, second } = node else {
+            let Node::Split {
+                dir,
+                ratio,
+                first,
+                second,
+            } = node
+            else {
                 return None;
             };
             let ratio = ratio.clamp(0.0, 1.0);
@@ -191,10 +200,20 @@ impl Layout {
                     let usable = (area.w - gap).max(0);
                     let fw = ((usable as f32 * ratio).round() as i32).clamp(0, usable);
                     if go_second {
-                        area = Rect { x: area.x + fw + gap, y: area.y, w: usable - fw, h: area.h };
+                        area = Rect {
+                            x: area.x + fw + gap,
+                            y: area.y,
+                            w: usable - fw,
+                            h: area.h,
+                        };
                         node = second;
                     } else {
-                        area = Rect { x: area.x, y: area.y, w: fw, h: area.h };
+                        area = Rect {
+                            x: area.x,
+                            y: area.y,
+                            w: fw,
+                            h: area.h,
+                        };
                         node = first;
                     }
                 }
@@ -202,10 +221,20 @@ impl Layout {
                     let usable = (area.h - gap).max(0);
                     let fh = ((usable as f32 * ratio).round() as i32).clamp(0, usable);
                     if go_second {
-                        area = Rect { x: area.x, y: area.y + fh + gap, w: area.w, h: usable - fh };
+                        area = Rect {
+                            x: area.x,
+                            y: area.y + fh + gap,
+                            w: area.w,
+                            h: usable - fh,
+                        };
                         node = second;
                     } else {
-                        area = Rect { x: area.x, y: area.y, w: area.w, h: fh };
+                        area = Rect {
+                            x: area.x,
+                            y: area.y,
+                            w: area.w,
+                            h: fh,
+                        };
                         node = first;
                     }
                 }

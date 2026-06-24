@@ -68,7 +68,10 @@ impl ApplicationHandler<UserEvent> for App {
                 return;
             }
         };
-        log::info!("startup: renderer+GPU+font ready at {:.1} ms", ms(self.started));
+        log::info!(
+            "startup: renderer+GPU+font ready at {:.1} ms",
+            ms(self.started)
+        );
         // Apply an explicit padding override (logical px scaled to physical).
         if let Some(pad) = self.config.padding {
             renderer.set_pad(pad * scale);
@@ -92,7 +95,13 @@ impl ApplicationHandler<UserEvent> for App {
         let size = window.inner_size();
         renderer.resize(size.width, size.height);
         let m = renderer.cell_metrics();
-        let (cols, rows) = Self::grid_for(size, m.width, m.height, renderer.pad(), self.config.status_bar);
+        let (cols, rows) = Self::grid_for(
+            size,
+            m.width,
+            m.height,
+            renderer.pad(),
+            self.config.status_bar,
+        );
         self.cols = cols;
         self.rows = rows;
 
@@ -306,7 +315,9 @@ impl ApplicationHandler<UserEvent> for App {
                     // A background tab produced output (in any of its panes): flag
                     // its chip for the activity dot. Only repaint on the false->true
                     // edge so a busy background tab doesn't spam redraws.
-                    let owner = self.tab_pos_of_pane(id).and_then(|p| self.tab_order.get(p).copied());
+                    let owner = self
+                        .tab_pos_of_pane(id)
+                        .and_then(|p| self.tab_order.get(p).copied());
                     if let Some(owner) = owner
                         && let Some(s) = self.background.iter_mut().find(|s| s.id == owner)
                     {
@@ -486,9 +497,10 @@ impl ApplicationHandler<UserEvent> for App {
                 // re-assert it (safe, repeatable) so winit's re-themed CSD titlebar
                 // stays coherent with our palette.
                 if !self.apply_system_theme(Some(scheme))
-                    && let Some(theme) = color::theme_by_name(&self.config.theme) {
-                        color::set_theme(theme);
-                    }
+                    && let Some(theme) = color::theme_by_name(&self.config.theme)
+                {
+                    color::set_theme(theme);
+                }
                 self.force_full_redraw = true;
                 self.mark_dirty(event_loop);
             }

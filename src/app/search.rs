@@ -223,11 +223,15 @@ impl App {
     /// returning `(col_start, col_end, screen_row, is_current)` for each run. The
     /// caller passes these to [`Self::paint_search`]. Holds the term lock briefly.
     pub(crate) fn search_highlights(&self) -> Vec<(usize, usize, usize, bool)> {
-        let Some(st) = self.search.as_ref() else { return Vec::new() };
+        let Some(st) = self.search.as_ref() else {
+            return Vec::new();
+        };
         if st.matches.is_empty() {
             return Vec::new();
         }
-        let Some(pty) = self.pty.as_ref() else { return Vec::new() };
+        let Some(pty) = self.pty.as_ref() else {
+            return Vec::new();
+        };
         let term = pty.term.lock();
         let display_offset = term.grid().display_offset() as i32;
         drop(term);
@@ -322,7 +326,11 @@ impl App {
         cx += cell_w * 2.0;
 
         // Query text (or a dim placeholder), with a block caret at the end.
-        let text_col = if bad_regex { color::danger() } else { gui::fg() };
+        let text_col = if bad_regex {
+            color::danger()
+        } else {
+            gui::fg()
+        };
         if query.is_empty() {
             for ch in "search…".chars() {
                 renderer.push_overlay_glyph_px(cx.round(), ty, ch, gui::fg_dim());
@@ -353,7 +361,11 @@ impl App {
             let w = readout.chars().count() as f32 * cell_w;
             let rx = surface.0 - inner_pad - w;
             let mut rcx = rx;
-            let rcol = if bad_regex { color::danger() } else { gui::fg_dim() };
+            let rcol = if bad_regex {
+                color::danger()
+            } else {
+                gui::fg_dim()
+            };
             for ch in readout.chars() {
                 renderer.push_overlay_glyph_px(rcx.round(), ty, ch, rcol);
                 rcx += cell_w;
@@ -534,14 +546,20 @@ mod tests {
     fn reveal_delta_moves_up_for_near_bottom_match() {
         // Line=20, offset=0, rows=24 → screen_row=20, want=12, delta=-8.
         let delta = reveal_delta(20, 0, 24);
-        assert_eq!(delta, -8, "must scroll down (negative delta) to center a near-bottom match");
+        assert_eq!(
+            delta, -8,
+            "must scroll down (negative delta) to center a near-bottom match"
+        );
     }
 
     #[test]
     fn reveal_delta_moves_down_for_near_top_match() {
         // Line=2, offset=0, rows=24 → screen_row=2, want=12, delta=10.
         let delta = reveal_delta(2, 0, 24);
-        assert_eq!(delta, 10, "must scroll up (positive delta) to center a near-top match");
+        assert_eq!(
+            delta, 10,
+            "must scroll up (positive delta) to center a near-top match"
+        );
     }
 
     #[test]

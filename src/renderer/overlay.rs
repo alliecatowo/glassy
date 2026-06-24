@@ -82,7 +82,15 @@ impl Renderer {
     /// draws an antialiased SDF rounded rect; `radius` is the corner radius in px
     /// (clamped to the box in the shader, so 0 = sharp rect). `color` is straight
     /// RGBA; the shader premultiplies. This is the GUI layer's surface primitive.
-    pub fn push_overlay_rrect_px(&mut self, x: f32, y: f32, w: f32, h: f32, radius: f32, color: [f32; 4]) {
+    pub fn push_overlay_rrect_px(
+        &mut self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        radius: f32,
+        color: [f32; 4],
+    ) {
         if w <= 0.0 || h <= 0.0 {
             return;
         }
@@ -158,7 +166,8 @@ impl Renderer {
     /// changed since the last rebuild. A no-op if the cache is empty (the App falls
     /// back to a full rebuild in that case).
     pub fn replay_tab_overlay(&mut self) {
-        self.overlay_quads.extend_from_slice(&self.tab_overlay_quads);
+        self.overlay_quads
+            .extend_from_slice(&self.tab_overlay_quads);
         self.overlay_text.extend_from_slice(&self.tab_overlay_text);
     }
 
@@ -355,5 +364,4 @@ impl Renderer {
             _pad: [0; 3],
         });
     }
-
 }

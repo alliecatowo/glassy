@@ -14,14 +14,21 @@ impl App {
         } else {
             None
         };
-        let Some(area) = self.content_area() else { return };
+        let Some(area) = self.content_area() else {
+            return;
+        };
         let focused_pane = match self.panes.as_ref() {
             Some(g) => g.layout.focused(),
             None => return,
         };
         // Precompute every leaf's rect + grid size (whole-`self` method calls)
         // BEFORE taking disjoint field borrows for the render loop below.
-        let rects = self.panes.as_ref().unwrap().layout.rects(area, Self::PANE_GAP);
+        let rects = self
+            .panes
+            .as_ref()
+            .unwrap()
+            .layout
+            .rects(area, Self::PANE_GAP);
         // Per-pane header chrome is runtime-configurable. When off, panes get their
         // full height and no header is painted (hdr_h == 0 collapses the body inset).
         let pane_headers = self.config.pane_headers;
@@ -61,7 +68,8 @@ impl App {
                 let mode = *t.mode();
                 let disp = t.grid().display_offset() as i32;
                 let hist = t.grid().history_size();
-                let sel = t.selection_to_string()
+                let sel = t
+                    .selection_to_string()
                     .map(|s| s.chars().count())
                     .unwrap_or(0);
                 (mode, disp, hist, sel)
@@ -69,13 +77,21 @@ impl App {
             None => (TermMode::empty(), 0, 0, 0),
         };
         let sb_focused = self.focused;
-        let sb_surface_h = self.renderer.as_ref().map(|r| r.surface_size().1).unwrap_or(0);
+        let sb_surface_h = self
+            .renderer
+            .as_ref()
+            .map(|r| r.surface_size().1)
+            .unwrap_or(0);
         // Status-bar cwd + git branch (same as single-pane path in render.rs).
-        let sb_cwd: Option<std::path::PathBuf> = self.pty.as_ref()
+        let sb_cwd: Option<std::path::PathBuf> = self
+            .pty
+            .as_ref()
             .and_then(|p| p.pane_info.cwd.clone())
             .or_else(|| self.active_cwd.clone());
         // Branch is precomputed in PaneInfo (refreshed on the 2 s proc poll).
-        let sb_git_branch: Option<String> = self.pty.as_ref()
+        let sb_git_branch: Option<String> = self
+            .pty
+            .as_ref()
             .and_then(|p| p.pane_info.git_branch.clone());
         let sb_progress = self.active_progress;
 
@@ -105,36 +121,44 @@ impl App {
         // (fallback = empty); the cwd and comm are displayed as a secondary subtitle.
         let pane_header_titles: Vec<(usize, String)> = {
             let g = self.panes.as_ref().unwrap();
-            pane_specs.iter().map(|(id, _, _, _, _)| {
-                let title = g.others_titles.get(id).cloned().unwrap_or_default();
-                (*id, title)
-            }).collect()
+            pane_specs
+                .iter()
+                .map(|(id, _, _, _, _)| {
+                    let title = g.others_titles.get(id).cloned().unwrap_or_default();
+                    (*id, title)
+                })
+                .collect()
         };
         // Per-pane cwd + foreground comm subtitle for the pane header.
         // Tuple: (pane_id, cwd_last_component, Option<comm>)
         let pane_header_proc: Vec<(usize, Option<String>, Option<String>)> = {
             let g = self.panes.as_ref().unwrap();
             let focused_pane_id = g.layout.focused();
-            pane_specs.iter().map(|(id, _, _, _, _)| {
-                let pty = if *id == focused_pane_id {
-                    self.pty.as_ref()
-                } else {
-                    g.others.get(id)
-                };
-                let (cwd, comm) = pty.map(|p| {
-                    let cwd = p.pane_info.cwd.as_ref().map(|path| {
-                        // Show only the last component (basename) of the path to fit
-                        // the narrow header. The full path is in the status bar.
-                        path.file_name()
-                            .and_then(|n| n.to_str())
-                            .unwrap_or("~")
-                            .to_string()
-                    });
-                    let comm = p.pane_info.foreground_comm.clone();
-                    (cwd, comm)
-                }).unwrap_or((None, None));
-                (*id, cwd, comm)
-            }).collect()
+            pane_specs
+                .iter()
+                .map(|(id, _, _, _, _)| {
+                    let pty = if *id == focused_pane_id {
+                        self.pty.as_ref()
+                    } else {
+                        g.others.get(id)
+                    };
+                    let (cwd, comm) = pty
+                        .map(|p| {
+                            let cwd = p.pane_info.cwd.as_ref().map(|path| {
+                                // Show only the last component (basename) of the path to fit
+                                // the narrow header. The full path is in the status bar.
+                                path.file_name()
+                                    .and_then(|n| n.to_str())
+                                    .unwrap_or("~")
+                                    .to_string()
+                            });
+                            let comm = p.pane_info.foreground_comm.clone();
+                            (cwd, comm)
+                        })
+                        .unwrap_or((None, None));
+                    (*id, cwd, comm)
+                })
+                .collect()
         };
         let pane_menu_open = self.pane_menu_open;
         let pane_menu_sel = self.pane_menu_sel;
@@ -183,7 +207,9 @@ impl App {
         };
 
         // Menu/help overlay snapshot (same as the single-pane path).
-        let has_selection_for_menu2 = self.pty.as_ref()
+        let has_selection_for_menu2 = self
+            .pty
+            .as_ref()
             .and_then(|p| p.term.lock().selection_to_string())
             .map(|s| !s.is_empty())
             .unwrap_or(false);
@@ -200,10 +226,15 @@ impl App {
                     (left as f32 * 8.0, top as f32 * 16.0)
                 }
             });
-            Some((entries, ax, ay, self.menu_sel,
+            Some((
+                entries,
+                ax,
+                ay,
+                self.menu_sel,
                 (self.mouse_px.0 as f32, self.mouse_px.1 as f32),
                 self.held_button == Some(0),
-                self.gui_click_edge))
+                self.gui_click_edge,
+            ))
         } else {
             None
         };
@@ -211,9 +242,7 @@ impl App {
         // Find-bar + palette inputs, snapshotted BEFORE the disjoint borrows
         // (both may lock the focused term). The find-bar highlights are positioned
         // relative to the focused pane's body rect (its on-screen pixel origin).
-        let search_inputs = self
-            .search_readout()
-            .map(|r| (r, self.search_highlights()));
+        let search_inputs = self.search_readout().map(|r| (r, self.search_highlights()));
         let search_origin = {
             // The focused pane's body rect origin + pad, mirroring px_to_cell.
             let pad = self.renderer.as_ref().map(|r| r.pad()).unwrap_or(0.0);
@@ -242,12 +271,24 @@ impl App {
         // full redraw is forced, e.g. theme change). Computed here so it can update
         // `self.tab_bar_key` after the renderer borrow ends.
         let new_tab_key = Self::tab_bar_key(
-            &tab_snapshot, tab_focused, tab_hovered, tab_held, tab_dragging, tab_mouse,
-            tab_spinner, tab_count, strip_off, strip_hist,
+            &tab_snapshot,
+            tab_focused,
+            tab_hovered,
+            tab_held,
+            tab_dragging,
+            tab_mouse,
+            tab_spinner,
+            tab_count,
+            strip_off,
+            strip_hist,
         );
         let tab_bar_rebuild = force_full
             || self.tab_bar_key != Some(new_tab_key)
-            || !self.renderer.as_ref().map(|r| r.has_tab_overlay()).unwrap_or(false);
+            || !self
+                .renderer
+                .as_ref()
+                .map(|r| r.has_tab_overlay())
+                .unwrap_or(false);
         let live_ids: Vec<usize> = pane_specs.iter().map(|(id, ..)| *id).collect();
         let rebuild: Vec<bool> = {
             let g = self.panes.as_ref().unwrap();
@@ -301,7 +342,15 @@ impl App {
                 };
                 let Some(pty) = pty else { continue };
                 renderer.begin_pane(*id, *body_rect, is_focused);
-                Self::push_pane(renderer, pty, *cols, *prows, win_focused, blink_on, hovered_link.as_deref());
+                Self::push_pane(
+                    renderer,
+                    pty,
+                    *cols,
+                    *prows,
+                    win_focused,
+                    blink_on,
+                    hovered_link.as_deref(),
+                );
                 renderer.end_pane();
             } else {
                 renderer.reuse_pane(*id);
@@ -348,7 +397,13 @@ impl App {
                                     gutter_glow,
                                 );
                             } else {
-                                renderer.push_divider(x0, a.y + a.h, x1 - x0, Self::PANE_GAP, divider);
+                                renderer.push_divider(
+                                    x0,
+                                    a.y + a.h,
+                                    x1 - x0,
+                                    Self::PANE_GAP,
+                                    divider,
+                                );
                             }
                         }
                     }
@@ -461,7 +516,8 @@ impl App {
             let mouse = (self.mouse_px.0 as f32, self.mouse_px.1 as f32);
             let help_result = gui::build_help(
                 renderer,
-                m.width, m.height,
+                m.width,
+                m.height,
                 (sw as f32, sh as f32),
                 mouse,
                 self.held_button == Some(0),
@@ -481,7 +537,9 @@ impl App {
         // Real GUI menu (§3.6) in split mode.
         if let Some((ref entries2, ax2, ay2, sel2, mouse2, md2, click2)) = menu_snapshot2 {
             let m = renderer.cell_metrics();
-            let _ = gui::menu(renderer, m.width, m.height, mouse2, md2, click2, ax2, ay2, entries2, sel2);
+            let _ = gui::menu(
+                renderer, m.width, m.height, mouse2, md2, click2, ax2, ay2, entries2, sel2,
+            );
         }
 
         // Find bar + match highlights (Ctrl+Shift+F) in split mode. Highlights are
@@ -505,8 +563,14 @@ impl App {
             let (sw, sh) = renderer.surface_size();
             let row_refs: Vec<(&str, Option<&str>)> =
                 rows.iter().map(|(l, h)| (l.as_str(), *h)).collect();
-            self.palette_rows =
-                Self::paint_palette(renderer, (sw as f32, sh as f32), query, &row_refs, *sel, mouse_px_f);
+            self.palette_rows = Self::paint_palette(
+                renderer,
+                (sw as f32, sh as f32),
+                query,
+                &row_refs,
+                *sel,
+                mouse_px_f,
+            );
         }
 
         // This frame consumed the forced-full-redraw request (every pane was
@@ -549,7 +613,8 @@ impl App {
 
     /// Pane-menu entries (for the ⋮ button in each pane header). Kept as a
     /// static slice so the menu shape is stable and hit-testing is index-based.
-    pub(crate) const PANE_MENU_ITEMS: &'static [&'static str] = &["Split vertical", "Split horizontal", "Close pane"];
+    pub(crate) const PANE_MENU_ITEMS: &'static [&'static str] =
+        &["Split vertical", "Split horizontal", "Close pane"];
 
     /// Paint per-pane title bars for all leaves in split mode. Each header is
     /// `PANE_HEADER_H` px tall at the top of the leaf rect and contains (L→R):
@@ -584,11 +649,11 @@ impl App {
         let fdim = if win_focused { 1.0 } else { 0.7 };
         let mul = |c: [f32; 4]| [c[0] * fdim, c[1] * fdim, c[2] * fdim, c[3]];
 
-        let accent   = mul(color::accent());
-        let fg       = mul(gui::fg());
-        let fg_dim   = mul(gui::fg_dim());
-        let body_e1  = mul(gui::glass_body());
-        let body_e2  = mul(gui::glass_raised());
+        let accent = mul(color::accent());
+        let fg = mul(gui::fg());
+        let fg_dim = mul(gui::fg_dim());
+        let body_e1 = mul(gui::glass_body());
+        let body_e2 = mul(gui::glass_raised());
         let hairline = mul(gui::hairline());
 
         // ⋮ button: a square hit-target flush to the right edge of each header.
@@ -615,7 +680,8 @@ impl App {
             renderer.push_overlay_px(rx, ry + hdr_h - 1.0, rw, 1.0, hairline);
 
             // Resolve the per-pane title from the snapshot.
-            let title = titles.iter()
+            let title = titles
+                .iter()
                 .find(|(tid, _)| *tid == *id)
                 .map(|(_, t)| t.as_str())
                 .unwrap_or("");
@@ -627,7 +693,8 @@ impl App {
             let ty = (ry + (hdr_h - m.height) * 0.5).round();
 
             // /proc cwd + foreground comm for this pane.
-            let (pi_cwd, pi_comm) = proc_info.iter()
+            let (pi_cwd, pi_comm) = proc_info
+                .iter()
                 .find(|(tid, _, _)| *tid == *id)
                 .map(|(_, c, k)| (c.as_deref(), k.as_deref()))
                 .unwrap_or((None, None));
@@ -640,10 +707,13 @@ impl App {
                 (None, None) => None,
             };
             // Annotation goes right-aligned, just left of the ⋮ button.
-            let annotation_w = annotation.as_deref().map(|s| {
-                let nchars = s.chars().count() as f32;
-                nchars * m.width + pad
-            }).unwrap_or(0.0);
+            let annotation_w = annotation
+                .as_deref()
+                .map(|s| {
+                    let nchars = s.chars().count() as f32;
+                    nchars * m.width + pad
+                })
+                .unwrap_or(0.0);
 
             // Focus dot.
             let mut tx = rx + pad;
@@ -669,13 +739,30 @@ impl App {
             // Hover highlight when the pointer is inside the button.
             let btn_hovered = gui::hit(
                 gui::Rect::new(btn_x, btn_y, menu_btn_w, hdr_h),
-                mouse_px.0, mouse_px.1,
+                mouse_px.0,
+                mouse_px.1,
             );
             if btn_hovered || is_menu_open {
-                let hi = [accent[0], accent[1], accent[2], if is_menu_open { 0.25 } else { 0.15 }];
-                renderer.push_overlay_rrect_px(btn_x + 2.0, btn_y + 2.0, menu_btn_w - 4.0, hdr_h - 4.0, 3.0, hi);
+                let hi = [
+                    accent[0],
+                    accent[1],
+                    accent[2],
+                    if is_menu_open { 0.25 } else { 0.15 },
+                ];
+                renderer.push_overlay_rrect_px(
+                    btn_x + 2.0,
+                    btn_y + 2.0,
+                    menu_btn_w - 4.0,
+                    hdr_h - 4.0,
+                    3.0,
+                    hi,
+                );
             }
-            let glyph_fg = if btn_hovered || is_menu_open { accent } else { fg_dim };
+            let glyph_fg = if btn_hovered || is_menu_open {
+                accent
+            } else {
+                fg_dim
+            };
             let gx = btn_x + (menu_btn_w - m.width) * 0.5;
             renderer.push_overlay_glyph_px(gx.round(), ty, '⋯', glyph_fg);
 
@@ -723,7 +810,8 @@ impl App {
             // Highlight hovered or keyboard-selected row.
             let mouse_on_row = gui::hit(
                 gui::Rect::new(ax, row_y, panel_w, row_h),
-                mouse_px.0, mouse_px.1,
+                mouse_px.0,
+                mouse_px.1,
             );
             if mouse_on_row || i == sel {
                 // Rounded highlight inset from the panel edge so it doesn't square
@@ -858,20 +946,42 @@ impl App {
                 decorations.underline = UnderlineStyle::Single;
             }
 
-            let ch = if hidden || cell.c == '\0' { ' ' } else { cell.c };
+            let ch = if hidden || cell.c == '\0' {
+                ' '
+            } else {
+                cell.c
+            };
             let (combiners, consumed) = if hidden {
                 (Vec::new(), unit_len(&cells, ci))
             } else {
                 build_grapheme(&cells, ci, indexed.point.line.0)
             };
             let wide = wide || consumed >= 2;
-            renderer.push_cell(col as usize, row_u, ch, &combiners, fg, bg, bold, italic, wide, decorations);
+            renderer.push_cell(
+                col as usize,
+                row_u,
+                ch,
+                &combiners,
+                fg,
+                bg,
+                bold,
+                italic,
+                wide,
+                decorations,
+            );
             ci += consumed;
         }
 
         // Cursor overlay (same precedence as the single-pane path).
-        if cursor_shown && cursor_row >= 0 && cursor_row < rows as i32 && cursor_col >= 0 && cursor_col < cols as i32 {
-            let blink_off = win_focused && cursor.shape != CursorShape::Hidden && !blink_on
+        if cursor_shown
+            && cursor_row >= 0
+            && cursor_row < rows as i32
+            && cursor_col >= 0
+            && cursor_col < cols as i32
+        {
+            let blink_off = win_focused
+                && cursor.shape != CursorShape::Hidden
+                && !blink_on
                 && term.cursor_style().blinking;
             if !blink_off {
                 let overlay = if !win_focused {
@@ -896,5 +1006,4 @@ impl App {
             }
         }
     }
-
 }
