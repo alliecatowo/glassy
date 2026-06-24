@@ -520,6 +520,7 @@ impl App {
                 m.height,
                 (sw as f32, sh as f32),
                 mouse,
+                self.gui_click_pos,
                 self.held_button == Some(0),
                 self.gui_click_edge,
                 &mut self.gui_pressed,
@@ -788,6 +789,13 @@ impl App {
         let panel_w = (max_label * m.width + 24.0).ceil();
         let row_h = (m.height + 6.0).ceil();
         let panel_h = items.len() as f32 * row_h + 4.0;
+
+        // Edge-clamp: keep the panel inside the rendered surface. The surface
+        // width is available via the renderer; clamp left so the right edge
+        // stays on-screen, and never go left of 0. This prevents the menu on
+        // the right pane from extending past the window boundary.
+        let (sw, _sh) = renderer.surface_size();
+        let ax = ax.min(sw as f32 - panel_w).max(0.0);
 
         // E3 floating panel.
         let float_fill = gui::glass_float();

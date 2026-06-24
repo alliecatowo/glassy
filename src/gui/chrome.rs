@@ -52,9 +52,12 @@ impl<'r> Ui<'r> {
         let ctrl_w = (inner.w - label_w).min(m.ctrl_w * 1.6).max(m.ctrl_w);
         let mut y = inner.y + header_h + m.gap;
         let step = m.row_h + m.gap;
+        // Row labels are limited to the label column width; clip with trailing
+        // ellipsis if a label is ever too long for the 12-cell slot.
+        let label_clip_w = label_w - m.gap;
         let row_label = |ui: &mut Self, y: f32, text: &str| {
             let ly = (y + (m.row_h - m.cell_h) * 0.5).round();
-            ui.label(inner.x.round(), ly, text, fg_dim());
+            ui.label_clip(inner.x.round(), ly, text, label_clip_w, fg_dim());
         };
         let ctrl_h = m.row_h - m.gap;
         let ctrl_rect = |y: f32, w: f32| Rect::new(ctrl_x, y, w, ctrl_h);
@@ -484,10 +487,29 @@ pub fn menu(
                     if *enabled { fg() } else { fg_dim() },
                 );
 
-                // Label.
+                // Label — clipped to the space before the shortcut hint (or the
+                // right pad) so long labels never overwrite the hint column.
                 let lx = ix + icon_w;
+                let hint_reserve = if hint.is_some() {
+                    hint_gap + hint_chars as f32 * cell_w
+                } else {
+                    0.0
+                };
+                let label_max_w = (ax + panel_w - pad_x - hint_reserve - lx).max(0.0);
+                let label_max_chars = (label_max_w / cell_w).floor() as usize;
+                let label_chars_vec: Vec<char> = label.chars().collect();
+                let label_display: String = if label_chars_vec.len() <= label_max_chars {
+                    (*label).to_string()
+                } else if label_max_chars >= 2 {
+                    let keep = label_max_chars - 1;
+                    let mut s: String = label_chars_vec[..keep].iter().collect();
+                    s.push('…');
+                    s
+                } else {
+                    String::new()
+                };
                 let mut cx = lx;
-                for ch in label.chars() {
+                for ch in label_display.chars() {
                     renderer.push_overlay_glyph_px(cx.round(), ty, ch, text_col);
                     cx += cell_w;
                 }

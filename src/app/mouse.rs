@@ -180,6 +180,14 @@ impl App {
                 // the release frame can still resolve a click on the latched
                 // widget (see the click-edge reset in `render`).
                 self.gui_click_edge = true;
+                // Capture the pointer position at the moment of release so that
+                // overlay hit tests always use the click's actual position, even
+                // if the pointer moves between this event and the next render.
+                self.gui_click_pos = (self.mouse_px.0 as f32, self.mouse_px.1 as f32);
+                // If an overlay was opened by the PRESS of this same button, the
+                // release belongs to that opening gesture — do not treat it as a
+                // click-outside-the-panel dismiss.
+                self.overlay_opened_by_press = false;
             }
             self.mark_dirty(event_loop);
         }
@@ -213,12 +221,23 @@ impl App {
             // starting just outside the panel kill the form before the Ui resolves
             // an inside-click, and would break starting a slider drag from outside.
             if button == MouseButton::Left && !pressed {
-                let (mx, my) = (self.mouse_px.0 as f32, self.mouse_px.1 as f32);
-                if !gui::hit(self.settings_panel, mx, my) {
-                    self.settings_open = false;
-                    self.settings_drop = gui::SettingsDrop::None;
-                    self.force_full_redraw = true;
-                    self.mark_dirty(event_loop);
+                // If this release belongs to the press that OPENED the overlay,
+                // consume it without dismissing — the strip button that opened
+                // settings is outside the panel, so without this guard the overlay
+                // would close on the very same gesture that opened it.
+                if self.overlay_opened_by_press {
+                    self.overlay_opened_by_press = false;
+                } else {
+                    // Use gui_click_pos (position at release time) so pointer
+                    // motion between release and this handler does not affect
+                    // the hit test.
+                    let (mx, my) = self.gui_click_pos;
+                    if !gui::hit(self.settings_panel, mx, my) {
+                        self.settings_open = false;
+                        self.settings_drop = gui::SettingsDrop::None;
+                        self.force_full_redraw = true;
+                        self.mark_dirty(event_loop);
+                    }
                 }
             }
             // Do NOT clear held_button here: the settings snapshot reads

@@ -84,6 +84,8 @@ impl App {
             gui_focused: None,
             gui_anims: std::collections::HashMap::new(),
             gui_click_edge: false,
+            gui_click_pos: (0.0, 0.0),
+            overlay_opened_by_press: false,
             gui_anim_last: Instant::now(),
             modify_other_keys: ModifyOtherKeys::default(),
             search: None,

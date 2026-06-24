@@ -124,7 +124,7 @@ impl RawConfig {
             theme_light,
             theme_dark,
             status_bar: self.status_bar.unwrap_or(false),
-            pane_headers: self.pane_headers.unwrap_or(true),
+            pane_headers: self.pane_headers.unwrap_or(false),
             word_separator: self.word_separator.unwrap_or_default(),
             ligatures: self.ligatures.unwrap_or(false),
             font_features: self.font_features.unwrap_or_default(),
