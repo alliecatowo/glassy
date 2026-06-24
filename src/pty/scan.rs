@@ -229,4 +229,93 @@ mod tests {
         let (begin, end) = scan_sync_2026(b"\x1b[?1049h\x1b[?1049l");
         assert_eq!((begin, end), (0, 0));
     }
+
+    // ---- clears_screen tests ------------------------------------------------
+
+    use super::clears_screen;
+
+    #[test]
+    fn clears_screen_csi_2j() {
+        // CSI 2 J is the standard "erase display" (clear) command.
+        assert!(clears_screen(b"\x1b[2J"));
+    }
+
+    #[test]
+    fn clears_screen_csi_3j() {
+        // CSI 3 J clears scrollback.
+        assert!(clears_screen(b"\x1b[3J"));
+    }
+
+    #[test]
+    fn clears_screen_ris() {
+        // ESC c (RIS = Reset to Initial State).
+        assert!(clears_screen(b"\x1bc"));
+    }
+
+    #[test]
+    fn clears_screen_csi_0j_does_not_count() {
+        // CSI 0 J only clears from cursor to end of screen, not a full-screen clear.
+        assert!(!clears_screen(b"\x1b[0J"));
+    }
+
+    #[test]
+    fn clears_screen_csi_1j_does_not_count() {
+        // CSI 1 J clears from start to cursor, not a full-screen clear.
+        assert!(!clears_screen(b"\x1b[1J"));
+    }
+
+    #[test]
+    fn clears_screen_plain_text() {
+        assert!(!clears_screen(b"hello world\r\n"));
+    }
+
+    #[test]
+    fn clears_screen_embedded_in_run() {
+        // A clear command embedded in a longer byte run must be detected.
+        assert!(clears_screen(b"abc\x1b[2Jdef"));
+    }
+
+    #[test]
+    fn clears_screen_bare_j_with_empty_params_counts() {
+        // The implementation treats empty params as an erase-all trigger.
+        // (CSI J with no parameter: the code's `params.is_empty()` branch fires.)
+        assert!(clears_screen(b"\x1b[J"));
+    }
+
+    // ---- scan_mok last-wins semantics --------------------------------------
+
+    #[test]
+    fn scan_mok_last_wins_in_buffer() {
+        // Set level 2 then immediately reset (level 0) — reset is the last.
+        let seq = b"\x1b[>4;2m\x1b[>4;0m";
+        assert_eq!(
+            scan_modify_other_keys(seq),
+            Some(ModifyOtherKeys::Reset),
+            "last sequence in buffer must win"
+        );
+    }
+
+    #[test]
+    fn scan_mok_level_out_of_range_treated_as_reset() {
+        // Any level > 2 should fall back to Reset.
+        let seq = b"\x1b[>4;99m";
+        assert_eq!(scan_modify_other_keys(seq), Some(ModifyOtherKeys::Reset));
+    }
+
+    // ---- scan_sync_2026 additional cases -----------------------------------
+
+    #[test]
+    fn scan_sync_multiple_brackets_counted() {
+        // Two nested or overlapping sync brackets.
+        let seq = b"\x1b[?2026h\x1b[?2026h\x1b[?2026l\x1b[?2026l";
+        let (begin, end) = scan_sync_2026(seq);
+        assert_eq!(begin, 2);
+        assert_eq!(end, 2);
+    }
+
+    #[test]
+    fn scan_sync_empty_input() {
+        let (begin, end) = scan_sync_2026(b"");
+        assert_eq!((begin, end), (0, 0));
+    }
 }

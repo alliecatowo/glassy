@@ -650,4 +650,50 @@ mod tests {
         assert!(out.contains('@'));
         assert_eq!(out.matches(',').count(), 1);
     }
+
+    #[test]
+    fn merge_word_seps_empty_defaults_with_extras() {
+        let out = merge_word_separators("", "@#");
+        assert!(out.contains('@'));
+        assert!(out.contains('#'));
+    }
+
+    #[test]
+    fn merge_word_seps_both_empty() {
+        assert_eq!(merge_word_separators("", ""), "");
+    }
+
+    #[test]
+    fn merge_word_seps_no_duplicates_when_extras_overlap() {
+        let out = merge_word_separators("abc", "bcd");
+        // 'b', 'c' from extras already in defaults → not duplicated.
+        // 'd' is new → added.
+        assert_eq!(out.matches('a').count(), 1);
+        assert_eq!(out.matches('b').count(), 1);
+        assert_eq!(out.matches('c').count(), 1);
+        assert_eq!(out.matches('d').count(), 1);
+    }
+
+    #[test]
+    fn merge_word_seps_preserves_defaults_order() {
+        // Default characters appear first, in original order.
+        let out = merge_word_separators("xyz", "aw");
+        assert!(out.starts_with('x'), "defaults come first: {out:?}");
+    }
+
+    #[test]
+    fn merge_word_seps_unicode_chars_handled() {
+        // Multibyte chars (│ is U+2502, 3 bytes in UTF-8) must not be double-counted.
+        let out = merge_word_separators(",│", "│");
+        assert_eq!(out.matches('│').count(), 1, "│ should not be duplicated");
+    }
+
+    #[test]
+    fn merge_word_seps_all_duplicates_no_change_in_length() {
+        // If every extra char is already in defaults, length stays the same.
+        let defaults = ",.:";
+        let extras = ",:";
+        let out = merge_word_separators(defaults, extras);
+        assert_eq!(out.chars().count(), defaults.chars().count());
+    }
 }
