@@ -5120,14 +5120,19 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.mouse_px = (position.x, position.y);
-                // Settings form: repaint so hover/press/slider-drag tracking
-                // follows the pointer.
-                if self.settings_open {
+                // Any open GUI overlay (settings, dropdown/context menu, help panel,
+                // pane ⋮ menu) owns the pointer: its immediate-mode widgets compute
+                // hover / press / slider-drag from `mouse_px` during paint, so every
+                // motion must trigger a repaint for those highlights to track the
+                // pointer. It also means motion must NOT fall through to drive
+                // tab-drag, gutter-drag, terminal hover, or text selection beneath
+                // the overlay. Mirror the settings treatment for all of them.
+                if self.settings_open
+                    || self.menu_open
+                    || self.help_open
+                    || self.pane_menu_open.is_some()
+                {
                     self.mark_dirty(event_loop);
-                }
-                // While the settings form is open it owns the pointer; don't let the
-                // motion drive tab-drag, gutter-drag, hover, or selection.
-                if self.settings_open {
                     return;
                 }
                 let cell = self.px_to_cell(position.x, position.y);
@@ -5270,6 +5275,19 @@ impl ApplicationHandler<UserEvent> for App {
                     // click and drag interactions. `held_button` is correctly set to
                     // None on the release event at the top of this handler (line
                     // `self.held_button = if pressed { Some(base) } else { None }`).
+                    return;
+                }
+
+                // The help panel (§3.7) is a full-screen scrim + floating panel that
+                // owns the pointer exactly like the settings form: its ✕ close button
+                // and scrollbar are immediate-mode widgets resolved during paint from
+                // the click edge captured above, and a click on the scrim (outside the
+                // panel) dismisses it (handled inside `build_help`). Consume the event
+                // so it never falls through to start a text selection / tab-click /
+                // gutter-drag beneath the panel. Do NOT clear `held_button` — the
+                // scrollbar drag reads it as `mouse_down` during paint (same rule as
+                // the settings block above).
+                if self.help_open {
                     return;
                 }
                 if !pressed {
