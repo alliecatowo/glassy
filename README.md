@@ -121,7 +121,18 @@ paru -S glassy
 yay -S glassy-bin
 ```
 
-**macOS — Homebrew** _(tap not yet published; use the one-liner above for now)_
+**macOS — .dmg installer** _(requires macOS 11+; universal binary, x86_64 + Apple Silicon)_
+
+Download `glassy-<version>-macos.dmg` from the [Releases page](https://github.com/alliecatowo/glassy/releases),
+open it, and drag **glassy.app** to your **Applications** folder. Then launch from Spotlight or the
+Applications folder. macOS may show a security warning on first launch — right-click the app and choose
+Open to bypass it (the binary is not yet notarized).
+
+> **Note:** the macOS build is pending source-compatibility work (Wayland/Linux-only deps). The .dmg
+> will appear on the Releases page once that lands. Track progress in the
+> [GitHub Issues](https://github.com/alliecatowo/glassy/issues).
+
+**macOS — Homebrew** _(tap not yet published; use the .dmg or one-liner above for now)_
 
 ```sh
 # Once the tap is live:

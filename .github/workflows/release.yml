@@ -133,12 +133,17 @@ jobs:
           path: dist/
 
   # -------------------------------------------------------------------------
-  # macOS universal binary (scaffolded; TODO: not yet green)
+  # macOS — universal .app bundle + .dmg (first-class artifact)
+  #
+  # continue-on-error stays true until glassy's Linux-only deps are ported
+  # (winit/wgpu Wayland plumbing, etc.).  The job is written so it "just
+  # works" the moment `cargo build` goes green on macOS — flip
+  # continue-on-error to false then.
   # -------------------------------------------------------------------------
   build-macos:
-    name: Build — macOS (TODO)
+    name: Build — macOS (.app + .dmg)
     runs-on: macos-latest
-    continue-on-error: true  # TODO: macOS build not yet verified; enable once deps resolved
+    continue-on-error: true  # flip to false once macOS source-compat is merged
     steps:
       - uses: actions/checkout@v4
 
@@ -152,7 +157,13 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      # TODO: install macOS-specific deps (e.g. via brew) when the build is wired up.
+      # macOS build deps via Homebrew.
+      # fontconfig + pkg-config are needed by cosmic-text's fontdb.
+      # No Wayland/X11/ALSA equivalents needed on macOS.
+      - name: Install macOS build dependencies
+        run: |
+          brew install pkg-config fontconfig create-dmg
+
       - name: Build x86_64
         run: cargo build --release --locked --target x86_64-apple-darwin
 
@@ -166,16 +177,157 @@ jobs:
             target/x86_64-apple-darwin/release/${{ env.BIN }} \
             target/aarch64-apple-darwin/release/${{ env.BIN }}
 
-      # TODO: sign and notarize; create .dmg with hdiutil/create-dmg.
-      - name: Stage macOS artifacts (unsigned)
+      # Build a proper .icns from the PNG assets (iconutil needs an
+      # iconset directory with exact filenames).
+      - name: Build .icns icon
         run: |
-          cp dist/${{ env.BIN }}-macos-universal dist/${{ env.BIN }}-x86_64-macos
-          cp dist/${{ env.BIN }}-macos-universal dist/${{ env.BIN }}-aarch64-macos
+          ICONSET=dist/glassy.iconset
+          mkdir -p "$ICONSET"
+          # iconutil requires these exact filenames.
+          cp assets/icons/glassy-16.png   "$ICONSET/icon_16x16.png"
+          cp assets/icons/glassy-32.png   "$ICONSET/icon_16x16@2x.png"
+          cp assets/icons/glassy-32.png   "$ICONSET/icon_32x32.png"
+          cp assets/icons/glassy-64.png   "$ICONSET/icon_32x32@2x.png"
+          cp assets/icons/glassy-128.png  "$ICONSET/icon_128x128.png"
+          cp assets/icons/glassy-256.png  "$ICONSET/icon_128x128@2x.png"
+          cp assets/icons/glassy-256.png  "$ICONSET/icon_256x256.png"
+          cp assets/icons/glassy-512.png  "$ICONSET/icon_256x256@2x.png"
+          cp assets/icons/glassy-512.png  "$ICONSET/icon_512x512.png"
+          # @2x 512 requires a 1024px source; use 512 as a stand-in until
+          # a 1024px asset is added to assets/icons/.
+          cp assets/icons/glassy-512.png  "$ICONSET/icon_512x512@2x.png"
+          iconutil -c icns -o dist/glassy.icns "$ICONSET"
+          rm -rf "$ICONSET"
+
+      # Assemble glassy.app following the macOS bundle layout.
+      # The Info.plist declares the app as a Terminal Emulator so
+      # Finder and Launchpad display it correctly.
+      - name: Bundle glassy.app
+        run: |
+          VERSION="${{ steps.meta.outputs.version }}"
+          APP=dist/glassy.app
+          CONTENTS="$APP/Contents"
+          MACOS="$CONTENTS/MacOS"
+          RESOURCES="$CONTENTS/Resources"
+
+          mkdir -p "$MACOS" "$RESOURCES"
+
+          # Binary.
+          cp dist/${{ env.BIN }}-macos-universal "$MACOS/glassy"
+          chmod 755 "$MACOS/glassy"
+
+          # Icon.
+          cp dist/glassy.icns "$RESOURCES/glassy.icns"
+
+          # Info.plist.
+          cat > "$CONTENTS/Info.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+            "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleIdentifier</key>
+            <string>io.github.alliecatowo.glassy</string>
+            <key>CFBundleName</key>
+            <string>glassy</string>
+            <key>CFBundleDisplayName</key>
+            <string>glassy</string>
+            <key>CFBundleExecutable</key>
+            <string>glassy</string>
+            <key>CFBundleIconFile</key>
+            <string>glassy</string>
+            <key>CFBundleVersion</key>
+            <string>${VERSION}</string>
+            <key>CFBundleShortVersionString</key>
+            <string>${VERSION}</string>
+            <key>CFBundlePackageType</key>
+            <string>APPL</string>
+            <key>CFBundleSignature</key>
+            <string>????</string>
+            <key>LSApplicationCategoryType</key>
+            <string>public.app-category.utilities</string>
+            <key>LSMinimumSystemVersion</key>
+            <string>11.0</string>
+            <key>NSHighResolutionCapable</key>
+            <true/>
+            <key>NSSupportsAutomaticGraphicsSwitching</key>
+            <true/>
+          </dict>
+          </plist>
+          PLIST
+
+          # PkgInfo (optional but conventional).
+          printf 'APPL????' > "$CONTENTS/PkgInfo"
+
+      # create-dmg produces a drag-to-Applications installer image.
+      # The volume name and window geometry follow macOS conventions.
+      - name: Create .dmg installer
+        run: |
+          VERSION="${{ steps.meta.outputs.version }}"
+          DMG="dist/glassy-${VERSION}-macos.dmg"
+
+          create-dmg \
+            --volname "glassy ${VERSION}" \
+            --volicon dist/glassy.icns \
+            --window-pos 200 120 \
+            --window-size 600 400 \
+            --icon-size 100 \
+            --icon "glassy.app" 175 190 \
+            --hide-extension "glassy.app" \
+            --app-drop-link 425 190 \
+            --no-internet-enable \
+            "$DMG" \
+            dist/glassy.app
+
+          echo "dmg=$DMG" >> "$GITHUB_OUTPUT"
+        id: dmg
+
+      # Sign the .dmg if credentials are available.
+      # Set APPLE_CERTIFICATE (base64 .p12) + APPLE_CERTIFICATE_PASSWORD
+      # + APPLE_IDENTITY ("Developer ID Application: ...") secrets to
+      # enable signing; the step is skipped if they are absent.
+      - name: Sign .dmg (if credentials present)
+        if: ${{ env.APPLE_CERTIFICATE != '' }}
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_IDENTITY: ${{ secrets.APPLE_IDENTITY }}
+        run: |
+          VERSION="${{ steps.meta.outputs.version }}"
+          DMG="dist/glassy-${VERSION}-macos.dmg"
+          # Import certificate into a temporary keychain.
+          KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain"
+          KEYCHAIN_PASS="$(openssl rand -base64 32)"
+          security create-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN_PATH"
+          echo "$APPLE_CERTIFICATE" | base64 --decode -o "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" \
+            -k "$KEYCHAIN_PATH" -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign
+          security list-keychains -d user -s "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple: \
+            -s -k "$KEYCHAIN_PASS" "$KEYCHAIN_PATH"
+          # Sign and verify.
+          codesign --force --deep --sign "$APPLE_IDENTITY" "$DMG"
+          codesign --verify --deep --strict "$DMG"
+          # TODO: add notarization via xcrun notarytool once Team ID /
+          # Apple ID secrets (APPLE_TEAM_ID, APPLE_ID, APPLE_APP_PASSWORD)
+          # are configured.
+
+      - name: Stage macOS artifacts
+        run: |
+          VERSION="${{ steps.meta.outputs.version }}"
+          # Keep the bare universal binary alongside the .dmg for users
+          # who prefer to install manually.
+          cp dist/${{ env.BIN }}-macos-universal dist/${{ env.BIN }}-macos-universal-bare
 
       - uses: actions/upload-artifact@v4
         with:
           name: macos
-          path: dist/
+          path: |
+            dist/glassy-*-macos.dmg
+            dist/${{ env.BIN }}-macos-universal-bare
 
   # -------------------------------------------------------------------------
   # Windows (scaffolded; TODO: not yet green)
@@ -263,7 +415,8 @@ jobs:
             | Fedora/RHEL/openSUSE | `glassy-${{ steps.meta.outputs.version }}-*.rpm` |
             | Linux x86_64 (binary) | `glassy-x86_64-linux` |
             | Linux aarch64 (binary) | `glassy-aarch64-linux` _(if green)_ |
-            | macOS (universal, unsigned) | `glassy-macos-universal` _(if green)_ |
+            | macOS (drag-to-Applications .dmg) | `glassy-${{ steps.meta.outputs.version }}-macos.dmg` _(if green)_ |
+            | macOS (bare universal binary) | `glassy-macos-universal-bare` _(if green)_ |
             | Windows | `glassy-x86_64-windows.exe` _(if green)_ |
 
             Verify any download against `SHA256SUMS`.
