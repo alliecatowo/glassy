@@ -726,6 +726,7 @@ impl App {
                 &mut self.gui_focused,
                 &mut self.gui_anims,
                 &mut self.help_state,
+                &self.config.keymap,
             );
             if help_result.close {
                 self.help_open = false;

@@ -5,6 +5,69 @@
 //! synthetic key events.
 
 use super::*;
+use crate::config::{Chord, KeyAction};
+
+/// Convert a winit key event + current modifiers into a [`Chord`] for keymap
+/// lookup. Returns `None` for modifier-only keypresses (the key IS a modifier).
+fn chord_from_event(event: &winit::event::KeyEvent, mods: ModifiersState) -> Option<Chord> {
+    let ctrl  = mods.control_key();
+    let shift = mods.shift_key();
+    let alt   = mods.alt_key();
+    let meta  = mods.super_key();
+
+    let key = match &event.logical_key {
+        Key::Character(s) => s.to_lowercase(),
+        Key::Named(n) => named_key_to_str(n)?.to_string(),
+        _ => return None,
+    };
+    Some(Chord { ctrl, shift, alt, meta, key })
+}
+
+/// Map a winit `NamedKey` to the lowercase string used in chord parsing.
+/// Returns `None` for keys that are purely modifiers (Shift, Ctrl, etc.).
+fn named_key_to_str(key: &NamedKey) -> Option<&'static str> {
+    Some(match key {
+        NamedKey::Tab        => "tab",
+        NamedKey::Space      => "space",
+        NamedKey::Enter      => "enter",
+        NamedKey::Escape     => "escape",
+        NamedKey::Backspace  => "backspace",
+        NamedKey::Delete     => "delete",
+        NamedKey::Home       => "home",
+        NamedKey::End        => "end",
+        NamedKey::PageUp     => "pageup",
+        NamedKey::PageDown   => "pagedown",
+        NamedKey::ArrowUp    => "arrowup",
+        NamedKey::ArrowDown  => "arrowdown",
+        NamedKey::ArrowLeft  => "arrowleft",
+        NamedKey::ArrowRight => "arrowright",
+        NamedKey::F1         => "f1",
+        NamedKey::F2         => "f2",
+        NamedKey::F3         => "f3",
+        NamedKey::F4         => "f4",
+        NamedKey::F5         => "f5",
+        NamedKey::F6         => "f6",
+        NamedKey::F7         => "f7",
+        NamedKey::F8         => "f8",
+        NamedKey::F9         => "f9",
+        NamedKey::F10        => "f10",
+        NamedKey::F11        => "f11",
+        NamedKey::F12        => "f12",
+        NamedKey::F13        => "f13",
+        NamedKey::F14        => "f14",
+        NamedKey::F15        => "f15",
+        NamedKey::F16        => "f16",
+        NamedKey::F17        => "f17",
+        NamedKey::F18        => "f18",
+        NamedKey::F19        => "f19",
+        NamedKey::F20        => "f20",
+        // Modifier-only keys: skip.
+        NamedKey::Shift | NamedKey::Control | NamedKey::Alt | NamedKey::Super
+        | NamedKey::Hyper | NamedKey::Meta | NamedKey::CapsLock | NamedKey::NumLock
+        | NamedKey::ScrollLock => return None,
+        _ => return None,
+    })
+}
 
 impl App {
     /// Handle a `WindowEvent::KeyboardInput` event. Returns early (without
@@ -15,33 +78,34 @@ impl App {
         event: winit::event::KeyEvent,
         event_loop: &ActiveEventLoop,
     ) {
-        // F11 toggles borderless fullscreen. Handled first so it works
-        // whether or not an overlay owns the keyboard, and never reaches
-        // the child.
+        // Window-level shortcuts (fullscreen / maximize) are handled first,
+        // before overlays, using the keymap so they can be rebound.
+        // We consult the keymap for ToggleFullscreen and ToggleMaximize before
+        // anything else so they work even when overlays are open.
         if event.state.is_pressed()
-            && matches!(&event.logical_key, Key::Named(NamedKey::F11))
+            && let Some(chord) = chord_from_event(&event, self.mods)
         {
-            if let Some(w) = self.window.as_ref() {
-                let fs = if w.fullscreen().is_some() {
-                    None
-                } else {
-                    Some(winit::window::Fullscreen::Borderless(None))
-                };
-                w.set_fullscreen(fs);
+            match self.config.keymap.get(&chord) {
+                Some(KeyAction::ToggleFullscreen) => {
+                    if let Some(w) = self.window.as_ref() {
+                        let fs = if w.fullscreen().is_some() {
+                            None
+                        } else {
+                            Some(winit::window::Fullscreen::Borderless(None))
+                        };
+                        w.set_fullscreen(fs);
+                    }
+                    return;
+                }
+                Some(KeyAction::ToggleMaximize) => {
+                    if let Some(w) = self.window.as_ref() {
+                        let maximized = w.is_maximized();
+                        w.set_maximized(!maximized);
+                    }
+                    return;
+                }
+                _ => {}
             }
-            return;
-        }
-
-        // F10 toggles maximize. Handled early so it works regardless of overlays,
-        // and never reaches the child.
-        if event.state.is_pressed()
-            && matches!(&event.logical_key, Key::Named(NamedKey::F10))
-        {
-            if let Some(w) = self.window.as_ref() {
-                let maximized = w.is_maximized();
-                w.set_maximized(!maximized);
-            }
-            return;
         }
 
         // The command palette and the find bar own the keyboard while
@@ -68,61 +132,32 @@ impl App {
             return;
         }
 
-        // Ctrl+Shift clipboard combos are consumed by glassy and never
-        // reach the child. Intercepted before `encode_key` so the control
-        // byte for C/V isn't sent to the PTY.
+        // --------------------------------------------------------------------
+        // Keymap dispatch: consult the user keymap (which includes defaults)
+        // FIRST, before any hard-coded path below. This lets custom bindings
+        // override every built-in chord.
+        // --------------------------------------------------------------------
         if event.state.is_pressed()
-            && self.mods.control_key()
-            && self.mods.shift_key()
-            && let Key::Character(s) = &event.logical_key
+            && let Some(chord) = chord_from_event(&event, self.mods)
+            && let Some(&action) = self.config.keymap.get(&chord)
         {
-            match s.as_str() {
-                "C" | "c" => {
-                    self.copy_selection();
-                    return;
-                }
-                "V" | "v" => {
-                    self.paste_clipboard();
-                    self.mark_dirty(event_loop);
-                    return;
-                }
-                "T" | "t" => {
-                    self.new_tab(event_loop);
-                    return;
-                }
-                "W" | "w" => {
-                    // Close the focused pane; falls back to closing the tab
-                    // when the tab has only a single pane.
-                    self.close_pane(event_loop);
-                    return;
-                }
-                // Ctrl+Shift+P opens the command palette (fuzzy action +
-                // settings list). Ctrl+Shift+F opens the in-terminal find
-                // bar. Both own the keyboard while open; handled below.
-                "P" | "p" => {
-                    self.open_palette(event_loop);
-                    return;
-                }
-                "F" | "f" => {
-                    self.open_search(event_loop);
-                    return;
-                }
-                // Split the focused pane: E = vertical (left|right),
-                // O = horizontal (top/bottom). Mirrors common terminals.
-                "E" | "e" => {
-                    self.split_pane(pane::Dir::Vertical, event_loop);
-                    return;
-                }
-                "O" | "o" => {
-                    self.split_pane(pane::Dir::Horizontal, event_loop);
-                    return;
-                }
-                _ => {}
+            // Scroll actions are suppressed on the alt-screen (let the
+            // app handle Shift+Page keys itself).
+            let is_scroll = matches!(
+                action,
+                KeyAction::ScrollUp | KeyAction::ScrollDown
+                | KeyAction::ScrollTop | KeyAction::ScrollBottom
+            );
+            if !is_scroll || !self.term_mode().contains(TermMode::ALT_SCREEN) {
+                self.run_key_action(action, event_loop);
+                return;
             }
         }
 
         // Alt+Arrow moves focus between tiled panes (no-op when not split,
         // so a single-pane tab passes Alt+Arrow through to the child).
+        // This is NOT in the keymap because it is not a simple chord: it only
+        // fires when a split exists, and falls through to the child otherwise.
         if event.state.is_pressed()
             && self.mods.alt_key()
             && !self.mods.control_key()
@@ -138,76 +173,6 @@ impl App {
             };
             if let Some(m) = m {
                 self.focus_pane(m, event_loop);
-                return;
-            }
-        }
-
-        // Ctrl+Tab / Ctrl+Shift+Tab cycle between tabs.
-        if event.state.is_pressed()
-            && self.mods.control_key()
-            && let Key::Named(NamedKey::Tab) = &event.logical_key
-        {
-            let delta = if self.mods.shift_key() { -1 } else { 1 };
-            self.cycle_tab(delta, event_loop);
-            return;
-        }
-
-        // Ctrl +/-/0 adjusts the font size at runtime (and Ctrl 0 resets
-        // to the configured size). Intercepted before `encode_key` so the
-        // control bytes for these keys never reach the child. Matches the
-        // de-facto terminal/browser zoom convention. Shift is allowed (so
-        // Ctrl+Shift+'=' i.e. Ctrl+'+' works) but not required.
-        if event.state.is_pressed()
-            && self.mods.control_key()
-            && !self.mods.alt_key()
-            && let Key::Character(s) = &event.logical_key
-        {
-            let step = match s.as_str() {
-                "+" | "=" => Some(FontStep::Inc),
-                "-" | "_" => Some(FontStep::Dec),
-                "0" => Some(FontStep::Reset),
-                _ => None,
-            };
-            if let Some(step) = step {
-                self.resize_font(step);
-                self.mark_dirty(event_loop);
-                return;
-            }
-        }
-
-        // Ctrl+Shift+B toggles the status bar (with Shift the char arrives
-        // upper-case on most layouts, so accept either case).
-        if event.state.is_pressed()
-            && self.mods.control_key()
-            && self.mods.shift_key()
-            && let Key::Character(s) = &event.logical_key
-            && matches!(s.as_str(), "b" | "B")
-        {
-            self.toggle_status_bar();
-            self.mark_dirty(event_loop);
-            return;
-        }
-
-        // Shift + PageUp/PageDown/Home/End drives glassy's own scrollback
-        // (the primary screen only) and is consumed before the child sees
-        // it. This mirrors the de-facto terminal convention.
-        if event.state.is_pressed()
-            && self.mods.shift_key()
-            && !self.term_mode().contains(TermMode::ALT_SCREEN)
-            && let Key::Named(named) = &event.logical_key
-        {
-            let scroll = match named {
-                NamedKey::PageUp => Some(Scroll::PageUp),
-                NamedKey::PageDown => Some(Scroll::PageDown),
-                NamedKey::Home => Some(Scroll::Top),
-                NamedKey::End => Some(Scroll::Bottom),
-                _ => None,
-            };
-            if let Some(scroll) = scroll {
-                if let Some(pty) = &self.pty {
-                    pty.term.lock().scroll_display(scroll);
-                }
-                self.mark_dirty(event_loop);
                 return;
             }
         }
@@ -259,6 +224,8 @@ impl App {
 
         // While an overlay is open it owns the keyboard — nothing reaches
         // the child. Esc / F1 / Ctrl+, close it; settings handles nav/edit.
+        // Note: Help / Settings open actions are handled by the keymap dispatch
+        // above; the close-overlay path below is overlay-navigation-specific.
         if event.state.is_pressed() && (self.help_open || self.settings_open) {
             let key = &event.logical_key;
             let toggle_settings = self.mods.control_key()
@@ -288,24 +255,6 @@ impl App {
                 self.handle_settings_key(key.clone(), event_loop);
             }
             return; // consume all other keys while an overlay is up
-        }
-
-        // Open an overlay (only when none is up).
-        if event.state.is_pressed() {
-            if let Key::Named(NamedKey::F1) = &event.logical_key {
-                self.help_open = true;
-                self.force_full_redraw = true;
-                self.mark_dirty(event_loop);
-                return;
-            }
-            if self.mods.control_key()
-                && matches!(&event.logical_key, Key::Character(s) if s.as_str() == ",")
-            {
-                self.open_settings();
-                self.force_full_redraw = true;
-                self.mark_dirty(event_loop);
-                return;
-            }
         }
 
         // Build kitty keyboard protocol flags from the terminal's current mode.
@@ -341,6 +290,97 @@ impl App {
             // typing while scrolled up into a paused/blocked program. Repaint
             // unconditionally so the view never stays frozen in scrollback.
             self.mark_dirty(event_loop);
+        }
+    }
+
+    /// Execute a [`KeyAction`] looked up from the keymap. Every arm routes
+    /// through the same method the palette / menu path uses, keeping behaviour
+    /// identical no matter how an action is triggered.
+    pub(super) fn run_key_action(&mut self, action: KeyAction, event_loop: &ActiveEventLoop) {
+        use KeyAction::*;
+        match action {
+            NewTab => self.new_tab(event_loop),
+            ClosePane => self.close_pane(event_loop),
+            NextTab => self.cycle_tab(1, event_loop),
+            PrevTab => self.cycle_tab(-1, event_loop),
+            SplitVertical => self.split_pane(pane::Dir::Vertical, event_loop),
+            SplitHorizontal => self.split_pane(pane::Dir::Horizontal, event_loop),
+            ToggleFullscreen => {
+                if let Some(w) = self.window.as_ref() {
+                    let fs = if w.fullscreen().is_some() {
+                        None
+                    } else {
+                        Some(winit::window::Fullscreen::Borderless(None))
+                    };
+                    w.set_fullscreen(fs);
+                }
+            }
+            ToggleMaximize => {
+                if let Some(w) = self.window.as_ref() {
+                    let maximized = w.is_maximized();
+                    w.set_maximized(!maximized);
+                }
+            }
+            Settings => {
+                self.open_settings();
+                self.force_full_redraw = true;
+                self.mark_dirty(event_loop);
+            }
+            Help => {
+                self.help_open = true;
+                self.force_full_redraw = true;
+                self.mark_dirty(event_loop);
+            }
+            Search => self.open_search(event_loop),
+            CommandPalette => self.open_palette(event_loop),
+            Copy => {
+                self.copy_selection();
+                self.mark_dirty(event_loop);
+            }
+            Paste => {
+                self.paste_clipboard();
+                self.mark_dirty(event_loop);
+            }
+            ToggleStatusBar => {
+                self.toggle_status_bar();
+                self.mark_dirty(event_loop);
+            }
+            FontIncrease => {
+                self.resize_font(FontStep::Inc);
+                self.mark_dirty(event_loop);
+            }
+            FontDecrease => {
+                self.resize_font(FontStep::Dec);
+                self.mark_dirty(event_loop);
+            }
+            FontReset => {
+                self.resize_font(FontStep::Reset);
+                self.mark_dirty(event_loop);
+            }
+            ScrollUp => {
+                if let Some(pty) = &self.pty {
+                    pty.term.lock().scroll_display(Scroll::PageUp);
+                }
+                self.mark_dirty(event_loop);
+            }
+            ScrollDown => {
+                if let Some(pty) = &self.pty {
+                    pty.term.lock().scroll_display(Scroll::PageDown);
+                }
+                self.mark_dirty(event_loop);
+            }
+            ScrollTop => {
+                if let Some(pty) = &self.pty {
+                    pty.term.lock().scroll_display(Scroll::Top);
+                }
+                self.mark_dirty(event_loop);
+            }
+            ScrollBottom => {
+                if let Some(pty) = &self.pty {
+                    pty.term.lock().scroll_display(Scroll::Bottom);
+                }
+                self.mark_dirty(event_loop);
+            }
         }
     }
 }
