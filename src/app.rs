@@ -3413,7 +3413,10 @@ impl ApplicationHandler<UserEvent> for App {
                 let kitty = self
                     .term_mode()
                     .contains(TermMode::DISAMBIGUATE_ESC_CODES);
-                if let Some(bytes) = encode_key(&event, self.mods, kitty) {
+                // DECCKM: arrows/Home/End go out as SS3 (ESC O X) for full-screen
+                // apps (vim, less, ncurses) that enable application cursor-key mode.
+                let app_cursor = self.term_mode().contains(TermMode::APP_CURSOR);
+                if let Some(bytes) = encode_key(&event, self.mods, kitty, app_cursor) {
                     // Typing resets the blink to solid-on so the cursor doesn't
                     // wink out mid-keystroke, matching every mainstream terminal.
                     self.reset_blink();

@@ -9,9 +9,19 @@ use winit::keyboard::{Key, ModifiersState, NamedKey};
 
 /// Encode a key press into the bytes a terminal application expects.
 ///
+/// `app_cursor` reflects DECCKM (terminal application cursor-key mode): when set
+/// — and the kitty protocol is not active — arrows/Home/End go out in SS3 form
+/// (`ESC O X`) instead of CSI (`ESC [ X`), which is what full-screen apps (vim,
+/// less, readline vi-mode, ncurses) expect.
+///
 /// Returns `None` for keys that produce no input (pure modifiers, unhandled
 /// named keys, key releases).
-pub fn encode_key(event: &KeyEvent, mods: ModifiersState, kitty: bool) -> Option<Vec<u8>> {
+pub fn encode_key(
+    event: &KeyEvent,
+    mods: ModifiersState,
+    kitty: bool,
+    app_cursor: bool,
+) -> Option<Vec<u8>> {
     // Terminals act on press (and OS autorepeat), never release.
     if !event.state.is_pressed() {
         return None;
@@ -47,12 +57,15 @@ pub fn encode_key(event: &KeyEvent, mods: ModifiersState, kitty: bool) -> Option
                 }
             }
             NamedKey::Escape => b"\x1b",
-            NamedKey::ArrowUp => b"\x1b[A",
-            NamedKey::ArrowDown => b"\x1b[B",
-            NamedKey::ArrowRight => b"\x1b[C",
-            NamedKey::ArrowLeft => b"\x1b[D",
-            NamedKey::Home => b"\x1b[H",
-            NamedKey::End => b"\x1b[F",
+            // Cursor keys: DECCKM (app_cursor) selects SS3 (ESC O X); the default
+            // is CSI (ESC [ X). The kitty path above has already returned for
+            // modified keys, so this only affects the unmodified legacy form.
+            NamedKey::ArrowUp => ss3_or_csi(app_cursor, b"\x1bOA", b"\x1b[A"),
+            NamedKey::ArrowDown => ss3_or_csi(app_cursor, b"\x1bOB", b"\x1b[B"),
+            NamedKey::ArrowRight => ss3_or_csi(app_cursor, b"\x1bOC", b"\x1b[C"),
+            NamedKey::ArrowLeft => ss3_or_csi(app_cursor, b"\x1bOD", b"\x1b[D"),
+            NamedKey::Home => ss3_or_csi(app_cursor, b"\x1bOH", b"\x1b[H"),
+            NamedKey::End => ss3_or_csi(app_cursor, b"\x1bOF", b"\x1b[F"),
             NamedKey::PageUp => b"\x1b[5~",
             NamedKey::PageDown => b"\x1b[6~",
             NamedKey::Delete => b"\x1b[3~",
@@ -212,6 +225,11 @@ fn kitty_named(named: NamedKey, shift: bool, alt: bool, ctrl: bool) -> Option<Ve
         NamedKey::F12 => csi_tilde(24),
         _ => None,
     }
+}
+
+/// Pick the SS3 form when DECCKM is active, otherwise the CSI form.
+fn ss3_or_csi(app_cursor: bool, ss3: &'static [u8], csi: &'static [u8]) -> &'static [u8] {
+    if app_cursor { ss3 } else { csi }
 }
 
 /// Map a character to its C0 control byte for Ctrl-<char>, if one exists.
