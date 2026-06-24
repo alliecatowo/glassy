@@ -574,11 +574,11 @@ impl App {
             self.config.follow_system = new_config.follow_system;
             self.config.theme_light = new_config.theme_light.clone();
             self.config.theme_dark = new_config.theme_dark.clone();
-            if let Some(window) = &self.window {
-                if self.apply_system_theme(window.theme()) {
-                    self.force_full_redraw = true;
-                    self.dirty = true;
-                }
+            if let Some(window) = &self.window
+                && self.apply_system_theme(window.theme())
+            {
+                self.force_full_redraw = true;
+                self.dirty = true;
             }
         } else if new_config.theme != self.config.theme {
             self.config.theme = new_config.theme.clone();

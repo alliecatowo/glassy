@@ -30,7 +30,7 @@ use crate::gui;
 use crate::input::{MouseReport, encode_key, encode_mouse};
 use crate::pane;
 use crate::pty::{Pty, UserEvent};
-use crate::renderer::{CursorOverlay, Decorations, Renderer, UnderlineStyle};
+use crate::renderer::{CursorOverlay, Decorations, LigatureCell, Renderer, UnderlineStyle};
 
 mod helpers;
 mod tabs;
@@ -99,6 +99,12 @@ pub struct Config {
     /// (plus the default whitespace + punctuation) are used as word boundaries.
     /// Empty string means use defaults only.
     pub word_separator: String,
+    /// Enable ligature shaping: shape full cell-runs through cosmic-text so
+    /// OpenType GSUB liga substitutions (e.g. `->` → `→`, `fi` ligature) are
+    /// applied across cell boundaries. Default false (opt-in) because it adds a
+    /// per-run shaping pass and may not be desirable for all fonts. Only takes
+    /// effect when the loaded font actually carries a `liga` GSUB feature.
+    pub ligatures: bool,
 }
 
 /// A tab's split layout: the tiling tree (whose leaf ids are pty/pane ids) plus

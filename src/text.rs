@@ -119,6 +119,26 @@ pub struct RasterizedGlyph {
     /// (`is_color == true`) it is RGBA8, length == `width * height * 4`. Empty
     /// when either dimension is 0.
     pub data: Vec<u8>,
+    /// Pen advance (horizontal) for this glyph in physical pixels, as reported by
+    /// the shaper. Used for Nerd-font wide-icon detection: if `advance` is more
+    /// than 1.1× the cell width, the glyph should be promoted to a WIDE (2-cell)
+    /// slot to avoid clipping. 0.0 for glyphs from the color path where the
+    /// advance is irrelevant (color emoji are always drawn by size, not advance).
+    pub advance: f32,
+}
+
+/// Per-input-cell slot produced by [`Text::rasterize_run`]. The `glyphs` vec is
+/// non-empty for the *first* cell of each shaped glyph (even a ligature that
+/// visually spans multiple cells is anchored to its first cell); subsequent cells
+/// that belong to the same ligature carry an empty `glyphs` vec (they must be
+/// rendered as blank/background-only). `advance_cells` is how many input cells
+/// this shaped output consumes (always 1 for ordinary glyphs; >1 for a ligature
+/// or a wide glyph that spans more than one cell).
+pub struct RunGlyph {
+    /// The rasterized bitmaps for this cell slot. Empty on continuation cells.
+    pub glyphs: Vec<RasterizedGlyph>,
+    /// How many grid cells this output occupies (1 = normal, 2+ = ligature/wide).
+    pub advance_cells: usize,
 }
 
 /// Owns the shaping/rasterization state. Rasterized glyphs are *not* cached here;
@@ -405,6 +425,7 @@ impl Text {
         let mut out = Vec::new();
         for run in self.buffer.layout_runs() {
             for glyph in run.glyphs.iter() {
+                let advance = glyph.w;
                 let pg = glyph.physical((0.0, 0.0), 1.0);
                 // Clone the Option so the FontSystem borrow ends before we read
                 // the image and build the glyph below.
@@ -443,10 +464,162 @@ impl Text {
                     top: img.placement.top,
                     is_color,
                     data,
+                    advance,
                 });
             }
         }
         out
+    }
+
+    /// Shape and rasterize a multi-cell run of characters as a single shaping
+    /// unit so OpenType ligatures (GSUB liga) are resolved across cell boundaries.
+    ///
+    /// Returns one [`RunGlyph`] per input *character* (Unicode scalar, not byte).
+    /// The first character of each shaped output glyph carries the rasterized
+    /// bitmaps; subsequent cells consumed by the same output shape (ligature
+    /// continuations) carry empty bitmaps and `advance_cells == 0`. The caller
+    /// must blank-render those continuation cells.
+    ///
+    /// `cell_w` is the nominal single-cell advance in physical pixels, used to
+    /// compute `advance_cells` for each output glyph.
+    pub fn rasterize_run(
+        &mut self,
+        text: &str,
+        bold: bool,
+        italic: bool,
+        cell_w: f32,
+    ) -> Vec<RunGlyph> {
+        let char_count = text.chars().count();
+        if char_count == 0 {
+            return Vec::new();
+        }
+
+        let attrs = build_attrs(self.family.as_family(), bold, italic);
+        self.buffer.set_text(text, &attrs, Shaping::Advanced, None);
+        self.buffer.shape_until_scroll(&mut self.font_system, false);
+
+        // We need to map shaped output glyphs back to input character positions.
+        // Each LayoutGlyph carries `start`/`end` byte offsets into the input string.
+        // Build a byte_offset → char_index lookup for all scalar boundaries.
+        let char_starts: Vec<usize> = text
+            .char_indices()
+            .map(|(byte_off, _)| byte_off)
+            .collect();
+        // Map byte offset → char index. We'll do a linear search since runs are short.
+        let byte_to_char = |byte_off: usize| -> usize {
+            char_starts
+                .iter()
+                .position(|&b| b == byte_off)
+                .unwrap_or(0)
+        };
+
+        // Allocate output slots — one per input character.
+        let mut slots: Vec<RunGlyph> = (0..char_count)
+            .map(|_| RunGlyph {
+                glyphs: Vec::new(),
+                advance_cells: 0,
+            })
+            .collect();
+
+        // For each shaped glyph, deposit its rasterized bitmap in the output slot
+        // that corresponds to the first input character of the glyph's byte range.
+        for run in self.buffer.layout_runs() {
+            for glyph in run.glyphs.iter() {
+                let advance = glyph.w;
+                let char_idx = byte_to_char(glyph.start);
+                // How many input cells does this advance span?
+                let span = if cell_w > 0.0 {
+                    ((advance / cell_w).round() as usize).max(1)
+                } else {
+                    1
+                };
+
+                let pg = glyph.physical((0.0, 0.0), 1.0);
+                let img_opt = self
+                    .swash_cache
+                    .get_image(&mut self.font_system, pg.cache_key)
+                    .clone();
+                let Some(img) = img_opt else {
+                    // Advance-only glyph (space, control char): mark the slot
+                    // so the caller knows this cell was shaped but blank.
+                    if char_idx < slots.len() {
+                        slots[char_idx].advance_cells = slots[char_idx].advance_cells.max(span);
+                    }
+                    continue;
+                };
+
+                let (w, h) = (img.placement.width, img.placement.height);
+                if w == 0 || h == 0 {
+                    if char_idx < slots.len() {
+                        slots[char_idx].advance_cells = slots[char_idx].advance_cells.max(span);
+                    }
+                    continue;
+                }
+                let pixels = (w * h) as usize;
+                let (data, is_color) = match img.content {
+                    SwashContent::Mask => (img.data.clone(), false),
+                    SwashContent::SubpixelMask => {
+                        let mut d = Vec::with_capacity(pixels);
+                        for px in img.data.chunks_exact(3) {
+                            d.push(px[0].max(px[1]).max(px[2]));
+                        }
+                        (d, false)
+                    }
+                    SwashContent::Color => (img.data.clone(), true),
+                };
+
+                if char_idx < slots.len() {
+                    slots[char_idx].glyphs.push(RasterizedGlyph {
+                        width: w,
+                        height: h,
+                        left: img.placement.left,
+                        top: img.placement.top,
+                        is_color,
+                        data,
+                        advance,
+                    });
+                    slots[char_idx].advance_cells = slots[char_idx].advance_cells.max(span);
+                }
+            }
+        }
+
+        // Ensure every slot has advance_cells >= 1 so callers can advance.
+        for slot in &mut slots {
+            if slot.advance_cells == 0 {
+                slot.advance_cells = 1;
+            }
+        }
+
+        slots
+    }
+
+    /// Probe whether the primary font loaded by this `Text` instance carries an
+    /// OpenType GSUB `liga` (standard ligatures) feature, which is a prerequisite
+    /// for run-level shaping to produce any ligature output.
+    ///
+    /// This is a best-effort heuristic: if the font system has no shaped run from
+    /// which we can read the underlying font's feature set we fall back to `false`.
+    /// False negatives (returning `false` for a font that does have liga) are safe
+    /// — they just disable the ligature path and fall back to per-char shaping.
+    /// False positives (returning `true` for a font without liga) are also safe:
+    /// run-level shaping simply returns the same per-char result.
+    ///
+    /// Detection strategy: shape "fi" and check whether the resulting shaped output
+    /// contains *fewer* glyphs than the two input characters. A real `liga` font
+    /// collapses "fi" into a single ligature glyph; a font without liga returns two
+    /// separate glyph records.
+    pub fn has_ligatures(&mut self) -> bool {
+        let attrs = build_attrs(self.family.as_family(), false, false);
+        self.buffer.set_text("fi", &attrs, Shaping::Advanced, None);
+        self.buffer.shape_until_scroll(&mut self.font_system, false);
+
+        let glyph_count: usize = self
+            .buffer
+            .layout_runs()
+            .map(|r| r.glyphs.len())
+            .sum();
+        // "fi" has 2 input characters; a liga font collapses them into 1 glyph.
+        glyph_count < 2
     }
 }
 
@@ -1035,3 +1208,101 @@ const PROBE_PATHS: &[&str] = &[
     "/usr/share/fonts/TTF/DejaVuSansMono.ttf",
     "/usr/share/fonts/liberation/LiberationMono-Regular.ttf",
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `rasterize_run` must return exactly one `RunGlyph` per input scalar,
+    /// each with `advance_cells >= 1`. This is a pure-logic invariant that must
+    /// hold regardless of what font is loaded.
+    #[test]
+    fn rasterize_run_length_matches_char_count() {
+        // Load a font via the discovery chain (same as normal startup).
+        let Ok((mut text, metrics)) = Text::load(None, 14.0) else {
+            // No font available in this CI environment — skip gracefully.
+            eprintln!("rasterize_run_length_matches_char_count: skipped (no font)");
+            return;
+        };
+        let cell_w = metrics.width;
+
+        // A short ASCII run.
+        let input = "hello";
+        let slots = text.rasterize_run(input, false, false, cell_w);
+        assert_eq!(
+            slots.len(),
+            input.chars().count(),
+            "rasterize_run should yield one slot per input character"
+        );
+        for slot in &slots {
+            assert!(
+                slot.advance_cells >= 1,
+                "every slot must have advance_cells >= 1"
+            );
+        }
+    }
+
+    /// An empty input string must yield an empty output.
+    #[test]
+    fn rasterize_run_empty_input() {
+        let Ok((mut text, metrics)) = Text::load(None, 14.0) else {
+            eprintln!("rasterize_run_empty_input: skipped (no font)");
+            return;
+        };
+        let slots = text.rasterize_run("", false, false, metrics.width);
+        assert!(slots.is_empty(), "empty input must yield empty output");
+    }
+
+    /// `has_ligatures` must return a boolean without panicking; the return value
+    /// depends on the installed font and is not asserted here.
+    #[test]
+    fn has_ligatures_does_not_panic() {
+        let Ok((mut text, _)) = Text::load(None, 14.0) else {
+            eprintln!("has_ligatures_does_not_panic: skipped (no font)");
+            return;
+        };
+        let _ = text.has_ligatures(); // must not panic
+    }
+
+    /// `rasterize_run` with a 2-char potential-ligature pair must still return
+    /// exactly 2 slots regardless of whether the font has the `fi` ligature.
+    #[test]
+    fn rasterize_run_two_chars_yields_two_slots() {
+        let Ok((mut text, metrics)) = Text::load(None, 14.0) else {
+            eprintln!("rasterize_run_two_chars_yields_two_slots: skipped (no font)");
+            return;
+        };
+        let slots = text.rasterize_run("fi", false, false, metrics.width);
+        assert_eq!(
+            slots.len(), 2,
+            "rasterize_run of \"fi\" must yield 2 slots (one per input char)"
+        );
+    }
+
+    /// Wide-advance detection: a glyph with advance > 1.1× cell_w must have
+    /// `advance > cell_w * 1.1`. This tests the `RasterizedGlyph.advance` field
+    /// is populated (non-negative) for any rasterized glyph.
+    #[test]
+    fn rasterize_populates_advance() {
+        let Ok((mut text, metrics)) = Text::load(None, 14.0) else {
+            eprintln!("rasterize_populates_advance: skipped (no font)");
+            return;
+        };
+        // Rasterize a printable ASCII character; its advance must be ≥ 0.
+        let glyphs = text.rasterize('A', false, false);
+        for g in &glyphs {
+            assert!(
+                g.advance >= 0.0,
+                "advance must be non-negative for a shaped glyph"
+            );
+            // For a monospace font, advance should be close to cell_w.
+            // Allow up to 2× for any unusual font; the key invariant is
+            // that the field is populated, not its exact value.
+            assert!(
+                g.advance <= metrics.width * 2.0,
+                "advance {} should not be wildly larger than cell_w {}",
+                g.advance, metrics.width
+            );
+        }
+    }
+}

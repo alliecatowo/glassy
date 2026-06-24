@@ -67,6 +67,8 @@ impl ApplicationHandler<UserEvent> for App {
         if let Some(pad) = self.config.padding {
             renderer.set_pad(pad * scale);
         }
+        // Enable ligature run-shaping if the config requests it.
+        renderer.set_ligatures(self.config.ligatures);
 
         let size = window.inner_size();
         renderer.resize(size.width, size.height);
@@ -1544,9 +1546,10 @@ fn spawn_config_watcher(config_path: std::path::PathBuf, proxy: EventLoopProxy<U
             match event_result {
                 Ok(event) => {
                     // Check if the event involves our config file.
-                    let is_config_change = event.paths.iter().any(|p| {
-                        p.file_name().map_or(false, |n| n == config_filename)
-                    });
+                    let is_config_change = event
+                        .paths
+                        .iter()
+                        .any(|p| p.file_name().is_some_and(|n| n == config_filename));
 
                     if is_config_change {
                         // Debounce: only reload if at least 500ms have passed since the last one.

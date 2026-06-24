@@ -20,6 +20,7 @@
 //! theme_dark  = tokyo-night            # theme used in system Dark mode
 //! status_bar  = false                  # show status bar at the bottom (default off)
 //! pane_headers= true                   # show per-pane title bars + accent rail in splits (default on)
+//! ligatures   = false                  # enable OpenType ligature shaping across cells (default off)
 //! color.fg    = #c0caf5                # override theme foreground (hex format)
 //! color.bg    = #1a1b26                # override theme background (hex format)
 //! color.cursor = #7dcfff               # override cursor color
@@ -103,6 +104,7 @@ struct RawConfig {
     status_bar: Option<bool>,
     pane_headers: Option<bool>,
     word_separator: Option<String>,
+    ligatures: Option<bool>,
     // Custom theme colors (hex format, e.g., "color.fg = #c0caf5")
     color_fg: Option<String>,
     color_bg: Option<String>,
@@ -192,6 +194,7 @@ impl RawConfig {
             status_bar: self.status_bar.unwrap_or(false),
             pane_headers: self.pane_headers.unwrap_or(true),
             word_separator: self.word_separator.unwrap_or_default(),
+            ligatures: self.ligatures.unwrap_or(false),
         };
 
         Ok(Settings { config, theme })
@@ -400,6 +403,9 @@ fn apply_kv(key: &str, value: &str, raw: &mut RawConfig) -> Result<()> {
         "word_separator" => {
             raw.word_separator = Some(value.to_string());
         }
+        "ligatures" => {
+            raw.ligatures = Some(parse_bool(value, "ligatures")?);
+        }
         // Custom theme colors: color.fg, color.bg, color.cursor, color.selection_bg, color.ansi0..15
         "color.fg" => {
             parse_hex_color(value)?; // Validate but store the string for later use
@@ -516,12 +522,11 @@ fn import_theme_toml(text: &str) -> Result<Theme> {
                 "cursor" => cursor = Some(parse_hex_color(value)?),
                 k if k.starts_with("color") => {
                     // Handle color0..color15
-                    if let Some(idx_str) = k.strip_prefix("color") {
-                        if let Ok(idx) = idx_str.parse::<usize>() {
-                            if idx < 16 {
-                                ansi16[idx] = Some(parse_hex_color(value)?);
-                            }
-                        }
+                    if let Some(idx_str) = k.strip_prefix("color")
+                        && let Ok(idx) = idx_str.parse::<usize>()
+                        && idx < 16
+                    {
+                        ansi16[idx] = Some(parse_hex_color(value)?);
                     }
                 }
                 _ => {}
@@ -567,14 +572,12 @@ fn import_theme_yaml(text: &str) -> Result<Theme> {
             let key = key.trim().to_lowercase();
             let value = unquote(value.trim().trim_start_matches('"').trim_end_matches('"'));
 
-            if let Some(hex) = key.strip_prefix("base") {
-                if hex.len() == 2 {
-                    if let Ok(idx) = u8::from_str_radix(hex, 16) {
-                        if (idx as usize) < 16 {
-                            colors[idx as usize] = Some(parse_hex_color(value)?);
-                        }
-                    }
-                }
+            if let Some(hex) = key.strip_prefix("base")
+                && hex.len() == 2
+                && let Ok(idx) = u8::from_str_radix(hex, 16)
+                && (idx as usize) < 16
+            {
+                colors[idx as usize] = Some(parse_hex_color(value)?);
             }
         }
     }

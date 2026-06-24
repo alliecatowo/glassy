@@ -456,10 +456,10 @@ pub struct SettingsEvents {
 // Immediate-mode Ui
 // ---------------------------------------------------------------------------
 
-/// The per-frame immediate-mode context. Borrows the renderer (to emit
-/// primitives) plus the App-owned persistent interaction state (pressed /
-/// focused id, animation map). Construct it once per chrome paint, call the
-/// component methods, then drop it.
+// The per-frame immediate-mode context. Borrows the renderer (to emit
+// primitives) plus the App-owned persistent interaction state (pressed /
+// focused id, animation map). Construct it once per chrome paint, call the
+// component methods, then drop it.
 
 #[cfg(test)]
 mod tests {
