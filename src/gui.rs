@@ -543,15 +543,20 @@ impl<'r> Ui<'r> {
         self.quad(Rect::new(r.x, r.y + r.h - 1.0, r.w, 1.0), hairline());
     }
 
-    /// A 1px accent border drawn as four thin rrects — the keyboard-focus ring,
-    /// visible even when not hovered.
+    /// A 1 px accent outline rrect — the keyboard-focus ring. Drawn as the
+    /// outer rrect minus a 1 px inset inner rrect (SDF alpha difference), which
+    /// produces clean rounded corners instead of the previous 4-quad approach
+    /// that left mitre gaps.
     fn focus_ring(&mut self, r: Rect, radius: f32) {
         let c = color::accent();
-        self.rrect(Rect::new(r.x, r.y, r.w, 1.0), 0.0, c);
-        self.rrect(Rect::new(r.x, r.y + r.h - 1.0, r.w, 1.0), 0.0, c);
-        self.rrect(Rect::new(r.x, r.y, 1.0, r.h), 0.0, c);
-        self.rrect(Rect::new(r.x + r.w - 1.0, r.y, 1.0, r.h), 0.0, c);
-        let _ = radius;
+        // Outer filled rrect.
+        self.rrect(r, radius, c);
+        // Inner filled rrect in the panel background — subtracts to leave a 1 px ring.
+        let inner = r.inset(1.0);
+        if inner.w > 0.0 && inner.h > 0.0 {
+            // Use the same glass_raised fill so the ring appears as a 1 px halo.
+            self.rrect(inner, (radius - 1.0).max(0.0), glass_raised());
+        }
     }
 
     // -- text -------------------------------------------------------------
@@ -588,10 +593,18 @@ impl<'r> Ui<'r> {
 
     /// A raised surface panel with a left accent rail (E2). Returns the inner
     /// content rect (inset by `pad`).
+    ///
+    /// The rail is drawn as a 1 px rrect that matches the panel's shape so it
+    /// doesn't bleed into the transparent corner feather zone that the rrect
+    /// SDF leaves (the old flat quad extended into those corners and produced a
+    /// coloured fringe against the terminal background).
     pub fn panel(&mut self, rect: Rect, radius: f32) -> Rect {
         self.rrect(rect, radius, glass_raised());
-        // Left accent rail.
-        self.quad(Rect::new(rect.x, rect.y, 1.0, rect.h), rail());
+        // Left accent rail — draw as a narrow rrect with the same radius so its
+        // corners are clipped identically to the panel background, preventing
+        // colour bleed into the transparent corner feather.
+        let rail_rect = Rect::new(rect.x, rect.y, (1.0_f32).max(radius * 0.5), rect.h);
+        self.rrect(rail_rect, radius, rail());
         rect.inset(self.m.pad)
     }
 
@@ -843,7 +856,8 @@ impl<'r> Ui<'r> {
         if with_copy {
             right -= icon_w;
             let ir = Rect::new(right, rect.y, icon_w, rect.h);
-            if self.icon_button(id_combine(wid, 1), ir, '🗐').clicked {
+            // U+29C9 ⧉ is BMP-safe (replaces U+1F5D0 🗐 which tofu on most terminal fonts).
+            if self.icon_button(id_combine(wid, 1), ir, '\u{29C9}').clicked {
                 evt = FieldEvt::Copy;
             }
         }
@@ -1051,8 +1065,16 @@ impl<'r> Ui<'r> {
         y += step;
 
         // -- Status bar (toggle) -----------------------------------------------
+        // Width = max(cell_h*2, ctrl_w*0.25) so the knob has meaningful travel.
         row_label(self, y, "Status bar");
-        let toggle_rect = Rect::new(ctrl_x, (y + (ctrl_h - m.cell_h) * 0.5).round(), m.cell_h, m.cell_h);
+        let toggle_w = (m.cell_h * 2.0).max(m.ctrl_w * 0.25).round();
+        let toggle_h = m.cell_h;
+        let toggle_rect = Rect::new(
+            ctrl_x,
+            (y + (ctrl_h - toggle_h) * 0.5).round(),
+            toggle_w,
+            toggle_h,
+        );
         let new_status_bar = self.toggle(id("settings/status_bar"), toggle_rect, v.status_bar);
         if new_status_bar != v.status_bar {
             ev.status_bar_toggle = true;
@@ -1088,6 +1110,7 @@ impl<'r> Ui<'r> {
         }
 
         // -- Floating dropdown popups (drawn LAST so they overlap the rows) ---
+        let surface_h = surface.1;
         match v.open {
             SettingsDrop::Theme => {
                 let pick = self.dropdown_popup(
@@ -1096,6 +1119,7 @@ impl<'r> Ui<'r> {
                     v.theme_names,
                     v.theme_idx,
                     Some(v.theme_swatches),
+                    surface_h,
                 );
                 ev.theme_pick = pick;
             }
@@ -1106,6 +1130,7 @@ impl<'r> Ui<'r> {
                     v.font_names,
                     v.font_idx,
                     None,
+                    surface_h,
                 );
                 ev.font_pick = pick;
             }
@@ -1134,8 +1159,9 @@ impl<'r> Ui<'r> {
     }
 
     /// The floating popup list for a dropdown (E3 surface anchored just below
-    /// `anchor`). Each row shows an optional swatch, the option name, and a `✓`
-    /// on the current selection. Returns the absolute index if a row was clicked.
+    /// `anchor`, or flipped above if it would overflow the bottom of the surface).
+    /// Each row shows an optional swatch, the option name, and a `✓` on the
+    /// current selection. Returns the absolute index if a row was clicked.
     /// Drawn after the form body so it composites above everything.
     fn dropdown_popup(
         &mut self,
@@ -1144,13 +1170,22 @@ impl<'r> Ui<'r> {
         rows: &[&str],
         sel: usize,
         swatches: Option<&[[f32; 4]]>,
+        surface_h: f32,
     ) -> Option<usize> {
         let m = self.m;
         let row_h = m.row_h;
         // Cap the popup height; tall lists would overflow the panel.
         let max_rows = rows.len().min(8);
         let h = (max_rows as f32 * row_h + 2.0).round();
-        let rect = Rect::new(anchor.x, anchor.y + anchor.h + 2.0, anchor.w, h);
+        // Anchor below by default; flip above when it would overflow the surface.
+        let below_y = anchor.y + anchor.h + 2.0;
+        let popup_y = if below_y + h > surface_h - m.pad {
+            // Flip above: anchor top minus popup height minus gap.
+            (anchor.y - h - 2.0).max(m.pad)
+        } else {
+            below_y
+        };
+        let rect = Rect::new(anchor.x, popup_y, anchor.w, h);
         self.rrect(rect, m.radius, glass_float());
         self.edge_light(rect);
         let mut picked = None;
@@ -1272,15 +1307,15 @@ pub fn menu(
     let sep_count  = entries.iter().filter(|e| matches!(e, MenuEntry::Separator)).count();
     let panel_h    = (item_count as f32 * row_h + sep_count as f32 * sep_h + 4.0).ceil();
 
-    // E3 floating panel + thin accent border + edge-lit rails.
+    // E3 floating panel with a 1 px accent rrect border (outer minus inner so
+    // the border follows the rounded shape and does not bleed into corners).
     let float_fill  = glass_float();
     let border_col  = with_alpha(color::accent(), 0.5);
     let hairline_c  = hairline();
-    renderer.push_overlay_rrect_px(ax, ay, panel_w, panel_h, 4.0, float_fill);
-    renderer.push_overlay_px(ax, ay, panel_w, 1.0, border_col);
-    renderer.push_overlay_px(ax, ay + panel_h - 1.0, panel_w, 1.0, border_col);
-    renderer.push_overlay_px(ax, ay, 1.0, panel_h, border_col);
-    renderer.push_overlay_px(ax + panel_w - 1.0, ay, 1.0, panel_h, border_col);
+    let menu_radius = 4.0_f32;
+    // Border: outer rrect in accent, then inner rrect in glass to carve out the fill.
+    renderer.push_overlay_rrect_px(ax, ay, panel_w, panel_h, menu_radius, border_col);
+    renderer.push_overlay_rrect_px(ax + 1.0, ay + 1.0, panel_w - 2.0, panel_h - 2.0, (menu_radius - 1.0).max(0.0), float_fill);
 
     let mut result: Option<usize> = None;
     let mut item_idx: usize = 0; // index among non-separator entries
@@ -1443,7 +1478,8 @@ pub fn build_help(
     renderer.push_overlay_px(panel.x, panel.y, 1.0, panel.h, rail());
 
     // Header: title + ✕ button.
-    let title = "⌨  glassy — keybindings";
+    // U+2328 ⌨ may tofu on narrow font sets; use the plain label instead.
+    let title = "glassy — keybindings";
     let th = ((header_h - cell_h) * 0.5).round();
     let ty = panel.y + m.pad + th;
     let mut cx = panel.x + m.pad * 1.5;
