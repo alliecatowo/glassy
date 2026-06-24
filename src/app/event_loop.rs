@@ -381,6 +381,16 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 return;
             }
+            UserEvent::ModifyOtherKeys(id, level) => {
+                // xterm modifyOtherKeys level changed by the running application
+                // (CSI > 4 ; N m intercepted in the PTY loop). Update the field so
+                // subsequent encode_key calls emit the correct encoding for modified
+                // printable keys. Only the active session's level applies.
+                if id == self.active_id {
+                    self.modify_other_keys = level;
+                }
+                return;
+            }
         }
         self.mark_dirty(event_loop);
     }
@@ -707,16 +717,22 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                 }
 
-                // When the application has enabled the kitty keyboard protocol,
-                // encode modified keys in CSI-u form so it can disambiguate them
-                // (this is what makes Shift+Enter distinct from Enter).
-                let kitty = self
-                    .term_mode()
-                    .contains(TermMode::DISAMBIGUATE_ESC_CODES);
+                // Build kitty keyboard protocol flags from the terminal's current mode.
+                // Level 1 (DISAMBIGUATE_ESC_CODES) makes modified named keys go as
+                // CSI-u. Higher levels add repeat/release events, alternate keys, and
+                // the all-keys-as-esc form required by Helix, Neovim, etc.
+                let mode = self.term_mode();
+                let kitty = KittyFlags {
+                    disambiguate:           mode.contains(TermMode::DISAMBIGUATE_ESC_CODES),
+                    report_event_types:     mode.contains(TermMode::REPORT_EVENT_TYPES),
+                    report_alternate_keys:  mode.contains(TermMode::REPORT_ALTERNATE_KEYS),
+                    report_all_keys_as_esc: mode.contains(TermMode::REPORT_ALL_KEYS_AS_ESC),
+                    report_associated_text: mode.contains(TermMode::REPORT_ASSOCIATED_TEXT),
+                };
                 // DECCKM: arrows/Home/End go out as SS3 (ESC O X) for full-screen
                 // apps (vim, less, ncurses) that enable application cursor-key mode.
-                let app_cursor = self.term_mode().contains(TermMode::APP_CURSOR);
-                if let Some(bytes) = encode_key(&event, self.mods, kitty, app_cursor) {
+                let app_cursor = mode.contains(TermMode::APP_CURSOR);
+                if let Some(bytes) = encode_key(&event, self.mods, kitty, app_cursor, self.modify_other_keys) {
                     // Typing resets the blink to solid-on so the cursor doesn't
                     // wink out mid-keystroke, matching every mainstream terminal.
                     self.reset_blink();

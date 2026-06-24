@@ -19,6 +19,7 @@ use std::os::fd::{AsRawFd, BorrowedFd};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
+use std::time::{Duration, Instant};
 
 use alacritty_terminal::event::{Event, EventListener, OnResize, WindowSize};
 use alacritty_terminal::sync::FairMutex;
@@ -30,6 +31,7 @@ use polling::{Event as PollEvent, Events, PollMode, Poller};
 use winit::event_loop::EventLoopProxy;
 
 use crate::image::ImageStore;
+use crate::input::ModifyOtherKeys;
 
 /// Events delivered from the PTY thread (and timers) into the winit loop. Each
 /// carries the id of the session (tab) it came from so the UI can route it.
@@ -71,6 +73,10 @@ pub enum UserEvent {
     Notification(usize, String),
     /// The config file was modified; reload from disk.
     ConfigReload,
+    /// The running application changed the xterm modifyOtherKeys level via
+    /// `CSI > 4 ; N m`. The UI thread updates `App::modify_other_keys` so
+    /// subsequent key events are encoded with the correct form.
+    ModifyOtherKeys(usize, ModifyOtherKeys),
 }
 
 /// Wraps the `ClipboardLoad` reply-builder closure so `UserEvent` can keep its
@@ -393,6 +399,99 @@ impl Pty {
     }
 }
 
+/// Maximum time to hold a synchronized-output buffer before forcibly waking the
+/// UI. 16 ms gives ~1 frame at 60 Hz; applications should close the bracket well
+/// within this, but we never stall longer.
+const SYNC_TIMEOUT: Duration = Duration::from_millis(16);
+
+/// Scan a VT byte run for `CSI > 4 ; N m` (XTMODKEYS modifyOtherKeys).
+///
+/// Returns `Some(level)` if such a sequence is found in `bytes`, where `level`
+/// is the `N` parameter (0=reset, 1=enable-except-well-defined, 2=enable-all).
+/// The caller is responsible for side-effecting application state; the byte run
+/// is still passed to the alacritty VT parser unchanged (alacritty ignores the
+/// sequence since it does not implement it, but we do here).
+fn scan_modify_other_keys(bytes: &[u8]) -> Option<ModifyOtherKeys> {
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != 0x1b {
+            i += 1;
+            continue;
+        }
+        // ESC >  (aka DECKPAM-alt / private CSI introducer for xterm private sequences)
+        // CSI > is  ESC [ > ...  — two-byte CSI then '>'
+        if bytes.get(i + 1) == Some(&b'[') && bytes.get(i + 2) == Some(&b'>') {
+            // Scan the parameter list and final byte.
+            let mut j = i + 3;
+            let mut params = Vec::new();
+            let mut cur: Option<u16> = None;
+            while j < bytes.len() {
+                let b = bytes[j];
+                if b.is_ascii_digit() {
+                    cur = Some(cur.unwrap_or(0) * 10 + (b - b'0') as u16);
+                    j += 1;
+                } else if b == b';' {
+                    params.push(cur.unwrap_or(0));
+                    cur = None;
+                    j += 1;
+                } else {
+                    params.push(cur.unwrap_or(0));
+                    j += 1;
+                    // final byte
+                    if b == b'm' && params.len() >= 2 && params[0] == 4 {
+                        let level = match params[1] {
+                            0 => ModifyOtherKeys::Reset,
+                            1 => ModifyOtherKeys::EnableExceptWellDefined,
+                            2 => ModifyOtherKeys::EnableAll,
+                            _ => ModifyOtherKeys::Reset,
+                        };
+                        return Some(level);
+                    }
+                    break;
+                }
+            }
+            i = j;
+            continue;
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Scan a VT byte run for DECSET/DECRST 2026 (synchronized output).
+/// Returns `(begin_count, end_count)` of `?2026h` / `?2026l` sequences found.
+fn scan_sync_2026(bytes: &[u8]) -> (u32, u32) {
+    let mut begin = 0u32;
+    let mut end = 0u32;
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != 0x1b {
+            i += 1;
+            continue;
+        }
+        if bytes.get(i + 1) == Some(&b'[') && bytes.get(i + 2) == Some(&b'?') {
+            // CSI ? ... h/l — scan param
+            let mut j = i + 3;
+            let mut num: u32 = 0;
+            while j < bytes.len() && bytes[j].is_ascii_digit() {
+                num = num * 10 + (bytes[j] - b'0') as u32;
+                j += 1;
+            }
+            if num == 2026 {
+                match bytes.get(j) {
+                    Some(&b'h') => begin += 1,
+                    Some(&b'l') => end += 1,
+                    _ => {}
+                }
+            }
+            i = if j < bytes.len() { j + 1 } else { j };
+            continue;
+        }
+        i += 1;
+    }
+    (begin, end)
+}
+
 /// Whether a VT byte run contains a full-screen erase (`CSI 2J` or `CSI 3J`) or a
 /// terminal reset (`ESC c`, RIS) — the signals that the screen content (and thus
 /// any inline images anchored to it) is being wiped, e.g. by `clear`/`reset`.
@@ -435,6 +534,20 @@ fn clears_screen(bytes: &[u8]) -> bool {
 
 /// PTY read/parse loop: waits on the master fd, drains control messages, reads
 /// available bytes, taps image/OSC sequences, and feeds the rest to the VT parser.
+///
+/// New VT features handled here (beyond alacritty_terminal's own parser):
+///
+/// **modifyOtherKeys** (XTMODKEYS, `CSI > 4 ; N m`): alacritty_terminal 0.26
+/// does not implement `set_modify_other_keys`, so we scan VT byte runs for the
+/// sequence and forward a `UserEvent::ModifyOtherKeys` to the UI thread, which
+/// updates `App::modify_other_keys`; `encode_key` then uses that state.
+///
+/// **Synchronized Output** (DECSET 2026, `CSI ? 2026 h/l`): when an
+/// application opens a synchronized update (`?2026h`) we hold the UI wakeup
+/// until the matching `?2026l` end marker or at most `SYNC_TIMEOUT` (16 ms),
+/// whichever comes first. This avoids waking the renderer mid-frame and tearing
+/// complex full-screen redraws. The VT parser still receives all bytes eagerly
+/// (so terminal state stays up to date) — we only delay the `Wakeup` event.
 fn run_loop(
     mut pty: tty::Pty,
     term: Arc<FairMutex<Term<EventProxy>>>,
@@ -471,10 +584,44 @@ fn run_loop(
     // a child exit, which would wrongly close the session.
     let mut child_exited = false;
 
+    // ---- Synchronized output state (DECSET 2026) --------------------------------
+    // `sync_depth > 0` means the application has opened a synchronized-output
+    // bracket (`?2026h`) without a matching close (`?2026l`). We suppress the UI
+    // Wakeup while depth > 0, emitting it only when the bracket closes or when
+    // `sync_deadline` elapses (hard cap to avoid stalling the UI indefinitely).
+    let mut sync_depth: u32 = 0;
+    let mut sync_deadline: Option<Instant> = None;
+    // Tracks whether any terminal data was processed in the current sync bracket
+    // (so we know whether to send a Wakeup when the bracket closes).
+    let mut sync_pending_wakeup = false;
+    // ---- End sync state ---------------------------------------------------------
+
     'main: loop {
+        // Compute the poll timeout: while inside a sync bracket, wake at the
+        // deadline so we never stall the UI longer than SYNC_TIMEOUT even if
+        // `?2026l` never arrives.
+        let timeout = if sync_depth > 0 {
+            sync_deadline.map(|d| d.saturating_duration_since(Instant::now()))
+        } else {
+            None // block until ready
+        };
+
         events.clear();
-        if poller.wait(&mut events, None).is_err() {
+        if poller.wait(&mut events, timeout).is_err() {
             break;
+        }
+
+        // Check for sync timeout expiry: if the deadline passed and we're still
+        // inside a bracket, force-close it and wake the UI.
+        if sync_depth > 0
+            && sync_deadline.is_some_and(|d| Instant::now() >= d)
+        {
+            sync_depth = 0;
+            sync_deadline = None;
+            if sync_pending_wakeup {
+                sync_pending_wakeup = false;
+                proxy.send_event(Event::Wakeup);
+            }
         }
 
         // Drain control messages (input/resize/shutdown).
@@ -508,11 +655,42 @@ fn run_loop(
                     // stream, yielding VT byte runs interleaved with image display
                     // points. Advance the parser for each run, then anchor each
                     // image at the cursor cell it occupies at that point.
-                    let events = tap.process(&buf[..n], &images);
+                    let tap_events = tap.process(&buf[..n], &images);
                     let mut term = term.lock();
-                    for ev in events {
+                    let mut did_process = false;
+
+                    for ev in tap_events {
                         match ev {
                             crate::image::TapEvent::Vt(bytes) => {
+                                // ---- modifyOtherKeys interception ----------------
+                                // Scan for `CSI > 4 ; N m` before feeding to the
+                                // alacritty parser (which ignores the sequence).
+                                // Forward the level to the UI thread so encode_key
+                                // can emit the CSI 27 ; mods ; code ~ form.
+                                if let Some(level) = scan_modify_other_keys(&bytes) {
+                                    proxy.send_user(UserEvent::ModifyOtherKeys(proxy.id, level));
+                                }
+
+                                // ---- Synchronized output interception ------------
+                                // Scan for ?2026h (begin) and ?2026l (end) before
+                                // feeding to the parser. The bytes still go to
+                                // alacritty (which handles DECSET/DECRST for its own
+                                // purposes; 2026 is unknown to it and ignored).
+                                let (begin_count, end_count) = scan_sync_2026(&bytes);
+                                if begin_count > 0 {
+                                    if sync_depth == 0 {
+                                        // Arm the deadline on the first open.
+                                        sync_deadline = Some(Instant::now() + SYNC_TIMEOUT);
+                                    }
+                                    sync_depth = sync_depth.saturating_add(begin_count);
+                                }
+                                if end_count > 0 {
+                                    sync_depth = sync_depth.saturating_sub(end_count);
+                                    if sync_depth == 0 {
+                                        sync_deadline = None;
+                                    }
+                                }
+
                                 // A full screen erase (CSI 2J / 3J) or terminal
                                 // reset (RIS, ESC c) wipes the content images sit
                                 // on, so drop placements at that point in the
@@ -523,6 +701,7 @@ fn run_loop(
                                     images.lock().delete(0);
                                 }
                                 processor.advance(&mut *term, &bytes);
+                                did_process = true;
                             }
                             crate::image::TapEvent::Display(p) => {
                                 let (row, col) = {
@@ -533,9 +712,11 @@ fn run_loop(
                                     )
                                 };
                                 images.lock().place(p.id, row, col, p.cols, p.rows);
+                                did_process = true;
                             }
                             crate::image::TapEvent::Delete(id) => {
                                 images.lock().delete(id);
+                                did_process = true;
                             }
                             crate::image::TapEvent::Cwd(path) => {
                                 // OSC 7: surface the shell's cwd to the UI thread so
@@ -570,7 +751,17 @@ fn run_loop(
                         }
                     }
                     drop(term);
-                    proxy.send_event(Event::Wakeup);
+
+                    // Wake the UI only when we are outside a synchronized-output
+                    // bracket. Inside the bracket, set `sync_pending_wakeup` so the
+                    // wakeup is sent when the bracket closes (or times out).
+                    if did_process {
+                        if sync_depth == 0 {
+                            proxy.send_event(Event::Wakeup);
+                        } else {
+                            sync_pending_wakeup = true;
+                        }
+                    }
                 }
                 Err(ref e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted) => {}
                 Err(_) => {
@@ -592,5 +783,93 @@ fn run_loop(
     let _ = poller.delete(unsafe { BorrowedFd::borrow_raw(fd) });
     if child_exited {
         proxy.send_event(Event::Exit);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{scan_modify_other_keys, scan_sync_2026, ModifyOtherKeys};
+
+    // ---- scan_modify_other_keys tests ----------------------------------------
+
+    #[test]
+    fn scan_mok_level2() {
+        // CSI > 4 ; 2 m  (enable-all)
+        let seq = b"\x1b[>4;2m";
+        assert_eq!(scan_modify_other_keys(seq), Some(ModifyOtherKeys::EnableAll));
+    }
+
+    #[test]
+    fn scan_mok_level1() {
+        let seq = b"\x1b[>4;1m";
+        assert_eq!(
+            scan_modify_other_keys(seq),
+            Some(ModifyOtherKeys::EnableExceptWellDefined)
+        );
+    }
+
+    #[test]
+    fn scan_mok_reset() {
+        let seq = b"\x1b[>4;0m";
+        assert_eq!(scan_modify_other_keys(seq), Some(ModifyOtherKeys::Reset));
+    }
+
+    #[test]
+    fn scan_mok_not_found_in_normal_text() {
+        assert_eq!(scan_modify_other_keys(b"hello world"), None);
+    }
+
+    #[test]
+    fn scan_mok_embedded_in_longer_run() {
+        // Normal output before + after the CSI > 4 ; 2 m sequence.
+        let seq = b"abc\x1b[>4;2mdef";
+        assert_eq!(scan_modify_other_keys(seq), Some(ModifyOtherKeys::EnableAll));
+    }
+
+    #[test]
+    fn scan_mok_different_param_not_4_ignored() {
+        // CSI > 5 ; 2 m — different resource (not modifyOtherKeys)
+        let seq = b"\x1b[>5;2m";
+        assert_eq!(scan_modify_other_keys(seq), None);
+    }
+
+    // ---- scan_sync_2026 tests ------------------------------------------------
+
+    #[test]
+    fn scan_sync_begin_only() {
+        let seq = b"\x1b[?2026h";
+        let (begin, end) = scan_sync_2026(seq);
+        assert_eq!(begin, 1);
+        assert_eq!(end, 0);
+    }
+
+    #[test]
+    fn scan_sync_end_only() {
+        let seq = b"\x1b[?2026l";
+        let (begin, end) = scan_sync_2026(seq);
+        assert_eq!(begin, 0);
+        assert_eq!(end, 1);
+    }
+
+    #[test]
+    fn scan_sync_begin_and_end_pair() {
+        // A complete synchronized update bracket in one buffer.
+        let seq = b"\x1b[?2026h...content...\x1b[?2026l";
+        let (begin, end) = scan_sync_2026(seq);
+        assert_eq!(begin, 1);
+        assert_eq!(end, 1);
+    }
+
+    #[test]
+    fn scan_sync_no_match_in_normal_text() {
+        let (begin, end) = scan_sync_2026(b"hello\r\n");
+        assert_eq!((begin, end), (0, 0));
+    }
+
+    #[test]
+    fn scan_sync_other_private_mode_ignored() {
+        // DECSET 1049 (alt screen) must not count.
+        let (begin, end) = scan_sync_2026(b"\x1b[?1049h\x1b[?1049l");
+        assert_eq!((begin, end), (0, 0));
     }
 }

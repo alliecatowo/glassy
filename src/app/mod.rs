@@ -27,7 +27,7 @@ use winit::window::{Window, WindowId};
 use crate::bell::{self, AudioBell};
 use crate::color;
 use crate::gui;
-use crate::input::{MouseReport, encode_key, encode_mouse};
+use crate::input::{KittyFlags, ModifyOtherKeys, MouseReport, encode_key, encode_mouse};
 use crate::pane;
 use crate::pty::{Pty, UserEvent};
 use crate::renderer::{CursorOverlay, Decorations, LigatureCell, Renderer, UnderlineStyle};
@@ -352,6 +352,11 @@ pub struct App {
     gui_click_edge: bool,
     /// Last instant the GUI animations were stepped, for dt computation.
     gui_anim_last: Instant,
+
+    /// xterm modifyOtherKeys level tracked from CSI > 4 ; N m sequences intercepted
+    /// in the PTY byte stream. Forwarded to encode_key so modified printable keys
+    /// emit the CSI 27 ; mods ; code ~ form expected by legacy-mode TUIs.
+    modify_other_keys: ModifyOtherKeys,
 
     /// In-terminal find bar (Ctrl+Shift+F). `Some` exactly while it is open; it
     /// owns the keyboard and paints a bottom bar + match highlights. See

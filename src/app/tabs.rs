@@ -75,6 +75,7 @@ impl App {
             gui_anims: std::collections::HashMap::new(),
             gui_click_edge: false,
             gui_anim_last: Instant::now(),
+            modify_other_keys: ModifyOtherKeys::default(),
             search: None,
             palette: None,
             palette_rows: Vec::new(),
@@ -593,6 +594,8 @@ impl App {
         self.active_busy_until = None;
         // The new tab starts at the inherited cwd; OSC 7 updates it as the user cd's.
         self.active_cwd = cwd;
+        // New session always starts with the default modifyOtherKeys level.
+        self.modify_other_keys = ModifyOtherKeys::default();
         self.reset_pointer_state();
         self.update_window_title();
         self.force_full_redraw = true;
@@ -668,6 +671,9 @@ impl App {
         if self.panes.is_some() {
             self.resize_panes();
         }
+        // Reset per-session keyboard state: the activated session manages its own
+        // modifyOtherKeys level independently via XTMODKEYS negotiation.
+        self.modify_other_keys = ModifyOtherKeys::default();
         self.reset_pointer_state();
         self.update_window_title();
         // A full repaint so the new tab's grid replaces the old one's persisted
