@@ -87,3 +87,88 @@ assets = [
     ["extra/glassy.desktop", "usr/share/applications/glassy.desktop", "644"],
     ["extra/glassy.1", "usr/share/man/man1/glassy.1", "644"],
 ]
+
+# ---------------------------------------------------------------------------
+# RPM packaging (cargo-generate-rpm).
+#
+# This metadata is inert for normal `cargo build`; it only takes effect when
+# building a .rpm with `cargo generate-rpm` (install it first:
+# `cargo install cargo-generate-rpm`).  The release binary must be built
+# first: `cargo build --release`.
+#
+# Usage:
+#   cargo build --release
+#   cargo generate-rpm
+#   # -> target/generate-rpm/glassy-*.rpm
+# ---------------------------------------------------------------------------
+[package.metadata.generate-rpm]
+name = "glassy"
+summary = "Fast, minimal GPU-accelerated terminal emulator written in Rust"
+description = """\
+glassy is a small, fast, GPU-accelerated terminal emulator written in Rust. \
+It draws the grid with an instanced wgpu renderer fed by a dynamic glyph atlas, \
+and supports 24-bit truecolor, color emoji, procedural box-drawing, mouse \
+reporting, selection, clipboard, scrollback, OSC 8 hyperlinks, tabs, window \
+decorations, configurable cursor, translucency, and themeable config."""
+license = "MIT"
+group = "User Interface/X Hardware Support"
+url = "https://github.com/alliecatowo/glassy"
+# Runtime shared-library requirements. rpm auto-detects some via rpmbuild
+# dependency generation, but we pin the key ones for clarity.
+requires = { libxkbcommon = "*", wayland-libs-client = "*", vulkan-loader = "*", alsa-lib = "*", fontconfig = "*" }
+
+[[package.metadata.generate-rpm.assets]]
+source = "target/release/glassy"
+dest = "/usr/bin/glassy"
+mode = "755"
+doc = false
+
+[[package.metadata.generate-rpm.assets]]
+source = "extra/glassy.desktop"
+dest = "/usr/share/applications/glassy.desktop"
+mode = "644"
+
+[[package.metadata.generate-rpm.assets]]
+source = "extra/glassy.1"
+dest = "/usr/share/man/man1/glassy.1"
+mode = "644"
+
+[[package.metadata.generate-rpm.assets]]
+source = "assets/icons/glassy-16.png"
+dest = "/usr/share/icons/hicolor/16x16/apps/glassy.png"
+mode = "644"
+
+[[package.metadata.generate-rpm.assets]]
+source = "assets/icons/glassy-32.png"
+dest = "/usr/share/icons/hicolor/32x32/apps/glassy.png"
+mode = "644"
+
+[[package.metadata.generate-rpm.assets]]
+source = "assets/icons/glassy-48.png"
+dest = "/usr/share/icons/hicolor/48x48/apps/glassy.png"
+mode = "644"
+
+[[package.metadata.generate-rpm.assets]]
+source = "assets/icons/glassy-64.png"
+dest = "/usr/share/icons/hicolor/64x64/apps/glassy.png"
+mode = "644"
+
+[[package.metadata.generate-rpm.assets]]
+source = "assets/icons/glassy-128.png"
+dest = "/usr/share/icons/hicolor/128x128/apps/glassy.png"
+mode = "644"
+
+[[package.metadata.generate-rpm.assets]]
+source = "assets/icons/glassy-256.png"
+dest = "/usr/share/icons/hicolor/256x256/apps/glassy.png"
+mode = "644"
+
+[[package.metadata.generate-rpm.assets]]
+source = "assets/icons/glassy-512.png"
+dest = "/usr/share/icons/hicolor/512x512/apps/glassy.png"
+mode = "644"
+
+[[package.metadata.generate-rpm.assets]]
+source = "LICENSE"
+dest = "/usr/share/licenses/glassy/LICENSE"
+mode = "644"

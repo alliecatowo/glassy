@@ -1,0 +1,42 @@
+# Maintainer: Allie <allisonemilycoleman@gmail.com>
+# This is the -bin variant: installs the pre-built binary from the GitHub
+# Release rather than compiling from source. This is faster to install and
+# does not require Rust or the build-time system headers.
+pkgname=glassy-bin
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="A fast, minimal GPU-accelerated terminal emulator written in Rust (pre-built binary)"
+arch=('x86_64')
+url="https://github.com/alliecatowo/glassy"
+license=('MIT')
+depends=('libxkbcommon' 'wayland' 'vulkan-icd-loader' 'alsa-lib' 'fontconfig' 'gcc-libs')
+provides=('glassy')
+conflicts=('glassy')
+source=(
+    "glassy-$pkgver-x86_64-linux::https://github.com/alliecatowo/glassy/releases/download/v$pkgver/glassy-x86_64-linux"
+    "glassy-$pkgver.tar.gz::https://github.com/alliecatowo/glassy/archive/refs/tags/v$pkgver.tar.gz"
+)
+# CI fills in the real sha256sums before publishing; keep SKIP until then.
+sha256sums=('SKIP'
+            'SKIP')
+
+package() {
+    # Binary from the release artifact.
+    install -Dm0755 "glassy-$pkgver-x86_64-linux" "$pkgdir/usr/bin/glassy"
+
+    # Icons, desktop entry, and man page from the source tarball.
+    cd "$pkgname-$pkgver" 2>/dev/null || cd "glassy-$pkgver"
+
+    for sz in 16 32 48 64 128 256 512; do
+        install -Dm0644 "assets/icons/glassy-$sz.png" \
+            "$pkgdir/usr/share/icons/hicolor/${sz}x${sz}/apps/glassy.png"
+    done
+
+    install -Dm0644 "extra/glassy.desktop" \
+        "$pkgdir/usr/share/applications/glassy.desktop"
+
+    install -Dm0644 "extra/glassy.1" \
+        "$pkgdir/usr/share/man/man1/glassy.1"
+
+    install -Dm0644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}
