@@ -551,7 +551,24 @@ impl App {
                 self.force_full_redraw = true;
                 self.mark_dirty(event_loop);
             }
-            None => {} // inert gap (native bar handles window drag)
+            None => {
+                // Double-click on empty tab bar area toggles maximize.
+                const MULTI_CLICK: Duration = Duration::from_millis(400);
+                let now = Instant::now();
+                let is_double = matches!(
+                    self.last_tab_click,
+                    Some((p, t)) if p == usize::MAX && now.duration_since(t) < MULTI_CLICK
+                );
+                // Use usize::MAX as a sentinel for "empty area" to distinguish from tab positions.
+                self.last_tab_click = Some((usize::MAX, now));
+                if is_double {
+                    // Inert gap, but we got a double-click: toggle maximize.
+                    if let Some(w) = self.window.as_ref() {
+                        let maximized = w.is_maximized();
+                        w.set_maximized(!maximized);
+                    }
+                }
+            } // inert gap (native bar handles window drag for single-clicks)
         }
         true
     }

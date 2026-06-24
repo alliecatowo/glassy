@@ -72,6 +72,19 @@ impl ApplicationHandler<UserEvent> for App {
         if let Some(pad) = self.config.padding {
             renderer.set_pad(pad * scale);
         }
+        // Apply per-side padding overrides if configured.
+        if let Some(pad_top) = self.config.padding_top {
+            renderer.set_pad_top(pad_top * scale);
+        }
+        if let Some(pad_bottom) = self.config.padding_bottom {
+            renderer.set_pad_bottom(pad_bottom * scale);
+        }
+        if let Some(pad_left) = self.config.padding_left {
+            renderer.set_pad_left(pad_left * scale);
+        }
+        if let Some(pad_right) = self.config.padding_right {
+            renderer.set_pad_right(pad_right * scale);
+        }
         // Enable ligature run-shaping if the config requests it.
         renderer.set_ligatures(self.config.ligatures);
 

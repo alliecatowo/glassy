@@ -52,6 +52,24 @@ impl Renderer {
         self.pad
     }
 
+    /// Get the effective padding on each side (physical px). Per-side overrides
+    /// take precedence; otherwise the uniform `pad` is used.
+    pub fn pad_top(&self) -> f32 {
+        self.pad_top.unwrap_or(self.pad)
+    }
+
+    pub fn pad_bottom(&self) -> f32 {
+        self.pad_bottom.unwrap_or(self.pad)
+    }
+
+    pub fn pad_left(&self) -> f32 {
+        self.pad_left.unwrap_or(self.pad)
+    }
+
+    pub fn pad_right(&self) -> f32 {
+        self.pad_right.unwrap_or(self.pad)
+    }
+
     /// The current font size in physical pixels.
     pub fn font_px(&self) -> f32 {
         self.font_px
@@ -69,6 +87,24 @@ impl Renderer {
         let pad = pad.max(0.0);
         self.pad_override = Some(pad);
         self.pad = pad;
+    }
+
+    /// Set per-side padding overrides at runtime (physical px). When set, these
+    /// override the uniform `pad` for their respective sides during grid layout.
+    pub fn set_pad_top(&mut self, pad: f32) {
+        self.pad_top = Some(pad.max(0.0));
+    }
+
+    pub fn set_pad_bottom(&mut self, pad: f32) {
+        self.pad_bottom = Some(pad.max(0.0));
+    }
+
+    pub fn set_pad_left(&mut self, pad: f32) {
+        self.pad_left = Some(pad.max(0.0));
+    }
+
+    pub fn set_pad_right(&mut self, pad: f32) {
+        self.pad_right = Some(pad.max(0.0));
     }
 
     /// Set the window background opacity at runtime. Only has a visible effect on

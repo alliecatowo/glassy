@@ -70,6 +70,13 @@ pub struct Config {
     /// Padding (grid inset) override in logical px; `None` derives it from the
     /// cell height.
     pub padding: Option<f32>,
+    /// Per-side padding overrides in logical px. When set, these override the
+    /// uniform `padding` for their respective sides. `None` means use `padding`
+    /// or the cell-derived default.
+    pub padding_top: Option<f32>,
+    pub padding_bottom: Option<f32>,
+    pub padding_left: Option<f32>,
+    pub padding_right: Option<f32>,
     /// Lines of scrollback history to retain.
     pub scrollback: usize,
     /// Shell program + args; `None` uses the user's default shell.
@@ -108,6 +115,10 @@ pub struct Config {
     /// per-run shaping pass and may not be desirable for all fonts. Only takes
     /// effect when the loaded font actually carries a `liga` GSUB feature.
     pub ligatures: bool,
+    /// OpenType font feature tags (e.g., "ss01" for stylistic set 1, "dlig" for
+    /// discretionary ligatures). Space or comma-separated; passed to the text
+    /// rendering system (cosmic-text) for selective feature activation.
+    pub font_features: Option<String>,
     /// Working directory for the FIRST tab's shell, from a `cwd` config key or an
     /// activated `[profile.NAME]`. `None` opens in the inherited/default directory.
     pub initial_cwd: Option<std::path::PathBuf>,
