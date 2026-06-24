@@ -18,6 +18,24 @@ impl App {
         // The OSC8 hyperlink under the pointer, underlined for affordance.
         // Captured before the renderer borrow.
         let hovered_link = self.hovered_link.clone();
+        // Plain-text link spans on the hovered row. Pre-computed here (before
+        // the renderer borrow) so the cell loop can do a fast col-range check.
+        // Only computed when the pointer is over a cell that has no OSC 8 link
+        // but does have a plain-text link (`hovered_link` is set for both cases;
+        // `plain_link_at` tells us which kind it is).
+        let (hovered_cell_col, hovered_cell_row) = self.mouse_cell;
+        let plain_link_spans: Vec<super::selection::PlainLink> = if hovered_link.is_some()
+            && self.pty.as_ref().map_or(false, |p| {
+                // Quick check: OSC 8 link → no plain spans needed.
+                hovered_cell_row < self.rows
+                    && p.term.lock().grid()[self.grid_point(hovered_cell_col, hovered_cell_row)]
+                        .hyperlink()
+                        .is_none()
+            }) {
+            self.scan_row_for_links(hovered_cell_row)
+        } else {
+            Vec::new()
+        };
         // Visual-bell overlay: while the flash window is open, tint the whole frame
         // toward the foreground color; otherwise clear it. Computed before the
         // renderer borrow so it can read `self.bell_flash_until`.
@@ -377,14 +395,20 @@ impl App {
                 }
             };
 
-            // Underline the hovered hyperlink's cells (only when not already
-            // underlined by the app), as a click affordance.
-            if !hidden
-                && matches!(decorations.underline, UnderlineStyle::None)
-                && let Some(ref hov) = hovered_link
-                && cell.hyperlink().is_some_and(|h| h.uri() == hov)
-            {
-                decorations.underline = UnderlineStyle::Single;
+            // Underline the hovered link's cells as a Ctrl+click affordance.
+            // OSC 8 links: match by URI stored in the cell's hyperlink field.
+            // Plain-text links: match by pre-computed col range on the hovered row.
+            if !hidden && matches!(decorations.underline, UnderlineStyle::None) {
+                let is_hovered_osc8 = hovered_link.as_deref()
+                    .is_some_and(|hov| cell.hyperlink().is_some_and(|h| h.uri() == hov));
+                let is_hovered_plain = !plain_link_spans.is_empty()
+                    && row_u == hovered_cell_row
+                    && plain_link_spans.iter().any(|s|
+                        (col as usize) >= s.col_start && (col as usize) < s.col_end
+                    );
+                if is_hovered_osc8 || is_hovered_plain {
+                    decorations.underline = UnderlineStyle::Single;
+                }
             }
 
             let ch = if hidden || cell.c == '\0' {
