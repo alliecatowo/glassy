@@ -162,6 +162,14 @@ pub fn run_loop(
                                         proxy.id, level,
                                     ));
                                 }
+                                // Detect SGR 5/6 (text blink) in the byte stream.
+                                // alacritty_terminal silently ignores these attrs, so
+                                // we intercept here and arm the UI's text-blink timer.
+                                if scan::scan_has_blink_sgr(&bytes) {
+                                    proxy.send_user(crate::pty::UserEvent::TextBlinkPresent(
+                                        proxy.id,
+                                    ));
+                                }
 
                                 // ---- Synchronized output interception ------------
                                 // Scan for ?2026h (begin) and ?2026l (end) before

@@ -530,7 +530,9 @@ impl App {
         let blink = blink_active.then_some(self.blink_at);
         let flash = flash_active.then_some(self.bell_flash_until).flatten();
         let spin = spin_active.then_some(self.spinner_at);
-        [blink, flash, spin].into_iter().flatten().min()
+        // Text blink (SGR 5/6) adds its own deadline when the timer is running.
+        let text_blink = (self.text_blink_active && self.focused).then_some(self.text_blink_at);
+        [blink, flash, spin, text_blink].into_iter().flatten().min()
     }
 
     /// Whether any tab is currently busy. While true the spinner must keep
