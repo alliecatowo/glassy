@@ -23,7 +23,7 @@ use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use alacritty_terminal::event::{Event, EventListener, OnResize, WindowSize};
 use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::grid::Dimensions;
-use alacritty_terminal::term::{Config, Term};
+use alacritty_terminal::term::{ClipboardType, Config, Term};
 use alacritty_terminal::tty::{self, EventedReadWrite, Options as PtyOptions, Shell};
 use alacritty_terminal::vte::ansi::Processor;
 use polling::{Event as PollEvent, Events, PollMode, Poller};
@@ -49,6 +49,30 @@ pub enum UserEvent {
     /// terminal's capabilities, so feature negotiation (e.g. Shift+Enter via the
     /// kitty keyboard protocol) silently fails.
     PtyWrite(usize, String),
+    /// OSC 7: the shell reported its working directory for this session. Stored so
+    /// new tabs/splits can inherit the cwd (parsed out of the byte stream by the
+    /// `StreamTap`, since alacritty's `Event` enum has no cwd variant).
+    Cwd(usize, PathBuf),
+    /// OSC 52: the application asked to write `String` to the OS clipboard
+    /// (`ClipboardType::Clipboard` or `Selection`). Routed to the UI thread because
+    /// arboard must be used there, not on the PTY thread.
+    ClipboardStore(usize, ClipboardType, String),
+    /// OSC 52 read: the application asked to read the clipboard. The UI thread reads
+    /// it, runs the bytes through `formatter` (which produces the reply escape
+    /// sequence), and writes the result back over the `PtyWrite` path.
+    ClipboardLoad(usize, ClipboardType, ClipboardFormatter),
+}
+
+/// Wraps the `ClipboardLoad` reply-builder closure so `UserEvent` can keep its
+/// `Debug`/`Clone` derives (the boxed `Fn` is itself `Clone` via `Arc` but not
+/// `Debug`).
+#[derive(Clone)]
+pub struct ClipboardFormatter(pub Arc<dyn Fn(&str) -> String + Sync + Send + 'static>);
+
+impl std::fmt::Debug for ClipboardFormatter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ClipboardFormatter(..)")
+    }
 }
 
 /// Bridges `alacritty_terminal`'s `EventListener` to the winit event loop, tagging
@@ -57,6 +81,16 @@ pub enum UserEvent {
 pub struct EventProxy {
     proxy: EventLoopProxy<UserEvent>,
     id: usize,
+}
+
+impl EventProxy {
+    /// Forward a pre-built `UserEvent` (already tagged with this proxy's session
+    /// id) straight to the winit loop. Used for events the PTY loop derives itself
+    /// rather than receiving from alacritty's `EventListener` (e.g. OSC 7 cwd,
+    /// which alacritty's `Event` enum does not model).
+    fn send_user(&self, event: UserEvent) {
+        let _ = self.proxy.send_event(event);
+    }
 }
 
 impl EventListener for EventProxy {
@@ -77,6 +111,14 @@ impl EventListener for EventProxy {
             Event::ColorRequest(index, formatter) => {
                 let rgb = crate::color::query_index(index);
                 Some(UserEvent::PtyWrite(self.id, formatter(rgb)))
+            }
+            // OSC 52 clipboard. arboard must run on the UI thread (as app.rs does),
+            // not here on the PTY thread, so forward both store and load to it.
+            Event::ClipboardStore(ty, text) => {
+                Some(UserEvent::ClipboardStore(self.id, ty, text))
+            }
+            Event::ClipboardLoad(ty, formatter) => {
+                Some(UserEvent::ClipboardLoad(self.id, ty, ClipboardFormatter(formatter)))
             }
             // TextAreaSizeRequest needs the cell-pixel + grid geometry, which the
             // EventProxy doesn't carry; left unanswered (not needed for the color
@@ -376,6 +418,11 @@ fn run_loop(
                             }
                             crate::image::TapEvent::Delete(id) => {
                                 images.lock().delete(id);
+                            }
+                            crate::image::TapEvent::Cwd(path) => {
+                                // OSC 7: surface the shell's cwd to the UI thread so
+                                // new tabs/splits of this session can inherit it.
+                                proxy.send_user(UserEvent::Cwd(proxy.id, path));
                             }
                         }
                     }

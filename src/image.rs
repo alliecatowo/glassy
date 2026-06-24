@@ -645,6 +645,9 @@ pub struct StreamTap {
     apc: Vec<u8>,
     kitty: KittyParser,
     dcs: Vec<u8>,
+    /// OSC body accumulated for cwd (OSC 7) detection. OSC bytes are *also* passed
+    /// through to the VT parser unchanged; this buffer only observes them.
+    osc: Vec<u8>,
     /// Next id to assign to a decoded sixel image (which carry no kitty id).
     next_sixel_id: u32,
 }
@@ -667,6 +670,10 @@ pub enum TapEvent {
     /// Delete placements for an image id (0 = all). Ordered with displays so a
     /// delete that follows a display in the stream is applied after it.
     Delete(u32),
+    /// OSC 7 reported a working directory (already percent-decoded, local host
+    /// only). Surfaced so the UI can store it per-session for new-tab/split cwd
+    /// inheritance. The original OSC bytes are still passed through to the parser.
+    Cwd(std::path::PathBuf),
 }
 
 #[derive(PartialEq, Eq)]
@@ -677,6 +684,8 @@ enum TapState {
     ApcEscape, // saw ESC inside an APC body (maybe ST)
     Dcs,       // inside a DCS body (ESC P ... ST) — sixel candidate
     DcsEscape, // saw ESC inside a DCS body (maybe ST)
+    Osc,       // inside an OSC body (ESC ] ... ST) — observed for OSC 7, passed through
+    OscEscape, // saw ESC inside an OSC body (maybe ST)
 }
 
 impl Default for StreamTap {
@@ -692,6 +701,7 @@ impl StreamTap {
             apc: Vec::new(),
             kitty: KittyParser::new(),
             dcs: Vec::new(),
+            osc: Vec::new(),
             next_sixel_id: SIXEL_ID_BASE,
         }
     }
@@ -730,10 +740,18 @@ impl StreamTap {
                     } else if b == b'P' {
                         self.dcs.clear();
                         self.state = TapState::Dcs; // DCS introducer; buffer (sixel?)
+                    } else if b == b']' {
+                        // OSC introducer. We only *observe* OSC (for OSC 7 cwd); the
+                        // bytes still pass through to the VT parser, so emit `ESC ]`
+                        // now and mirror the body into `out` as we buffer it.
+                        self.osc.clear();
+                        out.push(0x1b);
+                        out.push(b']');
+                        self.state = TapState::Osc;
                     } else if b == 0x1b {
                         out.push(0x1b); // another ESC; emit held ESC, stay
                     } else {
-                        out.push(0x1b); // not an APC/DCS; emit held ESC + this byte
+                        out.push(0x1b); // not an APC/DCS/OSC; emit held ESC + this byte
                         out.push(b);
                         self.state = TapState::Normal;
                     }
@@ -792,6 +810,42 @@ impl StreamTap {
                         self.state = TapState::Dcs;
                     }
                 }
+                TapState::Osc => {
+                    if b == 0x1b {
+                        self.state = TapState::OscEscape;
+                    } else if b == 0x07 {
+                        out.push(0x07); // BEL terminator (passed through)
+                        if let Some(ev) = self.finish_osc() {
+                            if !out.is_empty() {
+                                events.push(TapEvent::Vt(std::mem::take(&mut out)));
+                            }
+                            events.push(ev);
+                        }
+                        self.state = TapState::Normal;
+                    } else {
+                        out.push(b); // mirror body byte to the parser
+                        self.osc.push(b); // and observe it for OSC 7
+                    }
+                }
+                TapState::OscEscape => {
+                    if b == b'\\' {
+                        out.push(0x1b); // ST terminator (ESC \), passed through
+                        out.push(b'\\');
+                        if let Some(ev) = self.finish_osc() {
+                            if !out.is_empty() {
+                                events.push(TapEvent::Vt(std::mem::take(&mut out)));
+                            }
+                            events.push(ev);
+                        }
+                        self.state = TapState::Normal;
+                    } else {
+                        out.push(0x1b); // ESC was body, not terminator
+                        out.push(b);
+                        self.osc.push(0x1b);
+                        self.osc.push(b);
+                        self.state = TapState::Osc;
+                    }
+                }
             }
         }
         if !out.is_empty() {
@@ -831,6 +885,83 @@ impl StreamTap {
         self.dcs.clear();
         Some(TapEvent::Display(PendingDisplay { id, cols: 0, rows: 0 }))
     }
+
+    /// Finish a buffered OSC. If it is OSC 7 (`7;file://<host>/<path>`) for the
+    /// local host, return a `Cwd` event with the percent-decoded path. The OSC
+    /// bytes were already passed through to the parser; this only observes them.
+    /// Always clears the buffer.
+    fn finish_osc(&mut self) -> Option<TapEvent> {
+        let osc = std::mem::take(&mut self.osc);
+        parse_osc7_cwd(&osc).map(TapEvent::Cwd)
+    }
+}
+
+/// Parse an OSC 7 body (`7;file://<host>/<path>`) into a working-directory path,
+/// percent-decoding the path and accepting only the local host (empty,
+/// `localhost`, or this machine's hostname). Returns `None` for any other OSC,
+/// a non-local host, or an undecodable path.
+fn parse_osc7_cwd(body: &[u8]) -> Option<std::path::PathBuf> {
+    let body = std::str::from_utf8(body).ok()?;
+    // OSC code is the part before the first ';'. Must be exactly "7".
+    let rest = body.strip_prefix("7;")?;
+    let url = rest.strip_prefix("file://")?;
+    // Split host authority (up to the first '/') from the path. A `file://` URL
+    // without an explicit host (`file:///path`) yields an empty authority.
+    let slash = url.find('/')?;
+    let host = &url[..slash];
+    if !host_is_local(host) {
+        return None;
+    }
+    let path = percent_decode(&url[slash..]);
+    let path = String::from_utf8(path).ok()?;
+    if path.is_empty() {
+        return None;
+    }
+    Some(std::path::PathBuf::from(path))
+}
+
+/// Whether an OSC 7 `file://` authority refers to the local machine: empty,
+/// `localhost`, or the current hostname (case-insensitive). Remote hosts are
+/// rejected so a cwd from another machine is never used to spawn a local shell.
+fn host_is_local(host: &str) -> bool {
+    if host.is_empty() || host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    std::env::var("HOSTNAME")
+        .ok()
+        .or_else(|| {
+            std::fs::read_to_string("/proc/sys/kernel/hostname")
+                .ok()
+                .map(|s| s.trim().to_string())
+        })
+        .is_some_and(|h| {
+            // Match either the full hostname or its short (pre-dot) form.
+            h.eq_ignore_ascii_case(host)
+                || h.split('.').next().is_some_and(|s| s.eq_ignore_ascii_case(host))
+        })
+}
+
+/// Percent-decode a byte string (`%XX` -> the byte). Invalid escapes are passed
+/// through literally. Returns raw bytes (OSC 7 paths are UTF-8 in practice but
+/// the protocol permits arbitrary bytes).
+fn percent_decode(s: &str) -> Vec<u8> {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hi = (bytes[i + 1] as char).to_digit(16);
+            let lo = (bytes[i + 2] as char).to_digit(16);
+            if let (Some(hi), Some(lo)) = (hi, lo) {
+                out.push((hi * 16 + lo) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    out
 }
 
 #[cfg(test)]
@@ -977,6 +1108,7 @@ mod tests {
                 TapEvent::Vt(_) => "vt",
                 TapEvent::Display(_) => "display",
                 TapEvent::Delete(_) => "delete",
+                TapEvent::Cwd(_) => "cwd",
             })
             .collect();
         assert_eq!(kinds, vec!["display", "delete"]);
@@ -1050,6 +1182,93 @@ mod tests {
         assert_eq!(vt_bytes(&events), b"\x1bP$q\"p\x1b\\");
         assert_eq!(display_count(&events), 0);
         assert_eq!(store.lock().len(), 0);
+    }
+
+    /// The first `Cwd` event's path, if any.
+    fn first_cwd(events: &[TapEvent]) -> Option<std::path::PathBuf> {
+        events.iter().find_map(|e| match e {
+            TapEvent::Cwd(p) => Some(p.clone()),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn parses_osc7_cwd_basic() {
+        // file:// with empty host (file:///path) -> the decoded path.
+        assert_eq!(
+            parse_osc7_cwd(b"7;file:///home/alice/projects"),
+            Some(std::path::PathBuf::from("/home/alice/projects"))
+        );
+        // "localhost" host is accepted.
+        assert_eq!(
+            parse_osc7_cwd(b"7;file://localhost/var/log"),
+            Some(std::path::PathBuf::from("/var/log"))
+        );
+    }
+
+    #[test]
+    fn osc7_percent_decodes_path() {
+        // A space encoded as %20 must round-trip to a real space.
+        assert_eq!(
+            parse_osc7_cwd(b"7;file:///home/alice/My%20Code"),
+            Some(std::path::PathBuf::from("/home/alice/My Code"))
+        );
+    }
+
+    #[test]
+    fn osc7_rejects_remote_host_and_other_oscs() {
+        // A non-local host is rejected (don't cd into another machine's path).
+        assert_eq!(parse_osc7_cwd(b"7;file://otherbox/home/bob"), None);
+        // Other OSC codes are not cwd reports.
+        assert_eq!(parse_osc7_cwd(b"0;some window title"), None);
+        assert_eq!(parse_osc7_cwd(b"2;title"), None);
+        // OSC 7 without a file:// URL.
+        assert_eq!(parse_osc7_cwd(b"7;not-a-url"), None);
+    }
+
+    #[test]
+    fn tap_observes_osc7_and_passes_it_through() {
+        // OSC 7 must yield a Cwd event AND still reach the VT parser unchanged
+        // (BEL-terminated form here), with surrounding text intact.
+        let store = FairMutex::new(ImageStore::new());
+        let mut tap = StreamTap::new();
+        let events = tap.process(b"a\x1b]7;file:///tmp/work\x07b", &store);
+        assert_eq!(vt_bytes(&events), b"a\x1b]7;file:///tmp/work\x07b");
+        assert_eq!(first_cwd(&events), Some(std::path::PathBuf::from("/tmp/work")));
+    }
+
+    #[test]
+    fn tap_osc7_st_terminated() {
+        // The ST (ESC \) terminated form is handled too, and passed through.
+        let store = FairMutex::new(ImageStore::new());
+        let mut tap = StreamTap::new();
+        let events = tap.process(b"\x1b]7;file:///srv\x1b\\", &store);
+        assert_eq!(vt_bytes(&events), b"\x1b]7;file:///srv\x1b\\");
+        assert_eq!(first_cwd(&events), Some(std::path::PathBuf::from("/srv")));
+    }
+
+    #[test]
+    fn tap_passes_non_cwd_osc_through() {
+        // A title OSC (OSC 0) must reach the parser untouched and yield no Cwd.
+        let store = FairMutex::new(ImageStore::new());
+        let mut tap = StreamTap::new();
+        let events = tap.process(b"\x1b]0;my title\x07", &store);
+        assert_eq!(vt_bytes(&events), b"\x1b]0;my title\x07");
+        assert_eq!(first_cwd(&events), None);
+    }
+
+    #[test]
+    fn tap_osc7_split_across_reads() {
+        // An OSC split mid-sequence across two process() calls still parses and
+        // passes through, exercising the persistent OSC buffer.
+        let store = FairMutex::new(ImageStore::new());
+        let mut tap = StreamTap::new();
+        let a = tap.process(b"\x1b]7;file:///home/a", &store);
+        let b = tap.process(b"/b\x07", &store);
+        let mut vt = vt_bytes(&a);
+        vt.extend_from_slice(&vt_bytes(&b));
+        assert_eq!(vt, b"\x1b]7;file:///home/a/b\x07");
+        assert_eq!(first_cwd(&b), Some(std::path::PathBuf::from("/home/a/b")));
     }
 
     #[test]
