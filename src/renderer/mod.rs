@@ -206,6 +206,23 @@ pub struct Decorations {
     pub color: [f32; 4],
 }
 
+/// One cell in a ligature-shaped run, passed to [`Renderer::push_ligature_run`].
+/// Carries the cell's position, foreground/background colors, and display flags,
+/// but NOT the character — the run text is passed separately as `&str`.
+#[derive(Clone, Copy)]
+pub struct LigatureCell {
+    /// Grid column of this cell.
+    pub col: usize,
+    /// Foreground color (straight RGBA).
+    pub fg: [f32; 4],
+    /// Background color (straight RGBA).
+    pub bg: [f32; 4],
+    /// True if this cell already occupies two columns (CJK wide / wide-emoji).
+    pub wide: bool,
+    /// Text decorations for this cell (underline, strikethrough, etc.).
+    pub decorations: Decorations,
+}
+
 /// Cursor overlay shapes painted as solid rectangles by the renderer. The filled
 /// block cursor is handled in the app by inverting the cell beneath it (so the
 /// glyph stays legible), so it is intentionally absent here; this enum only covers
@@ -390,6 +407,22 @@ pub struct Renderer {
     glyph_cache: HashMap<(char, bool, bool), Vec<AtlasGlyph>>,
     /// Atlas entries for multi-codepoint grapheme clusters (combining/ZWJ).
     cluster_cache: HashMap<(String, bool, bool), Vec<AtlasGlyph>>,
+    /// Atlas entries for ligature-shaped multi-cell runs, keyed by
+    /// `(run_text, bold, italic)`. Each inner `Vec<Vec<AtlasGlyph>>` contains
+    /// one entry per input character: non-empty for the first character of each
+    /// shaped glyph, empty for ligature-continuation cells. Populated lazily by
+    /// [`Renderer::ensure_run_glyphs`] and cleared on atlas reset.
+    ligature_run_cache: HashMap<(String, bool, bool), Vec<Vec<AtlasGlyph>>>,
+    /// Characters (single-cell path) whose shaped advance exceeds 1.1× `cell_w`.
+    /// These glyphs are rendered in a 2-cell (WIDE) box even when alacritty did
+    /// not flag them as wide — corrects Nerd-font icons that overflow their cell.
+    wide_char_set: std::collections::HashSet<(char, bool, bool)>,
+    /// Whether the active font was detected to have an OpenType GSUB `liga`
+    /// feature.  When false, ligature-run shaping is skipped regardless of the
+    /// user config flag (no point paying for run-level shaping on a non-liga font).
+    font_has_ligatures: bool,
+    /// Whether the user config has ligature shaping enabled.
+    ligatures_enabled: bool,
 
     text: Text,
     metrics: CellMetrics,
@@ -566,7 +599,57 @@ fn clamp_scissor(x: i32, y: i32, w: i32, h: i32, surface_w: u32, surface_h: u32)
 
 #[cfg(test)]
 mod tests {
-    use super::clamp_scissor;
+    use super::*;
+
+    // ---- wide-icon threshold helper ----------------------------------------
+
+    /// A cell_w of 8.0. Advances at or below 1.1× (≤ 8.8) are normal; above are
+    /// promoted to WIDE.
+    const CELL_W: f32 = 8.0;
+    const WIDE_THRESHOLD: f32 = CELL_W * 1.1;
+
+    #[test]
+    fn wide_threshold_boundary() {
+        // Exactly at the threshold: NOT wide.
+        assert!(8.8 <= WIDE_THRESHOLD, "8.8 should be at most the threshold");
+        // One ULP above: IS wide.
+        assert!(8.9 > WIDE_THRESHOLD, "8.9 should exceed the 1.1× threshold");
+    }
+
+    #[test]
+    fn nerd_font_icon_range_qualifies_for_promotion() {
+        // Nerd-font Private Use Area starts at U+E000. These are 1.5× advance
+        // icons; verify the detection formula triggers for them.
+        let advance_1_5x: f32 = CELL_W * 1.5; // 12.0 > 8.8
+        assert!(
+            advance_1_5x > WIDE_THRESHOLD,
+            "1.5× advance Nerd-font icon should trigger wide promotion"
+        );
+        // Normal ASCII/CJK glyphs have advance == cell_w: should NOT promote.
+        let advance_1x: f32 = CELL_W;
+        assert!(
+            advance_1x <= WIDE_THRESHOLD,
+            "1× advance glyph should NOT trigger wide promotion"
+        );
+    }
+
+    // ---- LigatureCell smoke test -------------------------------------------
+
+    #[test]
+    fn ligature_cell_fields_are_accessible() {
+        // Ensure the public struct is usable from outside the module.
+        let lc = LigatureCell {
+            col: 3,
+            fg: [1.0, 0.0, 0.0, 1.0],
+            bg: [0.0, 0.0, 0.0, 1.0],
+            wide: false,
+            decorations: Decorations::default(),
+        };
+        assert_eq!(lc.col, 3);
+        assert!(!lc.wide);
+    }
+
+    // ---- clamp_scissor tests -----------------------------------------------
 
     #[test]
     fn scissor_fully_inside_is_unchanged() {

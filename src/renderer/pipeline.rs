@@ -382,12 +382,27 @@ impl Renderer {
 
     /// Ensure the glyph(s) for `(ch, bold, italic)` are rasterized and packed
     /// into the atlas, recording their `AtlasGlyph` entries in the cache.
+    ///
+    /// As a side-effect, if any glyph in the rasterized output has a pen advance
+    /// greater than 1.1× the nominal cell width, the character is inserted into
+    /// `wide_char_set` so `push_cell` can promote it to a 2-cell (WIDE) box.
+    /// This corrects Nerd-font icons that are designed as 1.5× or 2× wide but
+    /// are not flagged WIDE_CHAR by alacritty's unicode-width tables.
     pub(crate) fn ensure_glyphs(&mut self, ch: char, bold: bool, italic: bool) {
         let key = (ch, bold, italic);
         if self.glyph_cache.contains_key(&key) {
             return;
         }
-        let rasters = collect_rasters(&self.text.rasterize(ch, bold, italic));
+        let raw = self.text.rasterize(ch, bold, italic);
+        // Wide-icon detection: if any shaped glyph's pen advance exceeds
+        // 1.1× the cell width, promote this character to the wide set.
+        // We check the `advance` field populated by `build_glyphs`.
+        let cell_w = self.metrics.width;
+        let is_wide = raw.iter().any(|g| g.advance > cell_w * 1.1);
+        if is_wide {
+            self.wide_char_set.insert(key);
+        }
+        let rasters = collect_rasters(&raw);
         let packed = self.pack_rasters(&rasters);
         self.glyph_cache.insert(key, packed);
     }
@@ -402,6 +417,35 @@ impl Renderer {
         let rasters = collect_rasters(&self.text.rasterize_cluster(cluster, bold, italic));
         let packed = self.pack_rasters(&rasters);
         self.cluster_cache.insert(key, packed);
+    }
+
+    /// Ensure that the ligature run `(text, bold, italic)` is shaped and packed
+    /// into the atlas. The result is a `Vec<Vec<AtlasGlyph>>` — one inner Vec per
+    /// input character — where only the *first* cell of each shaped glyph carries
+    /// atlas entries and continuation cells have empty Vecs. This is stored in
+    /// `ligature_run_cache` keyed by `(text, bold, italic)`.
+    ///
+    /// Callers must check `ligature_run_cache` after this call; the result is
+    /// already there (or the cache was just populated).
+    pub(crate) fn ensure_run_glyphs(&mut self, run: &str, bold: bool, italic: bool) {
+        let key = (run.to_string(), bold, italic);
+        if self.ligature_run_cache.contains_key(&key) {
+            return;
+        }
+        let cell_w = self.metrics.width;
+        let run_glyphs = self.text.rasterize_run(run, bold, italic, cell_w);
+        // For each per-cell slot, collect_rasters and pack into the atlas.
+        let mut per_cell: Vec<Vec<AtlasGlyph>> = Vec::with_capacity(run_glyphs.len());
+        for slot in &run_glyphs {
+            if slot.glyphs.is_empty() {
+                per_cell.push(Vec::new());
+            } else {
+                let rasters = collect_rasters(&slot.glyphs);
+                let packed = self.pack_rasters(&rasters);
+                per_cell.push(packed);
+            }
+        }
+        self.ligature_run_cache.insert(key, per_cell);
     }
 
     /// Pack owned glyph bitmaps into the atlases, returning their placed entries.
@@ -439,6 +483,8 @@ impl Renderer {
                         log::warn!("glyph atlas full; clearing cache and repacking");
                         self.glyph_cache.clear();
                         self.cluster_cache.clear();
+                        self.ligature_run_cache.clear();
+                        self.wide_char_set.clear();
                         self.packer.reset();
                         self.color_packer.reset();
                         // Every cached glyph's atlas position just changed, so any

@@ -67,6 +67,8 @@ impl ApplicationHandler<UserEvent> for App {
         if let Some(pad) = self.config.padding {
             renderer.set_pad(pad * scale);
         }
+        // Enable ligature run-shaping if the config requests it.
+        renderer.set_ligatures(self.config.ligatures);
 
         let size = window.inner_size();
         renderer.resize(size.width, size.height);

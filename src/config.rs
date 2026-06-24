@@ -20,6 +20,7 @@
 //! theme_dark  = tokyo-night            # theme used in system Dark mode
 //! status_bar  = false                  # show status bar at the bottom (default off)
 //! pane_headers= true                   # show per-pane title bars + accent rail in splits (default on)
+//! ligatures   = false                  # enable OpenType ligature shaping across cells (default off)
 //! color.fg    = #c0caf5                # override theme foreground (hex format)
 //! color.bg    = #1a1b26                # override theme background (hex format)
 //! color.cursor = #7dcfff               # override cursor color
@@ -102,6 +103,7 @@ struct RawConfig {
     theme_dark: Option<String>,
     status_bar: Option<bool>,
     pane_headers: Option<bool>,
+    ligatures: Option<bool>,
     // Custom theme colors (hex format, e.g., "color.fg = #c0caf5")
     color_fg: Option<String>,
     color_bg: Option<String>,
@@ -190,6 +192,7 @@ impl RawConfig {
             theme_dark,
             status_bar: self.status_bar.unwrap_or(false),
             pane_headers: self.pane_headers.unwrap_or(true),
+            ligatures: self.ligatures.unwrap_or(false),
         };
 
         Ok(Settings { config, theme })
@@ -394,6 +397,9 @@ fn apply_kv(key: &str, value: &str, raw: &mut RawConfig) -> Result<()> {
         }
         "pane_headers" => {
             raw.pane_headers = Some(parse_bool(value, "pane_headers")?);
+        }
+        "ligatures" => {
+            raw.ligatures = Some(parse_bool(value, "ligatures")?);
         }
         // Custom theme colors: color.fg, color.bg, color.cursor, color.selection_bg, color.ansi0..15
         "color.fg" => {

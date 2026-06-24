@@ -613,6 +613,10 @@ impl Renderer {
             atlas_reset: false,
             glyph_cache: HashMap::new(),
             cluster_cache: HashMap::new(),
+            ligature_run_cache: HashMap::new(),
+            wide_char_set: std::collections::HashSet::new(),
+            font_has_ligatures: false, // probed below after renderer is built
+            ligatures_enabled: false,  // updated via set_ligatures()
             text,
             metrics,
             pad: pad_for(metrics.height),
@@ -641,6 +645,17 @@ impl Renderer {
             transparent,
             mp: MultiPane::default(),
         };
+
+        // Probe the loaded font for OpenType GSUB liga support. This shapes the
+        // canonical "fi" test string: a liga font collapses it into one glyph
+        // while a non-liga font keeps two. We log the result so operators can
+        // confirm that the `ligatures` config key actually does something for their
+        // chosen font.
+        renderer.font_has_ligatures = renderer.text.has_ligatures();
+        log::info!(
+            "  renderer: font_has_ligatures={}",
+            renderer.font_has_ligatures
+        );
 
         // Pre-warm the atlas with printable ASCII (regular + bold) so the first
         // frame is rasterize-free. Bold is prewarm'd because most shell prompts and

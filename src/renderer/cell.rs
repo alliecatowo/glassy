@@ -3,6 +3,21 @@
 use super::*;
 
 impl Renderer {
+    /// Enable or disable ligature run-shaping. Only has an effect when the loaded
+    /// font was detected to carry an OpenType GSUB liga feature (see
+    /// `font_has_ligatures`). When ligatures are disabled (or the font lacks liga),
+    /// each cell is shaped individually as before.
+    pub fn set_ligatures(&mut self, enabled: bool) {
+        self.ligatures_enabled = enabled;
+    }
+
+    /// Returns true when both the config flag is set AND the loaded font was
+    /// detected to have OpenType GSUB ligatures. The render loop uses this to
+    /// decide whether to accumulate cell runs and call `push_ligature_run`.
+    pub fn ligatures_active(&self) -> bool {
+        self.ligatures_enabled && self.font_has_ligatures
+    }
+
     pub fn resize(&mut self, width: u32, height: u32) {
         if width == 0 || height == 0 {
             return;
@@ -92,6 +107,12 @@ impl Renderer {
         self.color_packer.reset();
         self.glyph_cache.clear();
         self.cluster_cache.clear();
+        self.ligature_run_cache.clear();
+        self.wide_char_set.clear();
+
+        // Re-probe ligature support: the new font file might be different from
+        // the previous size's file (unlikely but possible after GLASSY_FONT change).
+        self.font_has_ligatures = self.text.has_ligatures();
 
         // Pre-warm printable ASCII (regular + bold) at the new size for a
         // rasterize-free first frame after a font-size change.
@@ -365,7 +386,7 @@ impl Renderer {
         // box spans `2 * cell_w`. The grid skips the trailing spacer cell, so we
         // lay the glyph out across the full two-cell box here. Single-width cells
         // keep the ordinary one-cell box.
-        let box_w = if wide { cell_w * 2.0 } else { cell_w };
+        let mut box_w = if wide { cell_w * 2.0 } else { cell_w };
 
         // Push the cell background, but skip cells whose background equals the
         // frame's clear color — the clear already paints those, so emitting a quad
@@ -442,6 +463,17 @@ impl Renderer {
         }
 
         self.ensure_glyphs(ch, bold, italic);
+
+        // Nerd-font wide-icon promotion: if the shaper measured this glyph's
+        // advance as > 1.1× cell_w, and the cell was not already promoted to
+        // wide by alacritty's WIDE_CHAR flag, use a 2-cell box so the icon
+        // doesn't clip its right edge. This only applies to single-cell glyphs
+        // (combiners and wide-char spacers are handled above); we also skip it
+        // when the cell is already wide (would double-promote).
+        if !wide && self.wide_char_set.contains(&(ch, bold, italic)) {
+            box_w = cell_w * 2.0;
+        }
+
         if let Some(glyphs) = self.glyph_cache.get(&(ch, bold, italic)) {
             let cur = self.cur_row;
             Self::place_glyphs(
@@ -454,6 +486,80 @@ impl Renderer {
                 box_w,
                 cell_h,
             );
+        }
+    }
+
+    /// Render a ligature-shaped multi-cell run. `cells` is a slice of
+    /// `(col, ch, fg, bg, bold, italic, wide, decorations)` for each cell in the
+    /// run, all belonging to the same `row`. The run has already been shaped by
+    /// `ensure_run_glyphs`; this method looks up the per-cell atlas entries and
+    /// pushes instances, distributing the shaped output glyphs to the correct
+    /// cell origins.
+    ///
+    /// Cells whose atlas slot is empty (ligature continuation cells, or cells with
+    /// no drawable coverage) still get their background and decorations pushed.
+    #[allow(clippy::too_many_arguments)]
+    pub fn push_ligature_run(
+        &mut self,
+        row: usize,
+        run_text: &str,
+        cells: &[LigatureCell],
+        bold: bool,
+        italic: bool,
+    ) {
+        self.ensure_run_glyphs(run_text, bold, italic);
+
+        let cell_w = self.metrics.width;
+        let cell_h = self.metrics.height;
+        let pad = self.pad;
+
+        // Snapshot the per-cell atlas entries so we can release the borrow before
+        // the mutable push loop below. Runs are short (typically 2-8 cells) so the
+        // clone is cheap.
+        let cached: Vec<Vec<AtlasGlyph>> = self
+            .ligature_run_cache
+            .get(&(run_text.to_string(), bold, italic))
+            .cloned()
+            .unwrap_or_default();
+
+        let run_len = cells.len().min(cached.len());
+
+        for i in 0..run_len {
+            let cell = &cells[i];
+            let origin_x = cell.col as f32 * cell_w + pad;
+            let origin_y = row as f32 * cell_h + pad + self.grid_origin_y;
+            let box_w = if cell.wide { cell_w * 2.0 } else { cell_w };
+
+            // Push the cell background.
+            let glass = self.glass_bg(cell.bg);
+            if glass != self.clear_color {
+                self.rows[self.cur_row].bg.push(BgInstance {
+                    pos: [origin_x, origin_y],
+                    size: [box_w, cell_h],
+                    color: glass,
+                });
+            }
+
+            // Decorations (underline, strikethrough).
+            self.draw_decorations(origin_x, origin_y, cell.decorations);
+
+            let baseline = origin_y + self.metrics.ascent;
+            let glyphs = &cached[i];
+            if !glyphs.is_empty() {
+                let cur = self.cur_row;
+                Self::place_glyphs(
+                    &mut self.rows[cur].fg,
+                    glyphs,
+                    cell.fg,
+                    origin_x,
+                    baseline,
+                    cell_w,
+                    box_w,
+                    cell_h,
+                );
+            }
+            // Continuation cells (empty glyph slot): background + decorations
+            // already pushed above; no glyph instance needed.
         }
     }
 

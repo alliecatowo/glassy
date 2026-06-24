@@ -229,6 +229,52 @@ impl App {
         // Collect the visible cells so we can look ahead across cells when
         // reconstructing grapheme clusters (compound emoji span several cells).
         let cells: Vec<_> = content.display_iter.collect();
+
+        // Ligature run accumulator. When ligature shaping is active we buffer
+        // consecutive simple (no-combiner, single-cell, same bold/italic/row)
+        // characters into a run and flush them as a unit via `push_ligature_run`.
+        // This lets cosmic-text apply GSUB liga substitutions across cell boundaries
+        // so e.g. `->`  shapes to `→` when the font has that ligature.
+        //
+        // A run breaks on: style change, row change, hidden cell, wide cell,
+        // grapheme cluster (combiners present), box-drawing/block-element ranges
+        // (which take the procedural path), or cursor inversion. All those cases
+        // fall through to the individual `push_cell` path after flushing.
+        let use_liga = renderer.ligatures_active();
+        // Per-run accumulated state.
+        let mut run_text = String::new();
+        let mut run_cells: Vec<LigatureCell> = Vec::new();
+        let mut run_row: usize = 0;
+        let mut run_bold: bool = false;
+        let mut run_italic: bool = false;
+
+        // Flush the pending ligature run to the renderer.
+        // Called when the run breaks or at the end of the cell loop.
+        // NOTE: this is a local macro rather than a closure so it can mutably
+        // borrow both `renderer` and the run state simultaneously.
+        macro_rules! flush_run {
+            () => {
+                if !run_text.is_empty() {
+                    if run_cells.len() == 1 {
+                        // Single-cell run: skip the ligature path (no benefit)
+                        // and emit directly via push_cell.
+                        let lc = &run_cells[0];
+                        let ch = run_text.chars().next().unwrap_or(' ');
+                        renderer.push_cell(
+                            lc.col, run_row, ch, &[], lc.fg, lc.bg,
+                            run_bold, run_italic, lc.wide, lc.decorations,
+                        );
+                    } else {
+                        renderer.push_ligature_run(
+                            run_row, &run_text, &run_cells, run_bold, run_italic,
+                        );
+                    }
+                    run_text.clear();
+                    run_cells.clear();
+                }
+            };
+        }
+
         let mut ci = 0;
         while ci < cells.len() {
             let indexed = &cells[ci];
@@ -250,6 +296,7 @@ impl App {
             let row_u = row as usize;
             // Skip cells in rows that did not change: their instances are reused.
             if !dirty[row_u] {
+                flush_run!();
                 ci += unit_len(&cells, ci);
                 continue;
             }
@@ -352,6 +399,57 @@ impl App {
             // a 2-cell box so its color glyph fills the space instead of being
             // squished into one cell.
             let wide = wide || consumed >= 2;
+
+            // Determine whether this cell is eligible for ligature run accumulation.
+            // A cell is ineligible if it has combiners, is wide, is hidden, is a
+            // space/null (blank), or falls in the box-drawing / block-element ranges
+            // (those take the procedural path in push_cell and must not be shaped as
+            // part of a text run).
+            let cp = ch as u32;
+            let is_box_or_block = (0x2500..=0x259F).contains(&cp);
+            let liga_eligible = use_liga
+                && !hidden
+                && combiners.is_empty()
+                && !wide
+                && ch != ' ' && ch != '\0'
+                && !is_box_or_block;
+
+            if liga_eligible {
+                // Check if this cell is compatible with the current open run.
+                // A run break occurs on: row change, style change, or cursor
+                // inversion (cursor-inverted cells must not join a ligature because
+                // their fg/bg are swapped individually).
+                let is_cursor_cell = invert_block && row == cursor_row && col == cursor_col;
+                let run_continues = !run_cells.is_empty()
+                    && run_row == srow
+                    && run_bold == bold
+                    && run_italic == italic
+                    && !is_cursor_cell;
+
+                if !run_continues {
+                    // Flush any open run before starting a new one.
+                    flush_run!();
+                    run_row = srow;
+                    run_bold = bold;
+                    run_italic = italic;
+                }
+
+                // Append this cell to the run.
+                run_text.push(ch);
+                run_cells.push(LigatureCell {
+                    col: col as usize,
+                    fg,
+                    bg,
+                    wide: false, // we checked !wide above
+                    decorations,
+                });
+                ci += consumed;
+                continue;
+            }
+
+            // Non-ligature path: flush any open ligature run first.
+            flush_run!();
+
             renderer.push_cell(
                 col as usize,
                 srow,
@@ -366,6 +464,9 @@ impl App {
             );
             ci += consumed;
         }
+
+        // Flush any remaining ligature run at end of cell list.
+        flush_run!();
 
         // The real GUI tab bar is painted as a pixel overlay near the END of the
         // frame (after the cursor + images), so it composites above everything in
