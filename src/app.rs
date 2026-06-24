@@ -322,6 +322,26 @@ fn config_display_path() -> String {
 
 /// Lighten an RGB color toward white by `amount`, keeping alpha. Used for the
 /// raised help-panel surface.
+/// Percent-encode a filesystem path for embedding in a `file://` URI. Keeps the
+/// unreserved set (RFC 3986) plus `/` (path separator) verbatim; everything else
+/// (spaces, `#`, `?`, non-ASCII bytes, …) is `%XX`-escaped so the URI can't be
+/// truncated or reinterpreted by the URL handler.
+fn percent_encode_path(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
+    for &b in path.as_bytes() {
+        let keep = b.is_ascii_alphanumeric()
+            || matches!(b, b'/' | b'-' | b'_' | b'.' | b'~');
+        if keep {
+            out.push(b as char);
+        } else {
+            out.push('%');
+            out.push(char::from_digit((b >> 4) as u32, 16).unwrap().to_ascii_uppercase());
+            out.push(char::from_digit((b & 0xf) as u32, 16).unwrap().to_ascii_uppercase());
+        }
+    }
+    out
+}
+
 fn lighten(c: [f32; 4], amount: f32) -> [f32; 4] {
     [
         (c[0] + amount).min(1.0),
@@ -713,6 +733,10 @@ pub struct App {
     help_state: gui::HelpState,
 
     // --- Pane title-bar ⋮ menu -----------------------------------------------
+    /// The pane header currently under the pointer: `(pane id, in ⋮ button)`, or
+    /// `None` when the pointer is off every header. Cached so `CursorMoved` only
+    /// repaints on an enter/leave or button-edge change rather than every pixel.
+    hovered_pane_header: Option<(usize, bool)>,
     /// When the ⋮ pane-menu is open: the pane id that owns it. The menu shows
     /// Split V / Split H / Close pane. `None` when no pane menu is open.
     pane_menu_open: Option<usize>,
@@ -848,6 +872,7 @@ impl App {
             menu_anchor: None,
             menu_anchor_px: None,
             help_state: gui::HelpState::default(),
+            hovered_pane_header: None,
             pane_menu_open: None,
             pane_menu_sel: 0,
             mouse_cell: (0, 0),
@@ -911,7 +936,22 @@ impl App {
     /// Open a URL with the system handler, detached. Restricted to web/file
     /// schemes so terminal output can't launch arbitrary URI handlers.
     fn open_url(url: &str) {
-        if (url.starts_with("http://") || url.starts_with("https://") || url.starts_with("file://"))
+        let allowed = if url.starts_with("http://") || url.starts_with("https://") {
+            true
+        } else if let Some(path) = url.strip_prefix("file://") {
+            // file:// is permitted for genuine local links, but terminal output
+            // must not be able to hand xdg-open a path that launches arbitrary
+            // handlers or pokes pseudo-filesystems. Block .desktop launchers and
+            // the /proc, /dev, /sys trees outright.
+            let lower = path.to_ascii_lowercase();
+            !(lower.ends_with(".desktop")
+                || path.starts_with("/proc")
+                || path.starts_with("/dev")
+                || path.starts_with("/sys"))
+        } else {
+            false
+        };
+        if allowed
             && let Err(e) = std::process::Command::new("xdg-open").arg(url).spawn()
         {
             log::warn!("failed to open {url}: {e}");
@@ -1263,9 +1303,34 @@ impl App {
                     // Pixel anchor: below the # button, at the right of the window.
                     if let Some(r) = self.renderer.as_ref() {
                         let (sw, _sh) = r.surface_size();
-                        // Approximate panel width: icon + label + shortcut + padding.
-                        let est_w = 220.0_f32;
-                        let bar_h = tab_bar_h(r.cell_metrics().height);
+                        // Panel width derived from LIVE cell metrics, mirroring the
+                        // formula in `gui::menu` (icon + widest label + widest
+                        // shortcut + padding), so the right-anchored dropdown lines
+                        // up exactly with the painted panel at any font size — no
+                        // hardcoded 220px estimate that drifts with DPI/font.
+                        let m = r.cell_metrics();
+                        let cell_w = m.width;
+                        let label_chars =
+                            MenuAction::ALL.iter().map(|a| a.label().len()).max().unwrap_or(4);
+                        let hint_chars = MenuAction::ALL
+                            .iter()
+                            .filter_map(|a| a.shortcut().map(|h| h.len()))
+                            .max()
+                            .unwrap_or(0);
+                        let pad_x = (cell_w * 1.2).round();
+                        let icon_w = cell_w + 4.0;
+                        let hint_gap = (cell_w * 2.0).round();
+                        let est_w = (icon_w
+                            + label_chars as f32 * cell_w
+                            + if hint_chars > 0 {
+                                hint_gap + hint_chars as f32 * cell_w
+                            } else {
+                                0.0
+                            }
+                            + pad_x * 2.0)
+                            .max(cell_w * 8.0)
+                            .ceil();
+                        let bar_h = tab_bar_h(m.height);
                         self.menu_anchor_px = Some(((sw as f32 - est_w).max(0.0), bar_h + 2.0));
                     }
                 } else {
@@ -2127,6 +2192,25 @@ impl App {
         }
     }
 
+    /// Send a DECSET 1004 focus report (`seq`) to every pane PTY whose child has
+    /// enabled focus reporting (`TermMode::FOCUS_IN_OUT`). Covers the focused pane
+    /// (`self.pty`) and every parked pane in a split.
+    fn report_focus(&self, seq: &[u8]) {
+        let report = |pty: &Pty| {
+            if pty.term.lock().mode().contains(TermMode::FOCUS_IN_OUT) {
+                pty.write(seq.to_vec());
+            }
+        };
+        if let Some(pty) = self.pty.as_ref() {
+            report(pty);
+        }
+        if let Some(g) = self.panes.as_ref() {
+            for pty in g.others.values() {
+                report(pty);
+            }
+        }
+    }
+
     /// Encode and send a mouse report to the child, choosing SGR vs legacy form
     /// based on the terminal's current mode.
     fn report_mouse(&self, button: u8, pressed: bool, motion: bool, mode: TermMode) {
@@ -2331,7 +2415,17 @@ impl App {
         let danger = mul(color::danger());
         let fg = mul(gui::fg());
         let fg_dim = mul(gui::fg_dim());
-        let active_fg = mul(color::default_bg()); // dark text on the accent rail tab
+        // Active-tab label color derived from the LUMA of the chip body it sits on
+        // (E2 raised glass), not a fixed `default_bg()` — on a LIGHT theme the
+        // background is light, so dark-on-dark text would vanish. Pick near-black
+        // on a light chip, near-white on a dark one, for guaranteed contrast.
+        let raised = gui::glass_raised();
+        let chip_luma = 0.2126 * raised[0] + 0.7152 * raised[1] + 0.0722 * raised[2];
+        let active_fg = if chip_luma > 0.5 {
+            mul([0.06, 0.06, 0.07, 1.0])
+        } else {
+            mul([0.96, 0.96, 0.97, 1.0])
+        };
 
         // 1) Bar backdrop (E1) + top accent rail + bottom hairline (content seam).
         renderer.push_overlay_px(0.0, 0.0, bar_w, bar_h, bar_bg);
@@ -2613,9 +2707,16 @@ impl App {
             } else if hover {
                 gui::state_fill(surface, 0.7, false)
             } else {
-                [surface[0], surface[1], surface[2], surface[3] * 0.55]
+                // Recede inactive chips harder so the active tab clearly reads as
+                // the foreground one (was 0.55 — too close to active).
+                [surface[0], surface[1], surface[2], surface[3] * 0.35]
             };
             renderer.push_overlay_rrect_px(rr.x, rr.y, rr.w, rr.h, TAB_RADIUS, fill);
+            // A 1px bottom groove anchors the inactive chip below the active one.
+            if !hover && !held {
+                let h = gui::hairline();
+                renderer.push_overlay_px(rr.x, rr.y + rr.h - 1.0, rr.w, 1.0, [h[0], h[1], h[2], h[3] * 0.6]);
+            }
             if hover && !held {
                 renderer.push_overlay_px(rr.x, rr.y, rr.w, 1.0, accent);
             }
@@ -2663,8 +2764,13 @@ impl App {
         let text_w = (r.w - (tx - r.x) - reserve).max(0.0);
         let max_chars = (text_w / cell_w).floor() as usize;
         let s = if multi {
-            let title = fit_label(label, max_chars.saturating_sub(2).max(1));
-            format!("{} {}", idx + 1, title)
+            // The "N " number prefix is shown before the title; reserve its width
+            // (digits + a space) from max_chars BEFORE fitting the title, so the
+            // composed string never overflows the chip (prefix + fit_label must be
+            // ≤ max_chars together).
+            let prefix = format!("{} ", idx + 1);
+            let title_max = max_chars.saturating_sub(prefix.chars().count()).max(1);
+            format!("{}{}", prefix, fit_label(label, title_max))
         } else {
             fit_label(label, max_chars.max(1))
         };
@@ -2807,20 +2913,7 @@ impl App {
             changed = true;
         }
         if ev.status_bar_toggle {
-            self.config.status_bar = !self.config.status_bar;
-            // Resize the grid to reclaim/reserve space for the status bar.
-            if let Some(window) = self.window.as_ref() {
-                let size = window.inner_size();
-                if let Some(r) = self.renderer.as_ref() {
-                    let m = r.cell_metrics();
-                    let (cols, rows) = Self::grid_for(size, m.width, m.height, r.pad(), self.config.status_bar);
-                    self.cols = cols;
-                    self.rows = rows;
-                    if let Some(pty) = self.pty.as_mut() {
-                        pty.resize(cols, rows, m.width.round() as u16, m.height.round() as u16);
-                    }
-                }
-            }
+            self.toggle_status_bar();
             changed = true;
         }
         if ev.copy_path {
@@ -3967,7 +4060,9 @@ impl App {
                 mouse_px.0, mouse_px.1,
             );
             if mouse_on_row || i == sel {
-                renderer.push_overlay_px(ax + 1.0, row_y, panel_w - 2.0, row_h, sel_bg);
+                // Rounded highlight inset from the panel edge so it doesn't square
+                // off over the panel's own rounded corners (matches gui::menu).
+                renderer.push_overlay_rrect_px(ax + 2.0, row_y, panel_w - 4.0, row_h, 3.0, sel_bg);
             }
             let ty = (row_y + (row_h - m.height) * 0.5).round();
             renderer.push_overlay_glyph_px_str((ax + 8.0).round(), ty, label, fg);
@@ -4146,6 +4241,17 @@ impl App {
         self.settings_drop = gui::SettingsDrop::None;
         self.settings_saved = false;
         self.gui_focused = Some(Self::settings_focus_order()[0]);
+        // Seed the click-outside hit rect to the WHOLE surface so a stray press
+        // landing in the same frame the form opens (before the first paint sets
+        // the real panel rect at `render`) is treated as "inside" and never
+        // dismisses the form. After the first paint `settings_panel` becomes the
+        // true (smaller) panel rect, so genuine outside clicks dismiss correctly.
+        let (sw, sh) = self
+            .renderer
+            .as_ref()
+            .map(|r| r.surface_size())
+            .unwrap_or((u32::MAX, u32::MAX));
+        self.settings_panel = gui::Rect::new(0.0, 0.0, sw as f32, sh as f32);
         self.force_full_redraw = true;
     }
 
@@ -4212,7 +4318,9 @@ impl App {
     }
 
     /// Enter/Space on the focused control: Save activates, the config field copies
-    /// its path, otherwise it opens the focused dropdown (theme / font).
+    /// its path, the dropdowns toggle open, the segmented bell control advances,
+    /// the status-bar toggle flips. Only a control with no activation of its own
+    /// falls through to Save.
     fn settings_activate_focused(&mut self) {
         let f = self.gui_focused;
         if f == Some(gui::id("settings/save")) {
@@ -4231,9 +4339,36 @@ impl App {
             } else {
                 gui::SettingsDrop::Font
             };
+        } else if f == Some(gui::id("settings/bell")) {
+            // Segmented control: Enter/Space advances to the next mode (wraps),
+            // matching a click cycling Off → Visual → Audible → Off.
+            let cur = self.bell_index() as i32;
+            self.set_bell_index(((cur + 1).rem_euclid(3)) as usize);
+        } else if f == Some(gui::id("settings/status_bar")) {
+            self.toggle_status_bar();
         } else {
             self.save_settings();
         }
+    }
+
+    /// Flip the status bar on/off and reflow the grid to reclaim/reserve its row.
+    /// Shared by the settings toggle (mouse + keyboard) and the menu action.
+    fn toggle_status_bar(&mut self) {
+        self.config.status_bar = !self.config.status_bar;
+        if let Some(window) = self.window.as_ref() {
+            let size = window.inner_size();
+            if let Some(r) = self.renderer.as_ref() {
+                let m = r.cell_metrics();
+                let (cols, rows) =
+                    Self::grid_for(size, m.width, m.height, r.pad(), self.config.status_bar);
+                self.cols = cols;
+                self.rows = rows;
+                if let Some(pty) = self.pty.as_mut() {
+                    pty.resize(cols, rows, m.width.round() as u16, m.height.round() as u16);
+                }
+            }
+        }
+        self.force_full_redraw = true;
     }
 
     /// Bell mode as a segmented index: 0 = Off, 1 = Visual, 2 = Audible.
@@ -4350,16 +4485,20 @@ impl App {
         let path = crate::config::path()
             .map(|p| p.display().to_string())
             .unwrap_or_else(config_display_path);
-        let uri = if path.starts_with('/') {
-            format!("file://{path}")
+        let abs = if path.starts_with('/') {
+            path
         } else if let Some(rest) = path.strip_prefix("~/") {
             match std::env::var("HOME") {
-                Ok(home) => format!("file://{home}/{rest}"),
+                Ok(home) => format!("{home}/{rest}"),
                 Err(_) => return,
             }
         } else {
             return;
         };
+        // Percent-encode the path so a $HOME (or config dir) containing spaces or
+        // other reserved chars produces a valid file:// URI rather than a truncated
+        // / misinterpreted one. '/' is preserved as the path separator.
+        let uri = format!("file://{}", percent_encode_path(&abs));
         Self::open_url(&uri);
     }
 
@@ -4816,10 +4955,21 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 return;
             }
-            UserEvent::ClipboardStore(_id, _ty, text) => {
+            UserEvent::ClipboardStore(_id, _ty, mut text) => {
                 // OSC 52 copy: write to the OS clipboard on the UI thread (arboard
                 // must not run on the PTY thread). arboard exposes only the standard
                 // clipboard, so a Selection store also lands there. Not visual.
+                // Cap the payload (~1 MiB) so a hostile / runaway program can't push
+                // the clipboard to an unbounded size; truncate on a char boundary.
+                const OSC52_MAX: usize = 1 << 20;
+                if text.len() > OSC52_MAX {
+                    let mut end = OSC52_MAX;
+                    while end > 0 && !text.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    text.truncate(end);
+                    log::debug!("OSC 52 store truncated to {end} bytes");
+                }
                 if let Some(cb) = self.clipboard()
                     && let Err(e) = cb.set_text(text)
                 {
@@ -4858,6 +5008,11 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::Focused(focused) => {
                 self.focused = focused;
+                // DECSET 1004 focus reporting: notify each pane's child that asked
+                // for it. \x1b[I on focus-in, \x1b[O on focus-out. Per-PTY because a
+                // split tab runs an independent program in every pane.
+                let seq: &[u8] = if focused { b"\x1b[I" } else { b"\x1b[O" };
+                self.report_focus(seq);
                 // Restart the blink solid-on so a freshly-focused window shows the
                 // cursor immediately; the cadence resumes from about_to_wait.
                 self.reset_blink();
@@ -4887,6 +5042,23 @@ impl ApplicationHandler<UserEvent> for App {
             } => {
                 // Synthetic events are injected on focus change for held keys.
                 if is_synthetic {
+                    return;
+                }
+
+                // F11 toggles borderless fullscreen. Handled first so it works
+                // whether or not an overlay owns the keyboard, and never reaches
+                // the child.
+                if event.state.is_pressed()
+                    && matches!(&event.logical_key, Key::Named(NamedKey::F11))
+                {
+                    if let Some(w) = self.window.as_ref() {
+                        let fs = if w.fullscreen().is_some() {
+                            None
+                        } else {
+                            Some(winit::window::Fullscreen::Borderless(None))
+                        };
+                        w.set_fullscreen(fs);
+                    }
                     return;
                 }
 
@@ -4986,27 +5158,15 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                 }
 
-                // Ctrl+Shift+B toggles the status bar.
+                // Ctrl+Shift+B toggles the status bar (with Shift the char arrives
+                // upper-case on most layouts, so accept either case).
                 if event.state.is_pressed()
                     && self.mods.control_key()
                     && self.mods.shift_key()
                     && let Key::Character(s) = &event.logical_key
-                    && s.as_str() == "b"
+                    && matches!(s.as_str(), "b" | "B")
                 {
-                    self.config.status_bar = !self.config.status_bar;
-                    // Resize the grid to reclaim/reserve space for the status bar.
-                    if let Some(window) = self.window.as_ref() {
-                        let size = window.inner_size();
-                        if let Some(r) = self.renderer.as_ref() {
-                            let m = r.cell_metrics();
-                            let (cols, rows) = Self::grid_for(size, m.width, m.height, r.pad(), self.config.status_bar);
-                            self.cols = cols;
-                            self.rows = rows;
-                            if let Some(pty) = self.pty.as_mut() {
-                                pty.resize(cols, rows, m.width.round() as u16, m.height.round() as u16);
-                            }
-                        }
-                    }
+                    self.toggle_status_bar();
                     self.mark_dirty(event_loop);
                     return;
                 }
@@ -5181,8 +5341,24 @@ impl ApplicationHandler<UserEvent> for App {
                 // pointer. It also means motion must NOT fall through to drive
                 // tab-drag, gutter-drag, terminal hover, or text selection beneath
                 // the overlay. Mirror the settings treatment for all of them.
+                // The dropdown / context menu (`gui::menu`) highlights the row under
+                // the pointer. Mirror the hovered row into `menu_sel` so mouse hover
+                // and keyboard nav share one selection, and repaint only when that
+                // row actually changes — not every pixel of motion across the panel.
+                if self.menu_open && !self.settings_open && !self.help_open {
+                    if let Some(action) = self.menu_hit_test(position.x, position.y) {
+                        let items: &[MenuAction] =
+                            self.menu_items.as_deref().unwrap_or(MenuAction::ALL);
+                        if let Some(idx) = items.iter().position(|&a| a == action)
+                            && idx != self.menu_sel
+                        {
+                            self.menu_sel = idx;
+                            self.mark_dirty(event_loop);
+                        }
+                    }
+                    return;
+                }
                 if self.settings_open
-                    || self.menu_open
                     || self.help_open
                     || self.pane_menu_open.is_some()
                 {
@@ -5230,15 +5406,18 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                 }
 
-                // Pane header hover: trigger a repaint whenever the pointer enters
-                // or leaves a pane header's ⋮ button, so the hover highlight tracks
-                // the pointer without spinning the event loop at rest (mark_dirty
-                // only queues one frame per monitor refresh).
+                // Pane header hover: repaint only on an enter/leave or ⋮-button
+                // edge, not on every pixel of motion — otherwise dragging the
+                // pointer across a header queues a frame per event for no visual
+                // change. Track the hovered header and diff it.
                 if self.is_split() {
-                    let in_header = self.pane_header_at(position.x, position.y).is_some();
-                    if in_header {
+                    let new_hover = self.pane_header_at(position.x, position.y);
+                    if new_hover != self.hovered_pane_header {
+                        self.hovered_pane_header = new_hover;
                         self.mark_dirty(event_loop);
                     }
+                } else if self.hovered_pane_header.is_some() {
+                    self.hovered_pane_header = None;
                 }
 
                 // Tab-bar hover highlighting: track the item under the pointer (only
@@ -5494,8 +5673,16 @@ impl ApplicationHandler<UserEvent> for App {
                         self.mark_dirty(event_loop);
                     }
                     // Left release: finish the drag; the selection persists for copy.
+                    // Copy-on-select: a completed selection is mirrored to the
+                    // clipboard immediately (the de-facto X11/terminal convention),
+                    // so a middle-click / Ctrl+Shift+V paste works without an
+                    // explicit copy. A no-op when nothing was actually selected.
                     (MouseButton::Left, false) => {
+                        let was_selecting = self.selecting;
                         self.selecting = false;
+                        if was_selecting {
+                            self.copy_selection();
+                        }
                     }
                     // Middle click pastes the clipboard (primary on X11 would be
                     // ideal, but arboard exposes only the standard clipboard).
@@ -5508,6 +5695,25 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::MouseWheel { delta, phase, .. } => {
                 use winit::event::TouchPhase;
+                // Help panel owns the wheel while open: scroll its keybinding list.
+                // The next `build_help` clamps `scroll` against the content height,
+                // so we just accumulate here (negative = scroll up toward the top).
+                if self.help_open {
+                    let line_px = self
+                        .renderer
+                        .as_ref()
+                        .map(|r| r.cell_metrics().height)
+                        .unwrap_or(20.0)
+                        .max(1.0);
+                    let dy = match delta {
+                        MouseScrollDelta::LineDelta(_, y) => y * line_px * 3.0,
+                        MouseScrollDelta::PixelDelta(p) => p.y as f32,
+                    };
+                    // Wheel-up (positive y) moves content up = decrease scroll.
+                    self.help_state.scroll = (self.help_state.scroll - dy).max(0.0);
+                    self.mark_dirty(event_loop);
+                    return;
+                }
                 // A touchpad gesture brackets its deltas with Started/Ended; reset
                 // the accumulators and the one-switch-per-swipe latch at those
                 // boundaries so each gesture is independent.
@@ -5612,7 +5818,16 @@ impl ApplicationHandler<UserEvent> for App {
                         // on by default and the alt screen has no scrollback of its
                         // own. ~3 lines per notch.
                         if let Some(pty) = &self.pty {
-                            let seq: &[u8] = if up { b"\x1b[A" } else { b"\x1b[B" };
+                            // DECCKM: when the app enabled application cursor-key
+                            // mode, arrow keys go out as SS3 (ESC O X), so the wheel
+                            // emulation must match or the pager sees the wrong code.
+                            let seq: &[u8] = if mode.contains(TermMode::APP_CURSOR) {
+                                if up { b"\x1bOA" } else { b"\x1bOB" }
+                            } else if up {
+                                b"\x1b[A"
+                            } else {
+                                b"\x1b[B"
+                            };
                             let n = count * 3;
                             let mut out = Vec::with_capacity(seq.len() * n);
                             for _ in 0..n {
@@ -5691,8 +5906,19 @@ impl ApplicationHandler<UserEvent> for App {
             gui::step_anims(&mut self.gui_anims, dt, 12.0);
             self.gui_anim_last = now;
             self.dirty = true;
+            // Drop settled animations so the map can't grow without bound across a
+            // long session (every transient hover/press inserts an entry). A widget
+            // re-creates its entry lazily on next access via `or_insert_with`, which
+            // seeds it AT the current target — so pruning a resting entry causes no
+            // animation restart / flicker.
+            self.gui_anims.retain(|_, a| !a.is_settled());
             true
         } else {
+            // Everything has settled: prune the whole map in one pass (same
+            // no-flicker rationale as above).
+            if !self.gui_anims.is_empty() {
+                self.gui_anims.retain(|_, a| !a.is_settled());
+            }
             self.gui_anim_last = now;
             false
         };
