@@ -113,7 +113,7 @@ struct Pending {
 
 /// Parsed `key=value,key=value` control block of a graphics command.
 #[derive(Clone)]
-struct Controls {
+pub(crate) struct Controls {
     action: Action,
     format: Format,
     id: u32,
