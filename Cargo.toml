@@ -102,7 +102,10 @@ assets = [
     ["assets/icons/glassy-512.png", "usr/share/icons/hicolor/512x512/apps/glassy.png", "644"],
     ["extra/glassy.desktop", "usr/share/applications/glassy.desktop", "644"],
     ["extra/glassy.1", "usr/share/man/man1/glassy.1", "644"],
+    ["terminfo/glassy.terminfo", "usr/share/doc/glassy/terminfo/glassy.terminfo", "644"],
 ]
+# Post-install script to compile and install terminfo.
+scripts = { postinst = "packaging/scripts/postinst.sh" }
 
 # ---------------------------------------------------------------------------
 # RPM packaging (cargo-generate-rpm).
