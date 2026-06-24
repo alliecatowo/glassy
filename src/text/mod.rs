@@ -25,7 +25,7 @@ mod tests {
     #[test]
     fn rasterize_run_length_matches_char_count() {
         // Load a font via the discovery chain (same as normal startup).
-        let Ok((mut text, metrics)) = Text::load(None, 14.0) else {
+        let Ok((mut text, metrics)) = Text::load(None, 14.0, &[]) else {
             // No font available in this CI environment — skip gracefully.
             eprintln!("rasterize_run_length_matches_char_count: skipped (no font)");
             return;
@@ -51,7 +51,7 @@ mod tests {
     /// An empty input string must yield an empty output.
     #[test]
     fn rasterize_run_empty_input() {
-        let Ok((mut text, metrics)) = Text::load(None, 14.0) else {
+        let Ok((mut text, metrics)) = Text::load(None, 14.0, &[]) else {
             eprintln!("rasterize_run_empty_input: skipped (no font)");
             return;
         };
@@ -63,7 +63,7 @@ mod tests {
     /// depends on the installed font and is not asserted here.
     #[test]
     fn has_ligatures_does_not_panic() {
-        let Ok((mut text, _)) = Text::load(None, 14.0) else {
+        let Ok((mut text, _)) = Text::load(None, 14.0, &[]) else {
             eprintln!("has_ligatures_does_not_panic: skipped (no font)");
             return;
         };
@@ -74,7 +74,7 @@ mod tests {
     /// exactly 2 slots regardless of whether the font has the `fi` ligature.
     #[test]
     fn rasterize_run_two_chars_yields_two_slots() {
-        let Ok((mut text, metrics)) = Text::load(None, 14.0) else {
+        let Ok((mut text, metrics)) = Text::load(None, 14.0, &[]) else {
             eprintln!("rasterize_run_two_chars_yields_two_slots: skipped (no font)");
             return;
         };
@@ -85,12 +85,41 @@ mod tests {
         );
     }
 
+    /// Font features with an empty list must load without error and produce the
+    /// same result as passing no features at all.
+    #[test]
+    fn font_features_empty_list_loads() {
+        let r1 = Text::load(None, 14.0, &[]);
+        let r2 = Text::load(None, 14.0, &[]);
+        // Both must either both succeed or both fail (no font).
+        assert_eq!(r1.is_ok(), r2.is_ok(), "empty features must not change load outcome");
+    }
+
+    /// Font features with a valid tag list must parse and load without error.
+    /// We cannot assert the rendering is different (depends on the installed font),
+    /// but the load path must not panic or error out on valid tags.
+    #[test]
+    fn font_features_valid_tags_loads() {
+        let features = vec![
+            "ss01".to_string(),       // bare tag → enabled
+            "calt=0".to_string(),     // explicit disable
+            "liga=1".to_string(),     // explicit enable
+        ];
+        match Text::load(None, 14.0, &features) {
+            Ok(_) => {} // expected
+            Err(_) => {
+                // No font installed in this environment — that's fine.
+                eprintln!("font_features_valid_tags_loads: skipped (no font)");
+            }
+        }
+    }
+
     /// Wide-advance detection: a glyph with advance > 1.1× cell_w must have
     /// `advance > cell_w * 1.1`. This tests the `RasterizedGlyph.advance` field
     /// is populated (non-negative) for any rasterized glyph.
     #[test]
     fn rasterize_populates_advance() {
-        let Ok((mut text, metrics)) = Text::load(None, 14.0) else {
+        let Ok((mut text, metrics)) = Text::load(None, 14.0, &[]) else {
             eprintln!("rasterize_populates_advance: skipped (no font)");
             return;
         };

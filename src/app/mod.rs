@@ -108,6 +108,12 @@ pub struct Config {
     /// per-run shaping pass and may not be desirable for all fonts. Only takes
     /// effect when the loaded font actually carries a `liga` GSUB feature.
     pub ligatures: bool,
+    /// Optional list of OpenType font feature tags to enable or disable during
+    /// shaping, e.g. `["ss01", "calt=0"]`. Each entry is either a bare 4-byte
+    /// tag (enabled, value=1) or `tag=<u32>` (explicit value; 0=disable).
+    /// Passed directly to cosmic-text `Attrs::font_features`. Defaults to empty
+    /// (all features left at their font-defined defaults).
+    pub font_features: Vec<String>,
     /// Working directory for the FIRST tab's shell, from a `cwd` config key or an
     /// activated `[profile.NAME]`. `None` opens in the inherited/default directory.
     pub initial_cwd: Option<std::path::PathBuf>,

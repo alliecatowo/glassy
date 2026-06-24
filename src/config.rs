@@ -21,6 +21,7 @@
 //! status_bar  = false                  # show status bar at the bottom (default off)
 //! pane_headers= true                   # show per-pane title bars + accent rail in splits (default on)
 //! ligatures   = false                  # enable OpenType ligature shaping across cells (default off)
+//! font_features = ss01, calt=0         # OpenType feature tags to force on/off (comma or space separated)
 //! cwd         = /home/me/projects      # working directory for the first tab's shell
 //! restore_session = false              # restore previous tabs/splits/cwds on launch
 //! ```
@@ -130,6 +131,7 @@ struct RawConfig {
     pane_headers: Option<bool>,
     word_separator: Option<String>,
     ligatures: Option<bool>,
+    font_features: Option<Vec<String>>,
     cwd: Option<String>,
     restore_session: Option<bool>,
     // Custom theme colors (hex format, e.g., "color.fg = #c0caf5")
@@ -226,6 +228,7 @@ impl RawConfig {
             pane_headers: self.pane_headers.unwrap_or(true),
             word_separator: self.word_separator.unwrap_or_default(),
             ligatures: self.ligatures.unwrap_or(false),
+            font_features: self.font_features.unwrap_or_default(),
             initial_cwd: self.cwd.filter(|s| !s.is_empty()).map(PathBuf::from),
             restore_session: self.restore_session.unwrap_or(false),
         };
@@ -480,6 +483,32 @@ fn apply_kv(key: &str, value: &str, raw: &mut RawConfig) -> Result<()> {
         }
         "ligatures" => {
             raw.ligatures = Some(parse_bool(value, "ligatures")?);
+        }
+        "font_features" => {
+            // Comma-or-space separated list of OpenType feature tags, e.g.
+            // "ss01, calt=0, dlig" or "ss01 calt=0".  Each token is a bare
+            // 4-char tag (enable) or "tag=N" (explicit value).  We validate
+            // that each tag is exactly 4 ASCII characters; the value (after =)
+            // must be a non-negative integer.  Unknown tags are forwarded as-is
+            // to cosmic-text and ignored by shaping engines that lack them.
+            let features: Vec<String> = value
+                .split(|c: char| c == ',' || c == ' ')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|token| {
+                    // Validate the tag portion (4 ASCII chars) and optional value.
+                    let tag = token.split('=').next().unwrap_or(token).trim();
+                    if tag.len() != 4 || !tag.is_ascii() {
+                        log::warn!(
+                            "glassy: ignoring invalid font_features entry '{}' \
+                             (tag must be exactly 4 ASCII characters)",
+                            token
+                        );
+                    }
+                    token.to_string()
+                })
+                .collect();
+            raw.font_features = Some(features);
         }
         "cwd" => {
             if !value.is_empty() {
@@ -810,6 +839,17 @@ fn parse_cli(args: impl Iterator<Item = String>, raw: &mut RawConfig) -> Result<
             }
             // `--profile=NAME` inline form (also pre-scanned in `resolve`).
             a if a.starts_with("--profile=") => {}
+            "--font-features" => {
+                let v = next_value(&mut args, "--font-features")?;
+                // Same grammar as the config key: comma-or-space separated tags.
+                let features: Vec<String> = v
+                    .split(|c: char| c == ',' || c == ' ')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .collect();
+                raw.font_features = Some(features);
+            }
             "--working-directory" | "--cwd" => {
                 raw.cwd = Some(next_value(&mut args, "--working-directory")?);
             }
@@ -874,6 +914,7 @@ OPTIONS:
     --status-bar <BOOL>    Show status bar at the bottom (default false)
     --pane-headers <BOOL>  Show per-pane title bars in splits (default true)
     --word-separator <STR> Extra word separators for text selection
+    --font-features <LIST> OpenType feature tags, e.g. \"ss01,calt=0\" (comma/space separated)
     --import-theme <PATH>  Import Alacritty/base16 theme from TOML/YAML file
     --profile <NAME>       Activate a [profile.NAME] config section's overrides
     --cwd <PATH>           Working directory for the first tab's shell
@@ -1038,5 +1079,34 @@ opacity = 0.80
         // Default (unset) is on.
         let settings = RawConfig::default().into_settings().unwrap();
         assert!(settings.config.pane_headers);
+    }
+
+    #[test]
+    fn font_features_parses_comma_separated() {
+        let mut raw = RawConfig::default();
+        parse_config_file("font_features = ss01, calt=0, dlig\n", &mut raw).unwrap();
+        let feats = raw.font_features.as_ref().expect("font_features should be set");
+        assert!(feats.contains(&"ss01".to_string()), "ss01 should be present");
+        assert!(feats.contains(&"calt=0".to_string()), "calt=0 should be present");
+        assert!(feats.contains(&"dlig".to_string()), "dlig should be present");
+    }
+
+    #[test]
+    fn font_features_defaults_empty() {
+        let settings = RawConfig::default().into_settings().unwrap();
+        assert!(
+            settings.config.font_features.is_empty(),
+            "font_features must default to empty"
+        );
+    }
+
+    #[test]
+    fn font_features_space_separated_also_works() {
+        let mut raw = RawConfig::default();
+        parse_config_file("font_features = liga ss01\n", &mut raw).unwrap();
+        let feats = raw.font_features.as_ref().expect("font_features should be set");
+        assert_eq!(feats.len(), 2);
+        assert!(feats.contains(&"liga".to_string()));
+        assert!(feats.contains(&"ss01".to_string()));
     }
 }

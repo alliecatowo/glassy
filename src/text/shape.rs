@@ -5,8 +5,8 @@
 
 use anyhow::Result;
 use cosmic_text::{
-    Attrs, Buffer, Family, FontSystem, Metrics, Shaping, Style, SwashCache, SwashContent, Weight,
-    fontdb,
+    Attrs, Buffer, Family, FeatureTag, FontFeatures, FontSystem, Metrics, Shaping, Style,
+    SwashCache, SwashContent, Weight, fontdb,
 };
 
 use super::discover::{
@@ -78,15 +78,61 @@ pub struct Text {
     /// The resolved font family. We store the name as an owned `String` because
     /// `Family::Name` borrows; `attrs()` rebuilds the borrowing `Family` per call.
     pub(super) family: FamilyOwned,
+    /// Pre-parsed OpenType font features applied to every shaping call.  Empty
+    /// when the user did not request any features. Built once at load time from
+    /// the config's `font_features` list; re-applied on every `build_attrs` call.
+    font_features: FontFeatures,
 }
 
-/// Build shaping attributes for the given style against the resolved family.
-fn build_attrs<'a>(family: Family<'a>, bold: bool, italic: bool) -> Attrs<'a> {
+/// Build shaping attributes for the given style against the resolved family,
+/// applying any caller-supplied font features (OpenType feature overrides).
+fn build_attrs<'a>(family: Family<'a>, bold: bool, italic: bool, features: &FontFeatures) -> Attrs<'a> {
     let mut attrs = Attrs::new();
     attrs.family = family;
     attrs.weight = if bold { Weight::BOLD } else { Weight::NORMAL };
     attrs.style = if italic { Style::Italic } else { Style::Normal };
+    if !features.features.is_empty() {
+        attrs = attrs.font_features(features.clone());
+    }
     attrs
+}
+
+/// Parse a list of raw feature-tag strings (from the config) into a
+/// `FontFeatures` struct. Each entry is either:
+///   - a bare 4-char tag, e.g. `"ss01"` (enabled, value = 1), or
+///   - `"tag=N"` where N is a `u32`, e.g. `"calt=0"` (disabled).
+/// Entries that cannot be parsed are logged and skipped.
+fn parse_font_features(raw: &[String]) -> FontFeatures {
+    let mut ff = FontFeatures::new();
+    for entry in raw {
+        let (tag_str, val) = if let Some((t, v)) = entry.split_once('=') {
+            let v: u32 = match v.trim().parse() {
+                Ok(n) => n,
+                Err(_) => {
+                    log::warn!(
+                        "glassy: font_features: invalid value in '{}' (expected u32 after '='); skipping",
+                        entry
+                    );
+                    continue;
+                }
+            };
+            (t.trim(), v)
+        } else {
+            (entry.trim(), 1u32)
+        };
+        let bytes = tag_str.as_bytes();
+        if bytes.len() != 4 || !tag_str.is_ascii() {
+            log::warn!(
+                "glassy: font_features: tag '{}' must be exactly 4 ASCII characters; skipping",
+                tag_str
+            );
+            continue;
+        }
+        let tag = FeatureTag::new(bytes.try_into().unwrap());
+        ff.set(tag, val);
+        log::debug!("glassy: font_feature '{}' = {}", tag_str, val);
+    }
+    ff
 }
 
 /// Best-effort fallback advance when shaping yields no measurable glyph.
@@ -101,7 +147,13 @@ impl Text {
     /// it is tried first (resolved via fontconfig, verified to actually be that
     /// family); discovery then falls back to the curated list and the rest of the
     /// chain so a typo'd or absent family still yields a usable monospace font.
-    pub fn load(family: Option<&str>, font_px: f32) -> Result<(Text, CellMetrics)> {
+    ///
+    /// `font_features` is an optional list of raw OpenType feature-tag strings
+    /// from the `font_features` config key (e.g. `["ss01", "calt=0"]`). When
+    /// non-empty, each feature is parsed and applied to every shaping call so
+    /// callers do not need to post-process `Attrs` themselves. `None` / empty
+    /// slice means "use the font's defaults" (nothing forced on or off).
+    pub fn load(family: Option<&str>, font_px: f32, font_features: &[String]) -> Result<(Text, CellMetrics)> {
         // Gather candidate *producers* in priority order (explicit override,
         // requested family, curated families verified via fontconfig, generic
         // monospace, known paths). Each producer is a closure that only runs its
@@ -171,6 +223,7 @@ impl Text {
             swash_cache: SwashCache::new(),
             buffer: Buffer::new_empty(metrics),
             family,
+            font_features: parse_font_features(font_features),
         };
 
         let cell = text.measure_cell(font_px, line_height);
@@ -193,7 +246,7 @@ impl Text {
     /// the baseline (ascent) for one line, plus the decoration (underline /
     /// strikeout) stroke positions read from the primary font's metrics.
     fn measure_cell(&mut self, font_px: f32, line_height: f32) -> CellMetrics {
-        let attrs = build_attrs(self.family.as_family(), false, false);
+        let attrs = build_attrs(self.family.as_family(), false, false, &self.font_features);
         self.buffer.set_text("MM", &attrs, Shaping::Advanced, None);
         self.buffer.shape_until_scroll(&mut self.font_system, false);
 
@@ -313,7 +366,7 @@ impl Text {
     fn build_glyphs(&mut self, text: &str, bold: bool, italic: bool) -> Vec<RasterizedGlyph> {
         // `family` borrows `self`, so capture the borrowed `Family` before the
         // `&mut self.font_system` borrows below; they touch disjoint fields.
-        let attrs = build_attrs(self.family.as_family(), bold, italic);
+        let attrs = build_attrs(self.family.as_family(), bold, italic, &self.font_features);
         self.buffer.set_text(text, &attrs, Shaping::Advanced, None);
         self.buffer.shape_until_scroll(&mut self.font_system, false);
 
@@ -389,7 +442,7 @@ impl Text {
             return Vec::new();
         }
 
-        let attrs = build_attrs(self.family.as_family(), bold, italic);
+        let attrs = build_attrs(self.family.as_family(), bold, italic, &self.font_features);
         self.buffer.set_text(text, &attrs, Shaping::Advanced, None);
         self.buffer.shape_until_scroll(&mut self.font_system, false);
 
@@ -504,7 +557,7 @@ impl Text {
     /// collapses "fi" into a single ligature glyph; a font without liga returns two
     /// separate glyph records.
     pub fn has_ligatures(&mut self) -> bool {
-        let attrs = build_attrs(self.family.as_family(), false, false);
+        let attrs = build_attrs(self.family.as_family(), false, false, &self.font_features);
         self.buffer.set_text("fi", &attrs, Shaping::Advanced, None);
         self.buffer.shape_until_scroll(&mut self.font_system, false);
 

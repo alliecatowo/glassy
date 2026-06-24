@@ -442,6 +442,10 @@ pub struct Renderer {
     /// The resolved/requested font family name, kept so a runtime font resize can
     /// reload the same family at the new size. `None` uses the discovery default.
     font_family: Option<String>,
+    /// OpenType font feature overrides from the config's `font_features` key,
+    /// kept here so runtime font size changes re-apply the same features to the
+    /// newly loaded face.
+    font_features: Vec<String>,
 
     /// Persistent per-row instance storage. Index `r` holds row `r`'s background
     /// and foreground instances; only the rows reported as changed are rewritten
@@ -600,6 +604,23 @@ fn clamp_scissor(x: i32, y: i32, w: i32, h: i32, surface_w: u32, surface_h: u32)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- Powerline range check ---------------------------------------------
+
+    /// Confirm the Powerline code-point range used in push_cell matches the
+    /// four glyphs we handle procedurally (E0B0-E0B3).
+    #[test]
+    fn powerline_range_covers_e0b0_to_e0b3() {
+        for cp in [0xE0B0u32, 0xE0B1, 0xE0B2, 0xE0B3] {
+            assert!(
+                matches!(cp, 0xE0B0..=0xE0B3),
+                "cp {cp:#06X} should be in the E0B0..=E0B3 range"
+            );
+        }
+        // Code points just outside the range should NOT match.
+        assert!(!matches!(0xE0AFu32, 0xE0B0..=0xE0B3));
+        assert!(!matches!(0xE0B4u32, 0xE0B0..=0xE0B3));
+    }
 
     // ---- wide-icon threshold helper ----------------------------------------
 

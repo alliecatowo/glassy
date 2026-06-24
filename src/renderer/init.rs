@@ -8,6 +8,7 @@ impl Renderer {
         font_family: Option<String>,
         font_px: f32,
         opacity: f32,
+        font_features: Vec<String>,
     ) -> Result<Renderer> {
         let t = std::time::Instant::now();
         let ms = |t: std::time::Instant| t.elapsed().as_secs_f64() * 1000.0;
@@ -91,7 +92,7 @@ impl Renderer {
 
         // Font load runs concurrently with the GPU thread above.
         let (text, metrics) =
-            Text::load(font_family.as_deref(), font_px).context("loading font and cell metrics")?;
+            Text::load(font_family.as_deref(), font_px, &font_features).context("loading font and cell metrics")?;
         log::info!("  renderer: font loaded {:.1} ms", ms(t));
 
         // Recover the surface from the Arc now that the thread is done (or about to
@@ -624,6 +625,7 @@ impl Renderer {
             pad_override: None,
             font_px,
             font_family,
+            font_features,
             rows: Vec::new(),
             cur_row: 0,
             bg_row_offsets: Vec::new(),
