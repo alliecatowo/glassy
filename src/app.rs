@@ -338,39 +338,6 @@ const HELP_LINES: &[&str] = &[
     "  F1 or Esc         Close this help",
 ];
 
-/// Build the lines shown in the Ctrl+, settings overlay from the live config and
-/// the renderer's current physical font size. Read-only for now: it surfaces the
-/// effective settings + where to change them. `&Config` is taken by reference so
-/// the caller can pass `&self.config` alongside a live `&mut Renderer` borrow.
-fn settings_lines(config: &Config, font_px: f32, sel: usize, saved: bool) -> Vec<String> {
-    let family = config
-        .font_family
-        .as_deref()
-        .unwrap_or("FiraCode Nerd Font (default)");
-    let bell = if config.bell_visual { "visual" } else { "off" };
-    // The three adjustable rows; the selected one gets a ▸ cursor.
-    let mark = |row: usize| if row == sel { "▸" } else { " " };
-    let saved_line = if saved {
-        "  ✓ saved to config"
-    } else {
-        "  ↑↓ select · ←→ change · Enter save · Esc close"
-    };
-    vec![
-        "  glassy — settings".to_string(),
-        String::new(),
-        format!("{} Font size    {font_px:.0} px", mark(0)),
-        format!("{} Opacity      {:.2}", mark(1), config.opacity),
-        format!("{} Bell         {bell}", mark(2)),
-        format!("{} Theme        {}", mark(3), config.theme),
-        String::new(),
-        format!("  Font         {family}"),
-        format!("  Scrollback   {} lines", config.scrollback),
-        format!("  Config       {}", config_display_path()),
-        String::new(),
-        saved_line.to_string(),
-    ]
-}
-
 /// Display path of the config file for the settings overlay.
 fn config_display_path() -> String {
     crate::config::path()
@@ -811,8 +778,12 @@ pub struct App {
     help_open: bool,
     /// Whether the Ctrl+, settings overlay is currently shown.
     settings_open: bool,
-    /// Selected adjustable row in the settings overlay (0=font, 1=opacity, 2=bell).
-    settings_sel: usize,
+    /// Which settings dropdown (theme / font family) is currently expanded.
+    /// Keyboard focus is tracked by the shared `gui_focused` widget id.
+    settings_drop: gui::SettingsDrop,
+    /// Bounding rect of the settings panel from the last paint, for click-outside
+    /// dismissal in the mouse handler.
+    settings_panel: gui::Rect,
     /// True briefly after a successful settings save, for the overlay's status line.
     settings_saved: bool,
     /// Whether the ≡ hamburger dropdown menu is currently shown.
@@ -956,7 +927,8 @@ impl App {
             swipe_consumed: false,
             help_open: false,
             settings_open: false,
-            settings_sel: 0,
+            settings_drop: gui::SettingsDrop::None,
+            settings_panel: gui::Rect::default(),
             settings_saved: false,
             menu_open: false,
             menu_sel: 0,
@@ -1121,9 +1093,7 @@ impl App {
             }
             MenuAction::NewTab => self.new_tab(event_loop),
             MenuAction::Settings => {
-                self.settings_open = true;
-                self.settings_sel = 0;
-                self.settings_saved = false;
+                self.open_settings();
                 self.mark_dirty(event_loop);
             }
             MenuAction::Help => {
@@ -1297,9 +1267,11 @@ impl App {
                 self.mark_dirty(event_loop);
             }
             Some(StripItem::Settings) => {
-                self.settings_open = !self.settings_open;
-                self.settings_sel = 0;
-                self.settings_saved = false;
+                if self.settings_open {
+                    self.settings_open = false;
+                } else {
+                    self.open_settings();
+                }
                 self.help_open = false;
                 self.menu_open = false;
                 self.force_full_redraw = true;
@@ -2813,6 +2785,166 @@ impl App {
         let _ = ui.scrollbar(gui::id("demo/scroll"), track, met.row_h * 5.0, list_h, 0.0);
     }
 
+    /// Paint the settings form (§3.5) as a centered glass panel over a full-screen
+    /// scrim, returning the interaction events for the caller to apply. Static (no
+    /// `&self`) so it composes with the live `&mut Renderer` borrow held in
+    /// `render`/`render_split`. Mirrors `paint_gui_demo`'s threading of the
+    /// App-owned persistent GUI state.
+    #[allow(clippy::too_many_arguments)]
+    fn paint_settings(
+        renderer: &mut Renderer,
+        config: &Config,
+        font_px: f32,
+        bell_idx: usize,
+        font_choices: &[String],
+        font_idx: usize,
+        config_path: &str,
+        open: gui::SettingsDrop,
+        saved: bool,
+        mouse: (f32, f32),
+        mouse_down: bool,
+        clicked: bool,
+        gui_pressed: &mut Option<gui::WidgetId>,
+        gui_focused: &mut Option<gui::WidgetId>,
+        gui_anims: &mut std::collections::HashMap<gui::WidgetId, gui::Anim>,
+    ) -> gui::SettingsEvents {
+        // Theme names + per-theme accent swatches (the cursor color each theme
+        // deliberately picks to pop).
+        let theme_names = color::THEME_NAMES;
+        let swatches: Vec<[f32; 4]> = theme_names
+            .iter()
+            .map(|n| match color::theme_by_name(n) {
+                Some(t) => [
+                    t.cursor.r as f32 / 255.0,
+                    t.cursor.g as f32 / 255.0,
+                    t.cursor.b as f32 / 255.0,
+                    1.0,
+                ],
+                None => color::accent(),
+            })
+            .collect();
+        let theme_idx = theme_names
+            .iter()
+            .position(|&n| n == config.theme)
+            .unwrap_or(0);
+        let font_refs: Vec<&str> = font_choices.iter().map(|s| s.as_str()).collect();
+        let font_display = config.font_family.as_deref().unwrap_or("default");
+
+        let (sw, sh) = renderer.surface_size();
+        let (cw, ch) = {
+            let m = renderer.cell_metrics();
+            (m.width, m.height)
+        };
+        let mut ui = gui::Ui::new(
+            renderer,
+            cw,
+            ch,
+            mouse,
+            mouse_down,
+            clicked,
+            gui_pressed,
+            gui_focused,
+            gui_anims,
+        );
+        let view = gui::SettingsView {
+            font_px,
+            opacity: config.opacity,
+            bell: bell_idx,
+            theme_idx,
+            theme_names,
+            theme_swatches: &swatches,
+            font_family: font_display,
+            font_names: &font_refs,
+            font_idx,
+            scrollback: config.scrollback,
+            config_path,
+            open,
+            saved,
+        };
+        ui.build_settings((sw as f32, sh as f32), &view)
+    }
+
+    /// Apply the settings-form events to the live config + renderer + theme. Runs
+    /// after `paint_settings` (the `Ui` borrow is dropped), driving the existing
+    /// effects so opacity / font / theme preview immediately. Requests a repaint
+    /// directly via the window (no `event_loop` is available inside `render`).
+    fn apply_settings_events(&mut self, ev: gui::SettingsEvents) {
+        // Remember the panel bounds for click-outside dismissal next frame.
+        self.settings_panel = ev.panel;
+        let mut changed = false;
+        if ev.font_delta > 0 {
+            self.resize_font(FontStep::Inc);
+            changed = true;
+        } else if ev.font_delta < 0 {
+            self.resize_font(FontStep::Dec);
+            changed = true;
+        }
+        if let Some(o) = ev.opacity {
+            self.config.opacity = o;
+            if let Some(r) = self.renderer.as_mut() {
+                r.set_opacity(o);
+            }
+            changed = true;
+        }
+        if let Some(b) = ev.bell {
+            self.set_bell_index(b);
+            changed = true;
+        }
+        if ev.theme_toggle {
+            self.settings_drop = if self.settings_drop == gui::SettingsDrop::Theme {
+                gui::SettingsDrop::None
+            } else {
+                gui::SettingsDrop::Theme
+            };
+            changed = true;
+        }
+        if let Some(t) = ev.theme_pick {
+            self.set_theme_by_idx(t);
+            self.settings_drop = gui::SettingsDrop::None;
+            changed = true;
+        }
+        if ev.font_toggle {
+            self.settings_drop = if self.settings_drop == gui::SettingsDrop::Font {
+                gui::SettingsDrop::None
+            } else {
+                gui::SettingsDrop::Font
+            };
+            changed = true;
+        }
+        if let Some(f) = ev.font_pick {
+            self.set_font_family_index(f);
+            self.settings_drop = gui::SettingsDrop::None;
+            changed = true;
+        }
+        if ev.scrollback_delta != 0 {
+            self.adjust_scrollback(ev.scrollback_delta);
+            changed = true;
+        }
+        if ev.copy_path {
+            self.copy_config_path();
+            changed = true;
+        }
+        if ev.open_path {
+            self.open_config_path();
+        }
+        if ev.save {
+            self.save_settings();
+            changed = true;
+        }
+        if ev.close {
+            self.settings_open = false;
+            self.settings_drop = gui::SettingsDrop::None;
+            changed = true;
+        }
+        if changed {
+            self.force_full_redraw = true;
+            self.dirty = true;
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
+        }
+    }
+
     fn render(&mut self) {
         // Split tabs take the dedicated multi-pane path; a single-pane tab (the
         // common case) falls through to the byte-identical fast path below.
@@ -2881,6 +3013,24 @@ impl App {
         };
         let sb_focused = self.focused;
         let sb_surface_h = self.renderer.as_ref().map(|r| r.surface_size().1).unwrap_or(0);
+
+        // Settings-form inputs (whole-`self` method calls) snapshotted BEFORE the
+        // disjoint `renderer`/`pty` borrows below.
+        let settings_inputs = if self.settings_open {
+            Some((
+                self.font_family_choices(),
+                self.font_family_index(),
+                self.bell_index(),
+                config_display_path(),
+                self.settings_drop,
+                self.settings_saved,
+                (self.mouse_px.0 as f32, self.mouse_px.1 as f32),
+                self.held_button == Some(0),
+                self.gui_click_edge,
+            ))
+        } else {
+            None
+        };
 
         let (Some(renderer), Some(pty)) = (self.renderer.as_mut(), self.pty.as_ref()) else {
             return;
@@ -3233,16 +3383,40 @@ impl App {
         );
 
         // Modal overlays (help / settings): centered panels over a dimmed backdrop.
-        // Rebuild every screen row (cheap — only while open, and the screen is
-        // static), replacing terminal content so nothing bleeds through. Settings
-        // wins if both are somehow set.
-        if self.settings_open {
-            // `&self.config` is a disjoint field borrow, so it coexists with the
-            // live `renderer` (self.renderer) mutable borrow.
-            let lines =
-                settings_lines(&self.config, renderer.font_px(), self.settings_sel, self.settings_saved);
-            let refs: Vec<&str> = lines.iter().map(|s| s.as_str()).collect();
-            draw_modal(renderer, self.rows, self.cols, &refs);
+        // The settings form is a real GUI panel (§3.5) drawn via the overlay
+        // pipeline; its events are captured here (disjoint field borrows coexist
+        // with the live `renderer` borrow) and applied after the GPU submit below.
+        let mut settings_events: Option<gui::SettingsEvents> = None;
+        if let Some((
+            ref font_choices,
+            font_idx,
+            bell_idx,
+            ref cfg_path,
+            drop,
+            saved,
+            mouse,
+            mouse_down,
+            click_edge,
+        )) = settings_inputs
+        {
+            let font_px = renderer.font_px();
+            settings_events = Some(Self::paint_settings(
+                renderer,
+                &self.config,
+                font_px,
+                bell_idx,
+                font_choices,
+                font_idx,
+                cfg_path,
+                drop,
+                saved,
+                mouse,
+                mouse_down,
+                click_edge,
+                &mut self.gui_pressed,
+                &mut self.gui_focused,
+                &mut self.gui_anims,
+            ));
         } else if self.help_open {
             draw_modal(renderer, self.rows, self.cols, HELP_LINES);
         } else if self.menu_open {
@@ -3286,7 +3460,11 @@ impl App {
         self.prev_display_offset = display_offset;
         self.prev_has_selection = has_selection;
         self.force_full_redraw = false;
-        // The chrome paint consumed this frame's click edge.
+        // The chrome paint consumed this frame's click edge; if it was a release
+        // edge, also drop the press latch now that the click has been resolved.
+        if self.gui_click_edge {
+            self.gui_pressed = None;
+        }
         self.gui_click_edge = false;
 
         // The renderer self-heals lost/outdated surfaces internally. If a frame is
@@ -3322,6 +3500,13 @@ impl App {
         }
 
         self.dirty = false;
+
+        // Apply settings-form interactions now the renderer borrow has ended, so
+        // opacity / font / theme preview live and Save/Close take effect. Deferred
+        // here (after present) because applying mutates `self.renderer`/config.
+        if let Some(ev) = settings_events {
+            self.apply_settings_events(ev);
+        }
     }
 
     /// Render a split (multi-pane) tab via the renderer's scissored multi-pane
@@ -3437,6 +3622,25 @@ impl App {
             c
         };
         let gutter_tol = Self::GUTTER_TOL;
+
+        // Settings-form inputs (whole-`self` method calls) snapshotted BEFORE the
+        // disjoint field borrows below, so the form can be painted via the live
+        // renderer borrow without routing through `self`.
+        let settings_inputs = if self.settings_open {
+            Some((
+                self.font_family_choices(),
+                self.font_family_index(),
+                self.bell_index(),
+                config_display_path(),
+                self.settings_drop,
+                self.settings_saved,
+                (self.mouse_px.0 as f32, self.mouse_px.1 as f32),
+                self.held_button == Some(0),
+                self.gui_click_edge,
+            ))
+        } else {
+            None
+        };
 
         // Disjoint field borrows: `renderer` (mut), `panes`/`pty` (shared) are
         // distinct fields, so the borrow checker allows them together as long as
@@ -3556,12 +3760,60 @@ impl App {
             sb_focused,
         );
 
+        // Settings form (§3.5): drawn over the split via the overlay pipeline,
+        // events captured here (disjoint `&self.config` borrow) and applied after
+        // the GPU submit below.
+        let mut settings_events: Option<gui::SettingsEvents> = None;
+        if let Some((
+            ref font_choices,
+            font_idx,
+            bell_idx,
+            ref cfg_path,
+            drop,
+            saved,
+            mouse,
+            mouse_down,
+            click_edge,
+        )) = settings_inputs
+        {
+            let font_px = renderer.font_px();
+            settings_events = Some(Self::paint_settings(
+                renderer,
+                &self.config,
+                font_px,
+                bell_idx,
+                font_choices,
+                font_idx,
+                cfg_path,
+                drop,
+                saved,
+                mouse,
+                mouse_down,
+                click_edge,
+                &mut self.gui_pressed,
+                &mut self.gui_focused,
+                &mut self.gui_anims,
+            ));
+        }
+
         if let Err(err) = renderer.render_multi() {
             log::debug!("split frame dropped: {err:?}");
             self.force_full_redraw = true;
             if let Some(w) = &self.window {
                 w.request_redraw();
             }
+        }
+
+        // The chrome paint consumed this frame's click edge (the single-pane path
+        // resets it too); on a release edge also drop the press latch.
+        if self.gui_click_edge {
+            self.gui_pressed = None;
+        }
+        self.gui_click_edge = false;
+
+        // Apply settings-form interactions now the renderer borrow has ended.
+        if let Some(ev) = settings_events {
+            self.apply_settings_events(ev);
         }
     }
 
@@ -3870,46 +4122,247 @@ impl App {
         }
     }
 
-    /// Handle a keypress while the settings overlay is open: arrow-key navigation
-    /// + adjustment, Enter/`s` to save. Other keys are consumed (ignored).
+    /// The keyboard tab order of the settings form, in declaration order. These
+    /// mirror the widget ids emitted by [`gui::Ui::build_settings`] and are used
+    /// for Tab / Shift+Tab / Up / Down focus movement (the form itself collects
+    /// the live order each paint, but key handling runs between paints so it walks
+    /// this fixed list — identical ordering keeps focus stable).
+    fn settings_focus_order() -> [gui::WidgetId; 8] {
+        [
+            gui::id("settings/font_size"),
+            gui::id("settings/opacity"),
+            gui::id("settings/bell"),
+            gui::id("settings/theme"),
+            gui::id("settings/font_family"),
+            gui::id("settings/scrollback"),
+            gui::id("settings/config"),
+            gui::id("settings/save"),
+        ]
+    }
+
+    /// Open the settings form: focus the first control and clear transient state.
+    /// Forces a full rebuild so the glass panel composites over freshly-painted
+    /// terminal rows (the `push_overlay_px` invariant).
+    fn open_settings(&mut self) {
+        self.settings_open = true;
+        self.settings_drop = gui::SettingsDrop::None;
+        self.settings_saved = false;
+        self.gui_focused = Some(Self::settings_focus_order()[0]);
+        self.force_full_redraw = true;
+    }
+
+    /// Move settings keyboard focus by `dir` (+1 forward / -1 back) through
+    /// [`Self::settings_focus_order`], wrapping at the ends.
+    fn settings_move_focus(&mut self, dir: i32) {
+        let order = Self::settings_focus_order();
+        let cur = order.iter().position(|&w| Some(w) == self.gui_focused).unwrap_or(0);
+        let n = order.len() as i32;
+        let next = (cur as i32 + dir).rem_euclid(n) as usize;
+        self.gui_focused = Some(order[next]);
+        self.settings_saved = false;
+    }
+
+    /// Handle a keypress while the settings form is open: Tab/Shift+Tab + Up/Down
+    /// move focus, Left/Right (and -/+) adjust the focused control, Enter saves,
+    /// and Esc (handled by the caller) closes. Other keys are consumed.
     fn handle_settings_key(&mut self, key: Key, event_loop: &ActiveEventLoop) {
-        const ROWS: usize = 4; // font, opacity, bell, theme
+        let shift = self.mods.shift_key();
         match key {
-            Key::Named(NamedKey::ArrowUp) => {
-                self.settings_sel = (self.settings_sel + ROWS - 1) % ROWS;
-                self.settings_saved = false;
+            Key::Named(NamedKey::Tab) => self.settings_move_focus(if shift { -1 } else { 1 }),
+            Key::Named(NamedKey::ArrowUp) => self.settings_move_focus(-1),
+            Key::Named(NamedKey::ArrowDown) => self.settings_move_focus(1),
+            Key::Named(NamedKey::ArrowLeft) => self.settings_adjust_focused(-1),
+            Key::Named(NamedKey::ArrowRight) => self.settings_adjust_focused(1),
+            Key::Character(ref s) if s.as_str() == "-" => self.settings_adjust_focused(-1),
+            Key::Character(ref s) if s.as_str() == "+" || s.as_str() == "=" => {
+                self.settings_adjust_focused(1)
             }
-            Key::Named(NamedKey::ArrowDown) => {
-                self.settings_sel = (self.settings_sel + 1) % ROWS;
-                self.settings_saved = false;
+            Key::Named(NamedKey::Enter) | Key::Named(NamedKey::Space) => {
+                self.settings_activate_focused()
             }
-            Key::Named(NamedKey::ArrowLeft) => self.adjust_setting(-1),
-            Key::Named(NamedKey::ArrowRight) => self.adjust_setting(1),
-            Key::Named(NamedKey::Enter) => self.save_settings(),
-            Key::Character(ref s) if s.as_str() == "s" => self.save_settings(),
             _ => return,
         }
         self.force_full_redraw = true;
         self.mark_dirty(event_loop);
     }
 
-    /// Adjust the selected setting by `dir` (-1/+1). Font + opacity apply live;
-    /// bell toggles. None persist until [`App::save_settings`].
-    fn adjust_setting(&mut self, dir: i32) {
+    /// Adjust the currently-focused settings control by `dir` (-1/+1). Font,
+    /// opacity, theme, and font-family apply live; bell + scrollback update the
+    /// config. None persist until [`App::save_settings`].
+    fn settings_adjust_focused(&mut self, dir: i32) {
         self.settings_saved = false;
-        match self.settings_sel {
-            0 => self.resize_font(if dir > 0 { FontStep::Inc } else { FontStep::Dec }),
-            1 => {
-                let o = (self.config.opacity + dir as f32 * 0.05).clamp(0.0, 1.0);
-                self.config.opacity = o;
-                if let Some(r) = self.renderer.as_mut() {
-                    r.set_opacity(o);
-                }
+        let f = self.gui_focused;
+        if f == Some(gui::id("settings/font_size")) {
+            self.resize_font(if dir > 0 { FontStep::Inc } else { FontStep::Dec });
+        } else if f == Some(gui::id("settings/opacity")) {
+            let o = (self.config.opacity + dir as f32 * 0.05).clamp(0.0, 1.0);
+            self.config.opacity = o;
+            if let Some(r) = self.renderer.as_mut() {
+                r.set_opacity(o);
             }
-            2 => self.config.bell_visual = !self.config.bell_visual,
-            3 => self.cycle_theme(dir),
-            _ => {}
+        } else if f == Some(gui::id("settings/bell")) {
+            let cur = self.bell_index() as i32;
+            let n = 3;
+            self.set_bell_index(((cur + dir).rem_euclid(n)) as usize);
+        } else if f == Some(gui::id("settings/theme")) {
+            self.cycle_theme(dir);
+        } else if f == Some(gui::id("settings/font_family")) {
+            self.cycle_font_family(dir);
+        } else if f == Some(gui::id("settings/scrollback")) {
+            self.adjust_scrollback(dir);
         }
+    }
+
+    /// Enter/Space on the focused control: Save activates, the config field copies
+    /// its path, otherwise it opens the focused dropdown (theme / font).
+    fn settings_activate_focused(&mut self) {
+        let f = self.gui_focused;
+        if f == Some(gui::id("settings/save")) {
+            self.save_settings();
+        } else if f == Some(gui::id("settings/config")) {
+            self.copy_config_path();
+        } else if f == Some(gui::id("settings/theme")) {
+            self.settings_drop = if self.settings_drop == gui::SettingsDrop::Theme {
+                gui::SettingsDrop::None
+            } else {
+                gui::SettingsDrop::Theme
+            };
+        } else if f == Some(gui::id("settings/font_family")) {
+            self.settings_drop = if self.settings_drop == gui::SettingsDrop::Font {
+                gui::SettingsDrop::None
+            } else {
+                gui::SettingsDrop::Font
+            };
+        } else {
+            self.save_settings();
+        }
+    }
+
+    /// Bell mode as a segmented index: 0 = Off, 1 = Visual, 2 = Audible.
+    fn bell_index(&self) -> usize {
+        if self.config.bell_audible {
+            2
+        } else if self.config.bell_visual {
+            1
+        } else {
+            0
+        }
+    }
+
+    /// Set the bell mode from a segmented index (Off / Visual / Audible).
+    fn set_bell_index(&mut self, idx: usize) {
+        match idx {
+            0 => {
+                self.config.bell_visual = false;
+                self.config.bell_audible = false;
+            }
+            2 => {
+                self.config.bell_visual = false;
+                self.config.bell_audible = true;
+            }
+            _ => {
+                self.config.bell_visual = true;
+                self.config.bell_audible = false;
+            }
+        }
+    }
+
+    /// The font-family choices shown in the settings dropdown: a small curated set
+    /// of common monospace families, always including the active selection so the
+    /// current value is selectable + has a checkmark. Index 0 is "default".
+    fn font_family_choices(&self) -> Vec<String> {
+        let mut names: Vec<String> = vec!["default".to_string()];
+        for f in [
+            "FiraCode Nerd Font",
+            "JetBrainsMono Nerd Font",
+            "Hack Nerd Font",
+            "DejaVu Sans Mono",
+            "Liberation Mono",
+            "monospace",
+        ] {
+            names.push(f.to_string());
+        }
+        if let Some(cur) = self.config.font_family.as_deref()
+            && !names.iter().any(|n| n == cur)
+        {
+            names.push(cur.to_string());
+        }
+        names
+    }
+
+    /// The index of the active font family within [`Self::font_family_choices`]
+    /// (0 = "default" when unset).
+    fn font_family_index(&self) -> usize {
+        let choices = self.font_family_choices();
+        match self.config.font_family.as_deref() {
+            None => 0,
+            Some(cur) => choices.iter().position(|n| n == cur).unwrap_or(0),
+        }
+    }
+
+    /// Select a font family by its index into [`Self::font_family_choices`].
+    /// Index 0 clears to the discovery default. Persisted on Save and applied on
+    /// the next launch (live font reload is out of scope for this layer).
+    fn set_font_family_index(&mut self, idx: usize) {
+        let choices = self.font_family_choices();
+        let Some(name) = choices.get(idx) else { return };
+        self.config.font_family = if name == "default" {
+            None
+        } else {
+            Some(name.clone())
+        };
+        self.settings_saved = false;
+    }
+
+    /// Cycle the font family by `dir` through [`Self::font_family_choices`].
+    fn cycle_font_family(&mut self, dir: i32) {
+        let choices = self.font_family_choices();
+        let n = choices.len() as i32;
+        if n == 0 {
+            return;
+        }
+        let cur = self.font_family_index() as i32;
+        let next = (cur + dir).rem_euclid(n) as usize;
+        self.set_font_family_index(next);
+    }
+
+    /// Adjust scrollback by `dir` in 1000-line steps, clamped to a sane range.
+    fn adjust_scrollback(&mut self, dir: i32) {
+        let step = 1000i64;
+        let cur = self.config.scrollback as i64;
+        let next = (cur + dir as i64 * step).clamp(0, 1_000_000);
+        self.config.scrollback = next as usize;
+        self.settings_saved = false;
+    }
+
+    /// Copy the config-file path to the OS clipboard (settings ⧉ button).
+    fn copy_config_path(&mut self) {
+        let path = config_display_path();
+        if let Some(cb) = self.clipboard()
+            && let Err(e) = cb.set_text(path)
+        {
+            log::debug!("clipboard copy (config path) failed: {e}");
+        }
+    }
+
+    /// Open the config file in the user's editor / file handler (settings ↗).
+    /// `open_url` only launches http(s)/file URLs, so wrap the absolute path in a
+    /// `file://` URI (after best-effort tilde expansion).
+    fn open_config_path(&mut self) {
+        let path = crate::config::path()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(config_display_path);
+        let uri = if path.starts_with('/') {
+            format!("file://{path}")
+        } else if let Some(rest) = path.strip_prefix("~/") {
+            match std::env::var("HOME") {
+                Ok(home) => format!("file://{home}/{rest}"),
+                Err(_) => return,
+            }
+        } else {
+            return;
+        };
+        Self::open_url(&uri);
     }
 
     /// Cycle the active theme by `dir` through `color::THEME_NAMES`, applying it
@@ -3925,6 +4378,18 @@ impl App {
             // The renderer reads theme colors fresh each frame; a full rebuild
             // repaints every cell + the clear color in the new palette.
             self.force_full_redraw = true;
+        }
+    }
+
+    /// Install the theme at absolute index `idx` within `color::THEME_NAMES`,
+    /// applying it live (settings theme-dropdown click). No-op if out of range.
+    fn set_theme_by_idx(&mut self, idx: usize) {
+        let Some(&name) = color::THEME_NAMES.get(idx) else { return };
+        if let Some(theme) = color::theme_by_name(name) {
+            color::set_theme(theme);
+            self.config.theme = name.to_string();
+            self.force_full_redraw = true;
+            self.settings_saved = false;
         }
     }
 
@@ -3957,8 +4422,9 @@ impl App {
         }
     }
 
-    /// Persist the live-adjustable settings (font size in pt, opacity, bell) to
-    /// the config file, preserving every other key/comment.
+    /// Persist the live-adjustable settings (font size in pt, opacity, bell,
+    /// theme, font family, scrollback) to the config file, preserving every other
+    /// key/comment.
     fn save_settings(&mut self) {
         let scale = self
             .window
@@ -3976,7 +4442,13 @@ impl App {
             ("font_size", format!("{pt:.0}")),
             ("opacity", format!("{:.2}", self.config.opacity)),
             ("bell_visual", self.config.bell_visual.to_string()),
+            ("bell_audible", self.config.bell_audible.to_string()),
             ("theme", self.config.theme.clone()),
+            (
+                "font_family",
+                self.config.font_family.clone().unwrap_or_default(),
+            ),
+            ("scrollback", self.config.scrollback.to_string()),
         ];
         match crate::config::save(&updates) {
             Ok(()) => {
@@ -4591,11 +5063,23 @@ impl ApplicationHandler<UserEvent> for App {
                     let key = &event.logical_key;
                     let toggle_settings = self.mods.control_key()
                         && matches!(key, Key::Character(s) if s.as_str() == ",");
+                    // Esc inside settings closes an open dropdown first; only a
+                    // second Esc (or F1 / Ctrl+,) closes the whole panel.
+                    if self.settings_open
+                        && matches!(key, Key::Named(NamedKey::Escape))
+                        && self.settings_drop != gui::SettingsDrop::None
+                    {
+                        self.settings_drop = gui::SettingsDrop::None;
+                        self.force_full_redraw = true;
+                        self.mark_dirty(event_loop);
+                        return;
+                    }
                     if matches!(key, Key::Named(NamedKey::Escape | NamedKey::F1))
                         || toggle_settings
                     {
                         self.help_open = false;
                         self.settings_open = false;
+                        self.settings_drop = gui::SettingsDrop::None;
                         self.force_full_redraw = true;
                         self.mark_dirty(event_loop);
                         return;
@@ -4617,9 +5101,7 @@ impl ApplicationHandler<UserEvent> for App {
                     if self.mods.control_key()
                         && matches!(&event.logical_key, Key::Character(s) if s.as_str() == ",")
                     {
-                        self.settings_open = true;
-                        self.settings_sel = 0;
-                        self.settings_saved = false;
+                        self.open_settings();
                         self.force_full_redraw = true;
                         self.mark_dirty(event_loop);
                         return;
@@ -4669,9 +5151,15 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.mouse_px = (position.x, position.y);
-                // GUI demo: repaint so hover/press tracking follows the pointer.
-                if self.gui_demo {
+                // GUI demo / settings form: repaint so hover/press/slider-drag
+                // tracking follows the pointer.
+                if self.gui_demo || self.settings_open {
                     self.mark_dirty(event_loop);
+                }
+                // While the settings form is open it owns the pointer; don't let the
+                // motion drive tab-drag, gutter-drag, hover, or selection.
+                if self.settings_open {
+                    return;
                 }
                 let cell = self.px_to_cell(position.x, position.y);
                 let moved = cell != self.mouse_cell;
@@ -4782,10 +5270,32 @@ impl ApplicationHandler<UserEvent> for App {
                     if pressed {
                         self.gui_click_edge = false;
                     } else {
+                        // Set the press→release edge; the press latch (`gui_pressed`)
+                        // is cleared only AFTER the next paint consumes this edge so
+                        // the release frame can still resolve a click on the latched
+                        // widget (see the click-edge reset in `render`).
                         self.gui_click_edge = true;
-                        self.gui_pressed = None;
                     }
                     self.mark_dirty(event_loop);
+                }
+
+                // While the settings form is open it owns the mouse: the form's
+                // immediate-mode widgets resolve hits during paint (from the click
+                // edge captured above), so consume the event here and never fall
+                // through to the terminal / tab / menu handlers. A left click well
+                // outside the panel dismisses the form.
+                if self.settings_open {
+                    if button == MouseButton::Left && pressed {
+                        let (mx, my) = (self.mouse_px.0 as f32, self.mouse_px.1 as f32);
+                        if !gui::hit(self.settings_panel, mx, my) {
+                            self.settings_open = false;
+                            self.settings_drop = gui::SettingsDrop::None;
+                            self.force_full_redraw = true;
+                            self.mark_dirty(event_loop);
+                        }
+                    }
+                    self.held_button = None;
+                    return;
                 }
                 if !pressed {
                     self.dragging_tab = None; // end any tab drag-reorder on release
@@ -5247,6 +5757,26 @@ mod tests {
         StripItem, WheelAction, image_dst_size, motion_button, move_in_order, strip_item_at,
         strip_layout, wheel_action,
     };
+
+    #[test]
+    fn settings_focus_order_matches_gui_ids_and_is_distinct() {
+        use crate::gui;
+        let order = super::App::settings_focus_order();
+        // Each entry must equal the corresponding form widget id (build_settings).
+        assert_eq!(order[0], gui::id("settings/font_size"));
+        assert_eq!(order[1], gui::id("settings/opacity"));
+        assert_eq!(order[2], gui::id("settings/bell"));
+        assert_eq!(order[3], gui::id("settings/theme"));
+        assert_eq!(order[4], gui::id("settings/font_family"));
+        assert_eq!(order[5], gui::id("settings/scrollback"));
+        assert_eq!(order[6], gui::id("settings/config"));
+        assert_eq!(order[7], gui::id("settings/save"));
+        for (i, a) in order.iter().enumerate() {
+            for b in order.iter().skip(i + 1) {
+                assert_ne!(a, b);
+            }
+        }
+    }
 
     #[test]
     fn move_in_order_reorders() {

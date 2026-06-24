@@ -25,7 +25,7 @@ use crate::renderer::Renderer;
 // ---------------------------------------------------------------------------
 
 /// An axis-aligned rectangle in physical pixels.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Rect {
     pub x: f32,
     pub y: f32,
@@ -336,6 +336,80 @@ pub enum FieldEvt {
     Copy,
     /// The open (`↗`) icon was clicked.
     Open,
+}
+
+// ---------------------------------------------------------------------------
+// Settings form (§3.5)
+// ---------------------------------------------------------------------------
+
+/// Which settings dropdown is currently expanded (only one at a time). Owned by
+/// the App across frames so the popup list survives between paints.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum SettingsDrop {
+    /// No dropdown open.
+    #[default]
+    None,
+    /// The theme chooser list is open.
+    Theme,
+    /// The font-family chooser list is open.
+    Font,
+}
+
+/// The live, read-only view of state the settings form draws from. The App
+/// fills this each frame from its `Config` + renderer; `build_settings` never
+/// mutates it (all changes flow back through [`SettingsEvents`]).
+pub struct SettingsView<'a> {
+    pub font_px: f32,
+    pub opacity: f32,
+    /// Bell mode: 0 = Off, 1 = Visual, 2 = Audible.
+    pub bell: usize,
+    /// Index of the active theme within [`color::THEME_NAMES`].
+    pub theme_idx: usize,
+    pub theme_names: &'a [&'a str],
+    /// Theme preview swatch colors, parallel to `theme_names`.
+    pub theme_swatches: &'a [[f32; 4]],
+    pub font_family: &'a str,
+    pub font_names: &'a [&'a str],
+    pub font_idx: usize,
+    pub scrollback: usize,
+    pub config_path: &'a str,
+    /// Which dropdown (if any) is currently expanded.
+    pub open: SettingsDrop,
+    /// Show the transient "✓ saved" footer label.
+    pub saved: bool,
+}
+
+/// Everything the settings form reported this frame. The App applies each
+/// non-default field to its live effects (`resize_font`, `set_opacity`,
+/// `cycle_theme`/`set_theme`, `save_settings`, …).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SettingsEvents {
+    /// Font-size stepper delta in clicks (-1 / 0 / +1).
+    pub font_delta: i32,
+    /// New opacity value if the slider moved this frame.
+    pub opacity: Option<f32>,
+    /// New bell mode index if the segmented control changed.
+    pub bell: Option<usize>,
+    /// The user toggled the theme dropdown header (App flips `open`).
+    pub theme_toggle: bool,
+    /// A theme row was picked (absolute index into `theme_names`).
+    pub theme_pick: Option<usize>,
+    /// The user toggled the font dropdown header.
+    pub font_toggle: bool,
+    /// A font row was picked (absolute index into `font_names`).
+    pub font_pick: Option<usize>,
+    /// Scrollback stepper delta in clicks (-1 / 0 / +1).
+    pub scrollback_delta: i32,
+    /// Copy the config path to the clipboard.
+    pub copy_path: bool,
+    /// Open the config path in the user's editor.
+    pub open_path: bool,
+    /// The Save button (or Enter) fired.
+    pub save: bool,
+    /// The Close button (or the ✕) fired.
+    pub close: bool,
+    /// The bounding rect of the whole panel (for click-outside dismissal).
+    pub panel: Rect,
 }
 
 // ---------------------------------------------------------------------------
@@ -857,6 +931,242 @@ impl<'r> Ui<'r> {
         self.rrect(thumb, track.w * 0.5, fill);
         s
     }
+
+    /// Build the whole Ctrl+, settings form (§3.5): a full-screen scrim, one
+    /// centered glass panel with a header (`glassy — settings` + ✕), labelled
+    /// rows (font / opacity / bell / theme / font-family / scrollback / config
+    /// path) wired to the live effects, and a footer (Save / Close + transient
+    /// saved label). All widget ids share the `settings/…` namespace so they are
+    /// collected into `tab_order` in declaration order for keyboard nav. Open
+    /// dropdown popups (theme / font) are drawn LAST so they float over the rows.
+    ///
+    /// `surface` is the framebuffer size in px (for centering + the scrim). The
+    /// returned [`SettingsEvents`] carry every change back to the App.
+    pub fn build_settings(&mut self, surface: (f32, f32), v: &SettingsView) -> SettingsEvents {
+        let mut ev = SettingsEvents::default();
+        let m = self.m;
+
+        // Full-screen scrim (dim the chrome + terminal beneath).
+        self.quad(Rect::new(0.0, 0.0, surface.0, surface.1), [0.0, 0.0, 0.0, 0.5]);
+
+        // Centered panel. Width ≈ 40 columns; height grows with the row count.
+        let pw = (m.cell_w * 42.0).min(surface.0 - 2.0 * m.pad).max(m.cell_w * 24.0);
+        const ROWS: usize = 7; // font, opacity, bell, theme, font, scrollback, path
+        let header_h = m.row_h;
+        let footer_h = m.row_h + m.gap;
+        let body_h = ROWS as f32 * (m.row_h + m.gap);
+        let ph = (header_h + m.gap + body_h + m.gap + footer_h + 2.0 * m.pad).round();
+        let px = ((surface.0 - pw) * 0.5).round();
+        let py = ((surface.1 - ph) * 0.5).round().max(m.pad);
+        let panel = Rect::new(px, py, pw, ph);
+        ev.panel = panel;
+        let inner = self.panel(panel, m.card_radius);
+
+        // Header row: title + close (✕) at the right.
+        let title_y = (inner.y + (m.row_h - m.cell_h) * 0.5).round();
+        self.label(inner.x.round(), title_y, "glassy — settings", fg());
+        let close_r = Rect::new(inner.x + inner.w - m.row_h, inner.y, m.row_h, m.row_h);
+        if self.icon_button(id("settings/close"), close_r, '✕').clicked {
+            ev.close = true;
+        }
+
+        // Each row: a left label column + a right control column.
+        let label_w = (m.cell_w * 12.0).round();
+        let ctrl_x = inner.x + label_w;
+        let ctrl_w = (inner.w - label_w).min(m.ctrl_w * 1.6).max(m.ctrl_w);
+        let mut y = inner.y + header_h + m.gap;
+        let step = m.row_h + m.gap;
+        let row_label = |ui: &mut Self, y: f32, text: &str| {
+            let ly = (y + (m.row_h - m.cell_h) * 0.5).round();
+            ui.label(inner.x.round(), ly, text, fg_dim());
+        };
+        let ctrl_h = m.row_h - m.gap;
+        let ctrl_rect = |y: f32, w: f32| Rect::new(ctrl_x, y, w, ctrl_h);
+
+        // -- Font size (stepper) ---------------------------------------------
+        row_label(self, y, "Font size");
+        let fs_txt = format!("{:.0} px", v.font_px);
+        ev.font_delta = self.stepper(id("settings/font_size"), ctrl_rect(y, m.ctrl_w), &fs_txt);
+        y += step;
+
+        // -- Opacity (slider) ------------------------------------------------
+        row_label(self, y, "Opacity");
+        let sl = ctrl_rect(y, ctrl_w - m.cell_w * 6.0);
+        let nv = self.slider(id("settings/opacity"), sl, v.opacity, 0.0, 1.0, 0.05);
+        if (nv - v.opacity).abs() > f32::EPSILON {
+            ev.opacity = Some(nv);
+        }
+        self.label_right(ctrl_x + ctrl_w, (y + (m.row_h - m.cell_h) * 0.5).round(), &format!("{nv:.2}"), fg());
+        y += step;
+
+        // -- Bell (segmented) ------------------------------------------------
+        row_label(self, y, "Bell");
+        let bv = self.segmented(
+            id("settings/bell"),
+            ctrl_rect(y, ctrl_w),
+            &["Off", "Visual", "Audible"],
+            v.bell.min(2),
+        );
+        if bv != v.bell {
+            ev.bell = Some(bv);
+        }
+        y += step;
+
+        // -- Theme (dropdown + swatch) ---------------------------------------
+        row_label(self, y, "Theme");
+        let theme_rect = ctrl_rect(y, ctrl_w);
+        let theme_name = v.theme_names.get(v.theme_idx).copied().unwrap_or("");
+        let swatch = v.theme_swatches.get(v.theme_idx).copied();
+        if self.dropdown(id("settings/theme"), theme_rect, theme_name, v.open == SettingsDrop::Theme, swatch)
+            == DropdownEvt::Toggle
+        {
+            ev.theme_toggle = true;
+        }
+        y += step;
+
+        // -- Font family (dropdown) ------------------------------------------
+        row_label(self, y, "Font");
+        let font_rect = ctrl_rect(y, ctrl_w);
+        if self.dropdown(id("settings/font_family"), font_rect, v.font_family, v.open == SettingsDrop::Font, None)
+            == DropdownEvt::Toggle
+        {
+            ev.font_toggle = true;
+        }
+        y += step;
+
+        // -- Scrollback (stepper) --------------------------------------------
+        row_label(self, y, "Scrollback");
+        let sb_txt = format!("{} lines", v.scrollback);
+        ev.scrollback_delta = self.stepper(id("settings/scrollback"), ctrl_rect(y, m.ctrl_w), &sb_txt);
+        y += step;
+
+        // -- Config path (readonly + copy/open) ------------------------------
+        row_label(self, y, "Config");
+        let field_rect = ctrl_rect(y, ctrl_w);
+        match self.text_field_readonly(id("settings/config"), field_rect, v.config_path, true, true) {
+            FieldEvt::Copy => ev.copy_path = true,
+            FieldEvt::Open => ev.open_path = true,
+            FieldEvt::None => {}
+        }
+        y += step;
+
+        // -- Footer: separator + Save (accent) + Close + transient saved ------
+        let sep_y = (y + m.gap * 0.5).round();
+        self.separator(inner.x, sep_y, inner.w);
+        let fy = sep_y + m.gap;
+        let bw = (m.cell_w * 9.0).round();
+        let close_btn = Rect::new(inner.x + inner.w - bw, fy, bw, m.row_h);
+        let save_btn = Rect::new(close_btn.x - bw - m.gap, fy, bw, m.row_h);
+        if self.accent_button(id("settings/save"), save_btn, "Save").clicked {
+            ev.save = true;
+        }
+        if self.button(id("settings/close_btn"), close_btn, "Close").clicked {
+            ev.close = true;
+        }
+        if v.saved {
+            let ly = (fy + (m.row_h - m.cell_h) * 0.5).round();
+            self.label(inner.x.round(), ly, "✓ saved", fill_on());
+        }
+
+        // -- Floating dropdown popups (drawn LAST so they overlap the rows) ---
+        match v.open {
+            SettingsDrop::Theme => {
+                let pick = self.dropdown_popup(
+                    id("settings/theme/list"),
+                    theme_rect,
+                    v.theme_names,
+                    v.theme_idx,
+                    Some(v.theme_swatches),
+                );
+                ev.theme_pick = pick;
+            }
+            SettingsDrop::Font => {
+                let pick = self.dropdown_popup(
+                    id("settings/font/list"),
+                    font_rect,
+                    v.font_names,
+                    v.font_idx,
+                    None,
+                );
+                ev.font_pick = pick;
+            }
+            SettingsDrop::None => {}
+        }
+
+        ev
+    }
+
+    /// A primary (accent-filled) button — same interaction as [`Ui::button`] but
+    /// filled with the accent color and dark-on-accent text. Used for Save.
+    pub fn accent_button(&mut self, wid: WidgetId, rect: Rect, text: &str) -> Interaction {
+        let it = self.interact(wid, rect, true);
+        let st = self.wstate(wid, &it, true);
+        let hover_t = self.anim(wid, if matches!(st, WState::Hover | WState::Press) { 1.0 } else { 0.0 });
+        let fill = state_fill(fill_on(), hover_t, it.pressed);
+        self.rrect(rect, self.m.radius, fill);
+        if matches!(st, WState::Focus) {
+            self.focus_ring(rect, self.m.radius);
+        }
+        let nudge = if it.pressed { 1.0 } else { 0.0 };
+        let mut content = rect;
+        content.y += nudge;
+        self.label_centered(content, text, color::default_bg());
+        it
+    }
+
+    /// The floating popup list for a dropdown (E3 surface anchored just below
+    /// `anchor`). Each row shows an optional swatch, the option name, and a `✓`
+    /// on the current selection. Returns the absolute index if a row was clicked.
+    /// Drawn after the form body so it composites above everything.
+    fn dropdown_popup(
+        &mut self,
+        wid: WidgetId,
+        anchor: Rect,
+        rows: &[&str],
+        sel: usize,
+        swatches: Option<&[[f32; 4]]>,
+    ) -> Option<usize> {
+        let m = self.m;
+        let row_h = m.row_h;
+        // Cap the popup height; tall lists would overflow the panel.
+        let max_rows = rows.len().min(8);
+        let h = (max_rows as f32 * row_h + 2.0).round();
+        let rect = Rect::new(anchor.x, anchor.y + anchor.h + 2.0, anchor.w, h);
+        self.rrect(rect, m.radius, glass_float());
+        self.edge_light(rect);
+        let mut picked = None;
+        for (i, name) in rows.iter().enumerate().take(max_rows) {
+            let ry = rect.y + 1.0 + i as f32 * row_h;
+            let rr = Rect::new(rect.x + 1.0, ry, rect.w - 2.0, row_h);
+            let it = self.interact(id_combine(wid, i as u64), rr, true);
+            if i == sel {
+                self.rrect(rr.inset(1.0), m.radius - 1.0, sel_bg());
+            } else if it.hovered {
+                self.rrect(rr.inset(1.0), m.radius - 1.0, state_fill(track_off(), 1.0, false));
+            }
+            let mut tx = rr.x + m.pad;
+            let ty = (rr.center_y() - m.cell_h * 0.5).round();
+            if let Some(sw) = swatches.and_then(|s| s.get(i).copied()) {
+                let s = (m.cell_h * 0.8).round();
+                let sy = rr.center_y() - s * 0.5;
+                self.rrect(Rect::new(tx, sy, s, s), 3.0, sw);
+                tx += s + m.gap;
+            }
+            self.label(tx.round(), ty, name, fg());
+            if i == sel {
+                self.r.push_overlay_glyph_px(
+                    (rr.x + rr.w - m.pad - m.cell_w).round(),
+                    ty,
+                    '✓',
+                    fill_on(),
+                );
+            }
+            if it.clicked {
+                picked = Some(i);
+            }
+        }
+        picked
+    }
 }
 
 /// Combine a base widget id with a sub-index (segments / stepper buttons).
@@ -886,6 +1196,40 @@ mod tests {
     fn id_is_stable_and_distinct() {
         assert_eq!(id("settings/opacity"), id("settings/opacity"));
         assert_ne!(id("settings/opacity"), id("settings/font"));
+    }
+
+    #[test]
+    fn settings_widget_ids_are_all_distinct() {
+        // The settings form's keyboard tab order relies on these ids being
+        // unique (App::settings_focus_order mirrors this set).
+        let ids = [
+            id("settings/font_size"),
+            id("settings/opacity"),
+            id("settings/bell"),
+            id("settings/theme"),
+            id("settings/font_family"),
+            id("settings/scrollback"),
+            id("settings/config"),
+            id("settings/save"),
+            id("settings/close"),
+            id("settings/close_btn"),
+        ];
+        for (i, a) in ids.iter().enumerate() {
+            for b in ids.iter().skip(i + 1) {
+                assert_ne!(a, b, "settings widget ids must be unique");
+            }
+        }
+    }
+
+    #[test]
+    fn settings_defaults_are_inert() {
+        // A freshly-built event struct must drive no live effects.
+        let ev = SettingsEvents::default();
+        assert_eq!(ev.font_delta, 0);
+        assert!(ev.opacity.is_none());
+        assert!(ev.bell.is_none());
+        assert!(!ev.save && !ev.close);
+        assert!(ev.theme_pick.is_none() && ev.font_pick.is_none());
     }
 
     #[test]
