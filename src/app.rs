@@ -444,10 +444,73 @@ impl MenuAction {
             MenuAction::Paste => "Paste",
             MenuAction::NewTab => "New tab",
             MenuAction::Settings => "Settings",
-            MenuAction::Help => "Help",
+            MenuAction::Help => "Help / keys",
             MenuAction::CloseTab => "Close tab",
         }
     }
+
+    /// Left-column icon glyph for the real GUI menu (§3.6).
+    fn icon(self) -> char {
+        match self {
+            MenuAction::Copy      => '⧉',
+            MenuAction::Paste     => '⊞',
+            MenuAction::NewTab    => '+',
+            MenuAction::Settings  => '⚙',
+            MenuAction::Help      => '?',
+            MenuAction::CloseTab  => '✕',
+        }
+    }
+
+    /// Right-aligned shortcut hint for the real GUI menu (§3.6). `None` for
+    /// actions that have no keybinding shown in the menu.
+    fn shortcut(self) -> Option<&'static str> {
+        match self {
+            MenuAction::Copy      => Some("Ctrl+Shift+C"),
+            MenuAction::Paste     => Some("Ctrl+Shift+V"),
+            MenuAction::NewTab    => Some("Ctrl+Shift+T"),
+            MenuAction::Settings  => Some("Ctrl+,"),
+            MenuAction::Help      => Some("F1"),
+            MenuAction::CloseTab  => Some("Ctrl+Shift+W"),
+        }
+    }
+}
+
+/// Build a `Vec<MenuEntry>` for the real GUI menu from a flat list of
+/// `MenuAction`s. Context menus with Copy+Paste get a separator between the
+/// clipboard group and the navigation group; the hamburger menu has its own
+/// separator after Settings (before CloseTab). Pure for testing.
+fn actions_to_entries(actions: &[MenuAction], has_selection: bool) -> Vec<gui::MenuEntry<'static>> {
+    let mut v: Vec<gui::MenuEntry<'static>> = Vec::with_capacity(actions.len() + 2);
+    // We need to detect group boundaries and insert separators.
+    // Simple rule: insert a separator before NewTab when Copy/Paste precede it
+    // (context menu), and before CloseTab when Settings precedes it (hamburger).
+    let mut prev: Option<MenuAction> = None;
+    for &a in actions {
+        // Separator before group boundary.
+        let sep = match (prev, a) {
+            // Context menu: clipboard group → navigation group.
+            (Some(MenuAction::Copy | MenuAction::Paste), MenuAction::NewTab) => true,
+            // Hamburger: app group → destructive group.
+            (Some(MenuAction::Help), MenuAction::CloseTab) => true,
+            _ => false,
+        };
+        if sep {
+            v.push(gui::MenuEntry::Separator);
+        }
+        let enabled = match a {
+            MenuAction::Copy  => has_selection,
+            MenuAction::Paste => true,
+            _                 => true,
+        };
+        v.push(gui::MenuEntry::Item {
+            icon:    a.icon(),
+            label:   a.label(),
+            hint:    a.shortcut(),
+            enabled,
+        });
+        prev = Some(a);
+    }
+    v
 }
 
 /// Draw a dropdown menu panel anchored at `(left, top)` in screen-row/col
@@ -455,6 +518,7 @@ impl MenuAction {
 /// highlighted row (0-based). `left`/`top` come from either the hamburger
 /// (top-right, below strip) or the context menu (pointer-anchored, clamped).
 /// Only repaints the rows the panel occupies; the rest keep their content.
+/// **Retained as a fallback** while `gui::menu` is integrated; both can coexist.
 fn draw_dropdown_menu(
     renderer: &mut Renderer,
     rows: usize,
@@ -796,7 +860,14 @@ pub struct App {
     menu_items: Option<Vec<MenuAction>>,
     /// Screen-cell anchor (col, row) for the open dropdown panel. Set for both
     /// the hamburger and the context menu so the render site is branch-free.
+    /// Retained for the legacy cell-based `menu_hit_test` (until fully replaced).
     menu_anchor: Option<(usize, usize)>,
+    /// Pixel anchor (x, y) for the real GUI menu panel (§3.6). Replaces the
+    /// cell-based `menu_anchor` for the `gui::menu` draw + hit-test path.
+    menu_anchor_px: Option<(f32, f32)>,
+    /// Scroll position for the F1 help panel (§3.7). Preserved across opens so
+    /// the user returns to where they left off.
+    help_state: gui::HelpState,
 
     // --- Pane title-bar ⋮ menu -----------------------------------------------
     /// When the ⋮ pane-menu is open: the pane id that owns it. The menu shows
@@ -934,6 +1005,8 @@ impl App {
             menu_sel: 0,
             menu_items: None,
             menu_anchor: None,
+            menu_anchor_px: None,
+            help_state: gui::HelpState::default(),
             pane_menu_open: None,
             pane_menu_sel: 0,
             mouse_cell: (0, 0),
@@ -1081,6 +1154,7 @@ impl App {
         self.menu_open = false;
         self.menu_items = None;
         self.menu_anchor = None;
+        self.menu_anchor_px = None;
         self.force_full_redraw = true;
         match action {
             MenuAction::Copy => {
@@ -1124,31 +1198,41 @@ impl App {
         v
     }
 
-    /// Open the right-click context menu anchored at the current pointer cell,
-    /// with screen-edge clamping so the panel stays fully on-screen.
+    /// Open the right-click context menu anchored at the current pointer position
+    /// in physical pixels, clamped so the panel stays fully on-screen.
     fn open_context_menu(&mut self, event_loop: &ActiveEventLoop) {
         let items = self.context_menu_items();
         if items.is_empty() {
             return; // guard: Paste+NewTab are always present, so never fires
         }
 
-        // Anchor at the pointer cell in screen coordinates (strip row included).
-        let (col, term_row) = self.px_to_cell(self.mouse_px.0, self.mouse_px.1);
-        let anchor_col = col;
-        let anchor_row = term_row + TAB_STRIP_ROWS;
+        // Pixel anchor: pointer position, with a rough panel-size estimate for
+        // clamp. The exact panel size is not known until draw time (gui::menu
+        // measures labels), so we use a conservative estimate.
+        let (mx, my) = (self.mouse_px.0 as f32, self.mouse_px.1 as f32);
+        let est_panel_w = items.iter().map(|a| a.label().len()).max().unwrap_or(0) as f32
+            * 8.0   // approximate cell_w
+            + 80.0; // icon + shortcut + padding
+        let est_panel_h = items.len() as f32 * 22.0 + 8.0;
+        let sw = self.renderer.as_ref().map(|r| r.surface_size().0 as f32).unwrap_or(800.0);
+        let sh = self.renderer.as_ref().map(|r| r.surface_size().1 as f32).unwrap_or(600.0);
+        let ax = mx.min(sw - est_panel_w).max(0.0);
+        let ay = my.min(sh - est_panel_h).max(0.0);
 
-        // Clamp so the panel stays on-screen.
-        let label_w = items.iter().map(|a| a.label().len()).max().unwrap_or(0);
-        let panel_w = label_w + 4;
-        let panel_h = items.len() + 2;
+        // Also keep legacy cell-based anchor for the old menu_hit_test path
+        // (used by the mouse handler until fully replaced).
+        let (col, term_row) = self.px_to_cell(self.mouse_px.0, self.mouse_px.1);
         let total_rows = self.rows + TAB_STRIP_ROWS;
-        let left = anchor_col.min(self.cols.saturating_sub(panel_w));
-        let top = anchor_row
-            .min(total_rows.saturating_sub(panel_h))
+        let label_w = items.iter().map(|a| a.label().len()).max().unwrap_or(0);
+        let panel_h_c = items.len() + 2;
+        let left = col.min(self.cols.saturating_sub(label_w + 4));
+        let top = (term_row + TAB_STRIP_ROWS)
+            .min(total_rows.saturating_sub(panel_h_c))
             .max(TAB_STRIP_ROWS);
 
         self.menu_items = Some(items);
         self.menu_anchor = Some((left, top));
+        self.menu_anchor_px = Some((ax, ay));
         self.menu_sel = 0;
         self.menu_open = true;
         self.help_open = false;
@@ -1164,6 +1248,7 @@ impl App {
         self.menu_open = false;
         self.menu_items = None;
         self.menu_anchor = None;
+        self.menu_anchor_px = None;
         self.force_full_redraw = true;
         self.mark_dirty(event_loop);
     }
@@ -1207,31 +1292,77 @@ impl App {
     }
 
     /// Hit-test a mouse click at physical pixel `(x, y)` against the open
-    /// dropdown menu. Returns the action if a row was clicked, `None` otherwise.
-    /// Reads `menu_items`/`menu_anchor` so it works for both the hamburger and
-    /// the pointer-anchored context menu.
+    /// dropdown menu. Returns the `MenuAction` if an enabled item was clicked,
+    /// `None` otherwise. Uses the pixel anchor set by `menu_anchor_px` so the
+    /// hit-area exactly matches what `gui::menu` draws (§3.6).
     fn menu_hit_test(&self, x: f64, y: f64) -> Option<MenuAction> {
         let renderer = self.renderer.as_ref()?;
         let m = renderer.cell_metrics();
-        let pad = renderer.pad() as f64;
-        let items: &[MenuAction] = self.menu_items.as_deref().unwrap_or(MenuAction::ALL);
-        let (left, top) = self.menu_anchor?;
-        let label_w = items.iter().map(|a| a.label().len()).max().unwrap_or(0);
-        let panel_w = label_w + 4;
+        let (ax, ay) = if let Some(p) = self.menu_anchor_px {
+            p
+        } else if let Some((left, top)) = self.menu_anchor {
+            // Legacy fallback: convert cell-based anchor to pixels.
+            let pad = renderer.pad();
+            (left as f32 * m.width + pad, top as f32 * m.height + pad)
+        } else {
+            return None;
+        };
 
-        // Panel occupies screen columns [left, left+panel_w).
-        let px_left = left as f64 * m.width as f64 + pad;
-        let px_right = (left + panel_w) as f64 * m.width as f64 + pad;
-        if x < px_left || x >= px_right {
+        let items: &[MenuAction] = self.menu_items.as_deref().unwrap_or(MenuAction::ALL);
+        let has_sel = self.pty.as_ref()
+            .and_then(|p| p.term.lock().selection_to_string())
+            .map(|s| !s.is_empty())
+            .unwrap_or(false);
+        let entries = actions_to_entries(items, has_sel);
+
+        // Replicate gui::menu's row layout to find which item was hit.
+        let cell_h = m.height;
+        let cell_w = m.width;
+        let row_h = (cell_h * 1.4).round().max(cell_h + 4.0);
+        let sep_h  = 5.0_f32;
+        // Panel width estimation (mirrors gui::menu — just needs to be wide enough
+        // that hits inside it are valid; exact width used for x-clamping).
+        let label_chars = items.iter().map(|a| a.label().len()).max().unwrap_or(4);
+        let hint_chars  = items.iter().filter_map(|a| a.shortcut()).map(|h| h.len()).max().unwrap_or(0);
+        let pad_x = (cell_w * 1.2).round();
+        let icon_w = cell_w + 4.0;
+        let hint_gap = (cell_w * 2.0).round();
+        let panel_w = (icon_w
+            + label_chars as f32 * cell_w
+            + if hint_chars > 0 { hint_gap + hint_chars as f32 * cell_w } else { 0.0 }
+            + pad_x * 2.0)
+            .max(cell_w * 8.0)
+            .ceil();
+
+        let x = x as f32;
+        let y = y as f32;
+        if x < ax || x >= ax + panel_w {
             return None;
         }
-        // Items occupy screen rows [top+1 .. top+1+items.len()) (top row = border).
-        let top_px = (top as f64 + 1.0) * m.height as f64 + pad;
-        let row_rel = ((y - top_px) / m.height as f64).floor();
-        if row_rel < 0.0 || row_rel >= items.len() as f64 {
+        if y < ay {
             return None;
         }
-        items.get(row_rel as usize).copied()
+
+        let mut ry = ay + 2.0;
+        let mut item_idx: usize = 0;
+        for entry in &entries {
+            match entry {
+                gui::MenuEntry::Separator => {
+                    ry += sep_h;
+                }
+                gui::MenuEntry::Item { enabled, .. } => {
+                    if y >= ry && y < ry + row_h {
+                        if !enabled {
+                            return None; // greyed out
+                        }
+                        return items.get(item_idx).copied();
+                    }
+                    item_idx += 1;
+                    ry += row_h;
+                }
+            }
+        }
+        None
     }
 
     fn strip_click(&mut self, event_loop: &ActiveEventLoop) -> bool {
@@ -1288,9 +1419,18 @@ impl App {
                         MenuAction::ALL.iter().map(|a| a.label().len()).max().unwrap_or(0);
                     let panel_w = label_w + 4;
                     self.menu_anchor = Some((self.cols.saturating_sub(panel_w), TAB_STRIP_ROWS));
+                    // Pixel anchor: below the ≡ button, at the right of the window.
+                    if let Some(r) = self.renderer.as_ref() {
+                        let (sw, _sh) = r.surface_size();
+                        // Approximate panel width: icon + label + shortcut + padding.
+                        let est_w = 220.0_f32;
+                        let bar_h = tab_bar_h(r.cell_metrics().height);
+                        self.menu_anchor_px = Some(((sw as f32 - est_w).max(0.0), bar_h + 2.0));
+                    }
                 } else {
                     self.menu_items = None;
                     self.menu_anchor = None;
+                    self.menu_anchor_px = None;
                 }
                 self.help_open = false;
                 self.settings_open = false;
@@ -3032,6 +3172,34 @@ impl App {
             None
         };
 
+        // Menu/help overlay inputs snapshotted before the renderer borrow.
+        // `has_selection` lets Copy be greyed when nothing is selected.
+        let has_selection_for_menu = self.pty.as_ref()
+            .and_then(|p| p.term.lock().selection_to_string())
+            .map(|s| !s.is_empty())
+            .unwrap_or(false);
+        let menu_snapshot = if self.menu_open {
+            let actions: &[MenuAction] = self.menu_items.as_deref().unwrap_or(MenuAction::ALL);
+            let entries = actions_to_entries(actions, has_selection_for_menu);
+            let (ax, ay) = self.menu_anchor_px.unwrap_or_else(|| {
+                // Fallback: derive pixel anchor from cell-based legacy anchor.
+                let (left, top) = self.menu_anchor.unwrap_or((0, TAB_STRIP_ROWS));
+                if let Some(r) = self.renderer.as_ref() {
+                    let m = r.cell_metrics();
+                    let pad = r.pad();
+                    (left as f32 * m.width + pad, top as f32 * m.height + pad)
+                } else {
+                    (left as f32 * 8.0, top as f32 * 16.0)
+                }
+            });
+            Some((entries, ax, ay, self.menu_sel,
+                (self.mouse_px.0 as f32, self.mouse_px.1 as f32),
+                self.held_button == Some(0),
+                self.gui_click_edge))
+        } else {
+            None
+        };
+
         let (Some(renderer), Some(pty)) = (self.renderer.as_mut(), self.pty.as_ref()) else {
             return;
         };
@@ -3418,20 +3586,49 @@ impl App {
                 &mut self.gui_anims,
             ));
         } else if self.help_open {
-            draw_modal(renderer, self.rows, self.cols, HELP_LINES);
-        } else if self.menu_open {
-            // Dropdown menu (hamburger or context): anchored panel floating above
-            // terminal content. Both share the same draw function; the anchor and
-            // item list differ between them.
-            let items: &[MenuAction] = self.menu_items.as_deref().unwrap_or(MenuAction::ALL);
-            let (left, top) = self.menu_anchor.unwrap_or((
-                self.cols.saturating_sub(
-                    items.iter().map(|a| a.label().len()).max().unwrap_or(0) + 4,
-                ),
-                TAB_STRIP_ROWS,
-            ));
-            draw_dropdown_menu(renderer, self.rows, self.cols, items, self.menu_sel, left, top);
+            // Real GUI help panel (§3.7): scrollable two-column keybindings over
+            // a scrim. `help_state` carries scroll position across frames.
+            let (sw, sh) = renderer.surface_size();
+            let m = renderer.cell_metrics();
+            let mouse = (self.mouse_px.0 as f32, self.mouse_px.1 as f32);
+            let help_result = gui::build_help(
+                renderer,
+                m.width, m.height,
+                (sw as f32, sh as f32),
+                mouse,
+                self.held_button == Some(0),
+                self.gui_click_edge,
+                &mut self.gui_pressed,
+                &mut self.gui_focused,
+                &mut self.gui_anims,
+                &mut self.help_state,
+            );
+            if help_result.close {
+                self.help_open = false;
+                self.force_full_redraw = true;
+            }
         }
+
+        // Real GUI menu (§3.6): drawn AFTER the scrim-bearing overlays so it always
+        // floats on top. Captured into a local so we can invoke the action after the
+        // renderer borrow ends (invoking mutates `self`).
+        let menu_clicked_action: Option<MenuAction> =
+            if let Some((ref entries, ax, ay, sel_item, mouse, mouse_down, click)) = menu_snapshot {
+                let m = renderer.cell_metrics();
+                let item_idx = gui::menu(
+                    renderer,
+                    m.width, m.height,
+                    mouse, mouse_down, click,
+                    ax, ay,
+                    entries,
+                    sel_item,
+                );
+                item_idx.and_then(|i| {
+                    self.menu_items.as_deref().unwrap_or(MenuAction::ALL).get(i).copied()
+                })
+            } else {
+                None
+            };
 
         // Temporary GUI-primitive demo (gated behind GLASSY_GUI_DEMO) — proves the
         // Wave-0 primitives render with correct AA corners + hover/press/focus. No
@@ -3507,6 +3704,11 @@ impl App {
         if let Some(ev) = settings_events {
             self.apply_settings_events(ev);
         }
+
+        // The menu click result from gui::menu is used to provide visual feedback
+        // only; the actual invocation happens in the MouseInput handler via
+        // `menu_hit_test` (which now uses pixel coordinates matching the drawn panel).
+        let _ = menu_clicked_action;
     }
 
     /// Render a split (multi-pane) tab via the renderer's scissored multi-pane
@@ -3638,6 +3840,32 @@ impl App {
                 self.held_button == Some(0),
                 self.gui_click_edge,
             ))
+        } else {
+            None
+        };
+
+        // Menu/help overlay snapshot (same as the single-pane path).
+        let has_selection_for_menu2 = self.pty.as_ref()
+            .and_then(|p| p.term.lock().selection_to_string())
+            .map(|s| !s.is_empty())
+            .unwrap_or(false);
+        let menu_snapshot2 = if self.menu_open {
+            let actions: &[MenuAction] = self.menu_items.as_deref().unwrap_or(MenuAction::ALL);
+            let entries = actions_to_entries(actions, has_selection_for_menu2);
+            let (ax, ay) = self.menu_anchor_px.unwrap_or_else(|| {
+                let (left, top) = self.menu_anchor.unwrap_or((0, TAB_STRIP_ROWS));
+                if let Some(r) = self.renderer.as_ref() {
+                    let m2 = r.cell_metrics();
+                    let pad = r.pad();
+                    (left as f32 * m2.width + pad, top as f32 * m2.height + pad)
+                } else {
+                    (left as f32 * 8.0, top as f32 * 16.0)
+                }
+            });
+            Some((entries, ax, ay, self.menu_sel,
+                (self.mouse_px.0 as f32, self.mouse_px.1 as f32),
+                self.held_button == Some(0),
+                self.gui_click_edge))
         } else {
             None
         };
@@ -3794,6 +4022,33 @@ impl App {
                 &mut self.gui_focused,
                 &mut self.gui_anims,
             ));
+        } else if self.help_open {
+            // Real GUI help panel (§3.7) in split mode.
+            let (sw, sh) = renderer.surface_size();
+            let m = renderer.cell_metrics();
+            let mouse = (self.mouse_px.0 as f32, self.mouse_px.1 as f32);
+            let help_result = gui::build_help(
+                renderer,
+                m.width, m.height,
+                (sw as f32, sh as f32),
+                mouse,
+                self.held_button == Some(0),
+                self.gui_click_edge,
+                &mut self.gui_pressed,
+                &mut self.gui_focused,
+                &mut self.gui_anims,
+                &mut self.help_state,
+            );
+            if help_result.close {
+                self.help_open = false;
+                self.force_full_redraw = true;
+            }
+        }
+
+        // Real GUI menu (§3.6) in split mode.
+        if let Some((ref entries2, ax2, ay2, sel2, mouse2, md2, click2)) = menu_snapshot2 {
+            let m = renderer.cell_metrics();
+            let _ = gui::menu(renderer, m.width, m.height, mouse2, md2, click2, ax2, ay2, entries2, sel2);
         }
 
         if let Err(err) = renderer.render_multi() {
