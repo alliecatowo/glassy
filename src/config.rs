@@ -2,7 +2,8 @@
 //! argument parser layered on top (CLI overrides the file).
 //!
 //! The config file lives at `$XDG_CONFIG_HOME/glassy/glassy.conf` (falling back
-//! to `~/.config/glassy/glassy.conf`). Recognized keys:
+//! to `~/.config/glassy/glassy.conf`) on Linux, or
+//! `~/Library/Application Support/glassy/glassy.conf` on macOS. Recognized keys:
 //!
 //! ```text
 //! font_family = FiraCode Nerd Font Mono
@@ -18,6 +19,11 @@
 //! theme_light = rose-pine-dawn         # theme used in system Light mode
 //! theme_dark  = tokyo-night            # theme used in system Dark mode
 //! status_bar  = false                  # show status bar at the bottom (default off)
+//! color.fg    = #c0caf5                # override theme foreground (hex format)
+//! color.bg    = #1a1b26                # override theme background (hex format)
+//! color.cursor = #7dcfff               # override cursor color
+//! color.selection_bg = #283457         # override selection background
+//! color.ansi0 through color.ansi15     # override ANSI palette colors
 //! ```
 //!
 //! CLI flags override the file: at minimum `--font-size <pt>`, `--opacity <f>`,
@@ -247,14 +253,28 @@ fn merge_config(existing: &str, updates: &[(&str, String)]) -> String {
 }
 
 /// The resolved config file path, honoring `$XDG_CONFIG_HOME` then `$HOME`.
+/// On macOS, uses ~/Library/Application Support/glassy/glassy.conf.
+/// On other platforms, honors $XDG_CONFIG_HOME then ~/.config/glassy/glassy.conf.
 fn config_path() -> Option<PathBuf> {
-    if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME")
-        && !xdg.is_empty()
+    #[cfg(target_os = "macos")]
     {
-        return Some(PathBuf::from(xdg).join("glassy/glassy.conf"));
+        let home = std::env::var_os("HOME")?;
+        return Some(
+            PathBuf::from(home)
+                .join("Library/Application Support/glassy/glassy.conf")
+        );
     }
-    let home = std::env::var_os("HOME")?;
-    Some(PathBuf::from(home).join(".config/glassy/glassy.conf"))
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME")
+            && !xdg.is_empty()
+        {
+            return Some(PathBuf::from(xdg).join("glassy/glassy.conf"));
+        }
+        let home = std::env::var_os("HOME")?;
+        Some(PathBuf::from(home).join(".config/glassy/glassy.conf"))
+    }
 }
 
 /// Parse a `KEY=VALUE` config file into `raw`. Blank lines and `#`/`;` comments
@@ -567,9 +587,10 @@ OPTIONS:
 
 CONFIG FILE:
     $XDG_CONFIG_HOME/glassy/glassy.conf  (or ~/.config/glassy/glassy.conf)
+    macOS: ~/Library/Application Support/glassy/glassy.conf
     KEY=VALUE lines: font_family, font_size, theme, opacity, padding,
     shell, scrollback, bell_visual, bell_audible, follow_system,
-    theme_light, theme_dark, status_bar. CLI flags override the file.",
+    theme_light, theme_dark, status_bar, color.*. CLI flags override the file.",
         env!("CARGO_PKG_VERSION")
     );
 }
