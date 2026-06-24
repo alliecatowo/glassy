@@ -23,7 +23,7 @@
 //! theme_light = rose-pine-dawn         # theme used in system Light mode
 //! theme_dark  = tokyo-night            # theme used in system Dark mode
 //! status_bar  = false                  # show status bar at the bottom (default off)
-//! pane_headers= true                   # show per-pane title bars + accent rail in splits (default on)
+//! pane_headers= false                  # show per-pane title bars + accent rail in splits (default off)
 //! ligatures   = false                  # enable OpenType ligature shaping across cells (default off)
 //! font_features = ss01, calt=0         # OpenType feature tags to force on/off (comma or space separated)
 //! cwd         = /home/me/projects      # working directory for the first tab's shell
@@ -283,13 +283,18 @@ opacity = 0.80
     }
 
     #[test]
-    fn pane_headers_parses_and_defaults_on() {
+    fn pane_headers_parses_and_defaults_off() {
         let mut raw = RawConfig::default();
         parse_config_file("pane_headers = off\n", &mut raw).unwrap();
         assert_eq!(raw.pane_headers, Some(false));
-        // Default (unset) is on.
+        // Default (unset) is now OFF — owner prefers clean splits without headers.
         let settings = RawConfig::default().into_settings().unwrap();
-        assert!(settings.config.pane_headers);
+        assert!(!settings.config.pane_headers);
+        // Explicitly enabling works.
+        let mut raw_on = RawConfig::default();
+        parse_config_file("pane_headers = on\n", &mut raw_on).unwrap();
+        let settings_on = raw_on.into_settings().unwrap();
+        assert!(settings_on.config.pane_headers);
     }
 
     #[test]

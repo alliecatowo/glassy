@@ -43,9 +43,13 @@ pub struct HelpResult {
 /// overflows the panel. Esc/F1/scrim/✕ all set `close`.
 ///
 /// `surface` is `(width, height)` in physical px. `mouse`/`mouse_down`/`clicked`
-/// are the current frame's pointer state. `state` is the caller-owned scroll
-/// position (mutable borrow; updated in place). `keymap` is the effective live
-/// keymap; the displayed rows are derived from it so custom bindings are shown.
+/// are the current frame's pointer state. `click_pos` is the pointer position
+/// captured at the moment the click edge was set (button release); this is used
+/// for the click-outside-panel dismiss test so that pointer motion between the
+/// release event and the render frame does not shift the hit-test result. `state`
+/// is the caller-owned scroll position (mutable borrow; updated in place).
+/// `keymap` is the effective live keymap; the displayed rows are derived from it
+/// so custom bindings are shown.
 #[allow(clippy::too_many_arguments)]
 pub fn build_help(
     renderer: &mut Renderer,
@@ -53,6 +57,7 @@ pub fn build_help(
     cell_h: f32,
     surface: (f32, f32),
     mouse: (f32, f32),
+    click_pos: (f32, f32),
     mouse_down: bool,
     clicked: bool,
     pressed: &mut Option<WidgetId>,
@@ -64,12 +69,11 @@ pub fn build_help(
     let mut result = HelpResult::default();
     let m = Metrics::new(cell_w, cell_h);
 
-    // Full-screen scrim — click on scrim closes the panel.
+    // Full-screen scrim backdrop — hover/drag use live `mouse`; click-outside
+    // uses `click_pos` (captured at release time) so motion between release and
+    // render cannot shift the hit-test and accidentally dismiss the overlay.
     let scrim = Rect::new(0.0, 0.0, surface.0, surface.1);
     renderer.push_overlay_px(scrim.x, scrim.y, scrim.w, scrim.h, [0.0, 0.0, 0.0, 0.5]);
-    if clicked && hit(scrim, mouse.0, mouse.1) {
-        // Will be refined: only close if click was OUTSIDE the panel (checked below).
-    }
 
     // Panel sizing: ≈ 50 columns wide, tall enough for visible rows (capped at 80%).
     let pw = (cell_w * 50.0)
@@ -101,8 +105,10 @@ pub fn build_help(
     let py = ((surface.1 - ph) * 0.5).round().max(m.pad);
     let panel = Rect::new(px, py, pw, ph);
 
-    // Close if clicked outside the panel (scrim click).
-    if clicked && !hit(panel, mouse.0, mouse.1) {
+    // Close if the click landed outside the panel (scrim click).
+    // Use click_pos (pointer position at release time) — not live mouse — so
+    // that motion after the release does not relocate the hit-test anchor.
+    if clicked && !hit(panel, click_pos.0, click_pos.1) {
         result.close = true;
     }
 

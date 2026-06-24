@@ -772,6 +772,7 @@ impl App {
                 m.height,
                 (sw as f32, sh as f32),
                 mouse,
+                self.gui_click_pos,
                 self.held_button == Some(0),
                 self.gui_click_edge,
                 &mut self.gui_pressed,

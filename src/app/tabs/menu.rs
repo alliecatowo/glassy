@@ -288,13 +288,20 @@ impl App {
             Some(StripItem::TabClose(pos)) => self.close_tab(pos, event_loop),
             Some(StripItem::NewTab) => self.new_tab(event_loop),
             Some(StripItem::Help) => {
-                self.help_open = !self.help_open;
+                let opening = !self.help_open;
+                self.help_open = opening;
                 self.settings_open = false;
                 self.menu_open = false;
+                // When this press OPENS an overlay, the release of the same
+                // button must not be treated as a click-outside-panel dismiss.
+                if opening {
+                    self.overlay_opened_by_press = true;
+                }
                 self.force_full_redraw = true;
                 self.mark_dirty(event_loop);
             }
             Some(StripItem::Settings) => {
+                let opening = !self.settings_open;
                 if self.settings_open {
                     self.settings_open = false;
                 } else {
@@ -302,12 +309,16 @@ impl App {
                 }
                 self.help_open = false;
                 self.menu_open = false;
+                if opening {
+                    self.overlay_opened_by_press = true;
+                }
                 self.force_full_redraw = true;
                 self.mark_dirty(event_loop);
             }
             Some(StripItem::Menu) => {
                 // Toggle the hamburger dropdown; close other overlays.
-                self.menu_open = !self.menu_open;
+                let opening = !self.menu_open;
+                self.menu_open = opening;
                 self.menu_sel = 0;
                 if self.menu_open {
                     // Hamburger: uses MenuAction::ALL; anchor top-right below strip.
@@ -362,6 +373,9 @@ impl App {
                 }
                 self.help_open = false;
                 self.settings_open = false;
+                if opening {
+                    self.overlay_opened_by_press = true;
+                }
                 self.force_full_redraw = true;
                 self.mark_dirty(event_loop);
             }

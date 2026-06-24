@@ -102,8 +102,9 @@ pub struct Config {
     /// Show the status bar at the bottom of the window. Default false.
     pub status_bar: bool,
     /// Show per-pane title bars (with the close box / split menu) and the accent
-    /// top-rail on each pane when the tab is split. Default true. When false,
-    /// panes use their full height with no header chrome.
+    /// top-rail on each pane when the tab is split. Default false (off by
+    /// default; enable via `pane_headers = true` in the config or the settings
+    /// toggle). When false, panes use their full height with no header chrome.
     pub pane_headers: bool,
     /// Word separator characters for text selection. Whitespace chars from this string
     /// (plus the default whitespace + punctuation) are used as word boundaries.
@@ -409,6 +410,17 @@ pub struct App {
     /// Press→release click edge captured by the MouseInput handler and consumed by
     /// the next chrome paint. Set on left-release, cleared after the GUI frame.
     gui_click_edge: bool,
+    /// Mouse position (physical px) at the instant `gui_click_edge` was set (i.e.
+    /// at the moment of the button release). Overlay hit tests use this position
+    /// instead of the current `mouse_px` so that pointer motion between the release
+    /// event and the next render frame does not shift the hit-test result — the most
+    /// common cause of "overlay closes immediately after opening" and
+    /// "motion dismisses help" bugs.
+    gui_click_pos: (f32, f32),
+    /// Set when an overlay (settings / help / menu) was opened by a tab-strip button
+    /// PRESS. Cleared after the next left-button release so that same release is not
+    /// immediately treated as a click-outside-the-panel dismiss.
+    overlay_opened_by_press: bool,
     /// Last instant the GUI animations were stepped, for dt computation.
     gui_anim_last: Instant,
 

@@ -151,6 +151,34 @@ impl<'r> Ui<'r> {
         }
     }
 
+    /// Draw `text` left-aligned, clipping to at most `max_w` pixels. When the
+    /// text is too wide, the tail is replaced with `…` (trailing ellipsis) so
+    /// the visible portion stays within `[x, x + max_w)`. Identical to `label`
+    /// when `text` fits.
+    pub fn label_clip(&mut self, x: f32, y: f32, text: &str, max_w: f32, color: [f32; 4]) {
+        let cw = self.m.cell_w;
+        let max_chars = (max_w / cw).floor() as usize;
+        let chars: Vec<char> = text.chars().collect();
+        let display: String = if chars.len() <= max_chars {
+            text.to_string()
+        } else if max_chars >= 2 {
+            // Tail-ellipsis: keep as many leading chars as fit, then "…".
+            let keep = max_chars - 1; // reserve one cell for "…"
+            let mut s: String = chars[..keep].iter().collect();
+            s.push('…');
+            s
+        } else if max_chars == 1 {
+            String::from("…")
+        } else {
+            return; // no space at all
+        };
+        let mut cx = x;
+        for ch in display.chars() {
+            self.r.push_overlay_glyph_px(cx, y, ch, color);
+            cx += cw;
+        }
+    }
+
     /// Draw `text` so its right edge ends at `x_right`, top at `y`.
     pub fn label_right(&mut self, x_right: f32, y: f32, text: &str, color: [f32; 4]) {
         let w = self.text_width(text);
@@ -422,7 +450,11 @@ impl<'r> Ui<'r> {
             self.rrect(Rect::new(tx, sy, s, s), 3.0, sw);
             tx += s + self.m.gap;
         }
-        self.label(tx.round(), ty.round(), label, fg());
+        // Clip the label so it does not overflow into the chevron column.
+        // Reserve: right pad + one cell for the chevron (▾/▴).
+        let chev_reserve = pad + self.m.cell_w;
+        let label_max_w = (rect.x + rect.w - chev_reserve - tx).max(0.0);
+        self.label_clip(tx.round(), ty.round(), label, label_max_w, fg());
         // Chevron flips appearance via glyph: ▴ when open, ▾ when closed.
         let chev = if open { '▴' } else { '▾' };
         let cx = rect.x + rect.w - pad - self.m.cell_w;
