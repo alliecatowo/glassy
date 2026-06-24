@@ -383,13 +383,16 @@ pub fn canonical_name(input: &str) -> &'static str {
 static ACTIVE: AtomicPtr<Theme> = AtomicPtr::new(std::ptr::null_mut());
 
 /// Install the active theme. Safe to call repeatedly (startup + live changes).
-/// The previous theme is intentionally leaked rather than freed: a concurrent
-/// reader may hold a `&'static Theme` from `active()`, and themes are tiny and
-/// swapped rarely, so leaking a few hundred bytes per change is the simplest
-/// sound choice.
+/// Frees the previous theme instead of leaking it.
 pub fn set_theme(theme: Theme) {
     let ptr = Box::into_raw(Box::new(theme));
-    ACTIVE.swap(ptr, Ordering::AcqRel);
+    let old_ptr = ACTIVE.swap(ptr, Ordering::AcqRel);
+    // Free the previous theme if it was set (not null and not the static defaults).
+    if !old_ptr.is_null() {
+        // SAFETY: `old_ptr` is a pointer produced by `Box::into_raw` in a prior
+        // `set_theme` call, so it is valid and safe to drop.
+        let _ = unsafe { Box::from_raw(old_ptr) };
+    }
 }
 
 /// The active theme, defaulting to Tokyo Night before `set_theme` is called.

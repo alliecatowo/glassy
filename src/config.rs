@@ -94,16 +94,50 @@ struct RawConfig {
     theme_light: Option<String>,
     theme_dark: Option<String>,
     status_bar: Option<bool>,
+    // Custom theme colors (hex format, e.g., "color.fg = #c0caf5")
+    color_fg: Option<String>,
+    color_bg: Option<String>,
+    color_cursor: Option<String>,
+    color_selection_bg: Option<String>,
+    color_ansi: Option<[Option<String>; 16]>,
 }
 
 impl RawConfig {
     fn into_settings(self) -> Result<Settings> {
         let theme_input = self.theme.as_deref().unwrap_or("tokyo-night");
-        let theme = color::theme_by_name(theme_input).unwrap_or_else(|| {
+        let mut theme = color::theme_by_name(theme_input).unwrap_or_else(|| {
             log::warn!("glassy: unknown theme '{theme_input}'; using Tokyo Night");
             color::theme_by_name("tokyo-night").expect("default theme exists")
         });
         let theme_name = color::canonical_name(theme_input).to_string();
+
+        // Apply custom color overrides if provided.
+        if self.color_fg.is_some()
+            || self.color_bg.is_some()
+            || self.color_cursor.is_some()
+            || self.color_selection_bg.is_some()
+            || self.color_ansi.is_some()
+        {
+            if let Some(fg) = self.color_fg {
+                theme.fg = parse_hex_color(&fg)?;
+            }
+            if let Some(bg) = self.color_bg {
+                theme.bg = parse_hex_color(&bg)?;
+            }
+            if let Some(cursor) = self.color_cursor {
+                theme.cursor = parse_hex_color(&cursor)?;
+            }
+            if let Some(sel_bg) = self.color_selection_bg {
+                theme.selection_bg = parse_hex_color(&sel_bg)?;
+            }
+            if let Some(ansi_colors) = self.color_ansi {
+                for (i, color_str) in ansi_colors.iter().enumerate() {
+                    if let Some(color) = color_str {
+                        theme.ansi16[i] = parse_hex_color(color)?;
+                    }
+                }
+            }
+        }
 
         // Follow-system theming: defaults pick a sensible dark/light pair so a
         // user only has to flip `follow_system = true`. Unknown names canonicalize
@@ -193,14 +227,18 @@ fn merge_config(existing: &str, updates: &[(&str, String)]) -> String {
         let key = key.trim().to_ascii_lowercase();
         for (i, (k, v)) in updates.iter().enumerate() {
             if !written[i] && key == *k {
-                *line = format!("{k} = {v}");
+                // Strip newlines and carriage returns from value to prevent injection.
+                let clean_v = v.replace('\n', "").replace('\r', "");
+                *line = format!("{k} = {clean_v}");
                 written[i] = true;
             }
         }
     }
     for (i, (k, v)) in updates.iter().enumerate() {
         if !written[i] {
-            lines.push(format!("{k} = {v}"));
+            // Strip newlines and carriage returns from value to prevent injection.
+            let clean_v = v.replace('\n', "").replace('\r', "");
+            lines.push(format!("{k} = {clean_v}"));
         }
     }
     let mut out = lines.join("\n");
@@ -251,6 +289,22 @@ fn unquote(s: &str) -> &str {
     s
 }
 
+/// Parse a hex color string (with or without leading #) to an Rgb.
+/// Accepts formats: "c0caf5", "#c0caf5", "C0CAF5", "#C0CAF5", etc.
+fn parse_hex_color(s: &str) -> Result<alacritty_terminal::vte::ansi::Rgb> {
+    let hex = s.trim_start_matches('#');
+    if hex.len() != 6 {
+        bail!("color must be a 6-digit hex value, got '{s}'");
+    }
+    let r = u8::from_str_radix(&hex[0..2], 16)
+        .with_context(|| format!("invalid hex color '{s}'"))?;
+    let g = u8::from_str_radix(&hex[2..4], 16)
+        .with_context(|| format!("invalid hex color '{s}'"))?;
+    let b = u8::from_str_radix(&hex[4..6], 16)
+        .with_context(|| format!("invalid hex color '{s}'"))?;
+    Ok(alacritty_terminal::vte::ansi::Rgb { r, g, b })
+}
+
 /// Apply a single recognized `key`/`value` pair into `raw`.
 fn apply_kv(key: &str, value: &str, raw: &mut RawConfig) -> Result<()> {
     match key {
@@ -291,7 +345,7 @@ fn apply_kv(key: &str, value: &str, raw: &mut RawConfig) -> Result<()> {
             let n: usize = value
                 .parse()
                 .with_context(|| format!("scrollback: invalid integer '{value}'"))?;
-            raw.scrollback = Some(n);
+            raw.scrollback = Some(n.clamp(0, 1_000_000));
         }
         "bell_visual" => {
             raw.bell_visual = Some(parse_bool(value, "bell_visual")?);
@@ -314,6 +368,40 @@ fn apply_kv(key: &str, value: &str, raw: &mut RawConfig) -> Result<()> {
         }
         "status_bar" => {
             raw.status_bar = Some(parse_bool(value, "status_bar")?);
+        }
+        // Custom theme colors: color.fg, color.bg, color.cursor, color.selection_bg, color.ansi0..15
+        "color.fg" => {
+            parse_hex_color(value)?; // Validate but store the string for later use
+            raw.color_fg = Some(value.to_string());
+        }
+        "color.bg" => {
+            parse_hex_color(value)?;
+            raw.color_bg = Some(value.to_string());
+        }
+        "color.cursor" => {
+            parse_hex_color(value)?;
+            raw.color_cursor = Some(value.to_string());
+        }
+        "color.selection_bg" => {
+            parse_hex_color(value)?;
+            raw.color_selection_bg = Some(value.to_string());
+        }
+        // Parse color.ansi0 through color.ansi15
+        k if k.starts_with("color.ansi") => {
+            let ansi_idx = k.strip_prefix("color.ansi")
+                .and_then(|s| s.parse::<usize>().ok())
+                .filter(|&idx| idx < 16);
+            if let Some(idx) = ansi_idx {
+                parse_hex_color(value)?;
+                if raw.color_ansi.is_none() {
+                    raw.color_ansi = Some(Default::default());
+                }
+                if let Some(ref mut ansi) = raw.color_ansi {
+                    ansi[idx] = Some(value.to_string());
+                }
+            } else {
+                log::warn!("glassy: ignoring invalid color key '{k}'");
+            }
         }
         other => {
             log::warn!("glassy: ignoring unknown config key '{other}'");
