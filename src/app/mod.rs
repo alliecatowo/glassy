@@ -105,6 +105,13 @@ pub struct Config {
     /// per-run shaping pass and may not be desirable for all fonts. Only takes
     /// effect when the loaded font actually carries a `liga` GSUB feature.
     pub ligatures: bool,
+    /// Working directory for the FIRST tab's shell, from a `cwd` config key or an
+    /// activated `[profile.NAME]`. `None` opens in the inherited/default directory.
+    pub initial_cwd: Option<std::path::PathBuf>,
+    /// Restore the previous session's tabs + splits + cwds on launch (from the
+    /// state file written on exit). Default false; opt in via `restore_session`
+    /// config key or `--restore-session`.
+    pub restore_session: bool,
 }
 
 /// A tab's split layout: the tiling tree (whose leaf ids are pty/pane ids) plus
@@ -143,6 +150,13 @@ struct Session {
     /// so a new tab/split opened from this tab inherits the cwd. `None` until the
     /// shell emits OSC 7 (or for shells that never do).
     last_cwd: Option<std::path::PathBuf>,
+    /// User-assigned custom title (double-click rename). Overrides the OSC `title`
+    /// for the chip when set. `None` uses the OSC title.
+    custom_title: Option<String>,
+    /// Per-pane last cwd for non-focused panes of this parked tab (focused pane's
+    /// is `last_cwd`). Keyed by pane id; used for session persistence so each pane
+    /// of a split restores in its own directory.
+    pane_cwds: std::collections::HashMap<usize, std::path::PathBuf>,
 }
 
 pub struct App {
@@ -170,6 +184,25 @@ pub struct App {
     active_id: usize,
     /// Title reported by the active session (OSC), for the tab strip.
     active_title: String,
+    /// User-assigned custom title for the ACTIVE tab (double-click rename), which
+    /// overrides `active_title` in the chip. `None` uses the OSC title.
+    active_custom_title: Option<String>,
+    /// Per-pane last cwd for the ACTIVE tab's non-focused panes (the focused pane's
+    /// is `active_cwd`). Keyed by pane id; persisted so each split pane restores in
+    /// its own directory.
+    active_pane_cwds: std::collections::HashMap<usize, std::path::PathBuf>,
+    /// Inline tab-rename editor: `Some((pos, buffer))` while a tab chip at stable
+    /// position `pos` is being renamed; the buffer is the in-progress text. Enter
+    /// commits, Esc cancels. `None` when not renaming.
+    tab_rename: Option<(usize, String)>,
+    /// Last tab-chip click `(pos, time)`, for double-click rename detection. A
+    /// second click on the same chip within the multi-click window opens the
+    /// inline rename editor.
+    last_tab_click: Option<(usize, Instant)>,
+    /// Set when the tab/split structure changed and the session file should be
+    /// re-persisted. Flushed (debounced) in `about_to_wait` so a burst of changes
+    /// writes once. A no-op when `restore_session` is off.
+    session_dirty: bool,
     /// Last working directory reported by the active session via OSC 7. New
     /// tabs/splits inherit it so they open where the user is, not in `$HOME`.
     /// Parked sessions keep their own in `Session::last_cwd`.

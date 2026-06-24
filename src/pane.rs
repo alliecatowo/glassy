@@ -289,6 +289,30 @@ impl Layout {
         }
     }
 
+    /// Serialize the tree into a flat [`LayoutDesc`] for session persistence. Leaf
+    /// ids are remapped through `id_of`, which the caller uses to translate live
+    /// pane ids into stable session-relative indices (and back on restore). The
+    /// focused leaf is recorded so focus is restored too.
+    pub fn to_desc(&self, id_of: &impl Fn(usize) -> usize) -> LayoutDesc {
+        LayoutDesc {
+            root: self.root.to_desc(id_of),
+            focused: id_of(self.focused),
+        }
+    }
+
+    /// Rebuild a layout from a [`LayoutDesc`], remapping the stored leaf ids back
+    /// to live pane ids through `id_of`. The focused leaf is restored when it names
+    /// an existing leaf; otherwise focus falls back to the first leaf.
+    pub fn from_desc(desc: &LayoutDesc, id_of: &impl Fn(usize) -> usize) -> Self {
+        let root = Node::from_desc(&desc.root, id_of);
+        let focused = id_of(desc.focused);
+        let mut layout = Layout { root, focused };
+        if !layout.root.contains(focused) {
+            layout.focused = layout.root.first_leaf();
+        }
+        layout
+    }
+
     /// Set the divider `ratio` (fraction given to the first child) of the split
     /// addressed by `path` (a sequence of first(false)/second(true) descents).
     /// The value is clamped to `[0, 1]`. Returns false if `path` does not name a
@@ -309,6 +333,74 @@ impl Layout {
                 true
             }
             Node::Leaf(_) => false,
+        }
+    }
+}
+
+/// A serializable snapshot of a [`Layout`] tree for session persistence. Leaf ids
+/// are session-relative (assigned by the caller's `id_of` remap) so they round-trip
+/// independently of the live pane-id counter.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LayoutDesc {
+    pub root: NodeDesc,
+    pub focused: usize,
+}
+
+/// Serializable form of one [`Node`].
+#[derive(Clone, Debug, PartialEq)]
+pub enum NodeDesc {
+    Leaf(usize),
+    Split {
+        dir: Dir,
+        ratio: f32,
+        first: Box<NodeDesc>,
+        second: Box<NodeDesc>,
+    },
+}
+
+impl Node {
+    fn to_desc(&self, id_of: &impl Fn(usize) -> usize) -> NodeDesc {
+        match self {
+            Node::Leaf(l) => NodeDesc::Leaf(id_of(*l)),
+            Node::Split { dir, ratio, first, second } => NodeDesc::Split {
+                dir: *dir,
+                ratio: *ratio,
+                first: Box::new(first.to_desc(id_of)),
+                second: Box::new(second.to_desc(id_of)),
+            },
+        }
+    }
+
+    fn from_desc(desc: &NodeDesc, id_of: &impl Fn(usize) -> usize) -> Node {
+        match desc {
+            NodeDesc::Leaf(l) => Node::Leaf(id_of(*l)),
+            NodeDesc::Split { dir, ratio, first, second } => Node::Split {
+                dir: *dir,
+                ratio: *ratio,
+                first: Box::new(Node::from_desc(first, id_of)),
+                second: Box::new(Node::from_desc(second, id_of)),
+            },
+        }
+    }
+}
+
+impl LayoutDesc {
+    /// Every leaf id in this descriptor, in depth-first order.
+    pub fn leaves(&self) -> Vec<usize> {
+        let mut out = Vec::new();
+        self.root.collect_leaves(&mut out);
+        out
+    }
+}
+
+impl NodeDesc {
+    fn collect_leaves(&self, out: &mut Vec<usize>) {
+        match self {
+            NodeDesc::Leaf(l) => out.push(*l),
+            NodeDesc::Split { first, second, .. } => {
+                first.collect_leaves(out);
+                second.collect_leaves(out);
+            }
         }
     }
 }
@@ -867,6 +959,45 @@ mod tests {
         // A leaf path is rejected.
         assert!(!l.set_ratio(&[false], 0.5)); // [false] is leaf 1
         assert!(!l.set_ratio(&[true, false, true], 0.5)); // too deep
+    }
+
+    #[test]
+    fn layout_desc_round_trips_with_id_remap() {
+        // Build (1 | (2 / 3)), focus 3, then serialize with a session-relative
+        // remap and rebuild with a fresh live-id remap; the geometry must match.
+        let mut l = Layout::new(1);
+        l.split(Dir::Vertical, 2);
+        l.split(Dir::Horizontal, 3); // (1 | (2/3)), focus 3
+        l.set_ratio(&[], 0.4);
+        // Map live ids 1,2,3 -> session ids 0,1,2 (DFS order).
+        let leaves = l.leaves();
+        let to_sess = |live: usize| leaves.iter().position(|&x| x == live).unwrap();
+        let desc = l.to_desc(&to_sess);
+        assert_eq!(desc.focused, to_sess(3));
+        assert_eq!(desc.leaves(), vec![0, 1, 2]);
+
+        // Rebuild with a remap to brand-new live ids 10,11,12.
+        let new_ids = [10usize, 11, 12];
+        let from_sess = |sess: usize| new_ids[sess];
+        let rebuilt = Layout::from_desc(&desc, &from_sess);
+        assert_eq!(rebuilt.leaves(), vec![10, 11, 12]);
+        assert_eq!(rebuilt.focused(), 12);
+        // Same partition shape (ratios + dirs preserved).
+        let orig = l.rects(AREA, 0);
+        let new = rebuilt.rects(AREA, 0);
+        let orig_geo: Vec<Rect> = orig.iter().map(|(_, r)| *r).collect();
+        let new_geo: Vec<Rect> = new.iter().map(|(_, r)| *r).collect();
+        assert_eq!(orig_geo, new_geo);
+    }
+
+    #[test]
+    fn single_leaf_desc_round_trips() {
+        let l = Layout::new(7);
+        let desc = l.to_desc(&|_| 0);
+        assert_eq!(desc.root, NodeDesc::Leaf(0));
+        let rebuilt = Layout::from_desc(&desc, &|_| 42);
+        assert_eq!(rebuilt.leaves(), vec![42]);
+        assert_eq!(rebuilt.focused(), 42);
     }
 
     #[test]

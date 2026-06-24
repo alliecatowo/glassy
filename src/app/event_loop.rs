@@ -77,6 +77,11 @@ impl ApplicationHandler<UserEvent> for App {
         self.cols = cols;
         self.rows = rows;
 
+        // First tab opens in the configured cwd (from `cwd` / an activated profile),
+        // if any; otherwise the shell's default. Also seed `active_cwd` so a new
+        // tab/split inherits it before the shell emits its first OSC 7.
+        let initial_cwd = self.config.initial_cwd.clone();
+        self.active_cwd = initial_cwd.clone();
         let pty = match Pty::spawn(
             self.proxy.clone(),
             0,
@@ -85,7 +90,7 @@ impl ApplicationHandler<UserEvent> for App {
             m.width.round() as u16,
             m.height.round() as u16,
             self.config.shell.clone(),
-            None,
+            initial_cwd,
             self.config.scrollback,
         ) {
             Ok(p) => p,
@@ -100,6 +105,15 @@ impl ApplicationHandler<UserEvent> for App {
         self.window = Some(window);
         self.renderer = Some(renderer);
         self.pty = Some(pty);
+
+        // Session restore (opt-in): replace the single initial tab with the saved
+        // tabs/splits/cwds. Done before the watcher/headless hooks so the restored
+        // tabs are the live set everything else operates on.
+        if self.config.restore_session
+            && let Some(saved) = crate::session::Session::load()
+        {
+            self.restore_session(saved, event_loop);
+        }
 
         // Set up config file watcher for live reload. Uses notify crate to watch
         // the config file and send ConfigReload events when it changes (debounced).
@@ -302,11 +316,25 @@ impl ApplicationHandler<UserEvent> for App {
                 if self.id_in_active_tab(id) {
                     if id == self.active_id {
                         self.active_cwd = Some(path);
+                    } else {
+                        // A non-focused active-tab pane reports its own cwd: the
+                        // focused pane's stays the tab's inherited cwd, but we still
+                        // record the per-pane cwd for session persistence.
+                        self.active_pane_cwds.insert(id, path);
                     }
-                    // A non-focused active-tab pane reports its own cwd; we keep the
-                    // focused pane's as the tab's inherited cwd, so ignore it.
-                } else if let Some(s) = self.background.iter_mut().find(|s| s.id == id) {
-                    s.last_cwd = Some(path);
+                } else {
+                    // A pane of a parked tab. The focused pane (id == tab id) drives
+                    // last_cwd; a non-focused pane records into pane_cwds.
+                    for s in self.background.iter_mut() {
+                        if s.id == id {
+                            s.last_cwd = Some(path);
+                            break;
+                        }
+                        if s.panes.as_ref().is_some_and(|g| g.others.contains_key(&id)) {
+                            s.pane_cwds.insert(id, path);
+                            break;
+                        }
+                    }
                 }
                 return;
             }
@@ -465,6 +493,12 @@ impl ApplicationHandler<UserEvent> for App {
                         return;
                     }
                     return; // consume everything while the find bar is up
+                }
+                // The inline tab-rename editor owns the keyboard while open: text
+                // edits the title, Enter commits, Esc cancels. Consume everything.
+                if event.state.is_pressed() && self.is_renaming_tab() {
+                    self.handle_rename_key(&event.logical_key, event_loop);
+                    return;
                 }
 
                 // Ctrl+Shift clipboard combos are consumed by glassy and never
@@ -904,6 +938,24 @@ impl ApplicationHandler<UserEvent> for App {
                     self.mark_dirty(event_loop);
                 }
 
+                // While the inline tab-rename editor is open, a left press commits
+                // the current name. If the press is on the chip being renamed it is
+                // also consumed (keep editing — a re-click shouldn't switch tabs);
+                // otherwise the click falls through so it can switch/act normally.
+                if self.tab_rename.is_some() && button == MouseButton::Left && pressed {
+                    let renaming_pos = self.tab_rename.as_ref().map(|(p, _)| *p);
+                    let (mx, my) = (self.mouse_px.0 as f32, self.mouse_px.1 as f32);
+                    let on_same_chip = matches!(
+                        (self.strip_item_at_px(mx, my), renaming_pos),
+                        (Some(StripItem::Tab(p)), Some(rp)) if p == rp
+                    );
+                    self.commit_tab_rename(event_loop);
+                    if on_same_chip {
+                        self.held_button = None;
+                        return;
+                    }
+                }
+
                 // While the settings form is open it owns the mouse: the form's
                 // immediate-mode widgets resolve hits during paint (from the click
                 // edge captured above), so consume the event here and never fall
@@ -1313,6 +1365,14 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // Flush a pending session re-persist (tab/split structure changed). Gated on
+        // `restore_session`; cheap (a small JSON write) and coalesced to once per
+        // settle. The authoritative save also happens in `exiting`.
+        if self.session_dirty {
+            self.session_dirty = false;
+            self.save_session();
+        }
+
         // Headless capture path: at the deadline, render the latest content,
         // dump it to disk, and exit.
         if let Some(deadline) = self.capture_deadline {
@@ -1471,6 +1531,17 @@ impl ApplicationHandler<UserEvent> for App {
             }
         } else {
             event_loop.set_control_flow(ControlFlow::WaitUntil(self.next_frame));
+        }
+    }
+
+    /// Persist (or clear) the session on a clean exit. When `restore_session` is on,
+    /// write the current tabs/splits/cwds so the next launch restores them; when
+    /// off, remove any stale state file so a prior session never resurrects.
+    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        if self.config.restore_session {
+            self.save_session();
+        } else {
+            crate::session::Session::clear();
         }
     }
 }

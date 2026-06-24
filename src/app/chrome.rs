@@ -297,6 +297,60 @@ impl App {
         renderer.push_overlay_px(0.0, bar_y, 1.0, bar_h, mul(gui::rail()));
     }
 
+    /// Paint the inline tab-rename editor over the chip rect `r`: an opaque raised
+    /// field with an accent ring, the in-progress `buffer` text (tail-clipped so the
+    /// caret stays visible), and a block caret at the end. Associated (no `&self`)
+    /// so it composes with the caller's `&mut Renderer` borrow.
+    pub(crate) fn paint_tab_rename(renderer: &mut Renderer, r: gui::Rect, buffer: &str) {
+        let m = renderer.cell_metrics();
+        let cell_w = m.width;
+        let cell_h = m.height;
+        let radius = gui_radius(cell_h);
+
+        // Opaque field surface so the chip text underneath never shows through.
+        renderer.push_overlay_rrect_px(r.x, r.y, r.w, r.h, radius, gui::glass_float());
+        // Accent focus ring (1px): outer accent rrect minus an inset surface rrect.
+        renderer.push_overlay_rrect_px(r.x, r.y, r.w, r.h, radius, color::accent());
+        let inset = 1.0;
+        if r.w > 2.0 * inset && r.h > 2.0 * inset {
+            renderer.push_overlay_rrect_px(
+                r.x + inset,
+                r.y + inset,
+                r.w - 2.0 * inset,
+                r.h - 2.0 * inset,
+                (radius - inset).max(0.0),
+                gui::glass_float(),
+            );
+        }
+
+        // Text area: pad in, reserve one cell for the caret. Tail-clip so the END
+        // of the buffer stays visible while typing (the natural caret position).
+        let pad = (cell_w * 0.6).round();
+        let ty = (r.center_y() - cell_h * 0.5).round();
+        let text_w = (r.w - 2.0 * pad - cell_w).max(0.0);
+        let max_chars = (text_w / cell_w).floor() as usize;
+        let chars: Vec<char> = buffer.chars().collect();
+        let visible: String = if chars.len() <= max_chars {
+            buffer.to_string()
+        } else if max_chars >= 1 {
+            // Keep the tail; lead with an ellipsis. max_chars >= 1 here, so the
+            // subtraction never underflows.
+            let tail = &chars[chars.len() - (max_chars - 1)..];
+            let mut s = String::from("…");
+            s.extend(tail.iter());
+            s
+        } else {
+            String::new()
+        };
+        let mut cx = r.x + pad;
+        for ch in visible.chars() {
+            renderer.push_overlay_glyph_px(cx.round(), ty, ch, gui::fg());
+            cx += cell_w;
+        }
+        // Block caret immediately after the last visible glyph.
+        renderer.push_overlay_px(cx.round(), ty, 2.0, cell_h, color::accent());
+    }
+
     /// Paint one tab chip's surface (connector + rail for active, recess for
     /// inactive) and its label. Split out so the drag-ghost can reuse the label
     /// pass without the surface.

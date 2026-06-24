@@ -74,6 +74,12 @@ impl App {
         // Tab-bar state snapshot (owned data) for the pixel-overlay painter, taken
         // under the immutable `&self` borrow.
         let tab_snapshot = self.tab_bar_snapshot();
+        let rename_inputs = self.tab_rename_state().and_then(|(pos, buf)| {
+            self.tab_layout()
+                .into_iter()
+                .find(|s| s.item == StripItem::Tab(pos))
+                .map(|s| (s.rect, buf))
+        });
         let tab_focused = self.focused;
         let tab_hovered = self.hovered_strip_item;
         let tab_held = self.held_strip_item;
@@ -335,6 +341,11 @@ impl App {
             renderer.commit_tab_overlay();
         } else {
             renderer.replay_tab_overlay();
+        }
+
+        // Inline tab-rename editor, drawn over its chip on top of the tab bar.
+        if let Some((rect, buf)) = &rename_inputs {
+            Self::paint_tab_rename(renderer, *rect, buf);
         }
 
         // Pane title bars: one per leaf, drawn as overlay quads+glyphs so they

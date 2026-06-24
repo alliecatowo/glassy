@@ -8,6 +8,7 @@ mod input;
 mod pane;
 mod pty;
 mod renderer;
+mod session;
 mod text;
 
 use winit::event_loop::{ControlFlow, EventLoop};
