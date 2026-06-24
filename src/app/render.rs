@@ -188,6 +188,19 @@ impl App {
             None
         };
 
+        // Tab right-click context menu snapshot (drawn after the global menu).
+        let tab_menu_snapshot = self.tab_menu_snapshot().map(|(entries, ax, ay, sel)| {
+            (
+                entries,
+                ax,
+                ay,
+                sel,
+                (self.mouse_px.0 as f32, self.mouse_px.1 as f32),
+                self.held_button == Some(0),
+                self.gui_click_edge,
+            )
+        });
+
         // Find-bar (search) inputs snapshotted before the disjoint renderer/pty
         // borrows. `search_highlights` + `search_readout` both lock the term.
         let search_inputs = self.search_readout().map(|r| (r, self.search_highlights()));
@@ -813,6 +826,16 @@ impl App {
         } else {
             None
         };
+
+        // Tab right-click context menu: drawn after the global menu so it floats
+        // on top. The click is resolved in the MouseInput handler (via
+        // `tab_menu_hit_test`); this draw only provides hover/keyboard feedback.
+        if let Some((ref entries, ax, ay, sel_item, mouse, mouse_down, click)) = tab_menu_snapshot {
+            let m = renderer.cell_metrics();
+            gui::menu(
+                renderer, m.width, m.height, mouse, mouse_down, click, ax, ay, entries, sel_item,
+            );
+        }
 
         // Record the state this frame drew from, so the next frame can repaint only
         // what changed (the cursor's old/new row, selection, scroll position).

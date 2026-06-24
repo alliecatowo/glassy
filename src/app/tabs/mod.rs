@@ -2,6 +2,7 @@
 
 use super::*;
 
+mod ctxmenu;
 mod menu;
 mod rename;
 mod session;
@@ -52,6 +53,9 @@ impl App {
             menu_anchor: None,
             menu_anchor_px: None,
             help_state: gui::HelpState::default(),
+            tab_menu_target: None,
+            tab_menu_sel: 0,
+            tab_menu_anchor_px: None,
             hovered_pane_header: None,
             pane_menu_open: None,
             pane_menu_sel: 0,

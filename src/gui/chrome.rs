@@ -23,14 +23,28 @@ impl<'r> Ui<'r> {
             [0.0, 0.0, 0.0, 0.5],
         );
 
-        // Centered panel. Width ≈ 40 columns; height grows with the row count.
-        let pw = (m.cell_w * 42.0)
+        // Centered panel. Width ≈ 48 columns (room for the longer labels +
+        // controls now that the form covers most config keys).
+        let pw = (m.cell_w * 48.0)
             .min(surface.0 - 2.0 * m.pad)
-            .max(m.cell_w * 24.0);
-        const ROWS: usize = 9; // font, opacity, bell, theme, font, scrollback, status_bar, pane_headers, path
+            .max(m.cell_w * 28.0);
+        // font, opacity, bell, theme, font, scrollback, padding, status_bar,
+        // pane_headers, follow_system, ligatures, restore_session, word_sep,
+        // font_features, config path.
+        const ROWS: usize = 15;
         let header_h = m.row_h;
         let footer_h = m.row_h + m.gap;
-        let body_h = ROWS as f32 * (m.row_h + m.gap);
+        // Adaptive row step: the natural step is `row_h + gap`, but if the form
+        // would overflow the surface we shrink the step so every row stays visible
+        // (no clipping needed — the panel "coordinates" its own height to the
+        // window). The control heights still derive from `row_h`, so controls keep
+        // their size while rows pack closer.
+        let natural_step = m.row_h + m.gap;
+        let avail = (surface.1 - 2.0 * m.pad).max(m.row_h * 4.0);
+        let fixed_h = header_h + m.gap + m.gap + footer_h + 2.0 * m.pad;
+        let max_body = (avail - fixed_h).max(m.row_h);
+        let step = natural_step.min(max_body / ROWS as f32).max(m.cell_h + 2.0);
+        let body_h = ROWS as f32 * step;
         let ph = (header_h + m.gap + body_h + m.gap + footer_h + 2.0 * m.pad).round();
         let px = ((surface.0 - pw) * 0.5).round();
         let py = ((surface.1 - ph) * 0.5).round().max(m.pad);
@@ -46,17 +60,20 @@ impl<'r> Ui<'r> {
             ev.close = true;
         }
 
-        // Each row: a left label column + a right control column.
-        let label_w = (m.cell_w * 12.0).round();
+        // Each row: a left label column + a right control column. The label column
+        // is wide enough for the longest label ("Restore session").
+        let label_w = (m.cell_w * 17.0).round();
         let ctrl_x = inner.x + label_w;
         let ctrl_w = (inner.w - label_w).min(m.ctrl_w * 1.6).max(m.ctrl_w);
         let mut y = inner.y + header_h + m.gap;
-        let step = m.row_h + m.gap;
+        // The drawn height of a single row's control band: the smaller of the
+        // natural control height and the (possibly compressed) step, so adjacent
+        // rows never overlap when the form is packed to fit a short window.
+        let ctrl_h = (m.row_h - m.gap).min((step - 2.0).max(m.cell_h));
         let row_label = |ui: &mut Self, y: f32, text: &str| {
-            let ly = (y + (m.row_h - m.cell_h) * 0.5).round();
+            let ly = (y + (ctrl_h - m.cell_h) * 0.5).round();
             ui.label(inner.x.round(), ly, text, fg_dim());
         };
-        let ctrl_h = m.row_h - m.gap;
         let ctrl_rect = |y: f32, w: f32| Rect::new(ctrl_x, y, w, ctrl_h);
 
         // -- Font size (stepper) ---------------------------------------------
@@ -74,7 +91,7 @@ impl<'r> Ui<'r> {
         }
         self.label_right(
             ctrl_x + ctrl_w,
-            (y + (m.row_h - m.cell_h) * 0.5).round(),
+            (y + (ctrl_h - m.cell_h) * 0.5).round(),
             &format!("{nv:.2}"),
             fg(),
         );
@@ -132,6 +149,12 @@ impl<'r> Ui<'r> {
             self.stepper(id("settings/scrollback"), ctrl_rect(y, m.ctrl_w), &sb_txt);
         y += step;
 
+        // -- Padding (stepper) -----------------------------------------------
+        row_label(self, y, "Padding");
+        let pad_txt = format!("{} px", v.padding);
+        ev.padding_delta = self.stepper(id("settings/padding"), ctrl_rect(y, m.ctrl_w), &pad_txt);
+        y += step;
+
         // -- Status bar (toggle) -----------------------------------------------
         // Width = max(cell_h*2, ctrl_w*0.25) so the knob has meaningful travel.
         row_label(self, y, "Status bar");
@@ -162,6 +185,74 @@ impl<'r> Ui<'r> {
         if new_pane_headers != v.pane_headers {
             ev.pane_headers_toggle = true;
         }
+        y += step;
+
+        // -- Follow system theme (toggle) ------------------------------------
+        let toggle_at = |y: f32| {
+            Rect::new(
+                ctrl_x,
+                (y + (ctrl_h - toggle_h) * 0.5).round(),
+                toggle_w,
+                toggle_h,
+            )
+        };
+        row_label(self, y, "Follow system");
+        if self.toggle(id("settings/follow_system"), toggle_at(y), v.follow_system)
+            != v.follow_system
+        {
+            ev.follow_system_toggle = true;
+        }
+        y += step;
+
+        // -- Ligatures (toggle) ----------------------------------------------
+        row_label(self, y, "Ligatures");
+        if self.toggle(id("settings/ligatures"), toggle_at(y), v.ligatures) != v.ligatures {
+            ev.ligatures_toggle = true;
+        }
+        y += step;
+
+        // -- Restore session (toggle) ----------------------------------------
+        row_label(self, y, "Restore session");
+        if self.toggle(
+            id("settings/restore_session"),
+            toggle_at(y),
+            v.restore_session,
+        ) != v.restore_session
+        {
+            ev.restore_session_toggle = true;
+        }
+        y += step;
+
+        // -- Word separators (readonly display) ------------------------------
+        row_label(self, y, "Word seps");
+        let ws = if v.word_separator.is_empty() {
+            "(default)"
+        } else {
+            v.word_separator
+        };
+        self.text_field_readonly(
+            id("settings/word_separator"),
+            ctrl_rect(y, ctrl_w),
+            ws,
+            false,
+            false,
+        );
+        y += step;
+
+        // -- Font features (readonly display) --------------------------------
+        row_label(self, y, "Font features");
+        let ff = if v.font_features.is_empty() {
+            "(none)"
+        } else {
+            v.font_features
+        };
+        self.text_field_readonly(
+            id("settings/font_features"),
+            ctrl_rect(y, ctrl_w),
+            ff,
+            false,
+            false,
+        );
         y += step;
 
         // -- Config path (readonly + copy/open) ------------------------------

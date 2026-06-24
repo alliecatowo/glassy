@@ -666,6 +666,10 @@ impl App {
             .unwrap_or(0);
         let font_refs: Vec<&str> = font_choices.iter().map(|s| s.as_str()).collect();
         let font_display = config.font_family.as_deref().unwrap_or("default");
+        let font_features_str = config.font_features.join(" ");
+        // Effective uniform padding shown in the form: the explicit `padding`
+        // override if set, else 0 (meaning "cell-derived default").
+        let padding_px = config.padding.unwrap_or(0.0).round().max(0.0) as u32;
 
         let (sw, sh) = renderer.surface_size();
         let (cw, ch) = {
@@ -699,6 +703,12 @@ impl App {
             saved,
             status_bar: config.status_bar,
             pane_headers: config.pane_headers,
+            follow_system: config.follow_system,
+            ligatures: config.ligatures,
+            restore_session: config.restore_session,
+            padding: padding_px,
+            word_separator: &config.word_separator,
+            font_features: &font_features_str,
         };
         ui.build_settings((sw as f32, sh as f32), &view)
     }
@@ -765,6 +775,29 @@ impl App {
         }
         if ev.pane_headers_toggle {
             self.toggle_pane_headers();
+            changed = true;
+        }
+        if ev.follow_system_toggle {
+            self.config.follow_system = !self.config.follow_system;
+            self.settings_saved = false;
+            changed = true;
+        }
+        if ev.ligatures_toggle {
+            self.config.ligatures = !self.config.ligatures;
+            if let Some(r) = self.renderer.as_mut() {
+                r.set_ligatures(self.config.ligatures);
+            }
+            self.settings_saved = false;
+            changed = true;
+        }
+        if ev.restore_session_toggle {
+            self.config.restore_session = !self.config.restore_session;
+            self.session_dirty = true;
+            self.settings_saved = false;
+            changed = true;
+        }
+        if ev.padding_delta != 0 {
+            self.adjust_padding(ev.padding_delta);
             changed = true;
         }
         if ev.copy_path {

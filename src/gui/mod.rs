@@ -398,6 +398,18 @@ pub struct SettingsView<'a> {
     pub status_bar: bool,
     /// Show per-pane title bars + accent rail in splits.
     pub pane_headers: bool,
+    /// Follow the system light/dark color scheme.
+    pub follow_system: bool,
+    /// Enable OpenType ligature shaping.
+    pub ligatures: bool,
+    /// Restore the previous session's tabs/splits on launch.
+    pub restore_session: bool,
+    /// Grid inset padding in logical px (uniform).
+    pub padding: u32,
+    /// Word-separator characters used for double-click word selection.
+    pub word_separator: &'a str,
+    /// OpenType font-feature tags as a single display string (e.g. "ss01 calt=0").
+    pub font_features: &'a str,
 }
 
 /// Everything the settings form reported this frame. The App applies each
@@ -435,6 +447,14 @@ pub struct SettingsEvents {
     pub status_bar_toggle: bool,
     /// Pane-headers toggle was clicked.
     pub pane_headers_toggle: bool,
+    /// Follow-system toggle was clicked.
+    pub follow_system_toggle: bool,
+    /// Ligatures toggle was clicked.
+    pub ligatures_toggle: bool,
+    /// Restore-session toggle was clicked.
+    pub restore_session_toggle: bool,
+    /// Padding stepper delta in clicks (-1 / 0 / +1).
+    pub padding_delta: i32,
 }
 
 // ---------------------------------------------------------------------------

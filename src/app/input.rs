@@ -236,6 +236,38 @@ impl App {
         }
     }
 
+    /// Select the entire terminal buffer (scrollback history + visible screen).
+    /// Builds a `Lines`-granularity selection spanning the topmost history line
+    /// to the bottom-right of the screen, so a subsequent Copy lifts everything.
+    pub(crate) fn select_all(&mut self) {
+        let Some(pty) = self.pty.as_ref() else { return };
+        let mut term = pty.term.lock();
+        let grid = term.grid();
+        let cols = grid.columns();
+        if cols == 0 {
+            return;
+        }
+        let top = Line(-(grid.history_size() as i32));
+        let bottom = Line(grid.screen_lines() as i32 - 1);
+        let start = Point::new(top, Column(0));
+        let end = Point::new(bottom, Column(cols - 1));
+        let mut sel = Selection::new(SelectionType::Lines, start, Side::Left);
+        sel.update(end, Side::Right);
+        term.selection = Some(sel);
+    }
+
+    /// Clear the scrollback history (the lines above the visible screen). The
+    /// visible screen is untouched, matching the common terminal "Clear
+    /// scrollback" action; the display offset resets so the view snaps to the
+    /// bottom.
+    pub(crate) fn clear_scrollback(&mut self) {
+        if let Some(pty) = self.pty.as_ref() {
+            let mut term = pty.term.lock();
+            term.selection = None;
+            term.grid_mut().clear_history();
+        }
+    }
+
     /// Copy the current selection to the OS clipboard.
     pub(crate) fn copy_selection(&mut self) {
         let text = match self.pty.as_ref() {

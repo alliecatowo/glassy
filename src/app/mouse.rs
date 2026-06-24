@@ -38,6 +38,18 @@ impl App {
             }
             return;
         }
+        // Tab right-click menu: mirror the hovered row into `tab_menu_sel` so
+        // mouse hover and keyboard nav share one selection (repaint on change).
+        if self.tab_menu_target.is_some() {
+            if let Some(action) = self.tab_menu_hit_test(position.x, position.y)
+                && let Some(idx) = self.tab_menu_actions().iter().position(|&a| a == action)
+                && idx != self.tab_menu_sel
+            {
+                self.tab_menu_sel = idx;
+                self.mark_dirty(event_loop);
+            }
+            return;
+        }
         if self.settings_open
             || self.help_open
             || self.pane_menu_open.is_some()
@@ -330,6 +342,43 @@ impl App {
             }
             self.held_button = None;
             return;
+        }
+
+        // A click while the tab right-click menu is open: invoke the row on the
+        // left RELEASE edge, dismiss on a press outside the panel, and always close
+        // on a right-click. Consumed either way (never falls through to the strip /
+        // terminal beneath the menu).
+        if self.tab_menu_target.is_some()
+            && (button == MouseButton::Left || button == MouseButton::Right)
+        {
+            let (mx, my) = self.mouse_px;
+            if button == MouseButton::Right {
+                if pressed {
+                    self.close_tab_menu(event_loop);
+                }
+            } else if pressed {
+                if self.tab_menu_hit_test(mx, my).is_none() {
+                    self.close_tab_menu(event_loop);
+                }
+            } else if let Some(action) = self.tab_menu_hit_test(mx, my) {
+                self.invoke_tab_menu_action(action, event_loop);
+            }
+            self.held_button = None;
+            return;
+        }
+
+        // A right-click on a tab chip opens the tab context menu (Rename /
+        // Duplicate / Close / Close others / Move). Takes priority over the
+        // terminal context menu so the strip owns its own right-click.
+        if button == MouseButton::Right && pressed {
+            let (mx, my) = (self.mouse_px.0 as f32, self.mouse_px.1 as f32);
+            if let Some(StripItem::Tab(pos)) | Some(StripItem::TabClose(pos)) =
+                self.strip_item_at_px(mx, my)
+            {
+                self.open_tab_menu(pos, event_loop);
+                self.held_button = None;
+                return;
+            }
         }
 
         // A left press while the pane ⋮ menu is open: invoke or dismiss.

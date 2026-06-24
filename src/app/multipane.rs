@@ -239,6 +239,19 @@ impl App {
             None
         };
 
+        // Tab right-click context menu snapshot (drawn after the global menu).
+        let tab_menu_snapshot2 = self.tab_menu_snapshot().map(|(entries, ax, ay, sel)| {
+            (
+                entries,
+                ax,
+                ay,
+                sel,
+                (self.mouse_px.0 as f32, self.mouse_px.1 as f32),
+                self.held_button == Some(0),
+                self.gui_click_edge,
+            )
+        });
+
         // Find-bar + palette inputs, snapshotted BEFORE the disjoint borrows
         // (both may lock the focused term). The find-bar highlights are positioned
         // relative to the focused pane's body rect (its on-screen pixel origin).
@@ -539,6 +552,14 @@ impl App {
             let m = renderer.cell_metrics();
             let _ = gui::menu(
                 renderer, m.width, m.height, mouse2, md2, click2, ax2, ay2, entries2, sel2,
+            );
+        }
+
+        // Tab right-click context menu in split mode (drawn after the global menu).
+        if let Some((ref entries, ax, ay, sel_item, mouse, md, click)) = tab_menu_snapshot2 {
+            let m = renderer.cell_metrics();
+            let _ = gui::menu(
+                renderer, m.width, m.height, mouse, md, click, ax, ay, entries, sel_item,
             );
         }
 

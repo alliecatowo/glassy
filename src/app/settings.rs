@@ -8,7 +8,7 @@ impl App {
     /// for Tab / Shift+Tab / Up / Down focus movement (the form itself collects
     /// the live order each paint, but key handling runs between paints so it walks
     /// this fixed list — identical ordering keeps focus stable).
-    pub(crate) fn settings_focus_order() -> [gui::WidgetId; 10] {
+    pub(crate) fn settings_focus_order() -> [gui::WidgetId; 14] {
         [
             gui::id("settings/font_size"),
             gui::id("settings/opacity"),
@@ -16,8 +16,12 @@ impl App {
             gui::id("settings/theme"),
             gui::id("settings/font_family"),
             gui::id("settings/scrollback"),
+            gui::id("settings/padding"),
             gui::id("settings/status_bar"),
             gui::id("settings/pane_headers"),
+            gui::id("settings/follow_system"),
+            gui::id("settings/ligatures"),
+            gui::id("settings/restore_session"),
             gui::id("settings/config"),
             gui::id("settings/save"),
         ]
@@ -111,6 +115,8 @@ impl App {
             self.cycle_font_family(dir);
         } else if f == Some(gui::id("settings/scrollback")) {
             self.adjust_scrollback(dir);
+        } else if f == Some(gui::id("settings/padding")) {
+            self.adjust_padding(dir);
         }
     }
 
@@ -145,6 +151,19 @@ impl App {
             self.toggle_status_bar();
         } else if f == Some(gui::id("settings/pane_headers")) {
             self.toggle_pane_headers();
+        } else if f == Some(gui::id("settings/follow_system")) {
+            self.config.follow_system = !self.config.follow_system;
+            self.settings_saved = false;
+        } else if f == Some(gui::id("settings/ligatures")) {
+            self.config.ligatures = !self.config.ligatures;
+            if let Some(r) = self.renderer.as_mut() {
+                r.set_ligatures(self.config.ligatures);
+            }
+            self.settings_saved = false;
+        } else if f == Some(gui::id("settings/restore_session")) {
+            self.config.restore_session = !self.config.restore_session;
+            self.session_dirty = true;
+            self.settings_saved = false;
         } else {
             self.save_settings();
         }
@@ -281,6 +300,46 @@ impl App {
         self.settings_saved = false;
     }
 
+    /// Adjust the uniform grid padding by `dir` (-1/+1) in 2-logical-px steps,
+    /// clamped to a sane range. Applies live to the renderer (scaled to physical
+    /// px) and reflows the grid + PTY. Persisted on Save.
+    pub(crate) fn adjust_padding(&mut self, dir: i32) {
+        let step = 2.0_f32;
+        let cur = self.config.padding.unwrap_or(0.0);
+        let next = (cur + dir as f32 * step).clamp(0.0, 64.0);
+        self.config.padding = Some(next);
+        self.settings_saved = false;
+        let scale = self
+            .window
+            .as_ref()
+            .map(|w| w.scale_factor() as f32)
+            .unwrap_or(1.0)
+            .max(0.1);
+        if let Some(r) = self.renderer.as_mut() {
+            r.set_pad(next * scale);
+        }
+        // Reflow: the inset changed, so the grid size + PTY must be recomputed.
+        if let (Some(window), Some(renderer)) = (self.window.as_ref(), self.renderer.as_ref()) {
+            let size = window.inner_size();
+            let m = renderer.cell_metrics();
+            let (cols, rows) = Self::grid_for(
+                size,
+                m.width,
+                m.height,
+                renderer.pad(),
+                self.config.status_bar,
+            );
+            self.cols = cols;
+            self.rows = rows;
+            if self.panes.is_some() {
+                self.resize_panes();
+            } else if let Some(pty) = self.pty.as_ref() {
+                pty.resize(cols, rows, m.width.round() as u16, m.height.round() as u16);
+            }
+        }
+        self.force_full_redraw = true;
+    }
+
     /// Copy the config-file path to the OS clipboard (settings ⧉ button).
     pub(crate) fn copy_config_path(&mut self) {
         let path = config_display_path();
@@ -405,6 +464,14 @@ impl App {
             ),
             ("scrollback", self.config.scrollback.to_string()),
             ("status_bar", self.config.status_bar.to_string()),
+            ("pane_headers", self.config.pane_headers.to_string()),
+            ("follow_system", self.config.follow_system.to_string()),
+            ("ligatures", self.config.ligatures.to_string()),
+            ("restore_session", self.config.restore_session.to_string()),
+            (
+                "padding",
+                format!("{:.0}", self.config.padding.unwrap_or(0.0)),
+            ),
         ];
         match crate::config::save(&updates) {
             Ok(()) => {

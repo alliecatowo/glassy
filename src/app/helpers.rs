@@ -335,6 +335,11 @@ pub(crate) fn percent_encode_path(path: &str) -> String {
 pub(crate) enum MenuAction {
     Copy,
     Paste,
+    SelectAll,
+    ClearScrollback,
+    Search,
+    SplitRight,
+    SplitDown,
     NewTab,
     Settings,
     PaneHeaders,
@@ -357,6 +362,11 @@ impl MenuAction {
         match self {
             MenuAction::Copy => "Copy",
             MenuAction::Paste => "Paste",
+            MenuAction::SelectAll => "Select all",
+            MenuAction::ClearScrollback => "Clear scrollback",
+            MenuAction::Search => "Search",
+            MenuAction::SplitRight => "Split right",
+            MenuAction::SplitDown => "Split down",
             MenuAction::NewTab => "New tab",
             MenuAction::Settings => "Settings",
             MenuAction::PaneHeaders => "Pane headers",
@@ -370,6 +380,11 @@ impl MenuAction {
         match self {
             MenuAction::Copy => '◻',
             MenuAction::Paste => '□',
+            MenuAction::SelectAll => '◼',
+            MenuAction::ClearScrollback => '~',
+            MenuAction::Search => '/',
+            MenuAction::SplitRight => '|',
+            MenuAction::SplitDown => '-',
             MenuAction::NewTab => '+',
             MenuAction::Settings => '*',
             MenuAction::PaneHeaders => '▭',
@@ -384,11 +399,29 @@ impl MenuAction {
         match self {
             MenuAction::Copy => Some("Ctrl+Shift+C"),
             MenuAction::Paste => Some("Ctrl+Shift+V"),
+            MenuAction::SelectAll => Some("Ctrl+Shift+A"),
+            MenuAction::ClearScrollback => None,
+            MenuAction::Search => Some("Ctrl+Shift+F"),
+            MenuAction::SplitRight => Some("Ctrl+Shift+E"),
+            MenuAction::SplitDown => Some("Ctrl+Shift+O"),
             MenuAction::NewTab => Some("Ctrl+Shift+T"),
             MenuAction::Settings => Some("Ctrl+,"),
             MenuAction::PaneHeaders => None,
             MenuAction::Help => Some("F1"),
             MenuAction::CloseTab => Some("Ctrl+Shift+W"),
+        }
+    }
+
+    /// Visual group id used by [`actions_to_entries`] to place separators: a
+    /// separator is drawn between any two consecutive items whose groups differ.
+    /// 0 = clipboard, 1 = buffer/find, 2 = layout, 3 = app, 4 = destructive.
+    fn group(self) -> u8 {
+        match self {
+            MenuAction::Copy | MenuAction::Paste | MenuAction::SelectAll => 0,
+            MenuAction::ClearScrollback | MenuAction::Search => 1,
+            MenuAction::SplitRight | MenuAction::SplitDown | MenuAction::NewTab => 2,
+            MenuAction::Settings | MenuAction::PaneHeaders | MenuAction::Help => 3,
+            MenuAction::CloseTab => 4,
         }
     }
 }
@@ -401,26 +434,19 @@ pub(crate) fn actions_to_entries(
     actions: &[MenuAction],
     has_selection: bool,
 ) -> Vec<gui::MenuEntry<'static>> {
-    let mut v: Vec<gui::MenuEntry<'static>> = Vec::with_capacity(actions.len() + 2);
-    // We need to detect group boundaries and insert separators.
-    // Simple rule: insert a separator before NewTab when Copy/Paste precede it
-    // (context menu), and before CloseTab when Settings precedes it (hamburger).
-    let mut prev: Option<MenuAction> = None;
+    let mut v: Vec<gui::MenuEntry<'static>> = Vec::with_capacity(actions.len() + 4);
+    // Each action belongs to a visual group; a separator is drawn whenever the
+    // group changes between two consecutive items. Keeping the grouping on the
+    // action itself (rather than pairwise prev→cur rules) means new actions slot
+    // into the right group automatically in both the context menu and hamburger.
+    let mut prev_group: Option<u8> = None;
     for &a in actions {
-        // Separator before group boundary.
-        let sep = match (prev, a) {
-            // Context menu: clipboard group → navigation group.
-            (Some(MenuAction::Copy | MenuAction::Paste), MenuAction::NewTab) => true,
-            // Hamburger: app group → destructive group.
-            (Some(MenuAction::Help), MenuAction::CloseTab) => true,
-            _ => false,
-        };
-        if sep {
+        let group = a.group();
+        if prev_group.is_some_and(|g| g != group) {
             v.push(gui::MenuEntry::Separator);
         }
         let enabled = match a {
             MenuAction::Copy => has_selection,
-            MenuAction::Paste => true,
             _ => true,
         };
         v.push(gui::MenuEntry::Item {
@@ -429,7 +455,7 @@ pub(crate) fn actions_to_entries(
             hint: a.shortcut(),
             enabled,
         });
-        prev = Some(a);
+        prev_group = Some(group);
     }
     v
 }
