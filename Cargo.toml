@@ -30,6 +30,12 @@ winit = "0.30.13"
 # config regardless; it only takes effect in a `--features bell-audio` build.
 rodio = { version = "0.22.2", default-features = false, features = ["playback"], optional = true }
 
+# Desktop notifications (OSC 9 / OSC 777 shell-integration). default-features=false
+# drops the optional zbus/dbus system dependency on Linux; the `d` feature enables
+# the D-Bus backend (correct for desktop Linux). On other platforms the crate's
+# native backend is always used regardless of this feature flag.
+notify-rust = { version = "4", default-features = false, features = ["d"] }
+
 # Linux: enable wayland-data-control for Wayland clipboard support.
 # X11 clipboard support is built in to arboard on Linux (no separate feature flag needed in 3.x).
 [target.'cfg(target_os = "linux")'.dependencies]

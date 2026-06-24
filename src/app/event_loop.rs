@@ -341,6 +341,23 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 return;
             }
+            UserEvent::SemanticMark(_id, _mark) => {
+                // OSC 133 semantic mark: the PromptTracker on the Pty already
+                // recorded the row offset for 'A' marks. No redraw needed; this
+                // event is a notification hook for future UI use (e.g. prompt-count
+                // in the status bar or Shift+Up/Down keybind wiring in app/input.rs).
+                return;
+            }
+            UserEvent::Notification(_id, text) => {
+                // OSC 9 / OSC 777: fire a desktop notification when the window is
+                // not focused so background jobs can alert the user. When the window
+                // is focused the shell's own output is visible, so skip to avoid
+                // spurious notifications from noisy programs.
+                if !self.focused {
+                    fire_desktop_notification("glassy", &text);
+                }
+                return;
+            }
         }
         self.mark_dirty(event_loop);
     }
@@ -1433,5 +1450,35 @@ impl ApplicationHandler<UserEvent> for App {
             event_loop.set_control_flow(ControlFlow::WaitUntil(self.next_frame));
         }
     }
+}
+
+/// Fire a desktop notification with `app_name` as the summary prefix and `body`
+/// as the message. Called on the UI thread when an OSC 9 / OSC 777 notification
+/// arrives and the window is unfocused.
+///
+/// Uses `notify-rust`'s non-blocking `show_async()` path via `pollster` so the
+/// UI thread does not stall waiting for dbus. Errors are logged at debug level
+/// (a missing notification daemon is a non-fatal, common desktop configuration).
+fn fire_desktop_notification(app_name: &str, body: &str) {
+    use notify_rust::Notification;
+    let summary = app_name.to_string();
+    let body = body.to_string();
+    // Spawn a detached thread so the D-Bus round-trip never blocks the UI loop.
+    std::thread::Builder::new()
+        .name("glassy-notify".to_string())
+        .spawn(move || {
+            let result = Notification::new()
+                .summary(&summary)
+                .body(&body)
+                .appname("glassy")
+                // Request a reasonable timeout (5 s) so the notification doesn't
+                // linger forever when the user doesn't dismiss it.
+                .timeout(notify_rust::Timeout::Milliseconds(5000))
+                .show();
+            if let Err(e) = result {
+                log::debug!("desktop notification failed: {e}");
+            }
+        })
+        .ok(); // ignore thread-spawn failure (extremely unlikely)
 }
 
