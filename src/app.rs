@@ -5263,7 +5263,13 @@ impl ApplicationHandler<UserEvent> for App {
                             self.mark_dirty(event_loop);
                         }
                     }
-                    self.held_button = None;
+                    // Do NOT clear held_button here: the settings snapshot reads
+                    // `held_button == Some(0)` as `mouse_down` for immediate-mode
+                    // press-latch / slider-drag. Clearing it before the render frame
+                    // fires makes every widget see mouse_down=false, killing all
+                    // click and drag interactions. `held_button` is correctly set to
+                    // None on the release event at the top of this handler (line
+                    // `self.held_button = if pressed { Some(base) } else { None }`).
                     return;
                 }
                 if !pressed {
