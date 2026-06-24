@@ -8,10 +8,10 @@ polling = "3.11"
 png = "0.17"
 alacritty_terminal = "0.26.0"
 anyhow = "1.0.102"
-# default-features off drops the `image` crate (png/tiff/jpeg/ICC decoders) we
-# never use — glassy only calls set_text/get_text. Big binary + build-time win.
-# Keep wayland-data-control so the clipboard works natively on Wayland sessions.
-arboard = { version = "3.6.1", default-features = false, features = ["wayland-data-control"] }
+# arboard is split per target so macOS/Windows builds don't pull in Wayland/X11
+# system libraries that are absent on those platforms (primary macOS build blocker).
+# default-features=false drops the `image` crate (png/tiff/jpeg/ICC decoders) we
+# never use — glassy only calls set_text/get_text.
 bytemuck = { version = "1.25.0", features = ["derive"] }
 cosmic-text = "0.19.0"
 # default-features off drops regex + jiff + anstream (colored/timestamped output
@@ -29,6 +29,15 @@ winit = "0.30.13"
 # the audible bell is a no-op (logged once). `bell_audible` still parses from the
 # config regardless; it only takes effect in a `--features bell-audio` build.
 rodio = { version = "0.22.2", default-features = false, features = ["playback"], optional = true }
+
+# Linux: enable wayland-data-control for Wayland clipboard support.
+# X11 clipboard support is built in to arboard on Linux (no separate feature flag needed in 3.x).
+[target.'cfg(target_os = "linux")'.dependencies]
+arboard = { version = "3.6.1", default-features = false, features = ["wayland-data-control"] }
+
+# macOS / Windows / other: plain arboard — no Wayland system libs (primary macOS build blocker).
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+arboard = { version = "3.6.1", default-features = false }
 
 [features]
 # Compile in the audible-bell backend. Requires audio dev libs (e.g. alsa-lib-devel
