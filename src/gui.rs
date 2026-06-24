@@ -304,6 +304,40 @@ pub struct Interaction {
     pub changed: bool,
 }
 
+/// What a [`Ui::dropdown`] reported this frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum DropdownEvt {
+    /// No interaction.
+    #[default]
+    None,
+    /// The header was clicked — the caller should flip the open/closed state.
+    Toggle,
+}
+
+/// What a [`Ui::list`] reported this frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum ListEvt {
+    /// No interaction.
+    #[default]
+    None,
+    /// Row `usize` (absolute index) was clicked.
+    Clicked(usize),
+    /// Row `usize` (absolute index) is hovered (no click).
+    Hovered(usize),
+}
+
+/// What a [`Ui::text_field_readonly`] reported this frame (trailing icons).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum FieldEvt {
+    /// No interaction.
+    #[default]
+    None,
+    /// The copy (`⧉`) icon was clicked.
+    Copy,
+    /// The open (`↗`) icon was clicked.
+    Open,
+}
+
 // ---------------------------------------------------------------------------
 // Immediate-mode Ui
 // ---------------------------------------------------------------------------
@@ -642,6 +676,186 @@ impl<'r> Ui<'r> {
         } else {
             0
         }
+    }
+
+    /// A dropdown header (the always-visible chooser button). Renders the current
+    /// `label`, an optional left color `swatch`, and a `▾` chevron; returns
+    /// [`DropdownEvt::Toggle`] when clicked so the caller flips its `open` state.
+    /// The popup list itself is drawn separately via [`Ui::list`] (an E3 surface)
+    /// so it composites above everything; pass `open` only to draw the pressed/
+    /// active chrome here.
+    pub fn dropdown(
+        &mut self,
+        wid: WidgetId,
+        rect: Rect,
+        label: &str,
+        open: bool,
+        swatch: Option<[f32; 4]>,
+    ) -> DropdownEvt {
+        let it = self.interact(wid, rect, true);
+        let st = self.wstate(wid, &it, true);
+        let hover_t = self.anim(
+            wid,
+            if open || matches!(st, WState::Hover | WState::Press) { 1.0 } else { 0.0 },
+        );
+        let fill = state_fill(glass_raised(), hover_t, it.pressed || open);
+        self.rrect(rect, self.m.radius, fill);
+        if hover_t > 0.0 && !it.pressed {
+            self.quad(Rect::new(rect.x, rect.y, rect.w, 1.0), rail());
+        }
+        if matches!(st, WState::Focus) {
+            self.focus_ring(rect, self.m.radius);
+        }
+        // Left swatch (e.g. theme preview), label, trailing chevron.
+        let pad = self.m.pad;
+        let mut tx = rect.x + pad;
+        let ty = rect.center_y() - self.m.cell_h * 0.5;
+        if let Some(sw) = swatch {
+            let s = (self.m.cell_h * 0.8).round();
+            let sy = rect.center_y() - s * 0.5;
+            self.rrect(Rect::new(tx, sy, s, s), 3.0, sw);
+            tx += s + self.m.gap;
+        }
+        self.label(tx.round(), ty.round(), label, fg());
+        // Chevron flips appearance via glyph: ▴ when open, ▾ when closed.
+        let chev = if open { '▴' } else { '▾' };
+        let cx = rect.x + rect.w - pad - self.m.cell_w;
+        self.r.push_overlay_glyph_px(cx.round(), ty.round(), chev, fg_dim());
+        if it.clicked {
+            DropdownEvt::Toggle
+        } else {
+            DropdownEvt::None
+        }
+    }
+
+    /// A read-only text field with a leading-ellipsis clip (the END of `text`
+    /// stays visible — ideal for paths) plus optional trailing copy (`⧉`) and
+    /// open (`↗`) icon buttons. Returns which trailing icon was clicked.
+    pub fn text_field_readonly(
+        &mut self,
+        wid: WidgetId,
+        rect: Rect,
+        text: &str,
+        with_copy: bool,
+        with_open: bool,
+    ) -> FieldEvt {
+        // Sunken track.
+        self.rrect(rect, self.m.radius, track_off());
+        if *self.focused == Some(wid) {
+            self.focus_ring(rect, self.m.radius);
+        }
+        let pad = self.m.pad;
+        // Reserve trailing icon slots.
+        let icon_w = self.m.row_h;
+        let mut right = rect.x + rect.w;
+        let mut evt = FieldEvt::None;
+        if with_open {
+            right -= icon_w;
+            let ir = Rect::new(right, rect.y, icon_w, rect.h);
+            if self.icon_button(id_combine(wid, 2), ir, '↗').clicked {
+                evt = FieldEvt::Open;
+            }
+        }
+        if with_copy {
+            right -= icon_w;
+            let ir = Rect::new(right, rect.y, icon_w, rect.h);
+            if self.icon_button(id_combine(wid, 1), ir, '⧉').clicked {
+                evt = FieldEvt::Copy;
+            }
+        }
+        // Text area = everything left of the icons.
+        let text_w = (right - rect.x - 2.0 * pad).max(0.0);
+        let max_chars = (text_w / self.m.cell_w).floor() as usize;
+        let chars: Vec<char> = text.chars().collect();
+        let ty = rect.center_y() - self.m.cell_h * 0.5;
+        let tx = rect.x + pad;
+        if chars.len() <= max_chars {
+            self.label(tx.round(), ty.round(), text, fg());
+        } else if max_chars >= 1 {
+            // Leading ellipsis: keep the tail visible.
+            let tail = &chars[chars.len() - (max_chars - 1)..];
+            let mut s = String::from("…");
+            s.extend(tail.iter());
+            self.label(tx.round(), ty.round(), &s, fg());
+        }
+        evt
+    }
+
+    /// A scrollable selectable list. `rows` are the row labels; `sel` the
+    /// currently-selected absolute index (highlighted); `scroll` the vertical
+    /// scroll offset in px (the caller owns it and updates from the returned
+    /// value of any companion [`Ui::scrollbar`]). Rows are clipped to `rect` by
+    /// simple range-culling (no GPU scissor). Returns the row event this frame.
+    pub fn list(
+        &mut self,
+        wid: WidgetId,
+        rect: Rect,
+        rows: &[&str],
+        sel: usize,
+        scroll: f32,
+    ) -> ListEvt {
+        let row_h = self.m.row_h;
+        let mut evt = ListEvt::None;
+        let first = (scroll / row_h).floor().max(0.0) as usize;
+        let visible = (rect.h / row_h).ceil() as usize + 1;
+        for (i, label) in rows.iter().enumerate().skip(first).take(visible) {
+            let ry = rect.y + i as f32 * row_h - scroll;
+            // Cull rows fully outside the viewport.
+            if ry + row_h <= rect.y || ry >= rect.y + rect.h {
+                continue;
+            }
+            let rr = Rect::new(rect.x, ry, rect.w, row_h);
+            let row_id = id_combine(wid, i as u64);
+            let it = self.interact(row_id, rr, true);
+            if i == sel {
+                self.rrect(rr.inset(1.0), self.m.radius - 1.0, sel_bg());
+            } else if it.hovered {
+                self.rrect(rr.inset(1.0), self.m.radius - 1.0, state_fill(track_off(), 1.0, false));
+            }
+            let ty = rr.center_y() - self.m.cell_h * 0.5;
+            self.label((rr.x + self.m.pad).round(), ty.round(), label, fg());
+            if it.clicked {
+                evt = ListEvt::Clicked(i);
+            } else if it.hovered && evt == ListEvt::None {
+                evt = ListEvt::Hovered(i);
+            }
+        }
+        evt
+    }
+
+    /// A vertical scrollbar bound to a scrollable region. `track` is the gutter
+    /// rect; `content_h`/`view_h` size the thumb; `scroll` is the current offset
+    /// in px. Returns the (possibly dragged) scroll offset, clamped to range.
+    pub fn scrollbar(
+        &mut self,
+        wid: WidgetId,
+        track: Rect,
+        content_h: f32,
+        view_h: f32,
+        scroll: f32,
+    ) -> f32 {
+        let max_scroll = (content_h - view_h).max(0.0);
+        let mut s = scroll.clamp(0.0, max_scroll);
+        if max_scroll <= 0.0 {
+            return 0.0; // nothing to scroll; draw no thumb
+        }
+        // Track.
+        self.rrect(track, track.w * 0.5, track_off());
+        let it = self.interact(wid, track, true);
+        let thumb_h = (track.h * (view_h / content_h)).max(self.m.row_h * 0.6);
+        let span = (track.h - thumb_h).max(0.0);
+        if it.pressed && span > 0.0 {
+            // Map the pointer to a scroll position (thumb-centered).
+            let t = ((self.mouse.1 - track.y - thumb_h * 0.5) / span).clamp(0.0, 1.0);
+            s = t * max_scroll;
+        }
+        let t = if max_scroll > 0.0 { s / max_scroll } else { 0.0 };
+        let ty = track.y + span * t;
+        let thumb = Rect::new(track.x, ty, track.w, thumb_h);
+        let hover_t = self.anim(wid, if it.hovered || it.pressed { 1.0 } else { 0.0 });
+        let fill = state_fill(with_alpha(fg(), 0.35), hover_t, it.pressed);
+        self.rrect(thumb, track.w * 0.5, fill);
+        s
     }
 }
 

@@ -2211,7 +2211,7 @@ impl App {
         );
 
         let met = ui.m;
-        let panel = gui::Rect::new(60.0, 60.0, met.cell_w * 34.0, met.row_h * 8.0 + met.pad * 2.0);
+        let panel = gui::Rect::new(60.0, 60.0, met.cell_w * 38.0, met.row_h * 12.0 + met.pad * 2.0);
         let inner = ui.panel(panel, met.card_radius);
         ui.label(inner.x, inner.y, "glassy — gui demo", gui::fg());
 
@@ -2239,6 +2239,41 @@ impl App {
 
         let r = row(y);
         let _ = ui.stepper(gui::id("demo/step"), gui::Rect::new(r.x, r.y, met.ctrl_w, r.h), "14px");
+        y += met.row_h;
+
+        let r = row(y);
+        let _ = ui.dropdown(
+            gui::id("demo/dropdown"),
+            gui::Rect::new(r.x, r.y, met.ctrl_w, r.h),
+            "Solarized",
+            false,
+            Some(gui::fill_on()),
+        );
+        y += met.row_h;
+
+        let r = row(y);
+        let _ = ui.text_field_readonly(
+            gui::id("demo/field"),
+            gui::Rect::new(r.x, r.y, met.ctrl_w * 1.4, r.h),
+            "/home/allie/.config/glassy/glassy.toml",
+            true,
+            true,
+        );
+        y += met.row_h;
+
+        // List + scrollbar in a small scrolling region.
+        let list_h = met.row_h * 2.0;
+        let bar_w = met.gap.max(6.0);
+        let list_rect = gui::Rect::new(inner.x, y, met.ctrl_w, list_h);
+        let _ = ui.list(
+            gui::id("demo/list"),
+            list_rect,
+            &["one", "two", "three", "four", "five"],
+            1,
+            0.0,
+        );
+        let track = gui::Rect::new(list_rect.x + list_rect.w + 2.0, y, bar_w, list_h);
+        let _ = ui.scrollbar(gui::id("demo/scroll"), track, met.row_h * 5.0, list_h, 0.0);
     }
 
     fn render(&mut self) {
