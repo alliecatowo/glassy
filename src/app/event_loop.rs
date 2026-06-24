@@ -59,6 +59,7 @@ impl ApplicationHandler<UserEvent> for App {
             self.config.font_family.clone(),
             font_px,
             self.config.opacity,
+            self.config.font_features.clone(),
         ) {
             Ok(r) => r,
             Err(e) => {

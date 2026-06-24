@@ -556,6 +556,153 @@ impl Renderer {
         }
     }
 
+    /// Paint a Powerline separator glyph procedurally as a series of scanline
+    /// quads, without requiring a Powerline-patched font.
+    ///
+    /// Handled code points (Private Use Area, Powerline Extra symbols):
+    ///   U+E0B0  filled right-pointing triangle (→ separator arrow, solid)
+    ///   U+E0B1  right-pointing chevron outline (→ separator, stroke only)
+    ///   U+E0B2  filled left-pointing triangle (← separator arrow, solid)
+    ///   U+E0B3  left-pointing chevron outline (← separator, stroke only)
+    ///
+    /// Returns `true` when the code point was handled; `false` otherwise (the
+    /// caller falls through to the normal glyph path).
+    ///
+    /// Rendering strategy: approximate the diagonal edge with integer-snapped
+    /// horizontal scanline quads (one per pixel row). At typical terminal cell
+    /// sizes (8–20 px tall) the staircase is indistinguishable from a true
+    /// anti-aliased line; the fills are exact, producing sharp, gapless
+    /// separators that perfectly match adjacent solid-colored backgrounds.
+    ///
+    /// The `bg` color is used to "erase" the triangle's complementary region for
+    /// the solid variants (E0B0/E0B2), so the opposite half of the cell shows the
+    /// cell background rather than the foreground color.
+    pub(crate) fn draw_powerline(
+        &mut self,
+        ch: char,
+        ox: f32,
+        oy: f32,
+        fg: [f32; 4],
+        bg: [f32; 4],
+    ) -> bool {
+        let cw = self.metrics.width;
+        let chh = self.metrics.height;
+        let cp = ch as u32;
+
+        // Stroke thickness for the chevron outline variants.
+        let stroke = (chh / 12.0).round().max(1.0);
+
+        // Integer-pixel cell boundaries.
+        let left = ox.round() as i32;
+        let top = oy.round() as i32;
+        let right = (ox + cw).round() as i32;
+        let bot = (oy + chh).round() as i32;
+        let cell_w = (right - left).max(1);
+        let cell_h = (bot - top).max(1);
+
+        // Helper: push a single scanline row quad clamped inside the cell.
+        // `x0`..`x1` and `y0`..`y1` are integer pixel coords.
+        let push = |this: &mut Self, x0: i32, x1: i32, y0: i32, y1: i32, color: [f32; 4]| {
+            let x0 = x0.max(left).min(right);
+            let x1 = x1.max(left).min(right);
+            let y0 = y0.max(top).min(bot);
+            let y1 = y1.max(top).min(bot);
+            if x1 > x0 && y1 > y0 {
+                this.push_solid(x0 as f32, y0 as f32, (x1 - x0) as f32, (y1 - y0) as f32, color);
+            }
+        };
+
+        match cp {
+            // E0B0: right-pointing solid triangle.
+            // Row `r` (0-indexed from top): the filled fg region occupies columns
+            //   [left, left + (r+1)*cw/cell_h) on the upper half
+            //   (mirrored on the lower half via row distance from centre).
+            // Equivalently, for row r the fg x-extent is:
+            //   x_edge = left + round( (r + 0.5) * cell_w / cell_h )
+            // The "upper half" rows converge toward the right tip; the "lower half"
+            // mirrors.  But a right-pointing triangle is simply: for row r (0..h),
+            //   fill [left, left + round((r + 0.5) * cw / h)) for rows above the
+            //   midpoint, and [left, left + round((h - r - 0.5) * cw / h)) for below.
+            // This simplifies: x_edge = left + round( min(r+1, h-r) * cw / h ).
+            // Actually the standard Powerline right arrow is:
+            //   for row y in [0, h): fill x in [left, left + round((y+0.5)*cw/h)]
+            //   for the top half, and mirror for the bottom half.
+            // The cleanest description: it's a right triangle with vertices at
+            //   (left, top), (left, bot), (right, mid).
+            // For each row r: the rightmost pixel is interpolated from left→right
+            // as r goes top→mid, then right→left as r goes mid→bot.
+            0xE0B0 => {
+                for row in 0..cell_h {
+                    let y0 = top + row;
+                    let y1 = y0 + 1;
+                    // Fraction along the left→right edge (0 at top or bot, 1 at mid).
+                    let dist_from_mid = (row as f32 - (cell_h as f32 - 1.0) / 2.0).abs();
+                    let frac = 1.0 - dist_from_mid / ((cell_h as f32) / 2.0);
+                    let x_edge = left + (frac * cell_w as f32).round() as i32;
+                    // Fill fg region [left, x_edge).
+                    push(self, left, x_edge.min(right), y0, y1, fg);
+                    // Fill bg region [x_edge, right) so the full cell is painted.
+                    push(self, x_edge.min(right), right, y0, y1, bg);
+                }
+                true
+            }
+
+            // E0B2: left-pointing solid triangle.
+            // Mirror of E0B0: vertices at (right, top), (right, bot), (left, mid).
+            0xE0B2 => {
+                for row in 0..cell_h {
+                    let y0 = top + row;
+                    let y1 = y0 + 1;
+                    let dist_from_mid = (row as f32 - (cell_h as f32 - 1.0) / 2.0).abs();
+                    let frac = 1.0 - dist_from_mid / ((cell_h as f32) / 2.0);
+                    let x_edge = right - (frac * cell_w as f32).round() as i32;
+                    // Fill bg region [left, x_edge).
+                    push(self, left, x_edge.max(left), y0, y1, bg);
+                    // Fill fg region [x_edge, right).
+                    push(self, x_edge.max(left), right, y0, y1, fg);
+                }
+                true
+            }
+
+            // E0B1: right-pointing chevron outline.
+            // A ">" stroke from (left,top)→(right,mid)→(left,bot), `stroke` px wide.
+            0xE0B1 => {
+                for row in 0..cell_h {
+                    let y0 = top + row;
+                    let y1 = y0 + 1;
+                    // Distance from the nearer half-diagonal (upper or lower).
+                    let half = (cell_h as f32 - 1.0) / 2.0;
+                    let dist_from_mid = (row as f32 - half).abs();
+                    let frac = 1.0 - dist_from_mid / (cell_h as f32 / 2.0);
+                    let x_center = left + (frac * cell_w as f32).round() as i32;
+                    let x0 = (x_center - stroke as i32).max(left);
+                    let x1 = (x_center + 1).min(right);
+                    push(self, x0, x1, y0, y1, fg);
+                }
+                true
+            }
+
+            // E0B3: left-pointing chevron outline (mirror of E0B1).
+            // A "<" stroke from (right,top)→(left,mid)→(right,bot), `stroke` px wide.
+            0xE0B3 => {
+                for row in 0..cell_h {
+                    let y0 = top + row;
+                    let y1 = y0 + 1;
+                    let half = (cell_h as f32 - 1.0) / 2.0;
+                    let dist_from_mid = (row as f32 - half).abs();
+                    let frac = 1.0 - dist_from_mid / (cell_h as f32 / 2.0);
+                    let x_center = right - (frac * cell_w as f32).round() as i32;
+                    let x0 = left.max(x_center - 1);
+                    let x1 = (x_center + stroke as i32).min(right);
+                    push(self, x0, x1, y0, y1, fg);
+                }
+                true
+            }
+
+            _ => false,
+        }
+    }
+
     pub fn render(&mut self) -> RenderResult {
         // wgpu 29 returns a `CurrentSurfaceTexture` enum (there is no `SurfaceError`
         // in this version). `Success`/`Suboptimal` give us a frame; the remaining

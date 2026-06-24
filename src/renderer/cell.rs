@@ -125,7 +125,7 @@ impl Renderer {
         if (font_px - self.font_px).abs() < 0.01 {
             return;
         }
-        let (text, metrics) = match Text::load(self.font_family.as_deref(), font_px) {
+        let (text, metrics) = match Text::load(self.font_family.as_deref(), font_px, &self.font_features) {
             Ok(loaded) => loaded,
             Err(e) => {
                 log::warn!("glassy: font resize to {font_px:.1}px failed: {e:#}");
@@ -485,6 +485,15 @@ impl Renderer {
         let cp = ch as u32;
         let is_box = (0x2500..=0x257F).contains(&cp);
         let is_block = (0x2580..=0x259F).contains(&cp);
+        // Powerline separator glyphs (Private Use Area, E0B0–E0B3). Render these
+        // procedurally so they are always crisp even without a patched font.
+        // NOTE: E0B0/E0B2 fill the whole cell with two colored regions (fg + bg),
+        // so we must NOT push the cell background quad before this check. However,
+        // the background was already pushed unconditionally above. The `draw_powerline`
+        // method handles the full cell paint (bg region included) internally, so
+        // the pre-pushed background quad underneath is invisible (same color or
+        // overdrawn by our scanlines). This is correct: the bg quads are opaque.
+        let is_powerline = matches!(cp, 0xE0B0..=0xE0B3);
         if is_block {
             self.draw_block(ch, origin_x, origin_y, fg, bg);
             return;
@@ -494,6 +503,11 @@ impl Renderer {
             // which case we fall through to the normal glyph path so nothing
             // renders blank.
             if self.draw_box(ch, origin_x, origin_y, fg) {
+                return;
+            }
+        }
+        if is_powerline {
+            if self.draw_powerline(ch, origin_x, origin_y, fg, bg) {
                 return;
             }
         }
