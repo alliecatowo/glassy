@@ -466,6 +466,30 @@ fn dim(rgb: Rgb) -> Rgb {
     }
 }
 
+/// Lighten a color by adding a linear amount to each channel, clamped to [0, 1].
+/// Used by GUI surfaces to create elevated hierarchy without changing the hue.
+pub fn lighten(c: [f32; 4], amount: f32) -> [f32; 4] {
+    [
+        (c[0] + amount).min(1.0),
+        (c[1] + amount).min(1.0),
+        (c[2] + amount).min(1.0),
+        c[3],
+    ]
+}
+
+/// Darken a color by multiplying each channel by a factor in [0, 1].
+/// Used by GUI surfaces for shadows and hover states.
+pub fn darken(c: [f32; 4], f: f32) -> [f32; 4] {
+    [c[0] * f, c[1] * f, c[2] * f, c[3]]
+}
+
+/// Compute the relative luminance of a color using the standard formula
+/// (0.299*R + 0.587*G + 0.114*B), used to determine whether to lighten or
+/// darken a surface for contrast on near-white/light backgrounds.
+pub fn luma(c: [f32; 4]) -> f32 {
+    0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2]
+}
+
 fn default_named(named: NamedColor) -> Rgb {
     default_named_index(named as usize)
 }

@@ -313,15 +313,6 @@ pub(crate) fn percent_encode_path(path: &str) -> String {
     out
 }
 
-pub(crate) fn lighten(c: [f32; 4], amount: f32) -> [f32; 4] {
-    [
-        (c[0] + amount).min(1.0),
-        (c[1] + amount).min(1.0),
-        (c[2] + amount).min(1.0),
-        c[3],
-    ]
-}
-
 /// Actions available in the # hamburger dropdown and the right-click context
 /// menu. Kept as a single enum so the hit-test and keyboard dispatch share one
 /// definition across both menus.

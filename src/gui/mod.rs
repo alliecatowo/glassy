@@ -23,7 +23,7 @@
 
 use std::collections::HashMap;
 
-use crate::color;
+use crate::color::{self, lighten, darken, luma};
 use crate::renderer::Renderer;
 
 
@@ -181,22 +181,6 @@ fn with_alpha(mut c: [f32; 4], a: f32) -> [f32; 4] {
     c
 }
 
-fn lighten(c: [f32; 4], amount: f32) -> [f32; 4] {
-    [
-        (c[0] + amount).min(1.0),
-        (c[1] + amount).min(1.0),
-        (c[2] + amount).min(1.0),
-        c[3],
-    ]
-}
-
-fn darken(c: [f32; 4], f: f32) -> [f32; 4] {
-    [c[0] * f, c[1] * f, c[2] * f, c[3]]
-}
-
-fn luma(c: [f32; 4]) -> f32 {
-    0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2]
-}
 
 /// E1 chrome bar fill.
 pub fn glass_body() -> [f32; 4] {
