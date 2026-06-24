@@ -700,6 +700,10 @@ struct PaneGroup {
     layout: pane::Layout,
     /// Non-focused panes' PTYs, keyed by pane id (== leaf id == pty id).
     others: HashMap<usize, Pty>,
+    /// Per-leaf OSC window title, keyed by pane id. Tracks all panes including
+    /// the focused one (whose OSC title is also in `App::active_title`). New
+    /// panes start with an empty string (displayed as "shell" in the header).
+    others_titles: HashMap<usize, String>,
 }
 
 /// One terminal tab. The *active* tab's PTY lives directly in `App::pty` (so all
@@ -817,6 +821,13 @@ pub struct App {
     /// Screen-cell anchor (col, row) for the open dropdown panel. Set for both
     /// the hamburger and the context menu so the render site is branch-free.
     menu_anchor: Option<(usize, usize)>,
+
+    // --- Pane title-bar ⋮ menu -----------------------------------------------
+    /// When the ⋮ pane-menu is open: the pane id that owns it. The menu shows
+    /// Split V / Split H / Close pane. `None` when no pane menu is open.
+    pane_menu_open: Option<usize>,
+    /// Currently-highlighted row in the open pane menu (0-based, keyboard nav).
+    pane_menu_sel: usize,
 
     // Mouse reporting state.
     /// Last known cursor cell (col, row), clamped to the grid.
@@ -946,6 +957,8 @@ impl App {
             menu_sel: 0,
             menu_items: None,
             menu_anchor: None,
+            pane_menu_open: None,
+            pane_menu_sel: 0,
             mouse_cell: (0, 0),
             mouse_px: (0.0, 0.0),
             held_button: None,
@@ -1323,6 +1336,8 @@ impl App {
         if self.dragging_gutter.take().is_some() || self.hovered_gutter.take().is_some() {
             self.apply_gutter_cursor(None);
         }
+        // Dismiss the pane ⋮ menu: layout or focus changed.
+        self.pane_menu_open = None;
     }
 
     /// Open a new tab and make it active, parking the current tab in `background`.
@@ -1529,6 +1544,14 @@ impl App {
     /// Pixel gutter reserved between tiled panes (also the divider thickness).
     const PANE_GAP: i32 = 1;
 
+    /// Height of each pane's title bar in physical px (split mode only; the
+    /// single-pane path skips headers entirely). Carved from the top of each
+    /// leaf rect before grid layout and scissor so the cell grid sits below it.
+    const PANE_HEADER_H: i32 = 22;
+
+    /// Horizontal inner padding for the pane header text (px).
+    const PANE_HEADER_PAD: f32 = 8.0;
+
     /// The content rectangle (surface pixels) that panes tile: the whole surface
     /// below the tab strip. Each pane is internally inset by the renderer pad (the
     /// renderer adds `pad` to every cell), so this spans edge-to-edge and the pad
@@ -1628,6 +1651,7 @@ impl App {
             self.panes = Some(PaneGroup {
                 layout: pane::Layout::new(self.active_id),
                 others: HashMap::new(),
+                others_titles: HashMap::new(),
             });
         }
         // The pane currently in `self.pty` is the focused leaf; park it as an
@@ -1642,6 +1666,12 @@ impl App {
         if let Some(old) = self.pty.take() {
             g.others.insert(prev_focus, old);
         }
+        // Seed the previous focused pane's current title so its header displays
+        // immediately (OSC updates will overwrite as the shell prompts).
+        g.others_titles.entry(prev_focus).or_insert_with(|| self.active_title.clone());
+        // The new pane starts with the same title; it will update via OSC once
+        // the shell emits one.
+        g.others_titles.entry(new_id).or_default();
         self.pty = Some(pty);
 
         self.resize_panes();
@@ -1801,6 +1831,98 @@ impl App {
         let g = self.panes.as_ref()?;
         g.layout
             .split_at(area, Self::PANE_GAP, x.round() as i32, y.round() as i32, Self::GUTTER_TOL)
+    }
+
+    /// Hit-test the pane headers in the current split. Returns `(pane_id, in_menu_btn)`
+    /// when `(x, y)` is inside a pane's header strip. `in_menu_btn` is `true` when
+    /// the pointer is in the right-edge ⋮ button hit-zone. `None` when not split,
+    /// or when the pointer is outside all header strips.
+    fn pane_header_at(&self, x: f64, y: f64) -> Option<(usize, bool)> {
+        if !self.is_split() {
+            return None;
+        }
+        let area = self.content_area()?;
+        let g = self.panes.as_ref()?;
+        let rects = g.layout.rects(area, Self::PANE_GAP);
+        let (xi, yi) = (x as f32, y as f32);
+        let hdr_h = Self::PANE_HEADER_H as f32;
+        for (id, r) in rects {
+            let rx = r.x as f32;
+            let ry = r.y as f32;
+            let rw = r.w as f32;
+            // Is the point inside the header band?
+            if xi >= rx && xi < rx + rw && yi >= ry && yi < ry + hdr_h {
+                // Is it in the ⋮ button (right-edge square)?
+                let btn_x = rx + rw - hdr_h; // menu_btn_w == hdr_h
+                let in_menu = xi >= btn_x;
+                return Some((id, in_menu));
+            }
+        }
+        None
+    }
+
+    /// Handle a left-click on a pane header. Returns `true` if the click was
+    /// consumed (so the caller should skip further mouse processing).
+    fn pane_header_click(&mut self, x: f64, y: f64, event_loop: &ActiveEventLoop) -> bool {
+        let Some((id, in_menu_btn)) = self.pane_header_at(x, y) else {
+            return false;
+        };
+        if in_menu_btn {
+            // Toggle the ⋮ pane menu for this pane.
+            if self.pane_menu_open == Some(id) {
+                self.pane_menu_open = None;
+            } else {
+                self.pane_menu_open = Some(id);
+                self.pane_menu_sel = 0;
+                // Focus the clicked pane first so menu actions target it.
+                self.focus_pane_at(x, y, event_loop);
+            }
+            self.mark_dirty(event_loop);
+        } else {
+            // Click on the header body: just focus the pane.
+            self.pane_menu_open = None;
+            self.focus_pane_at(x, y, event_loop);
+        }
+        true
+    }
+
+    /// Hit-test the open pane ⋮ dropdown. Returns the index of the hit item or
+    /// `None`. Mirrors the layout in `paint_pane_menu`.
+    fn pane_menu_hit_test(&self, x: f64, y: f64) -> Option<usize> {
+        let open_pane = self.pane_menu_open?;
+        let area = self.content_area()?;
+        let g = self.panes.as_ref()?;
+        let rects = g.layout.rects(area, Self::PANE_GAP);
+        let (id, r) = rects.into_iter().find(|(id, _)| *id == open_pane)?;
+        let _ = id;
+        let m = self.renderer.as_ref()?.cell_metrics();
+        let hdr_h = Self::PANE_HEADER_H as f32;
+        let menu_btn_w = hdr_h;
+        let ax = r.x as f32 + r.w as f32 - menu_btn_w;
+        let ay = r.y as f32 + hdr_h;
+        let max_label = Self::PANE_MENU_ITEMS.iter().map(|s| s.len()).max().unwrap_or(4) as f32;
+        let panel_w = (max_label * m.width + 24.0).ceil();
+        let row_h = (m.height + 6.0).ceil();
+        let xi = x as f32;
+        let yi = y as f32;
+        for (i, _) in Self::PANE_MENU_ITEMS.iter().enumerate() {
+            let row_y = ay + 2.0 + i as f32 * row_h;
+            if gui::hit(gui::Rect::new(ax, row_y, panel_w, row_h), xi, yi) {
+                return Some(i);
+            }
+        }
+        None
+    }
+
+    /// Invoke the selected pane-menu action (0 = Split V, 1 = Split H, 2 = Close).
+    fn invoke_pane_menu_action(&mut self, idx: usize, event_loop: &ActiveEventLoop) {
+        self.pane_menu_open = None;
+        match idx {
+            0 => self.split_pane(pane::Dir::Vertical, event_loop),
+            1 => self.split_pane(pane::Dir::Horizontal, event_loop),
+            _ => self.close_pane(event_loop),
+        }
+        self.mark_dirty(event_loop);
     }
 
     /// While `dragging_gutter` is held, map the pointer to a new ratio for that
@@ -3071,11 +3193,22 @@ impl App {
         // Precompute every leaf's rect + grid size (whole-`self` method calls)
         // BEFORE taking disjoint field borrows for the render loop below.
         let rects = self.panes.as_ref().unwrap().layout.rects(area, Self::PANE_GAP);
-        let pane_specs: Vec<(usize, pane::Rect, usize, usize)> = rects
+        let hdr_h = Self::PANE_HEADER_H;
+        // Each pane_spec carries: (id, full_rect, body_rect, cols, rows).
+        // The body_rect is the full rect minus the PANE_HEADER_H header at the top;
+        // `pane_grid` and `begin_pane` receive the body rect so the cell grid
+        // starts below the header. `full_rect` is kept for header painting.
+        let pane_specs: Vec<(usize, pane::Rect, pane::Rect, usize, usize)> = rects
             .iter()
             .map(|(id, r)| {
-                let (c, rw) = self.pane_grid(*r);
-                (*id, *r, c, rw)
+                let body = pane::Rect {
+                    x: r.x,
+                    y: r.y + hdr_h,
+                    w: r.w,
+                    h: (r.h - hdr_h).max(0),
+                };
+                let (c, rw) = self.pane_grid(body);
+                (*id, *r, body, c, rw)
             })
             .collect();
 
@@ -3100,6 +3233,18 @@ impl App {
         let win_focused = self.focused;
         let blink_on = self.blink_on;
         let hovered_link = self.hovered_link.clone();
+
+        // Pane-header snapshot: per-leaf titles + focused pane + open pane menu.
+        let pane_header_titles: Vec<(usize, String)> = {
+            let g = self.panes.as_ref().unwrap();
+            pane_specs.iter().map(|(id, _, _, _, _)| {
+                let title = g.others_titles.get(id).cloned().unwrap_or_default();
+                (*id, title)
+            }).collect()
+        };
+        let pane_menu_open = self.pane_menu_open;
+        let pane_menu_sel = self.pane_menu_sel;
+        let mouse_px_f = (self.mouse_px.0 as f32, self.mouse_px.1 as f32);
         let divider = lighten(color::selection_bg(), 0.18);
         // The gutter to draw transiently emphasised (drag wins over mere hover).
         let active_gutter = self
@@ -3139,8 +3284,8 @@ impl App {
         renderer.set_grid_origin_y(0.0);
         renderer.begin_multi_frame(color::default_bg());
 
-        // Each leaf pane, clipped to its tile.
-        for (id, rect, cols, prows) in &pane_specs {
+        // Each leaf pane, clipped to its body rect (below the header).
+        for (id, _full_rect, body_rect, cols, prows) in &pane_specs {
             let is_focused = *id == focused_pane;
             let pty = if is_focused {
                 focused_pty
@@ -3148,7 +3293,7 @@ impl App {
                 g.others.get(id)
             };
             let Some(pty) = pty else { continue };
-            renderer.begin_pane(*rect, is_focused);
+            renderer.begin_pane(*body_rect, is_focused);
             Self::push_pane(renderer, pty, *cols, *prows, win_focused, blink_on, hovered_link.as_deref());
             renderer.end_pane();
         }
@@ -3217,12 +3362,186 @@ impl App {
             strip_hist,
         );
 
+        // Pane title bars: one per leaf, drawn as overlay quads+glyphs so they
+        // composite above the cell grid but below the tab bar. Single-pane case
+        // is handled by the caller never reaching render_split, so zero cost.
+        Self::paint_pane_headers(
+            renderer,
+            &pane_specs,
+            &pane_header_titles,
+            focused_pane,
+            win_focused,
+            pane_menu_open,
+            pane_menu_sel,
+            mouse_px_f,
+        );
+
         if let Err(err) = renderer.render_multi() {
             log::debug!("split frame dropped: {err:?}");
             self.force_full_redraw = true;
             if let Some(w) = &self.window {
                 w.request_redraw();
             }
+        }
+    }
+
+    /// Pane-menu entries (for the ⋮ button in each pane header). Kept as a
+    /// static slice so the menu shape is stable and hit-testing is index-based.
+    const PANE_MENU_ITEMS: &'static [&'static str] = &["Split vertical", "Split horizontal", "Close pane"];
+
+    /// Paint per-pane title bars for all leaves in split mode. Each header is
+    /// `PANE_HEADER_H` px tall at the top of the leaf rect and contains (L→R):
+    ///
+    ///   · focus dot (●/·)  · OSC title (ellipsized)  · [cwd slot, reserved]
+    ///   · ⋮ pane-menu button (opens a mini dropdown)
+    ///
+    /// The focused header is drawn with the E2 glass surface fill + a 2 px accent
+    /// top rail (focus chrome). Unfocused headers use the E1 body + dimmed text.
+    /// When the ⋮ menu is open for a pane, a small E3 dropdown is drawn below the
+    /// ⋮ button containing Split V / Split H / Close pane entries.
+    ///
+    /// Associated fn (no `&self`) so it composes with the caller's `&mut Renderer`
+    /// borrow; all `self`-derived data arrives via parameters.
+    #[allow(clippy::too_many_arguments)]
+    fn paint_pane_headers(
+        renderer: &mut Renderer,
+        pane_specs: &[(usize, pane::Rect, pane::Rect, usize, usize)],
+        titles: &[(usize, String)],
+        focused_pane: usize,
+        win_focused: bool,
+        pane_menu_open: Option<usize>,
+        pane_menu_sel: usize,
+        mouse_px: (f32, f32),
+    ) {
+        let m = renderer.cell_metrics();
+        let hdr_h = Self::PANE_HEADER_H as f32;
+        let pad = Self::PANE_HEADER_PAD;
+
+        // Dim everything when window is unfocused (matches tab-bar behaviour).
+        let fdim = if win_focused { 1.0 } else { 0.7 };
+        let mul = |c: [f32; 4]| [c[0] * fdim, c[1] * fdim, c[2] * fdim, c[3]];
+
+        let accent   = mul(color::accent());
+        let fg       = mul(gui::fg());
+        let fg_dim   = mul(gui::fg_dim());
+        let body_e1  = mul(gui::glass_body());
+        let body_e2  = mul(gui::glass_raised());
+        let hairline = mul(gui::hairline());
+
+        // ⋮ button: a square hit-target flush to the right edge of each header.
+        let menu_btn_w = hdr_h; // square
+
+        for (id, full_rect, _body_rect, _cols, _rows) in pane_specs {
+            let is_focused = *id == focused_pane;
+            let rx = full_rect.x as f32;
+            let ry = full_rect.y as f32;
+            let rw = full_rect.w as f32;
+
+            // Header fill: E2 (focused) or E1 (unfocused).
+            let fill = if is_focused { body_e2 } else { body_e1 };
+            renderer.push_overlay_px(rx, ry, rw, hdr_h, fill);
+
+            // Top accent rail (2 px on focused, 1 px hairline on unfocused).
+            if is_focused {
+                renderer.push_overlay_px(rx, ry, rw, 2.0, accent);
+            } else {
+                renderer.push_overlay_px(rx, ry, rw, 1.0, hairline);
+            }
+
+            // Bottom hairline separating header from cell body.
+            renderer.push_overlay_px(rx, ry + hdr_h - 1.0, rw, 1.0, hairline);
+
+            // Resolve the per-pane title from the snapshot.
+            let title = titles.iter()
+                .find(|(tid, _)| *tid == *id)
+                .map(|(_, t)| t.as_str())
+                .unwrap_or("");
+            let dot = if is_focused { '●' } else { '·' };
+            let dot_fg = if is_focused { accent } else { fg_dim };
+            let text_fg = if is_focused { fg } else { fg_dim };
+
+            // Vertical centering: glyph top = (hdr_h - cell_h) / 2.
+            let ty = (ry + (hdr_h - m.height) * 0.5).round();
+
+            // Focus dot.
+            let mut tx = rx + pad;
+            renderer.push_overlay_glyph_px(tx.round(), ty, dot, dot_fg);
+            tx += m.width + 2.0;
+
+            // Title (fit to available width, leaving room for the ⋮ button).
+            let avail = rw - (tx - rx) - menu_btn_w - pad;
+            let max_chars = (avail / m.width).floor() as usize;
+            let label = fit_label(title, max_chars.max(1));
+            renderer.push_overlay_glyph_px_str(tx.round(), ty, &label, text_fg);
+
+            // ⋮ pane-menu button (right-aligned in the header).
+            let btn_x = rx + rw - menu_btn_w;
+            let btn_y = ry;
+            let is_menu_open = pane_menu_open == Some(*id);
+            // Hover highlight when the pointer is inside the button.
+            let btn_hovered = gui::hit(
+                gui::Rect::new(btn_x, btn_y, menu_btn_w, hdr_h),
+                mouse_px.0, mouse_px.1,
+            );
+            if btn_hovered || is_menu_open {
+                let hi = [accent[0], accent[1], accent[2], if is_menu_open { 0.25 } else { 0.15 }];
+                renderer.push_overlay_rrect_px(btn_x + 2.0, btn_y + 2.0, menu_btn_w - 4.0, hdr_h - 4.0, 3.0, hi);
+            }
+            let glyph_fg = if btn_hovered || is_menu_open { accent } else { fg_dim };
+            let gx = btn_x + (menu_btn_w - m.width) * 0.5;
+            renderer.push_overlay_glyph_px(gx.round(), ty, '⋮', glyph_fg);
+
+            // If this pane's ⋮ menu is open, draw the dropdown below the button.
+            if is_menu_open {
+                Self::paint_pane_menu(renderer, btn_x, btn_y + hdr_h, pane_menu_sel, mouse_px, &m);
+            }
+        }
+    }
+
+    /// Draw the small pane ⋮ menu anchored at `(ax, ay)` (top-left of the dropdown).
+    /// Entries: "Split vertical" / "Split horizontal" / "Close pane".
+    fn paint_pane_menu(
+        renderer: &mut Renderer,
+        ax: f32,
+        ay: f32,
+        sel: usize,
+        mouse_px: (f32, f32),
+        m: &crate::text::CellMetrics,
+    ) {
+        let items = Self::PANE_MENU_ITEMS;
+        let max_label = items.iter().map(|s| s.len()).max().unwrap_or(4) as f32;
+        let panel_w = (max_label * m.width + 24.0).ceil();
+        let row_h = (m.height + 6.0).ceil();
+        let panel_h = items.len() as f32 * row_h + 4.0;
+
+        // E3 floating panel.
+        let float_fill = gui::glass_float();
+        renderer.push_overlay_rrect_px(ax, ay, panel_w, panel_h, 4.0, float_fill);
+        // Thin accent border.
+        let border = {
+            let a = color::accent();
+            [a[0], a[1], a[2], 0.5]
+        };
+        renderer.push_overlay_px(ax, ay, panel_w, 1.0, border);
+        renderer.push_overlay_px(ax, ay + panel_h - 1.0, panel_w, 1.0, border);
+        renderer.push_overlay_px(ax, ay, 1.0, panel_h, border);
+        renderer.push_overlay_px(ax + panel_w - 1.0, ay, 1.0, panel_h, border);
+
+        let fg = gui::fg();
+        let sel_bg = gui::sel_bg();
+
+        for (i, label) in items.iter().enumerate() {
+            let row_y = ay + 2.0 + i as f32 * row_h;
+            // Highlight hovered or keyboard-selected row.
+            let mouse_on_row = gui::hit(
+                gui::Rect::new(ax, row_y, panel_w, row_h),
+                mouse_px.0, mouse_px.1,
+            );
+            if mouse_on_row || i == sel {
+                renderer.push_overlay_px(ax + 1.0, row_y, panel_w - 2.0, row_h, sel_bg);
+            }
+            let ty = (row_y + (row_h - m.height) * 0.5).round();
+            renderer.push_overlay_glyph_px_str((ax + 8.0).round(), ty, label, fg);
         }
     }
 
@@ -3753,13 +4072,29 @@ impl ApplicationHandler<UserEvent> for App {
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
             UserEvent::Title(id, title) => {
-                // Only a tab's FOCUSED pane drives the chip/window title; a
-                // non-focused pane's title is not surfaced (kept simple).
+                // The focused pane drives the chip/window title. Non-focused panes
+                // of the active tab have their title stored in `others_titles` for
+                // the pane title-bar headers (Wave 3).
                 if id == self.active_id {
+                    // Also keep the focused pane's title in others_titles so the
+                    // header painter can look up any pane id uniformly.
+                    if let Some(g) = self.panes.as_mut() {
+                        g.others_titles.insert(id, title.clone());
+                    }
                     self.active_title = title;
                     self.update_window_title();
+                } else if let Some(g) = self.panes.as_mut()
+                    && g.others.contains_key(&id)
+                {
+                    // Non-focused pane of the active tab.
+                    g.others_titles.insert(id, title);
                 } else if let Some(s) = self.background.iter_mut().find(|s| s.id == id) {
-                    s.title = title;
+                    // Parked tab (single-pane or its focused pane).
+                    s.title = title.clone();
+                    // Also store in background tab's pane group if it's multi-pane.
+                    if let Some(g) = s.panes.as_mut() {
+                        g.others_titles.insert(id, title);
+                    }
                 }
             }
             UserEvent::ChildExit(id) => {
@@ -4037,6 +4372,39 @@ impl ApplicationHandler<UserEvent> for App {
                     // Fall through: let the keypress reach the child below.
                 }
 
+                // While the pane ⋮ menu is open, Up/Down/Enter/Esc navigate it.
+                if event.state.is_pressed() && self.pane_menu_open.is_some() {
+                    let n = Self::PANE_MENU_ITEMS.len();
+                    let key = &event.logical_key;
+                    match key {
+                        Key::Named(NamedKey::ArrowUp) => {
+                            self.pane_menu_sel = (self.pane_menu_sel + n - 1) % n;
+                            self.mark_dirty(event_loop);
+                            return;
+                        }
+                        Key::Named(NamedKey::ArrowDown) => {
+                            self.pane_menu_sel = (self.pane_menu_sel + 1) % n;
+                            self.mark_dirty(event_loop);
+                            return;
+                        }
+                        Key::Named(NamedKey::Enter) => {
+                            let idx = self.pane_menu_sel;
+                            self.invoke_pane_menu_action(idx, event_loop);
+                            return;
+                        }
+                        Key::Named(NamedKey::Escape) => {
+                            self.pane_menu_open = None;
+                            self.mark_dirty(event_loop);
+                            return;
+                        }
+                        _ => {
+                            // Any other key closes the menu; let it fall through.
+                            self.pane_menu_open = None;
+                            self.mark_dirty(event_loop);
+                        }
+                    }
+                }
+
                 // While an overlay is open it owns the keyboard — nothing reaches
                 // the child. Esc / F1 / Ctrl+, close it; settings handles nav/edit.
                 if event.state.is_pressed() && (self.help_open || self.settings_open) {
@@ -4166,6 +4534,17 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                 }
 
+                // Pane header hover: trigger a repaint whenever the pointer enters
+                // or leaves a pane header's ⋮ button, so the hover highlight tracks
+                // the pointer without spinning the event loop at rest (mark_dirty
+                // only queues one frame per monitor refresh).
+                if self.is_split() {
+                    let in_header = self.pane_header_at(position.x, position.y).is_some();
+                    if in_header {
+                        self.mark_dirty(event_loop);
+                    }
+                }
+
                 // Tab-bar hover highlighting: track the item under the pointer (only
                 // while over the bar's pixel band), repaint when it changes.
                 {
@@ -4278,6 +4657,32 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                     self.held_button = None;
                     return;
+                }
+
+                // A left press while the pane ⋮ menu is open: invoke or dismiss.
+                if button == MouseButton::Left && pressed && self.pane_menu_open.is_some() {
+                    let (mx, my) = self.mouse_px;
+                    if let Some(idx) = self.pane_menu_hit_test(mx as f64, my as f64) {
+                        self.invoke_pane_menu_action(idx, event_loop);
+                    } else {
+                        // Click outside the menu dismisses it; may still be a header
+                        // or content click so don't return early.
+                        self.pane_menu_open = None;
+                        self.mark_dirty(event_loop);
+                    }
+                    self.held_button = None;
+                    return;
+                }
+
+                // A left press on a pane title-bar header: focus the pane or toggle
+                // the ⋮ menu. This must come before the gutter check (headers overlap
+                // the top of each pane tile, not the inter-pane gap).
+                if button == MouseButton::Left && pressed {
+                    let (mx, my) = self.mouse_px;
+                    if self.pane_header_click(mx as f64, my as f64, event_loop) {
+                        self.held_button = None;
+                        return;
+                    }
                 }
 
                 // A left click in the tab strip switches tabs; never sent onward.
