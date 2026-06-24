@@ -128,6 +128,10 @@ pub struct Config {
     /// state file written on exit). Default false; opt in via `restore_session`
     /// config key or `--restore-session`.
     pub restore_session: bool,
+    /// The effective keybinding map (user overrides layered on the built-in
+    /// defaults). Built once at config resolution time by [`crate::config`] and
+    /// consulted by the keyboard handler before the hard-coded fallback paths.
+    pub keymap: crate::config::KeyMap,
 }
 
 /// A tab's split layout: the tiling tree (whose leaf ids are pty/pane ids) plus

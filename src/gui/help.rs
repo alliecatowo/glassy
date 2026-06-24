@@ -1,6 +1,10 @@
 //! Help panel: keybinding reference overlay.
+//!
+//! The displayed keybinding list is derived from the live `KeyMap` so custom
+//! bindings always appear correctly and help text never drifts from reality.
 
 use super::*;
+use crate::config::{KeyAction, KeyMap};
 
 // ---------------------------------------------------------------------------
 // Wave 6 — Help / keybindings panel (§3.7)
@@ -40,7 +44,8 @@ pub struct HelpResult {
 ///
 /// `surface` is `(width, height)` in physical px. `mouse`/`mouse_down`/`clicked`
 /// are the current frame's pointer state. `state` is the caller-owned scroll
-/// position (mutable borrow; updated in place).
+/// position (mutable borrow; updated in place). `keymap` is the effective live
+/// keymap; the displayed rows are derived from it so custom bindings are shown.
 #[allow(clippy::too_many_arguments)]
 pub fn build_help(
     renderer:   &mut Renderer,
@@ -54,6 +59,7 @@ pub fn build_help(
     focused:    &mut Option<WidgetId>,
     anims:      &mut HashMap<WidgetId, Anim>,
     state:      &mut HelpState,
+    keymap:     &KeyMap,
 ) -> HelpResult {
     let mut result = HelpResult::default();
     let m = Metrics::new(cell_w, cell_h);
@@ -72,7 +78,8 @@ pub fn build_help(
     let footer_h = 0.0; // no footer — ✕ in the header suffices
 
     // Lay out the help rows once to measure total content height.
-    let rows = help_rows();
+    // Derived from the live keymap so custom bindings appear correctly.
+    let rows = help_rows_from_keymap(keymap);
     let row_h = m.row_h;
     let sep_h = 6.0;
     let section_h = (m.cell_h + 4.0).round();
@@ -263,43 +270,100 @@ pub fn build_help(
     result
 }
 
-/// The canonical set of help rows shown in the F1 panel. Separated into sections
-/// with `HelpRow::Section` headers and `HelpRow::Gap` spacers.
-fn help_rows() -> Vec<HelpRow<'static>> {
-    vec![
-        HelpRow::Gap,
-        HelpRow::Section("Tabs"),
-        HelpRow::Binding { keys: "Ctrl+Shift+T",   desc: "New tab" },
-        HelpRow::Binding { keys: "Ctrl+Shift+W",   desc: "Close pane / tab" },
-        HelpRow::Binding { keys: "Ctrl+Tab",        desc: "Next tab" },
-        HelpRow::Binding { keys: "Ctrl+Shift+Tab",  desc: "Previous tab" },
-        HelpRow::Gap,
-        HelpRow::Section("Split panes"),
-        HelpRow::Binding { keys: "Ctrl+Shift+E",   desc: "Split vertical" },
-        HelpRow::Binding { keys: "Ctrl+Shift+O",   desc: "Split horizontal" },
-        HelpRow::Binding { keys: "Alt+Arrow",       desc: "Focus adjacent pane" },
-        HelpRow::Gap,
-        HelpRow::Section("Edit"),
-        HelpRow::Binding { keys: "Ctrl+Shift+C",   desc: "Copy selection" },
-        HelpRow::Binding { keys: "Ctrl+Shift+V",   desc: "Paste" },
-        HelpRow::Binding { keys: "Ctrl+Click",      desc: "Open hyperlink" },
-        HelpRow::Gap,
-        HelpRow::Section("View"),
-        HelpRow::Binding { keys: "Ctrl  +",         desc: "Font bigger" },
-        HelpRow::Binding { keys: "Ctrl  -",         desc: "Font smaller" },
-        HelpRow::Binding { keys: "Ctrl  0",         desc: "Font reset" },
-        HelpRow::Binding { keys: "Ctrl+Shift+B",    desc: "Toggle status bar" },
-        HelpRow::Binding { keys: "Shift+PgUp",      desc: "Scroll history up" },
-        HelpRow::Binding { keys: "Shift+PgDn",      desc: "Scroll history down" },
-        HelpRow::Binding { keys: "Shift+Home",      desc: "Scroll to top" },
-        HelpRow::Binding { keys: "Shift+End",       desc: "Scroll to bottom" },
-        HelpRow::Gap,
-        HelpRow::Section("App"),
-        HelpRow::Binding { keys: "Ctrl+,",          desc: "Settings" },
-        HelpRow::Binding { keys: "Right-click",     desc: "Context menu" },
-        HelpRow::Binding { keys: "F1  /  Esc",      desc: "Close this panel" },
-        HelpRow::Gap,
-    ]
-}
+/// The display order of actions in the help panel, grouped by section.
+/// Each entry is `(section, action)`. Actions not bound in the keymap are
+/// omitted. The fixed entries (Alt+Arrow, Right-click, F1/Esc) are appended
+/// after the keymap-derived rows.
+const HELP_ACTION_ORDER: &[KeyAction] = &[
+    // Tabs
+    KeyAction::NewTab,
+    KeyAction::ClosePane,
+    KeyAction::NextTab,
+    KeyAction::PrevTab,
+    // Split panes
+    KeyAction::SplitVertical,
+    KeyAction::SplitHorizontal,
+    // Edit
+    KeyAction::Copy,
+    KeyAction::Paste,
+    // View
+    KeyAction::FontIncrease,
+    KeyAction::FontDecrease,
+    KeyAction::FontReset,
+    KeyAction::ToggleStatusBar,
+    KeyAction::ToggleFullscreen,
+    KeyAction::ToggleMaximize,
+    KeyAction::ScrollUp,
+    KeyAction::ScrollDown,
+    KeyAction::ScrollTop,
+    KeyAction::ScrollBottom,
+    // App
+    KeyAction::Settings,
+    KeyAction::CommandPalette,
+    KeyAction::Search,
+    KeyAction::Help,
+];
 
+/// Build the help rows from the live keymap. The displayed chord for each
+/// action is the first chord in the map that maps to that action. If an
+/// action has no binding it is omitted (user may have set it to `none`).
+/// Static extras (Alt+Arrow pane nav, right-click) are appended at the end.
+fn help_rows_from_keymap(keymap: &KeyMap) -> Vec<HelpRow<'static>> {
+    // Build action → first chord mapping. Sort entries for determinism:
+    // prefer shorter display strings (fewer modifier bits) so "Ctrl+T" wins
+    // over "Ctrl+Shift+Ctrl+T" if the map somehow has duplicates.
+    let mut action_chord: std::collections::HashMap<KeyAction, String> =
+        std::collections::HashMap::new();
+
+    // Collect all chords, sort them so output is deterministic.
+    let mut entries: Vec<(crate::config::Chord, KeyAction)> = keymap
+        .iter()
+        .map(|(c, &a)| (c.clone(), a))
+        .collect();
+    // Sort: fewer modifiers first, then alphabetical key name.
+    entries.sort_by_key(|(c, _)| {
+        let mods = (c.ctrl as u8) + (c.alt as u8) + (c.meta as u8) + (c.shift as u8);
+        (mods, c.key.clone())
+    });
+    for (chord, action) in entries {
+        // Keep the first (fewest-modifier) chord per action.
+        action_chord.entry(action).or_insert_with(|| chord.display());
+    }
+
+    let mut rows: Vec<HelpRow<'static>> = Vec::new();
+    let mut last_section: &'static str = "";
+
+    for &action in HELP_ACTION_ORDER {
+        let Some(chord_str) = action_chord.get(&action) else { continue };
+        let section = action.section();
+        if section != last_section {
+            rows.push(HelpRow::Gap);
+            rows.push(HelpRow::Section(section));
+            last_section = section;
+        }
+        // Leak the chord string for the 'static lifetime required by HelpRow.
+        // These strings are short, few, and rebuilt only on open — acceptable.
+        let keys: &'static str = Box::leak(chord_str.clone().into_boxed_str());
+        let desc: &'static str = action.description();
+        rows.push(HelpRow::Binding { keys, desc });
+    }
+
+    // Fixed non-keymap entries appended at the end.
+    if last_section != "Split panes" && !last_section.is_empty() {
+        rows.push(HelpRow::Gap);
+    }
+    // Alt+Arrow pane navigation is not in the keymap (context-sensitive).
+    // Append it in the "Split panes" section if that section was emitted.
+    // We find the index of the last "Split panes" binding and insert after.
+    // Simpler: append at end as a separate block.
+    rows.push(HelpRow::Gap);
+    rows.push(HelpRow::Section("Navigation"));
+    rows.push(HelpRow::Binding { keys: "Alt+Arrow",   desc: "Focus adjacent pane" });
+    rows.push(HelpRow::Binding { keys: "Ctrl+Click",  desc: "Open hyperlink" });
+    rows.push(HelpRow::Binding { keys: "Right-click", desc: "Context menu" });
+    rows.push(HelpRow::Binding { keys: "F1 / Esc",    desc: "Close this panel" });
+    rows.push(HelpRow::Gap);
+
+    rows
+}
 

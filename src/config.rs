@@ -30,6 +30,34 @@
 //! restore_session = false              # restore previous tabs/splits/cwds on launch
 //! ```
 //!
+//! Custom keybindings live in a `[keybindings]` section mapping chords to actions:
+//!
+//! ```text
+//! [keybindings]
+//! ctrl+shift+t   = new_tab
+//! ctrl+shift+w   = close_pane
+//! ctrl+tab       = next_tab
+//! ctrl+shift+tab = prev_tab
+//! ctrl+shift+e   = split_vertical
+//! ctrl+shift+o   = split_horizontal
+//! f11            = toggle_fullscreen
+//! ctrl+,         = settings
+//! f1             = help
+//! ctrl+shift+f   = search
+//! ctrl+shift+p   = command_palette
+//! ctrl+shift+c   = copy
+//! ctrl+shift+v   = paste
+//! ctrl+shift+b   = toggle_status_bar
+//! ```
+//!
+//! Recognized actions: `new_tab`, `close_pane`, `next_tab`, `prev_tab`,
+//! `split_vertical`, `split_horizontal`, `toggle_fullscreen`, `settings`,
+//! `help`, `search`, `command_palette`, `copy`, `paste`, `toggle_status_bar`,
+//! `font_increase`, `font_decrease`, `font_reset`.
+//!
+//! A `[keybindings]` entry overrides the built-in default for that action; to
+//! disable a built-in bind entirely, set the action to `none`.
+//!
 //! Named profiles live in `[profile.NAME]` sections (activate with `--profile NAME`):
 //!
 //! ```text
@@ -63,6 +91,293 @@ use crate::renderer::DEFAULT_OPACITY;
 const DEFAULT_FONT_SIZE: f32 = 14.0;
 /// Default scrollback history (lines) when unset.
 const DEFAULT_SCROLLBACK: usize = 10_000;
+
+// ---------------------------------------------------------------------------
+// Keybinding types
+// ---------------------------------------------------------------------------
+
+/// A key chord: modifier flags + a canonical key identifier (lowercase key name
+/// or named-key label). Used as the map key in [`KeyMap`].
+///
+/// Chords are parsed from strings like `"ctrl+shift+t"`, `"ctrl+,"`, `"f11"`.
+/// The modifier bits are sorted so `ctrl+shift+t` and `shift+ctrl+t` are equal.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub struct Chord {
+    /// Whether Ctrl is held.
+    pub ctrl: bool,
+    /// Whether Shift is held.
+    pub shift: bool,
+    /// Whether Alt is held.
+    pub alt: bool,
+    /// Whether Super/Meta is held.
+    pub meta: bool,
+    /// Lowercase key label (e.g. `"t"`, `","`, `"f11"`, `"tab"`, `"space"`).
+    pub key: String,
+}
+
+impl Chord {
+    /// Human-readable display label, e.g. `"Ctrl+Shift+T"`.
+    pub fn display(&self) -> String {
+        let mut parts: Vec<&str> = Vec::new();
+        if self.ctrl  { parts.push("Ctrl"); }
+        if self.alt   { parts.push("Alt"); }
+        if self.meta  { parts.push("Super"); }
+        if self.shift { parts.push("Shift"); }
+        let key_label = match self.key.as_str() {
+            "tab"    => "Tab",
+            "space"  => "Space",
+            "enter"  => "Enter",
+            "escape" => "Esc",
+            "backspace" => "Backspace",
+            "delete" => "Delete",
+            "home"   => "Home",
+            "end"    => "End",
+            "pageup" => "PgUp",
+            "pagedown" => "PgDn",
+            "arrowup"   | "up"    => "Up",
+            "arrowdown" | "down"  => "Down",
+            "arrowleft" | "left"  => "Left",
+            "arrowright"| "right" => "Right",
+            k if k.starts_with('f') && k[1..].parse::<u32>().is_ok() => {
+                // Return the uppercase F-key, e.g. "f11" → "F11".
+                // We can't borrow from a local string here in a `match` arm that
+                // returns `&str`, so we fall through to the owned path below.
+                ""
+            }
+            _ => "",
+        };
+        if !key_label.is_empty() {
+            parts.push(key_label);
+            parts.join("+")
+        } else if self.key.starts_with('f') && self.key[1..].parse::<u32>().is_ok() {
+            let fk = format!("F{}", &self.key[1..]);
+            if parts.is_empty() {
+                fk
+            } else {
+                format!("{}+{}", parts.join("+"), fk)
+            }
+        } else {
+            let upper_key = self.key.to_ascii_uppercase();
+            parts.push(&upper_key);
+            parts.join("+")
+        }
+    }
+}
+
+/// Parse a chord string like `"ctrl+shift+t"`, `"f11"`, `"ctrl+,"` into a
+/// [`Chord`]. Case-insensitive. Returns an error on empty/unrecognized input.
+pub fn parse_chord(s: &str) -> Result<Chord> {
+    let s = s.trim().to_ascii_lowercase();
+    if s.is_empty() {
+        bail!("empty chord");
+    }
+    let mut ctrl = false;
+    let mut shift = false;
+    let mut alt = false;
+    let mut meta = false;
+
+    // Split on '+'. The tricky case is a literal '+' key, which is written as
+    // the last token after splitting (e.g. "ctrl++" or "ctrl+shift++").
+    let parts: Vec<&str> = s.split('+').collect();
+    // Walk all but the last as modifiers; the last is the key.
+    // Exception: if the last part is empty the user wrote something like
+    // "ctrl++" — the key is '+'.
+    let (modifier_parts, key_part) = if parts.last() == Some(&"") {
+        // trailing '+' means the key is '+'
+        (&parts[..parts.len() - 1], "+")
+    } else {
+        (&parts[..parts.len() - 1], parts[parts.len() - 1])
+    };
+
+    for m in modifier_parts {
+        match *m {
+            "" => {} // empty token from adjacent '+' (e.g. "ctrl++" trailing edge)
+            "ctrl" | "control" => ctrl = true,
+            "shift" => shift = true,
+            "alt" | "option" => alt = true,
+            "meta" | "super" | "cmd" | "command" | "win" | "windows" => meta = true,
+            other => bail!("unrecognized modifier '{other}' in chord '{s}'"),
+        }
+    }
+
+    if key_part.is_empty() {
+        bail!("chord has no key: '{s}'");
+    }
+    let key = key_part.to_string();
+    Ok(Chord { ctrl, shift, alt, meta, key })
+}
+
+/// An action that can be bound to a chord.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum KeyAction {
+    NewTab,
+    ClosePane,
+    NextTab,
+    PrevTab,
+    SplitVertical,
+    SplitHorizontal,
+    ToggleFullscreen,
+    ToggleMaximize,
+    Settings,
+    Help,
+    Search,
+    CommandPalette,
+    Copy,
+    Paste,
+    ToggleStatusBar,
+    FontIncrease,
+    FontDecrease,
+    FontReset,
+    ScrollUp,
+    ScrollDown,
+    ScrollTop,
+    ScrollBottom,
+}
+
+impl KeyAction {
+    /// Human-readable description for the help panel.
+    pub fn description(self) -> &'static str {
+        use KeyAction::*;
+        match self {
+            NewTab           => "New tab",
+            ClosePane        => "Close pane / tab",
+            NextTab          => "Next tab",
+            PrevTab          => "Previous tab",
+            SplitVertical    => "Split vertical",
+            SplitHorizontal  => "Split horizontal",
+            ToggleFullscreen => "Toggle fullscreen",
+            ToggleMaximize   => "Toggle maximize",
+            Settings         => "Settings",
+            Help             => "Help (this panel)",
+            Search           => "Find in terminal",
+            CommandPalette   => "Command palette",
+            Copy             => "Copy selection",
+            Paste            => "Paste",
+            ToggleStatusBar  => "Toggle status bar",
+            FontIncrease     => "Font bigger",
+            FontDecrease     => "Font smaller",
+            FontReset        => "Font reset",
+            ScrollUp         => "Scroll history up",
+            ScrollDown       => "Scroll history down",
+            ScrollTop        => "Scroll to top",
+            ScrollBottom     => "Scroll to bottom",
+        }
+    }
+
+    /// Section label for grouping in the help panel.
+    pub fn section(self) -> &'static str {
+        use KeyAction::*;
+        match self {
+            NewTab | ClosePane | NextTab | PrevTab => "Tabs",
+            SplitVertical | SplitHorizontal => "Split panes",
+            Copy | Paste => "Edit",
+            ToggleFullscreen | ToggleMaximize | FontIncrease | FontDecrease | FontReset
+            | ToggleStatusBar | ScrollUp | ScrollDown | ScrollTop | ScrollBottom => "View",
+            Settings | Help | Search | CommandPalette => "App",
+        }
+    }
+}
+
+/// Parse an action name string into a [`KeyAction`]. Returns `None` for the
+/// special `"none"` value (which disables a built-in bind) and an error for
+/// unrecognized names.
+fn parse_action(s: &str) -> Result<Option<KeyAction>> {
+    use KeyAction::*;
+    Ok(Some(match s.trim().to_ascii_lowercase().as_str() {
+        "none" | "disabled" | "disable" => return Ok(None),
+        "new_tab"            => NewTab,
+        "close_pane"         => ClosePane,
+        "next_tab"           => NextTab,
+        "prev_tab"           => PrevTab,
+        "split_vertical"     => SplitVertical,
+        "split_horizontal"   => SplitHorizontal,
+        "toggle_fullscreen"  => ToggleFullscreen,
+        "toggle_maximize"    => ToggleMaximize,
+        "settings"           => Settings,
+        "help"               => Help,
+        "search"             => Search,
+        "command_palette"    => CommandPalette,
+        "copy"               => Copy,
+        "paste"              => Paste,
+        "toggle_status_bar"  => ToggleStatusBar,
+        "font_increase"      => FontIncrease,
+        "font_decrease"      => FontDecrease,
+        "font_reset"         => FontReset,
+        "scroll_up"          => ScrollUp,
+        "scroll_down"        => ScrollDown,
+        "scroll_top"         => ScrollTop,
+        "scroll_bottom"      => ScrollBottom,
+        other => bail!("unrecognized keybinding action '{other}'"),
+    }))
+}
+
+/// The effective keymap: chord → action. Built in [`build_keymap`] by layering
+/// user overrides on top of the built-in defaults.
+pub type KeyMap = HashMap<Chord, KeyAction>;
+
+/// The built-in default keybindings. These are used as a base; user-supplied
+/// `[keybindings]` entries override or extend them.
+pub fn default_keymap() -> KeyMap {
+    use KeyAction::*;
+    let defaults: &[(&str, KeyAction)] = &[
+        ("ctrl+shift+t",   NewTab),
+        ("ctrl+shift+w",   ClosePane),
+        ("ctrl+tab",       NextTab),
+        ("ctrl+shift+tab", PrevTab),
+        ("ctrl+shift+e",   SplitVertical),
+        ("ctrl+shift+o",   SplitHorizontal),
+        ("f11",            ToggleFullscreen),
+        ("f10",            ToggleMaximize),
+        ("ctrl+,",         Settings),
+        ("f1",             Help),
+        ("ctrl+shift+f",   Search),
+        ("ctrl+shift+p",   CommandPalette),
+        ("ctrl+shift+c",   Copy),
+        ("ctrl+shift+v",   Paste),
+        ("ctrl+shift+b",   ToggleStatusBar),
+        ("ctrl++",         FontIncrease),
+        ("ctrl+=",         FontIncrease),
+        ("ctrl+-",         FontDecrease),
+        ("ctrl+0",         FontReset),
+        ("shift+pageup",   ScrollUp),
+        ("shift+pagedown", ScrollDown),
+        ("shift+home",     ScrollTop),
+        ("shift+end",      ScrollBottom),
+    ];
+    let mut map = KeyMap::new();
+    for (chord_str, action) in defaults {
+        match parse_chord(chord_str) {
+            Ok(c) => { map.insert(c, *action); }
+            Err(e) => log::warn!("glassy: bad default chord '{chord_str}': {e}"),
+        }
+    }
+    map
+}
+
+/// Apply user-supplied keybinding overrides (`[keybindings]` section) onto `base`,
+/// returning the merged effective keymap. `overrides` is a list of `(chord, action)`
+/// raw string pairs as parsed from the config file.
+///
+/// An action of `"none"` removes a chord from the map (disables the default).
+fn build_keymap(mut base: KeyMap, overrides: &[(String, String)]) -> KeyMap {
+    for (chord_str, action_str) in overrides {
+        let chord = match parse_chord(chord_str) {
+            Ok(c) => c,
+            Err(e) => {
+                log::warn!("glassy: ignoring bad keybinding chord '{chord_str}': {e}");
+                continue;
+            }
+        };
+        match parse_action(action_str) {
+            Ok(Some(action)) => { base.insert(chord, action); }
+            Ok(None) => { base.remove(&chord); } // "none" disables the default
+            Err(e) => {
+                log::warn!("glassy: ignoring bad keybinding action '{action_str}': {e}");
+            }
+        }
+    }
+    base
+}
 
 /// Fully-resolved settings handed to the app: the renderer/PTY `Config` plus the
 /// selected color `Theme` (installed globally by `main`).
@@ -152,6 +467,9 @@ struct RawConfig {
     /// pairs. Applied over the base config when the matching profile is activated
     /// (via `--profile NAME`). Lower-cased keys, same grammar as top-level keys.
     profiles: HashMap<String, Vec<(String, String)>>,
+    /// Keybinding overrides from `[keybindings]` sections: (chord, action) string
+    /// pairs. Layered on top of the built-in defaults in `into_settings`.
+    keybinding_overrides: Vec<(String, String)>,
 }
 
 impl RawConfig {
@@ -243,6 +561,7 @@ impl RawConfig {
             font_features: self.font_features.unwrap_or_default(),
             initial_cwd: self.cwd.filter(|s| !s.is_empty()).map(PathBuf::from),
             restore_session: self.restore_session.unwrap_or(false),
+            keymap: build_keymap(default_keymap(), &self.keybinding_overrides),
         };
 
         Ok(Settings { config, theme })
@@ -333,27 +652,42 @@ fn config_path() -> Option<PathBuf> {
     }
 }
 
+/// Section discriminant for the config file parser.
+#[derive(Clone, PartialEq)]
+enum Section {
+    /// Top-level global keys.
+    Global,
+    /// A `[profile.NAME]` block (collect, apply on activation).
+    Profile(String),
+    /// The `[keybindings]` block (chord = action pairs).
+    Keybindings,
+    /// An unrecognized section header — skip content for forward-compat.
+    Unknown,
+}
+
 /// Parse a `KEY=VALUE` config file into `raw`. Blank lines and `#`/`;` comments
 /// are ignored; surrounding whitespace and a single layer of matching quotes are
 /// stripped from values. An unknown key is warned about but not fatal; a value
 /// that fails to parse for a known key is a hard error (with the line number).
 fn parse_config_file(text: &str, raw: &mut RawConfig) -> Result<()> {
-    // The active section. `None` is the top-level (global) config; `Some(name)`
-    // collects keys into the named `[profile.NAME]` block instead of applying them.
-    let mut profile: Option<String> = None;
+    let mut section = Section::Global;
     for (i, line) in text.lines().enumerate() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
             continue;
         }
-        // Section header: `[profile.NAME]` switches the active profile; any other
-        // `[...]` header resets to the global section (forward-compatible).
+        // Section header.
         if line.starts_with('[') && line.ends_with(']') {
             let name = line[1..line.len() - 1].trim();
-            profile = name
-                .strip_prefix("profile.")
-                .map(|n| n.trim().to_ascii_lowercase())
-                .filter(|n| !n.is_empty());
+            section = if name.eq_ignore_ascii_case("keybindings") {
+                Section::Keybindings
+            } else if let Some(profile_name) = name.strip_prefix("profile.") {
+                let n = profile_name.trim().to_ascii_lowercase();
+                if n.is_empty() { Section::Unknown } else { Section::Profile(n) }
+            } else {
+                // Forward-compatible: unknown sections are skipped gracefully.
+                Section::Unknown
+            };
             continue;
         }
         let Some((key, value)) = line.split_once('=') else {
@@ -361,16 +695,25 @@ fn parse_config_file(text: &str, raw: &mut RawConfig) -> Result<()> {
         };
         let key = key.trim().to_ascii_lowercase();
         let value = unquote(value.trim());
-        match &profile {
-            None => apply_kv(&key, value, raw).with_context(|| format!("line {}", i + 1))?,
-            Some(name) => {
-                // Defer validation: keys are applied via apply_kv only when the
-                // profile is activated, so an unused profile with a bad value is
-                // not fatal at load.
+        match &section {
+            Section::Global => {
+                apply_kv(&key, value, raw).with_context(|| format!("line {}", i + 1))?;
+            }
+            Section::Profile(name) => {
+                // Defer validation: applied via apply_kv only when activated.
                 raw.profiles
                     .entry(name.clone())
                     .or_default()
                     .push((key, value.to_string()));
+            }
+            Section::Keybindings => {
+                // chord = action — key is the chord string (already lowercased),
+                // value is the action name. Defer parsing to build_keymap so an
+                // unused/future action name doesn't break the load.
+                raw.keybinding_overrides.push((key, value.to_string()));
+            }
+            Section::Unknown => {
+                // Skip content of unrecognized sections for forward-compat.
             }
         }
     }
@@ -977,7 +1320,14 @@ CONFIG FILE:
     KEY=VALUE lines: font_family, font_size, theme, opacity, padding,
     padding_top, padding_bottom, padding_left, padding_right, shell, scrollback,
     bell_visual, bell_audible, follow_system, theme_light, theme_dark, status_bar,
-    pane_headers, word_separator, ligatures, font_features, color.*. CLI flags override the file.",
+    pane_headers, word_separator, ligatures, font_features, color.*
+    Add a [keybindings] section to remap or disable chords:
+        ctrl+shift+n = new_tab
+        f11          = none    (disable a built-in bind)
+    Actions: new_tab, close_pane, next_tab, prev_tab, split_vertical,
+    split_horizontal, toggle_fullscreen, toggle_maximize, settings, help,
+    search, command_palette, copy, paste, toggle_status_bar, font_increase,
+    font_decrease, font_reset, scroll_up, scroll_down, scroll_top, scroll_bottom",
         env!("CARGO_PKG_VERSION")
     );
 }
@@ -1157,5 +1507,154 @@ opacity = 0.80
         assert_eq!(feats.len(), 2);
         assert!(feats.contains(&"liga".to_string()));
         assert!(feats.contains(&"ss01".to_string()));
+    }
+
+    // -----------------------------------------------------------------------
+    // Keybinding tests
+    // -----------------------------------------------------------------------
+    use super::{Chord, KeyAction, build_keymap, default_keymap, parse_chord, parse_action};
+
+    #[test]
+    fn parse_chord_simple_letter() {
+        let c = parse_chord("ctrl+shift+t").unwrap();
+        assert!(c.ctrl && c.shift && !c.alt && !c.meta);
+        assert_eq!(c.key, "t");
+    }
+
+    #[test]
+    fn parse_chord_function_key() {
+        let c = parse_chord("f11").unwrap();
+        assert!(!c.ctrl && !c.shift && !c.alt && !c.meta);
+        assert_eq!(c.key, "f11");
+    }
+
+    #[test]
+    fn parse_chord_ctrl_comma() {
+        let c = parse_chord("ctrl+,").unwrap();
+        assert!(c.ctrl && !c.shift);
+        assert_eq!(c.key, ",");
+    }
+
+    #[test]
+    fn parse_chord_ctrl_plus() {
+        // "ctrl++" — key is '+'
+        let c = parse_chord("ctrl++").unwrap();
+        assert!(c.ctrl);
+        assert_eq!(c.key, "+");
+    }
+
+    #[test]
+    fn parse_chord_case_insensitive() {
+        let a = parse_chord("Ctrl+Shift+T").unwrap();
+        let b = parse_chord("ctrl+shift+t").unwrap();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn parse_chord_empty_errors() {
+        assert!(parse_chord("").is_err());
+    }
+
+    #[test]
+    fn parse_action_known_values() {
+        assert_eq!(parse_action("new_tab").unwrap(), Some(KeyAction::NewTab));
+        assert_eq!(parse_action("close_pane").unwrap(), Some(KeyAction::ClosePane));
+        assert_eq!(parse_action("none").unwrap(), None);
+        assert_eq!(parse_action("disabled").unwrap(), None);
+    }
+
+    #[test]
+    fn parse_action_unknown_errors() {
+        assert!(parse_action("fly_away").is_err());
+    }
+
+    #[test]
+    fn default_keymap_has_new_tab() {
+        let km = default_keymap();
+        let chord = parse_chord("ctrl+shift+t").unwrap();
+        assert_eq!(km.get(&chord), Some(&KeyAction::NewTab));
+    }
+
+    #[test]
+    fn default_keymap_has_f11_fullscreen() {
+        let km = default_keymap();
+        let chord = parse_chord("f11").unwrap();
+        assert_eq!(km.get(&chord), Some(&KeyAction::ToggleFullscreen));
+    }
+
+    #[test]
+    fn build_keymap_override_replaces_default() {
+        let base = default_keymap();
+        // Override Ctrl+Shift+T → close_pane
+        let overrides = vec![("ctrl+shift+t".to_string(), "close_pane".to_string())];
+        let km = build_keymap(base, &overrides);
+        let chord = parse_chord("ctrl+shift+t").unwrap();
+        assert_eq!(km.get(&chord), Some(&KeyAction::ClosePane));
+    }
+
+    #[test]
+    fn build_keymap_none_removes_default() {
+        let base = default_keymap();
+        let overrides = vec![("f11".to_string(), "none".to_string())];
+        let km = build_keymap(base, &overrides);
+        let chord = parse_chord("f11").unwrap();
+        assert_eq!(km.get(&chord), None);
+    }
+
+    #[test]
+    fn build_keymap_bad_chord_is_warned_not_fatal() {
+        let base = default_keymap();
+        let overrides = vec![("@@invalid".to_string(), "new_tab".to_string())];
+        // build_keymap logs a warning but must not panic or return an error.
+        let km = build_keymap(base, &overrides);
+        // The existing defaults are intact.
+        let chord = parse_chord("ctrl+shift+t").unwrap();
+        assert_eq!(km.get(&chord), Some(&KeyAction::NewTab));
+    }
+
+    #[test]
+    fn config_file_keybindings_section_parsed() {
+        let text = "\
+font_size = 14\n\
+[keybindings]\n\
+ctrl+shift+t = new_tab\n\
+ctrl+shift+n = new_tab\n\
+f11 = none\n\
+";
+        let mut raw = RawConfig::default();
+        parse_config_file(text, &mut raw).unwrap();
+        // The keybinding overrides are collected (not immediately applied).
+        assert_eq!(raw.keybinding_overrides.len(), 3);
+        let s = raw.into_settings().unwrap();
+        // f11 was disabled.
+        let f11 = parse_chord("f11").unwrap();
+        assert_eq!(s.config.keymap.get(&f11), None);
+        // ctrl+shift+n added.
+        let new_chord = parse_chord("ctrl+shift+n").unwrap();
+        assert_eq!(s.config.keymap.get(&new_chord), Some(&KeyAction::NewTab));
+    }
+
+    #[test]
+    fn chord_display_is_readable() {
+        let c = parse_chord("ctrl+shift+t").unwrap();
+        // Should produce a human label like "Ctrl+Shift+T".
+        let d = c.display();
+        assert!(d.contains("Ctrl"), "{d}");
+        assert!(d.contains("Shift"), "{d}");
+        assert!(d.to_uppercase().contains('T'), "{d}");
+    }
+
+    #[test]
+    fn keybindings_section_does_not_bleed_into_global() {
+        let text = "theme = dracula\n[keybindings]\nf1 = help\nfont_size = 14\n";
+        let mut raw = RawConfig::default();
+        parse_config_file(text, &mut raw).unwrap();
+        // `font_size = 14` is inside [keybindings] and should NOT be applied
+        // as a global setting (it is a keybinding chord, not a font size).
+        // It ends up in keybinding_overrides (with action = "14", which will
+        // log a warning at keymap build time) — but font_size stays at None.
+        assert_eq!(raw.font_size, None);
+        // The theme = dracula (before the section) IS applied.
+        assert_eq!(raw.theme.as_deref(), Some("dracula"));
     }
 }
