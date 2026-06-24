@@ -60,7 +60,7 @@ const TAB_GAP: f32 = 2.0;
 const TAB_PAD_X: f32 = 10.0;
 /// Close-button hit box inside a tab (px, square).
 const CLOSE_BOX: f32 = 16.0;
-/// Square icon-button size for +/≡/?/⚙ controls (px).
+/// Square icon-button size for +/#/?/* controls (px).
 const CTRL_BTN: f32 = 28.0;
 
 /// Corner radius for tab-bar icon buttons, derived from the cell height like the
@@ -207,8 +207,8 @@ type TabDesc<'a> = (&'a str, bool, bool);
 /// Lay out the real GUI tab bar across the pixel-wide bar `[0, bar_w)` at height
 /// `bar_h`, from tab descriptors in stable order. Produces, left→right: the glassy
 /// mark slot, a `+` new-tab button, the tab chips (each a body rect + an embedded
-/// close-box rect in multi-tab mode), and right-aligned `?` help, `⚙` settings,
-/// `≡` menu icon buttons. The active tab keeps its position. Pure (pixel math
+/// close-box rect in multi-tab mode), and right-aligned `?` help, `*` settings,
+/// `#` menu icon buttons. The active tab keeps its position. Pure (pixel math
 /// only) so the painter and the click hit-test agree, and so it is unit-testable.
 fn strip_layout(tabs: &[TabDesc], bar_w: f32, bar_h: f32, cell_w: f32) -> Vec<StripSeg> {
     let mut segs = Vec::new();
@@ -331,7 +331,7 @@ fn lighten(c: [f32; 4], amount: f32) -> [f32; 4] {
     ]
 }
 
-/// Actions available in the ≡ hamburger dropdown and the right-click context
+/// Actions available in the # hamburger dropdown and the right-click context
 /// menu. Kept as a single enum so the hit-test and keyboard dispatch share one
 /// definition across both menus.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -345,7 +345,7 @@ enum MenuAction {
 }
 
 impl MenuAction {
-    /// The fixed set shown by the ≡ hamburger dropdown. The right-click context
+    /// The fixed set shown by the # hamburger dropdown. The right-click context
     /// menu uses a separately-built `Vec<MenuAction>` (see `context_menu_items`).
     const ALL: &'static [MenuAction] =
         &[MenuAction::NewTab, MenuAction::Settings, MenuAction::Help, MenuAction::CloseTab];
@@ -364,10 +364,10 @@ impl MenuAction {
     /// Left-column icon glyph for the real GUI menu (§3.6).
     fn icon(self) -> char {
         match self {
-            MenuAction::Copy      => '🗐',
-            MenuAction::Paste     => '❏',
+            MenuAction::Copy      => '◻',
+            MenuAction::Paste     => '□',
             MenuAction::NewTab    => '+',
-            MenuAction::Settings  => '⚙',
+            MenuAction::Settings  => '*',
             MenuAction::Help      => '?',
             MenuAction::CloseTab  => '✕',
         }
@@ -691,12 +691,12 @@ pub struct App {
     settings_panel: gui::Rect,
     /// True briefly after a successful settings save, for the overlay's status line.
     settings_saved: bool,
-    /// Whether the ≡ hamburger dropdown menu is currently shown.
+    /// Whether the # hamburger dropdown menu is currently shown.
     menu_open: bool,
     /// Currently-highlighted row in the dropdown menu (keyboard nav).
     menu_sel: usize,
     /// When the dropdown is the right-click context menu, the items it shows
-    /// (selection-aware). `None` means the dropdown is the ≡ hamburger (uses
+    /// (selection-aware). `None` means the dropdown is the # hamburger (uses
     /// `MenuAction::ALL`). Drives both draw and hit-test.
     menu_items: Option<Vec<MenuAction>>,
     /// Screen-cell anchor (col, row) for the open dropdown panel. Set for both
@@ -1257,7 +1257,7 @@ impl App {
                         MenuAction::ALL.iter().map(|a| a.label().len()).max().unwrap_or(0);
                     let panel_w = label_w + 4;
                     self.menu_anchor = Some((self.cols.saturating_sub(panel_w), TAB_STRIP_ROWS));
-                    // Pixel anchor: below the ≡ button, at the right of the window.
+                    // Pixel anchor: below the # button, at the right of the window.
                     if let Some(r) = self.renderer.as_ref() {
                         let (sw, _sh) = r.surface_size();
                         // Approximate panel width: icon + label + shortcut + padding.
@@ -2290,7 +2290,7 @@ impl App {
     /// content hairline so the tab "opens into" the content surface, plus a top
     /// accent rail. Inactive tabs are recessed E1 chips sitting above the bar
     /// bottom. The close button fades in on hover with its own danger-tinted
-    /// hover/press state. +/?/⚙/≡ are icon buttons. The rich (Unicode) title is
+    /// hover/press state. +/?/* / # are icon buttons. The rich (Unicode) title is
     /// drawn through the glyph atlas via `push_overlay_glyph_px` (tofu-proof). A
     /// held tab is lifted to a drag-ghost following the pointer.
     ///
@@ -2395,8 +2395,8 @@ impl App {
                     let glyph = match seg.item {
                         StripItem::NewTab => '+',
                         StripItem::Help => '?',
-                        StripItem::Settings => '⚙',
-                        _ => '≡',
+                        StripItem::Settings => '*',
+                        _ => '#',
                     };
                     let base = surface;
                     if is_held {
@@ -5790,7 +5790,7 @@ mod tests {
 
     #[test]
     fn strip_hit_test_matches_layout() {
-        // Two tabs (tab 1 active) + their ✕ + a + button + right-hand ?/⚙/≡. The
+        // Two tabs (tab 1 active) + their ✕ + a + button + right-hand ?/*/#. The
         // hit-test resolves to the same items the painter draws (pixel rects).
         let segs = strip_layout(&[("zsh", true, false), ("vim", false, false)], 1200.0, BH, CW);
         // Probe each tab body at its center and its close box, plus the controls.
