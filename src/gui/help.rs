@@ -253,20 +253,30 @@ pub fn build_help(
         };
         renderer.push_overlay_rrect_px(track.x, thumb_y, track.w, thumb_h, track.w * 0.5, thumb_col);
 
-        // Drag the scrollbar.
-        if mouse_down && hit(track, mouse.0, mouse.1) {
-            let t = ((mouse.1 - sb_y - thumb_h * 0.5) / (sb_h - thumb_h).max(1.0)).clamp(0.0, 1.0);
-            state.scroll = t * max_scroll;
+        // Drag the scrollbar with a press-latch: a press inside the track claims
+        // the widget; the drag then continues for as long as the button is held,
+        // even if the pointer leaves the narrow track (fast drags don't drop).
+        let wid = id("help/scrollbar");
+        if mouse_down && (hit(track, mouse.0, mouse.1) || *pressed == Some(wid)) {
+            if pressed.is_none() {
+                *pressed = Some(wid);
+            }
+            if *pressed == Some(wid) {
+                let t = ((mouse.1 - sb_y - thumb_h * 0.5) / (sb_h - thumb_h).max(1.0)).clamp(0.0, 1.0);
+                state.scroll = t * max_scroll;
+            }
+        }
+        if !mouse_down && *pressed == Some(wid) {
+            *pressed = None;
         }
 
         // Record scrollbar widget interaction for animation.
-        let wid = id("help/scrollbar");
         let a = anims.entry(wid).or_insert_with(|| Anim::new(0.0));
         a.target = if thumb_over { 1.0 } else { 0.0 };
     }
 
     // Suppress unused-variable warnings.
-    let _ = (pressed, focused, footer_h);
+    let _ = (focused, footer_h);
     result
 }
 

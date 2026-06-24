@@ -74,8 +74,9 @@ impl App {
         let sb_cwd: Option<std::path::PathBuf> = self.pty.as_ref()
             .and_then(|p| p.pane_info.cwd.clone())
             .or_else(|| self.active_cwd.clone());
-        let sb_git_branch: Option<String> = sb_cwd.as_deref()
-            .and_then(crate::app::helpers::read_git_branch);
+        // Branch is precomputed in PaneInfo (refreshed on the 2 s proc poll).
+        let sb_git_branch: Option<String> = self.pty.as_ref()
+            .and_then(|p| p.pane_info.git_branch.clone());
         let sb_progress = self.active_progress;
 
         // Tab-bar state snapshot (owned data) for the pixel-overlay painter, taken
@@ -527,6 +528,18 @@ impl App {
             self.gui_pressed = None;
         }
         self.gui_click_edge = false;
+
+        // Cache the focused pane's blink state (single lock here, on an actual
+        // repaint) so about_to_wait never takes the term lock per event.
+        self.cursor_blinks = self
+            .pty
+            .as_ref()
+            .map(|pty| {
+                let term = pty.term.lock();
+                term.cursor_style().blinking
+                    && term.renderable_content().cursor.shape != CursorShape::Hidden
+            })
+            .unwrap_or(false);
 
         // Apply settings-form interactions now the renderer borrow has ended.
         if let Some(ev) = settings_events {

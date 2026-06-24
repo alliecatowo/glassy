@@ -208,7 +208,11 @@ impl App {
         // through to the terminal / tab / menu handlers. A left click well
         // outside the panel dismisses the form.
         if self.settings_open {
-            if button == MouseButton::Left && pressed {
+            // Dismiss on the RELEASE edge, consistent with the in-panel widgets
+            // (which resolve on gui_click_edge). Acting on press would let a click
+            // starting just outside the panel kill the form before the Ui resolves
+            // an inside-click, and would break starting a slider drag from outside.
+            if button == MouseButton::Left && !pressed {
                 let (mx, my) = (self.mouse_px.0 as f32, self.mouse_px.1 as f32);
                 if !gui::hit(self.settings_panel, mx, my) {
                     self.settings_open = false;
@@ -243,7 +247,10 @@ impl App {
         // The command palette owns the pointer: a left press on a listed
         // row activates it; a press anywhere else (the scrim) closes it.
         if self.palette.is_some() {
-            if button == MouseButton::Left && pressed {
+            // Act on the RELEASE edge (matching every other immediate-mode overlay,
+            // which resolves via gui_click_edge): a press that arrives in the same
+            // frame the palette opened must not immediately dismiss it.
+            if button == MouseButton::Left && !pressed {
                 let (mx, my) = (self.mouse_px.0 as f32, self.mouse_px.1 as f32);
                 let hit = self
                     .palette_rows
@@ -297,22 +304,29 @@ impl App {
                 return;
             }
 
-        // A click anywhere while the dropdown is open: either invoke the
-        // selected item (left-click inside panel) or dismiss the menu.
-        // A right-click always closes the menu (second right-click = close).
-        if pressed && self.menu_open
+        // A click anywhere while the dropdown is open: invoke the selected item on
+        // the left RELEASE edge (consistent with the immediate-mode chrome, which
+        // resolves on button-up), dismiss on a press outside the panel, and always
+        // close on a right-click. The whole event is consumed either way so it
+        // never falls through to start a text selection beneath the menu.
+        if self.menu_open
             && (button == MouseButton::Left || button == MouseButton::Right)
         {
             let (mx, my) = self.mouse_px;
-            if button == MouseButton::Left {
-                if let Some(action) = self.menu_hit_test(mx, my) {
-                    self.invoke_menu_action(action, event_loop);
-                } else {
+            if button == MouseButton::Right {
+                // Right-click while menu is open: close without invoking.
+                if pressed {
                     self.close_menu(event_loop);
                 }
-            } else {
-                // Right-click while menu is open: close without invoking.
-                self.close_menu(event_loop);
+            } else if pressed {
+                // Left press: dismiss only when it lands outside the menu; a press
+                // inside keeps the menu up so the release can activate the item.
+                if self.menu_hit_test(mx, my).is_none() {
+                    self.close_menu(event_loop);
+                }
+            } else if let Some(action) = self.menu_hit_test(mx, my) {
+                // Left release inside the menu: invoke the item under the pointer.
+                self.invoke_menu_action(action, event_loop);
             }
             self.held_button = None;
             return;

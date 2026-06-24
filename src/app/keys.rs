@@ -271,7 +271,10 @@ impl App {
         };
         // DECCKM: arrows/Home/End go out as SS3 (ESC O X) for full-screen
         // apps (vim, less, ncurses) that enable application cursor-key mode.
-        let app_cursor = mode.contains(TermMode::APP_CURSOR);
+        // Under any active kitty bit (DISAMBIGUATE_ESC_CODES etc.) the spec
+        // forbids the ambiguous SS3 form for cursor keys, so suppress app-cursor
+        // mode when kitty is active — those keys then fall to unambiguous CSI.
+        let app_cursor = mode.contains(TermMode::APP_CURSOR) && !kitty.active();
         if let Some(bytes) = encode_key(&event, self.mods, kitty, app_cursor, self.modify_other_keys) {
             // Typing resets the blink to solid-on so the cursor doesn't
             // wink out mid-keystroke, matching every mainstream terminal.

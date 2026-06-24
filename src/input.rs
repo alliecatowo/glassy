@@ -114,17 +114,19 @@ pub fn encode_key(
             let _ = write!(s, ";{}:{}", kitty_mods, event_type);
         } else if kitty_mods != 1 || kitty.report_all_keys_as_esc {
             let _ = write!(s, ";{}", kitty_mods);
-        } else {
-            // omit mods param when unmodified and not forcing all-keys form
-            s.push(';');
         }
+        // else: unmodified and not forcing all-keys form — emit no second param
+        // group at all. A bare ";u" (empty second param before the final byte) is
+        // NOT valid kitty protocol; the correct unmodified form is "CSI <code> u".
 
-        // Third parameter group: shifted_key[:base_key] (REPORT_ALTERNATE_KEYS)
+        // Third parameter group: shifted_key[:base_key] (REPORT_ALTERNATE_KEYS).
+        // We don't have alternate key codepoints from winit, so the values are
+        // empty; but the positional slot must still be emitted whenever
+        // REPORT_ALTERNATE_KEYS is active OR the (fourth) text group follows, so the
+        // text codepoints land in the correct position rather than the third slot.
         let need_text = kitty.report_associated_text && text.is_some();
-        if kitty.report_alternate_keys {
-            // We don't have alternate key codepoints from winit; emit empty sub-param
-            // which applications interpret as "same as primary key".
-            if need_text { s.push(';'); } else { /* omit */ }
+        if kitty.report_alternate_keys || need_text {
+            s.push(';');
         }
 
         // Fourth parameter group: associated text Unicode codepoints (REPORT_ASSOCIATED_TEXT)
@@ -262,12 +264,10 @@ pub fn encode_key(
                 let mok_emit = match modify_other_keys {
                     ModifyOtherKeys::Reset => false,
                     ModifyOtherKeys::EnableAll => true,
-                    ModifyOtherKeys::EnableExceptWellDefined => {
-                        // Traditional Ctrl+alpha/symbol encodings are well-defined;
-                        // skip them at level 1 (only emit for unusual combos).
-                        // For simplicity: level 1 still suppresses standard C0 range.
-                        false
-                    }
+                    // Level 1 only encodes Ctrl combos that lack a traditional C0
+                    // mapping; a `control_byte` here IS the well-defined encoding,
+                    // so level 1 keeps the C0 byte.
+                    ModifyOtherKeys::EnableExceptWellDefined => false,
                 };
                 if mok_emit {
                     let mok_mods = xterm_mod_param(shift, alt, ctrl, super_);
@@ -281,6 +281,17 @@ pub fn encode_key(
                 }
                 out.push(byte);
                 return Some(out);
+            } else {
+                // Ctrl+<key> with NO traditional C0 mapping (e.g. Ctrl+digit,
+                // Ctrl+punctuation). Both level 1 (not-well-defined) and level 2
+                // encode these as CSI 27 ; mods ; codepoint ~. Level 0 falls through
+                // to the raw text below.
+                if modify_other_keys != ModifyOtherKeys::Reset {
+                    let mok_mods = xterm_mod_param(shift, alt, ctrl, super_);
+                    return Some(
+                        format!("\x1b[27;{};{}~", mok_mods, c as u32).into_bytes()
+                    );
+                }
             }
         }
 

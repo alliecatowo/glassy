@@ -89,6 +89,10 @@ pub struct PaneInfo {
     /// command, max 15 chars per Linux). `None` when the shell is the foreground
     /// leader (idle) or the read fails.
     pub foreground_comm: Option<String>,
+    /// Git branch for `cwd` (or `:<sha7>` when detached), derived by walking up to
+    /// the nearest `.git/HEAD`. Cached here so the status bar reads it without a
+    /// filesystem walk on every rendered frame; refreshed on the 2 s proc poll.
+    pub git_branch: Option<String>,
 }
 
 impl PaneInfo {
@@ -99,7 +103,12 @@ impl PaneInfo {
     pub fn read(shell_pid: u32) -> Self {
         let cwd = read_proc_cwd(shell_pid);
         let foreground_comm = read_foreground_comm(shell_pid);
-        Self { cwd, foreground_comm }
+        // Resolve the git branch once per refresh (not per frame); the walk + HEAD
+        // read is cheap at the 2 s cadence but a measurable idle-CPU cost at 60 Hz.
+        let git_branch = cwd
+            .as_deref()
+            .and_then(crate::app::read_git_branch);
+        Self { cwd, foreground_comm, git_branch }
     }
 }
 
@@ -161,9 +170,11 @@ fn read_foreground_comm(shell_pid: u32) -> Option<String> {
                 continue;
             }
             if let Ok(s) = std::fs::read_to_string(format!("/proc/{pid}/stat")) {
-                let after = s.rfind(')')?;
+                // `?`/early-return here would abort the WHOLE scan on the first
+                // unparseable entry; skip to the next pid instead.
+                let Some(after) = s.rfind(')') else { continue };
                 let tokens: Vec<&str> = s[after + 1..].split_whitespace().collect();
-                let pg: u32 = tokens.get(2)?.parse().ok()?;
+                let Some(Ok(pg)) = tokens.get(2).map(|t| t.parse::<u32>()) else { continue };
                 if pg == tpgid
                     && let Ok(comm) = std::fs::read_to_string(format!("/proc/{pid}/comm"))
                 {
@@ -315,8 +326,10 @@ const MAX_PROMPT_OFFSETS: usize = 1024;
 #[allow(dead_code)]
 #[derive(Default)]
 pub struct PromptTracker {
-    /// Absolute grid rows of `A` (prompt-start) marks, sorted ascending.
-    pub rows: Vec<i32>,
+    /// Absolute grid rows of `A` (prompt-start) marks, kept sorted ascending. A
+    /// `VecDeque` so the bounded-capacity eviction pops the front in O(1) rather
+    /// than memmoving the whole backing buffer.
+    pub rows: std::collections::VecDeque<i32>,
 }
 
 #[allow(dead_code)]
@@ -328,13 +341,21 @@ impl PromptTracker {
     /// Record a prompt-start row. Duplicate rows (same prompt, re-drawn) are
     /// silently deduped; the list is kept sorted and bounded.
     pub fn push(&mut self, row: i32) {
-        if self.rows.last() == Some(&row) {
-            return; // skip exact duplicate at the tail (common on prompt redraws)
+        // Maintain the sorted-ascending invariant that prev_prompt/next_prompt
+        // rely on. Marks usually arrive in ascending order (append to the tail),
+        // but a backward scroll can produce a lower absolute row; binary_search
+        // places it correctly and dedups exact duplicates.
+        if let Err(pos) = self.rows.binary_search(&row) {
+            if self.rows.len() >= MAX_PROMPT_OFFSETS {
+                self.rows.pop_front();
+                // The eviction shifted indices by one; re-find the slot.
+                let pos = self.rows.binary_search(&row).unwrap_or_else(|p| p);
+                self.rows.insert(pos, row);
+            } else {
+                self.rows.insert(pos, row);
+            }
         }
-        if self.rows.len() >= MAX_PROMPT_OFFSETS {
-            self.rows.remove(0);
-        }
-        self.rows.push(row);
+        // Ok(_) => row already present; skip the duplicate.
     }
 
     /// Return the row of the previous prompt relative to `current_row`, or
@@ -544,25 +565,22 @@ impl Pty {
             let step1 = text.replace("\x1b[200~", "").replace("\x1b[201~", "");
             // Filter out ESC-based control sequences (OSC, CSI, etc.) that shouldn't
             // be pasted, preserving only safe printable/whitespace characters.
+            // Operate on chars (not raw bytes): casting a UTF-8 continuation byte
+            // via `as char` would mangle non-ASCII clipboard content into Latin-1.
             let mut sanitized = String::new();
-            let mut i = 0;
-            let bytes = step1.as_bytes();
-            while i < bytes.len() {
-                if bytes[i] == 0x1b {
-                    // Skip ESC-based sequences: ESC X ... terminator
-                    i += 1;
-                    while i < bytes.len() && bytes[i] < 0x40 {
-                        i += 1;
+            let mut chars = step1.chars().peekable();
+            while let Some(c) = chars.next() {
+                if c == '\x1b' {
+                    // Skip an ESC-based sequence: ESC X ... terminator (>= 0x40).
+                    for c2 in chars.by_ref() {
+                        if (c2 as u32) >= 0x40 {
+                            break;
+                        }
                     }
-                    if i < bytes.len() {
-                        i += 1; // Skip the terminator
-                    }
-                } else if bytes[i] < 0x20 && bytes[i] != b'\t' && bytes[i] != b'\n' && bytes[i] != b'\r' {
-                    // Skip other control characters except tab, newline, carriage return
-                    i += 1;
+                } else if (c as u32) < 0x20 && c != '\t' && c != '\n' && c != '\r' {
+                    // Skip other control characters except tab, newline, carriage return.
                 } else {
-                    sanitized.push(bytes[i] as char);
-                    i += 1;
+                    sanitized.push(c);
                 }
             }
             let mut out = Vec::with_capacity(sanitized.len() + 12);
@@ -607,6 +625,7 @@ const SYNC_TIMEOUT: Duration = Duration::from_millis(16);
 /// is still passed to the alacritty VT parser unchanged (alacritty ignores the
 /// sequence since it does not implement it, but we do here).
 fn scan_modify_other_keys(bytes: &[u8]) -> Option<ModifyOtherKeys> {
+    let mut result = None;
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] != 0x1b {
@@ -634,13 +653,15 @@ fn scan_modify_other_keys(bytes: &[u8]) -> Option<ModifyOtherKeys> {
                     j += 1;
                     // final byte
                     if b == b'm' && params.len() >= 2 && params[0] == 4 {
-                        let level = match params[1] {
+                        // The LAST matching sequence in the buffer wins: an app may
+                        // set then reset the level within a single read; the final
+                        // state is what must be applied.
+                        result = Some(match params[1] {
                             0 => ModifyOtherKeys::Reset,
                             1 => ModifyOtherKeys::EnableExceptWellDefined,
                             2 => ModifyOtherKeys::EnableAll,
                             _ => ModifyOtherKeys::Reset,
-                        };
-                        return Some(level);
+                        });
                     }
                     break;
                 }
@@ -650,7 +671,7 @@ fn scan_modify_other_keys(bytes: &[u8]) -> Option<ModifyOtherKeys> {
         }
         i += 1;
     }
-    None
+    result
 }
 
 /// Scan a VT byte run for DECSET/DECRST 2026 (synchronized output).
@@ -670,6 +691,11 @@ fn scan_sync_2026(bytes: &[u8]) -> (u32, u32) {
             let mut num: u32 = 0;
             while j < bytes.len() && bytes[j].is_ascii_digit() {
                 num = num * 10 + (bytes[j] - b'0') as u32;
+                j += 1;
+            }
+            // Skip any trailing sub-params (`?2026;1h`) so the final byte check
+            // below lands on h/l rather than a semicolon.
+            while j < bytes.len() && (bytes[j] == b';' || bytes[j].is_ascii_digit()) {
                 j += 1;
             }
             if num == 2026 {

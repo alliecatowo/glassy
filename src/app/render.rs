@@ -108,8 +108,10 @@ impl App {
         let sb_cwd: Option<std::path::PathBuf> = self.pty.as_ref()
             .and_then(|p| p.pane_info.cwd.clone())
             .or_else(|| self.active_cwd.clone()); // fallback to OSC 7 path
-        let sb_git_branch: Option<String> = sb_cwd.as_deref()
-            .and_then(crate::app::helpers::read_git_branch);
+        // Branch is precomputed in PaneInfo (refreshed on the 2 s proc poll), so
+        // the render path does no filesystem walk.
+        let sb_git_branch: Option<String> = self.pty.as_ref()
+            .and_then(|p| p.pane_info.git_branch.clone());
         let sb_progress = self.active_progress;
 
         // Settings-form inputs (whole-`self` method calls) snapshotted BEFORE the
@@ -563,6 +565,11 @@ impl App {
         }
 
         drop(term); // release before GPU submit / present
+
+        // Cache whether the cursor should blink (style requested + not hidden) so
+        // about_to_wait can decide the blink timer without re-taking the term lock
+        // on every event.
+        self.cursor_blinks = cursor_blinking && cursor.shape != CursorShape::Hidden;
 
         // Inline images (kitty graphics). Drawn as an overlay every frame from the
         // live placement list, anchored to the cell they were displayed at. The

@@ -351,6 +351,12 @@ pub struct App {
     // (0% idle) and keep the cursor solid.
     blink_on: bool,
     blink_at: Instant,
+    /// Whether the focused pane's child requested a blinking, non-hidden cursor.
+    /// Cached from the last render (where the term lock is already held) so
+    /// `about_to_wait` — which fires on every CursorMoved/Wakeup — does not take
+    /// the term lock just to decide whether to keep the blink timer running,
+    /// avoiding lock contention with the PTY thread during output bursts.
+    cursor_blinks: bool,
 
     // Tab busy-spinner state. `active_busy_until` is the active session's busy
     // deadline (the parked sessions keep their own in `Session::busy_until`).

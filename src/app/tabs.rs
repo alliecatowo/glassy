@@ -65,6 +65,7 @@ impl App {
             refresh: Duration::from_micros(16_666), // 60 Hz default until queried
             blink_on: true,
             blink_at: Instant::now() + BLINK_INTERVAL,
+            cursor_blinks: false,
             active_busy_until: None,
             spinner_frame: 0,
             spinner_at: Instant::now() + SPINNER_INTERVAL,
@@ -897,8 +898,11 @@ impl App {
 
         // Rebuild each tab into a parked Session (the active one is swapped in after).
         let active_idx = saved.active.min(saved.tabs.len().saturating_sub(1));
-        let mut built: Vec<(usize, Session)> = Vec::new();
-        for tab in &saved.tabs {
+        // (orig_idx, tab_id, session): orig_idx is the index into saved.tabs so the
+        // active tab can be selected even when earlier tabs fail to spawn (and are
+        // skipped), which would otherwise shift `built` and misalign active_idx.
+        let mut built: Vec<(usize, usize, Session)> = Vec::new();
+        for (orig_idx, tab) in saved.tabs.iter().enumerate() {
             // Map each session-relative leaf id to a freshly-allocated live id, and
             // spawn a pane PTY per leaf in its saved cwd.
             let leaves = tab.layout.leaves();
@@ -1006,7 +1010,7 @@ impl App {
                 custom_title: tab.custom_title.clone(),
                 pane_cwds,
             };
-            built.push((tab_id, session));
+            built.push((orig_idx, tab_id, session));
         }
 
         if built.is_empty() {
@@ -1017,14 +1021,17 @@ impl App {
         }
 
         // Install: tab_order from built order, active tab swapped into the live slots.
-        for (id, _) in &built {
+        for (_, id, _) in &built {
             self.tab_order.push(*id);
         }
+        // Select by the ORIGINAL saved index, not a position in `built` (which may
+        // be shorter if any tab failed to spawn). Fall back to the first survivor.
         let active_id = built
-            .get(active_idx)
-            .map(|(id, _)| *id)
-            .unwrap_or(built[0].0);
-        for (id, session) in built {
+            .iter()
+            .find(|(orig, ..)| *orig == active_idx)
+            .map(|(_, id, _)| *id)
+            .unwrap_or(built[0].1);
+        for (_, id, session) in built {
             if id == active_id {
                 self.active_id = session.id;
                 self.active_title = session.title;
@@ -1197,6 +1204,11 @@ impl App {
                 self.active_custom_title = next.custom_title;
                 self.active_pane_cwds = next.pane_cwds;
                 self.active_cwd = next.last_cwd;
+                // Mirror activate_tab: carry the promoted tab's busy-spinner state
+                // and reset the modifyOtherKeys level (it is per-session and must
+                // not leak the closed tab's negotiated encoding to the new one).
+                self.active_busy_until = next.busy_until;
+                self.modify_other_keys = ModifyOtherKeys::default();
                 if self.panes.is_some() {
                     self.resize_panes();
                 }

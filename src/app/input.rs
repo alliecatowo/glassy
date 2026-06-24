@@ -27,8 +27,9 @@ impl App {
             return;
         }
         // The active focused pane: if the tab is split, close just that pane;
-        // otherwise close the whole tab (the original single-pane behaviour).
-        if id == self.active_id {
+        // otherwise close the whole tab (the original single-pane behaviour). After
+        // a split the focused leaf id != active_id, so match active_focused_id().
+        if id == self.active_id || id == self.active_focused_id() {
             if self.is_split() {
                 self.close_pane(event_loop);
             } else {
@@ -62,19 +63,6 @@ impl App {
                 }
             }
             self.update_window_title();
-        }
-    }
-
-    /// Whether the cursor should currently blink: the child requested a blinking
-    /// style and the cursor is not hidden. Returns false before the PTY is up.
-    pub(crate) fn cursor_blinking(&self) -> bool {
-        match self.pty.as_ref() {
-            Some(pty) => {
-                let term = pty.term.lock();
-                term.cursor_style().blinking
-                    && term.renderable_content().cursor.shape != CursorShape::Hidden
-            }
-            None => false,
         }
     }
 

@@ -192,6 +192,18 @@ impl App {
         if let Some(p) = g.others.remove(&new_focus) {
             self.pty = Some(p);
         }
+        // If the user closed the pane whose id equals active_id (the tab's stable
+        // identity — usually the original primary pane), that id now names a dead
+        // pane. Re-point active_id and its tab_order slot at a surviving pane so
+        // event routing (id_in_active_tab / tab_pos_of_pane) keeps finding the tab.
+        // The survivor is new_focus when collapsing to single-pane; while still
+        // split, active_id only needs to name SOME live pane, and new_focus is one.
+        if closing == self.active_id {
+            if let Some(pos) = self.tab_order.iter().position(|&id| id == self.active_id) {
+                self.tab_order[pos] = new_focus;
+            }
+            self.active_id = new_focus;
+        }
         // Collapse back to single-pane if only one leaf remains.
         if g.layout.len() == 1 {
             self.panes = None;
@@ -437,7 +449,7 @@ impl App {
     /// a background tab. Used to route PTY-keyed events (VT replies, etc.) to the
     /// correct pane regardless of which tab or split it belongs to.
     pub(crate) fn pty_by_id(&self, id: usize) -> Option<&Pty> {
-        if id == self.active_id {
+        if id == self.active_id || id == self.active_focused_id() {
             return self.pty.as_ref();
         }
         if let Some(g) = self.panes.as_ref()
@@ -458,10 +470,24 @@ impl App {
         None
     }
 
+    /// The id of the active tab's *focused* pane — the one whose PTY lives in
+    /// `self.pty`. For a single-pane tab this equals `active_id`, but after a
+    /// split the focused leaf has a freshly-allocated id that is neither
+    /// `active_id` nor a key in `g.others`, so events keyed by it must resolve
+    /// through here.
+    pub(crate) fn active_focused_id(&self) -> usize {
+        self.panes
+            .as_ref()
+            .map(|g| g.layout.focused())
+            .unwrap_or(self.active_id)
+    }
+
     /// Whether `id` names a pane (focused or not) of the ACTIVE tab — i.e. one
     /// whose output is currently visible and should trigger a repaint.
     pub(crate) fn id_in_active_tab(&self, id: usize) -> bool {
-        id == self.active_id || self.panes.as_ref().is_some_and(|g| g.others.contains_key(&id))
+        id == self.active_id
+            || id == self.active_focused_id()
+            || self.panes.as_ref().is_some_and(|g| g.others.contains_key(&id))
     }
 
     /// The display position (in `tab_order`) of the tab that owns pane `id`, where

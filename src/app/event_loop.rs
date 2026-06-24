@@ -253,8 +253,9 @@ impl ApplicationHandler<UserEvent> for App {
             UserEvent::Title(id, title) => {
                 // The focused pane drives the chip/window title. Non-focused panes
                 // of the active tab have their title stored in `others_titles` for
-                // the pane title-bar headers (Wave 3).
-                if id == self.active_id {
+                // the pane title-bar headers (Wave 3). After a split the focused
+                // leaf id != active_id, so resolve via active_focused_id().
+                if id == self.active_focused_id() {
                     // Also keep the focused pane's title in others_titles so the
                     // header painter can look up any pane id uniformly.
                     if let Some(g) = self.panes.as_mut() {
@@ -334,7 +335,7 @@ impl ApplicationHandler<UserEvent> for App {
                 // it. Only a tab's FOCUSED pane drives the inherited cwd (mirrors
                 // the title handling); not a visual change, so no repaint.
                 if self.id_in_active_tab(id) {
-                    if id == self.active_id {
+                    if id == self.active_focused_id() {
                         self.active_cwd = Some(path);
                     } else {
                         // A non-focused active-tab pane reports its own cwd: the
@@ -433,8 +434,9 @@ impl ApplicationHandler<UserEvent> for App {
                 // xterm modifyOtherKeys level changed by the running application
                 // (CSI > 4 ; N m intercepted in the PTY loop). Update the field so
                 // subsequent encode_key calls emit the correct encoding for modified
-                // printable keys. Only the active session's level applies.
-                if id == self.active_id {
+                // printable keys. Only the active focused pane's level applies
+                // (keystrokes route to self.pty, whose id is active_focused_id()).
+                if id == self.active_focused_id() {
                     self.modify_other_keys = level;
                 }
                 return;
@@ -442,8 +444,9 @@ impl ApplicationHandler<UserEvent> for App {
             UserEvent::Progress(id, state) => {
                 // OSC 9;4 progress report: update the active session's indicator.
                 // Non-active sessions' progress is ignored (only the focused session
-                // renders a progress bar). On Remove, clear the indicator.
-                if id == self.active_id {
+                // renders a progress bar). On Remove, clear the indicator. Resolve
+                // the focused pane via active_focused_id() (split-aware).
+                if id == self.active_focused_id() {
                     self.active_progress = match state {
                         crate::image::ProgressState::Remove => None,
                         other => Some(other),
@@ -632,7 +635,7 @@ impl ApplicationHandler<UserEvent> for App {
         // cursor. When that holds, advance the phase at each `blink_at` deadline and
         // mark dirty so the cursor redraws; otherwise the cursor stays solid and we
         // never schedule a wakeup for it (preserving the 0%-idle `Wait` path).
-        let blink_active = self.focused && self.cursor_blinking();
+        let blink_active = self.focused && self.cursor_blinks;
         if blink_active {
             if now >= self.blink_at {
                 self.blink_on = !self.blink_on;
