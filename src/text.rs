@@ -6,10 +6,10 @@
 //! glyph atlas; everything here is pure CPU work and is fully cached per
 //! `(char, bold, italic)` so repeated cells are a cheap `HashMap` lookup.
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 use std::process::Command;
 use std::sync::Arc;
 
@@ -20,7 +20,7 @@ use std::sync::Arc;
 /// launches (the "fc-match storm" at startup). Invalid / stale entries are
 /// ignored — a failed lookup just falls through to a live `fc-match` call and
 /// refreshes the cache entry.
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn fc_cache_path() -> Option<PathBuf> {
     let base = std::env::var_os("XDG_CACHE_HOME")
         .map(PathBuf::from)
@@ -33,7 +33,7 @@ fn fc_cache_path() -> Option<PathBuf> {
 
 /// Load the entire fc-match cache into a `HashMap<pattern, file_path>`.
 /// Silently returns an empty map on any I/O or parse error.
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn fc_cache_load() -> std::collections::HashMap<String, String> {
     let mut map = std::collections::HashMap::new();
     let path = match fc_cache_path() {
@@ -56,7 +56,7 @@ fn fc_cache_load() -> std::collections::HashMap<String, String> {
 /// Persist a single `pattern → file_path` mapping into the fc-match cache.
 /// Creates the parent directory if absent. Errors are logged at debug level
 /// and do not abort the font load.
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn fc_cache_insert(pattern: &str, file_path: &str) {
     let path = match fc_cache_path() {
         Some(p) => p,
@@ -490,18 +490,18 @@ fn build_font_system(bytes: Vec<u8>, primary_path: Option<PathBuf>) -> Option<Lo
 
     // Load the fc-match resolution cache once; both style and fallback loading
     // benefit from it (cache hits skip the subprocess entirely).
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     let fc_cache = fc_cache_load();
 
     // Load the bold/italic faces of the same family so styled text shapes with
     // the real monospace face rather than falling back to a proportional font.
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     load_primary_styles(&mut db, &family_name, primary_path.as_deref(), &fc_cache);
 
     // Enrich the database with fallback faces (best-effort; failures are skipped).
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     load_fallback_fonts(&mut db, primary_path.as_deref(), &fc_cache);
-    #[cfg(not(unix))]
+    #[cfg(not(target_os = "linux"))]
     let _ = primary_path;
 
     let font_system = FontSystem::new_with_locale_and_db("en-US".to_string(), db);
@@ -519,7 +519,7 @@ fn build_font_system(bytes: Vec<u8>, primary_path: Option<PathBuf>) -> Option<Lo
 // Emoji is handled separately (see `load_emoji_fallback`): we load a bundled
 // CBDT color-bitmap face by path, because swash cannot rasterize the COLRv1
 // "Noto Color Emoji" that fontconfig resolves to on most hosts.
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 const FALLBACK_PATTERNS: &[&str] = &[
     // CJK coverage.
     "Noto Sans CJK",
@@ -536,7 +536,7 @@ const FALLBACK_PATTERNS: &[&str] = &[
 /// `thread::scope` — all patterns are resolved concurrently, then the results
 /// are loaded serially into `db`. Resolved paths are written to the fc-cache
 /// so subsequent launches skip the subprocesses entirely.
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn load_fallback_fonts(
     db: &mut fontdb::Database,
     primary_path: Option<&Path>,
@@ -612,7 +612,7 @@ fn load_fallback_fonts(
 ///
 /// The three style lookups are resolved in parallel via `thread::scope`, then
 /// loaded serially. New mappings are written to the fc-cache.
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn load_primary_styles(
     db: &mut fontdb::Database,
     family: &str,
@@ -675,7 +675,7 @@ fn load_primary_styles(
 /// glyphs — whereas the COLRv1 "Noto Color Emoji" that fontconfig resolves to on
 /// most modern hosts is unrenderable by swash and comes out blank. Only if no
 /// bundled color face is present do we fall back to a monochrome emoji face.
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn load_emoji_fallback(
     db: &mut fontdb::Database,
     seen: &mut HashSet<PathBuf>,
@@ -711,7 +711,7 @@ fn load_emoji_fallback(
 }
 
 /// Locate the bundled CBDT color emoji font, searching the XDG data dir.
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn color_emoji_path() -> Option<PathBuf> {
     let mut roots: Vec<PathBuf> = Vec::new();
     if let Some(xdg) = std::env::var_os("XDG_DATA_HOME") {
@@ -728,7 +728,7 @@ fn color_emoji_path() -> Option<PathBuf> {
 
 /// Canonicalize a path for de-dup purposes, falling back to the path as-is when
 /// canonicalization fails (e.g. the file is gone between resolve and read).
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn canonical_or_owned(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
@@ -741,7 +741,7 @@ fn canonical_or_owned(path: &Path) -> PathBuf {
 ///
 /// `cache` is the pre-loaded fc-cache map; a hit skips the subprocess entirely
 /// (the path is re-validated with `Path::exists` to catch stale entries).
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn fc_match_file_cached(
     pattern: &str,
     cache: &std::collections::HashMap<String, String>,
@@ -756,7 +756,7 @@ fn fc_match_file_cached(
 }
 
 /// Run a live `fc-match` subprocess (no cache involved).
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn fc_match_file_live(pattern: &str) -> Option<String> {
     let output = Command::new("fc-match")
         .args(["-f", "%{file}", pattern])
@@ -787,7 +787,7 @@ fn discover_font_producers(requested: Option<&str>) -> Vec<CandidateProducer> {
 
     // Load the fc-match resolution cache once upfront. Curated-family closures
     // capture a clone; a cache hit in the closure avoids the subprocess entirely.
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     let fc_cache = fc_cache_load();
 
     // 1. Explicit override: an absolute path to a font file.
@@ -804,7 +804,7 @@ fn discover_font_producers(requested: Option<&str>) -> Vec<CandidateProducer> {
     // 1b. Config/CLI-requested family: resolve via fontconfig and verify it is
     //     genuinely that family (fc-match returns a fallback otherwise). An
     //     absolute path is also accepted directly as a font file.
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     if let Some(name) = requested {
         let name = name.trim().to_string();
         if !name.is_empty() {
@@ -836,14 +836,14 @@ fn discover_font_producers(requested: Option<&str>) -> Vec<CandidateProducer> {
             }));
         }
     }
-    #[cfg(not(unix))]
+    #[cfg(not(target_os = "linux"))]
     let _ = requested;
 
     // 2. A curated list of good monospace families, each resolved to a concrete
     //    file via fontconfig and verified to actually *be* that family (fc-match
     //    returns a nearest fallback even when the family is absent). One producer
     //    per family so discovery stops at the first installed one.
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     for family in CURATED_FAMILIES {
         let cache_clone = fc_cache.clone();
         producers.push(Box::new(move || {
@@ -861,7 +861,7 @@ fn discover_font_producers(requested: Option<&str>) -> Vec<CandidateProducer> {
     }
 
     // 3. Generic monospace via fontconfig; always a real monospace face.
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     {
         let cache_clone = fc_cache.clone();
         producers.push(Box::new(move || {
@@ -898,7 +898,7 @@ fn discover_font_producers(requested: Option<&str>) -> Vec<CandidateProducer> {
 /// glyph from that face is rasterized. Returns `true` on success. Used for the
 /// fallback/style chain, where most faces (CJK, emoji, symbols) are never
 /// touched in an ordinary ASCII session and should not cost idle memory.
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn load_font_file(db: &mut fontdb::Database, path: impl AsRef<Path>) -> bool {
     let path = path.as_ref();
     match db.load_font_file(path) {
@@ -926,7 +926,7 @@ fn read_font(path: impl AsRef<Path>) -> Option<Vec<u8>> {
 
 /// Curated, high-quality monospace families to try first, in priority order.
 /// `FiraCode Nerd Font Mono` is the ideal default when present.
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 const CURATED_FAMILIES: &[&str] = &[
     "FiraCode Nerd Font Mono",
     "JetBrains Mono",
@@ -945,7 +945,7 @@ const CURATED_FAMILIES: &[&str] = &[
 ///
 /// `cache` is the pre-loaded fc-cache map; a hit skips the subprocess (path
 /// is re-validated with `Path::exists` to catch stale entries).
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn fc_match_family_cached(
     family: &str,
     cache: &std::collections::HashMap<String, String>,
@@ -962,7 +962,7 @@ fn fc_match_family_cached(
 }
 
 /// Run a live `fc-match` family lookup (no cache involved).
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn fc_match_family_live(family: &str) -> Option<String> {
     let output = Command::new("fc-match")
         .args(["-f", "%{family}\t%{file}", family])
@@ -996,7 +996,7 @@ fn fc_match_family_live(family: &str) -> Option<String> {
 }
 
 /// Query fontconfig for the resolved monospace font file path.
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn fc_match_monospace_cached(
     cache: &std::collections::HashMap<String, String>,
 ) -> Option<String> {
