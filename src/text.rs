@@ -13,6 +13,75 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 
+/// Path to the on-disk fc-match resolution cache.
+///
+/// Layout: one entry per line, tab-separated `pattern\tfile_path`. The cache
+/// prevents repeat `fc-match` subprocess invocations on subsequent glassy
+/// launches (the "fc-match storm" at startup). Invalid / stale entries are
+/// ignored — a failed lookup just falls through to a live `fc-match` call and
+/// refreshes the cache entry.
+#[cfg(unix)]
+fn fc_cache_path() -> Option<PathBuf> {
+    let base = std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .map(|h| PathBuf::from(h).join(".cache"))
+        })?;
+    Some(base.join("glassy/fc-cache.tsv"))
+}
+
+/// Load the entire fc-match cache into a `HashMap<pattern, file_path>`.
+/// Silently returns an empty map on any I/O or parse error.
+#[cfg(unix)]
+fn fc_cache_load() -> std::collections::HashMap<String, String> {
+    let mut map = std::collections::HashMap::new();
+    let path = match fc_cache_path() {
+        Some(p) => p,
+        None => return map,
+    };
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(_) => return map,
+    };
+    for line in text.lines() {
+        if let Some((k, v)) = line.split_once('\t') {
+            if !k.is_empty() && !v.is_empty() {
+                map.insert(k.to_string(), v.to_string());
+            }
+        }
+    }
+    map
+}
+
+/// Persist a single `pattern → file_path` mapping into the fc-match cache.
+/// Creates the parent directory if absent. Errors are logged at debug level
+/// and do not abort the font load.
+#[cfg(unix)]
+fn fc_cache_insert(pattern: &str, file_path: &str) {
+    let path = match fc_cache_path() {
+        Some(p) => p,
+        None => return,
+    };
+    if let Some(parent) = path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            log::debug!("glassy: fc-cache dir create failed: {e}");
+            return;
+        }
+    }
+    // Append-only: one line per entry. The cache grows monotonically; a stale
+    // entry is harmless because lookup also validates the path still exists.
+    use std::io::Write;
+    match std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        Ok(mut f) => {
+            if let Err(e) = writeln!(f, "{pattern}\t{file_path}") {
+                log::debug!("glassy: fc-cache write failed: {e}");
+            }
+        }
+        Err(e) => log::debug!("glassy: fc-cache open failed: {e}"),
+    }
+}
+
 use anyhow::Result;
 use cosmic_text::{
     Attrs, Buffer, Family, FontSystem, Metrics, Shaping, Style, SwashCache, SwashContent, Weight,
@@ -161,11 +230,22 @@ impl Text {
         }
         let loaded = loaded.or(fallback);
 
-        // If nothing loaded, scan the system and rely on the generic monospace
-        // family resolution.
+        // If nothing loaded, fall back to a full system font scan.
+        // This is intentionally a last resort — it walks every font on the
+        // system and is O(hundreds of files) on a typical Linux install, so
+        // it adds hundreds of milliseconds to startup. Warn so the user (or
+        // packager) knows the curated discovery chain failed entirely.
         let (font_system, family) = match loaded {
             Some(found) => (found.font_system, found.family),
-            None => (FontSystem::new(), FamilyOwned::Monospace),
+            None => {
+                log::warn!(
+                    "glassy: no usable monospace font found via fc-match or probe paths; \
+                     falling back to full system font scan (slow). \
+                     Install a monospace font (e.g. JetBrains Mono, DejaVu Sans Mono) \
+                     or set GLASSY_FONT=<path> to suppress this."
+                );
+                (FontSystem::new(), FamilyOwned::Monospace)
+            }
         };
 
         // Line height is the cell height; round so cells land on pixel
@@ -410,14 +490,19 @@ fn build_font_system(bytes: Vec<u8>, primary_path: Option<PathBuf>) -> Option<Lo
     // path through `Family::Monospace` still resolves to the font we loaded.
     db.set_monospace_family(family_name.clone());
 
+    // Load the fc-match resolution cache once; both style and fallback loading
+    // benefit from it (cache hits skip the subprocess entirely).
+    #[cfg(unix)]
+    let fc_cache = fc_cache_load();
+
     // Load the bold/italic faces of the same family so styled text shapes with
     // the real monospace face rather than falling back to a proportional font.
     #[cfg(unix)]
-    load_primary_styles(&mut db, &family_name, primary_path.as_deref());
+    load_primary_styles(&mut db, &family_name, primary_path.as_deref(), &fc_cache);
 
     // Enrich the database with fallback faces (best-effort; failures are skipped).
     #[cfg(unix)]
-    load_fallback_fonts(&mut db, primary_path.as_deref());
+    load_fallback_fonts(&mut db, primary_path.as_deref(), &fc_cache);
     #[cfg(not(unix))]
     let _ = primary_path;
 
@@ -448,8 +533,17 @@ const FALLBACK_PATTERNS: &[&str] = &[
 
 /// Resolve the fallback patterns via fontconfig and load each distinct file into
 /// `db`. De-duplicates by resolved file path and never reloads the primary file.
+///
+/// The resolution phase (fc-match subprocesses) is parallelized via
+/// `thread::scope` — all patterns are resolved concurrently, then the results
+/// are loaded serially into `db`. Resolved paths are written to the fc-cache
+/// so subsequent launches skip the subprocesses entirely.
 #[cfg(unix)]
-fn load_fallback_fonts(db: &mut fontdb::Database, primary_path: Option<&Path>) {
+fn load_fallback_fonts(
+    db: &mut fontdb::Database,
+    primary_path: Option<&Path>,
+    cache: &std::collections::HashMap<String, String>,
+) {
     // Seed the seen set with the primary file (canonicalized when possible) so we
     // never load it a second time as a fallback.
     let mut seen: HashSet<PathBuf> = HashSet::new();
@@ -457,21 +551,54 @@ fn load_fallback_fonts(db: &mut fontdb::Database, primary_path: Option<&Path>) {
         seen.insert(canonical_or_owned(p));
     }
 
-    load_emoji_fallback(db, &mut seen);
+    load_emoji_fallback(db, &mut seen, cache);
 
-    for pattern in FALLBACK_PATTERNS {
-        let Some(path) = fc_match_file(pattern) else {
-            continue;
-        };
+    // Resolve all fallback patterns in parallel — each fc-match is a subprocess
+    // round-trip (~5–30 ms each on a cold fontconfig cache); doing them
+    // concurrently shaves ~100 ms off cold startups.
+    //
+    // Strategy: for each pattern, check the cache (free); if a miss, spawn a
+    // scoped thread for the fc-match subprocess. Collect handles inside the
+    // scope, then join them (also inside the scope) to get `Vec<(pattern, path)>`.
+    // `thread::scope` blocks until all threads finish, so the result is ready
+    // when the closure returns.
+    let resolved: Vec<(&str, Option<String>)> = std::thread::scope(|s| {
+        // Phase 1: for each pattern, either return a cache hit or a join handle.
+        enum Resolution<'scope, 'env> {
+            Cached(Option<String>),
+            Spawned(std::thread::ScopedJoinHandle<'scope, Option<String>>, std::marker::PhantomData<&'env ()>),
+        }
+        let work: Vec<(&str, Resolution<'_, '_>)> = FALLBACK_PATTERNS
+            .iter()
+            .map(|pattern| {
+                if let Some(cached_path) = cache.get(*pattern) {
+                    if Path::new(cached_path).exists() {
+                        return (*pattern, Resolution::Cached(Some(cached_path.clone())));
+                    }
+                }
+                let handle = s.spawn(move || fc_match_file_live(pattern));
+                (*pattern, Resolution::Spawned(handle, std::marker::PhantomData))
+            })
+            .collect();
+        // Phase 2: join all handles (cache hits pass through directly).
+        work.into_iter()
+            .map(|(pat, res)| match res {
+                Resolution::Cached(path) => (pat, path),
+                Resolution::Spawned(handle, _) => (pat, handle.join().unwrap_or(None)),
+            })
+            .collect()
+    });
+
+    for (pattern, path_opt) in resolved {
+        let Some(path) = path_opt else { continue };
+        // Persist to cache if it was a live lookup (not already in cache).
+        if !cache.contains_key(pattern) {
+            fc_cache_insert(pattern, &path);
+        }
         let key = canonical_or_owned(Path::new(&path));
         if !seen.insert(key) {
-            // Already loaded (primary or an earlier fallback resolved here).
             continue;
         }
-        // Load by path (memory-mapped) rather than reading the bytes into the
-        // heap: large fallback faces (CJK, color emoji) are then only paged in
-        // when a glyph actually needs them, keeping idle memory low for the
-        // common ASCII-only session.
         if load_font_file(db, &path) {
             log::debug!("glassy: loaded fallback font for '{pattern}': {path}");
         } else {
@@ -485,8 +612,16 @@ fn load_fallback_fonts(db: &mut fontdb::Database, primary_path: Option<&Path>) {
 /// falling back to a proportional font for those styles. Best-effort: a style
 /// that fontconfig resolves back to the already-loaded regular file (e.g. a
 /// font with no italic, like FiraCode) is de-duplicated and skipped.
+///
+/// The three style lookups are resolved in parallel via `thread::scope`, then
+/// loaded serially. New mappings are written to the fc-cache.
 #[cfg(unix)]
-fn load_primary_styles(db: &mut fontdb::Database, family: &str, primary_path: Option<&Path>) {
+fn load_primary_styles(
+    db: &mut fontdb::Database,
+    family: &str,
+    primary_path: Option<&Path>,
+    cache: &std::collections::HashMap<String, String>,
+) {
     let mut seen: HashSet<PathBuf> = HashSet::new();
     if let Some(p) = primary_path {
         seen.insert(canonical_or_owned(p));
@@ -496,10 +631,37 @@ fn load_primary_styles(db: &mut fontdb::Database, family: &str, primary_path: Op
         format!("{family}:slant=italic"),
         format!("{family}:weight=bold:slant=italic"),
     ];
-    for pattern in patterns {
-        let Some(path) = fc_match_file(&pattern) else {
-            continue;
-        };
+
+    // Resolve all three style patterns concurrently.
+    let resolved: Vec<(String, Option<String>)> = std::thread::scope(|s| {
+        let handles: Vec<_> = patterns
+            .iter()
+            .map(|pattern| {
+                // Cache hit: no thread needed.
+                if let Some(cached_path) = cache.get(pattern) {
+                    if Path::new(cached_path).exists() {
+                        return (pattern.clone(), Ok(Some(cached_path.clone())));
+                    }
+                }
+                let pattern_clone = pattern.clone();
+                let handle = s.spawn(move || fc_match_file_live(&pattern_clone));
+                (pattern.clone(), Err(handle))
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|(pat, result)| match result {
+                Ok(path) => (pat, path),
+                Err(handle) => (pat, handle.join().unwrap_or(None)),
+            })
+            .collect()
+    });
+
+    for (pattern, path_opt) in resolved {
+        let Some(path) = path_opt else { continue };
+        if !cache.contains_key(&pattern) {
+            fc_cache_insert(&pattern, &path);
+        }
         let key = canonical_or_owned(Path::new(&path));
         if !seen.insert(key) {
             continue;
@@ -518,7 +680,11 @@ fn load_primary_styles(db: &mut fontdb::Database, family: &str, primary_path: Op
 /// most modern hosts is unrenderable by swash and comes out blank. Only if no
 /// bundled color face is present do we fall back to a monochrome emoji face.
 #[cfg(unix)]
-fn load_emoji_fallback(db: &mut fontdb::Database, seen: &mut HashSet<PathBuf>) {
+fn load_emoji_fallback(
+    db: &mut fontdb::Database,
+    seen: &mut HashSet<PathBuf>,
+    cache: &std::collections::HashMap<String, String>,
+) {
     if let Some(path) = color_emoji_path() {
         let key = canonical_or_owned(&path);
         if seen.insert(key) {
@@ -535,7 +701,10 @@ fn load_emoji_fallback(db: &mut fontdb::Database, seen: &mut HashSet<PathBuf>) {
     // color). `:color=false` forces fontconfig away from an unrenderable COLRv1
     // face toward the monochrome NotoEmoji outline font.
     for pattern in ["Noto Emoji:color=false", "emoji"] {
-        if let Some(path) = fc_match_file(pattern) {
+        if let Some(path) = fc_match_file_cached(pattern, cache) {
+            if !cache.contains_key(pattern) {
+                fc_cache_insert(pattern, &path);
+            }
             let key = canonical_or_owned(Path::new(&path));
             if seen.insert(key) && load_font_file(db, &path) {
                 log::debug!("glassy: loaded monochrome emoji for '{pattern}': {path}");
@@ -573,8 +742,27 @@ fn canonical_or_owned(path: &Path) -> PathBuf {
 /// Unlike `fc_match_family`, we do *not* verify the resolved family — these are
 /// fallback fonts, so whatever file fontconfig returns for the pattern is
 /// acceptable (fontconfig always returns *some* installed file).
+///
+/// `cache` is the pre-loaded fc-cache map; a hit skips the subprocess entirely
+/// (the path is re-validated with `Path::exists` to catch stale entries).
 #[cfg(unix)]
-fn fc_match_file(pattern: &str) -> Option<String> {
+fn fc_match_file_cached(
+    pattern: &str,
+    cache: &std::collections::HashMap<String, String>,
+) -> Option<String> {
+    // Check the disk cache first — a valid hit avoids the subprocess.
+    if let Some(cached_path) = cache.get(pattern) {
+        if Path::new(cached_path).exists() {
+            log::debug!("glassy: fc-cache hit for '{pattern}': {cached_path}");
+            return Some(cached_path.clone());
+        }
+    }
+    fc_match_file_live(pattern)
+}
+
+/// Run a live `fc-match` subprocess (no cache involved).
+#[cfg(unix)]
+fn fc_match_file_live(pattern: &str) -> Option<String> {
     let output = Command::new("fc-match")
         .args(["-f", "%{file}", pattern])
         .output()
@@ -602,6 +790,11 @@ type CandidateProducer = Box<dyn FnOnce() -> Option<FontCandidate>>;
 fn discover_font_producers(requested: Option<&str>) -> Vec<CandidateProducer> {
     let mut producers: Vec<CandidateProducer> = Vec::new();
 
+    // Load the fc-match resolution cache once upfront. Curated-family closures
+    // capture a clone; a cache hit in the closure avoids the subprocess entirely.
+    #[cfg(unix)]
+    let fc_cache = fc_cache_load();
+
     // 1. Explicit override: an absolute path to a font file.
     producers.push(Box::new(|| {
         let path = std::env::var("GLASSY_FONT").ok()?;
@@ -620,6 +813,7 @@ fn discover_font_producers(requested: Option<&str>) -> Vec<CandidateProducer> {
     if let Some(name) = requested {
         let name = name.trim().to_string();
         if !name.is_empty() {
+            let cache_clone = fc_cache.clone();
             producers.push(Box::new(move || {
                 // Allow `font_family` to be an explicit file path.
                 let as_path = Path::new(&name);
@@ -631,7 +825,10 @@ fn discover_font_producers(requested: Option<&str>) -> Vec<CandidateProducer> {
                         source_label: format!("font_family path ({name})"),
                     });
                 }
-                if let Some(path) = fc_match_family(&name) {
+                if let Some(path) = fc_match_family_cached(&name, &cache_clone) {
+                    if !cache_clone.contains_key(&format!("family:{name}")) {
+                        fc_cache_insert(&format!("family:{name}"), &path);
+                    }
                     let bytes = read_font(&path)?;
                     return Some(FontCandidate {
                         bytes,
@@ -653,8 +850,12 @@ fn discover_font_producers(requested: Option<&str>) -> Vec<CandidateProducer> {
     //    per family so discovery stops at the first installed one.
     #[cfg(unix)]
     for family in CURATED_FAMILIES {
+        let cache_clone = fc_cache.clone();
         producers.push(Box::new(move || {
-            let path = fc_match_family(family)?;
+            let path = fc_match_family_cached(family, &cache_clone)?;
+            if !cache_clone.contains_key(&format!("family:{family}")) {
+                fc_cache_insert(&format!("family:{family}"), &path);
+            }
             let bytes = read_font(&path)?;
             Some(FontCandidate {
                 bytes,
@@ -666,15 +867,21 @@ fn discover_font_producers(requested: Option<&str>) -> Vec<CandidateProducer> {
 
     // 3. Generic monospace via fontconfig; always a real monospace face.
     #[cfg(unix)]
-    producers.push(Box::new(|| {
-        let path = fc_match_monospace()?;
-        let bytes = read_font(&path)?;
-        Some(FontCandidate {
-            bytes,
-            path: Some(PathBuf::from(&path)),
-            source_label: format!("fc-match monospace ({path})"),
-        })
-    }));
+    {
+        let cache_clone = fc_cache.clone();
+        producers.push(Box::new(move || {
+            let path = fc_match_monospace_cached(&cache_clone)?;
+            if !cache_clone.contains_key("monospace") {
+                fc_cache_insert("monospace", &path);
+            }
+            let bytes = read_font(&path)?;
+            Some(FontCandidate {
+                bytes,
+                path: Some(PathBuf::from(&path)),
+                source_label: format!("fc-match monospace ({path})"),
+            })
+        }));
+    }
 
     // 4. Probe well-known install locations as a last resort.
     for path in PROBE_PATHS {
@@ -740,8 +947,29 @@ const CURATED_FAMILIES: &[&str] = &[
 /// match is genuinely that family. `fc-match` always returns *some* font (a
 /// nearest fallback), so we must confirm the resolved family name contains the
 /// requested family (case-insensitive) before trusting the file.
+///
+/// `cache` is the pre-loaded fc-cache map; a hit skips the subprocess (path
+/// is re-validated with `Path::exists` to catch stale entries).
 #[cfg(unix)]
-fn fc_match_family(family: &str) -> Option<String> {
+fn fc_match_family_cached(
+    family: &str,
+    cache: &std::collections::HashMap<String, String>,
+) -> Option<String> {
+    // For family lookups we store the key as "family:<name>" to avoid
+    // collisions with bare `fc_match_file` pattern keys.
+    let key = format!("family:{family}");
+    if let Some(cached_path) = cache.get(&key) {
+        if Path::new(cached_path).exists() {
+            log::debug!("glassy: fc-cache hit for family '{family}': {cached_path}");
+            return Some(cached_path.clone());
+        }
+    }
+    fc_match_family_live(family)
+}
+
+/// Run a live `fc-match` family lookup (no cache involved).
+#[cfg(unix)]
+fn fc_match_family_live(family: &str) -> Option<String> {
     let output = Command::new("fc-match")
         .args(["-f", "%{family}\t%{file}", family])
         .output()
@@ -775,7 +1003,16 @@ fn fc_match_family(family: &str) -> Option<String> {
 
 /// Query fontconfig for the resolved monospace font file path.
 #[cfg(unix)]
-fn fc_match_monospace() -> Option<String> {
+fn fc_match_monospace_cached(
+    cache: &std::collections::HashMap<String, String>,
+) -> Option<String> {
+    let key = "monospace";
+    if let Some(cached_path) = cache.get(key) {
+        if Path::new(cached_path).exists() {
+            log::debug!("glassy: fc-cache hit for monospace: {cached_path}");
+            return Some(cached_path.clone());
+        }
+    }
     let output = Command::new("fc-match")
         .args(["-f", "%{file}", "monospace"])
         .output()
@@ -787,6 +1024,7 @@ fn fc_match_monospace() -> Option<String> {
     let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if path.is_empty() { None } else { Some(path) }
 }
+
 
 /// Known monospace font locations, probed in order as a last resort.
 #[cfg(target_os = "macos")]
