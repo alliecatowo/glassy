@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=glassy
+Comment=A fast, minimal GPU-accelerated terminal emulator
+Exec=glassy
+Icon=io.github.alliecatowo.glassy
+Type=Application
+Categories=System;TerminalEmulator;Utility;
+Terminal=false
+StartupNotify=true

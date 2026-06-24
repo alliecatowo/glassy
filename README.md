@@ -76,24 +76,88 @@ Accurate, not magic: glassy is fast because it's simple and because it leans on 
 
 ## Install
 
-**Quickest path** — build, put `glassy` on your `PATH`, and register a desktop entry:
+### One-liner (Linux / macOS)
+
+Downloads the latest pre-built binary, verifies its SHA-256 checksum, and
+installs to `~/.local/bin` (no sudo required):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/alliecatowo/glassy/main/scripts/install.sh | bash
+```
+
+Make sure `~/.local/bin` is on your `PATH`. The script prints a reminder if it
+isn't. To install system-wide instead: `INSTALL_DIR=/usr/local/bin curl … | bash`
+(requires sudo for that dir).
+
+---
+
+### Package managers
+
+**Debian / Ubuntu — apt / .deb**
+
+```sh
+# Download the latest .deb from the GitHub Releases page, then:
+sudo dpkg -i glassy_*_amd64.deb
+sudo apt-get install -f   # fix any missing dependencies
+```
+
+**Fedora / RHEL / openSUSE — dnf / .rpm**
+
+```sh
+# Download the latest .rpm from the GitHub Releases page, then:
+sudo dnf install glassy-*.rpm
+# or: sudo rpm -i glassy-*.rpm
+```
+
+**Arch Linux — AUR**
+
+```sh
+# Build from source (compile time ~5 min):
+yay -S glassy
+# or with paru:
+paru -S glassy
+
+# Pre-built binary (faster install; no Rust toolchain needed):
+yay -S glassy-bin
+```
+
+**macOS — Homebrew** _(tap not yet published; use the one-liner above for now)_
+
+```sh
+# Once the tap is live:
+brew tap alliecatowo/glassy
+brew install glassy
+```
+
+**Flatpak** _(not yet on Flathub; local build from the manifest)_
+
+```sh
+flatpak-builder build packaging/flatpak/io.github.alliecatowo.glassy.yaml --install
+```
+
+**cargo install** (always builds the latest main — slower but cross-platform):
+
+```sh
+cargo install --git https://github.com/alliecatowo/glassy --locked
+```
+
+---
+
+### Build from source
 
 ```sh
 git clone https://github.com/alliecatowo/glassy
 cd glassy
-make build install
+make build install   # installs to ~/.local/bin (no sudo)
 ```
 
-`make install` is user-local by default (installs under `~/.local`, no sudo). It also installs the bundled **color-emoji font** to `~/.local/share/glassy/fonts/NotoColorEmoji.ttf`, where glassy loads it at runtime. Make sure `~/.local/bin` is on your `PATH`.
+`make install` also installs the bundled color-emoji font to
+`~/.local/share/glassy/fonts/NotoColorEmoji.ttf`. To install system-wide:
+`sudo make build install PREFIX=/usr`
 
-**Just the binary:**
+For just the binary: `cargo build --release` → `target/release/glassy`
 
-```sh
-cargo build --release
-# -> target/release/glassy
-```
-
-For the audible bell, build with the optional feature (needs audio dev libs, e.g. `alsa-lib-devel` / `libasound2-dev`):
+For the audible bell (needs audio dev libs — `alsa-lib-devel` / `libasound2-dev`):
 
 ```sh
 cargo build --release --features bell-audio

@@ -1,5 +1,7 @@
 name: Release
 
+# Triggered by a version tag push (e.g. git tag v0.2.0 && git push --tags).
+# Do NOT modify ci.yml — the test matrix lives there.
 on:
   push:
     tags:
@@ -7,17 +9,35 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # Shared binary name.
+  BIN: glassy
 
 permissions:
   contents: write
 
+# ---------------------------------------------------------------------------
+# Build matrix — Linux x86_64 is required; aarch64 cross-compiled via
+# cross. macOS and Windows jobs are scaffolded but set continue-on-error
+# because those build targets are not yet verified green.
+# ---------------------------------------------------------------------------
 jobs:
-  release:
-    name: build & publish (x86_64-linux)
+  # -------------------------------------------------------------------------
+  # Linux x86_64 (required)
+  # -------------------------------------------------------------------------
+  build-linux-x86_64:
+    name: Build — Linux x86_64
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+
+      - name: Extract version
+        id: meta
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
 
       - name: Install system dependencies
         run: |
@@ -30,30 +50,346 @@ jobs:
             libfontconfig-dev \
             pkg-config
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache cargo artifacts
-        uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2
 
       - name: Install cargo-deb
-        run: cargo install cargo-deb
+        run: cargo install cargo-deb --locked
 
-      - name: Build release
-        run: cargo build --release --verbose
+      - name: Install cargo-generate-rpm
+        run: cargo install cargo-generate-rpm --locked
 
-      - name: Strip and stage binary
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Build .deb
+        run: cargo deb --no-build --output target/debian/${{ env.BIN }}_${{ steps.meta.outputs.version }}_amd64.deb
+
+      - name: Build .rpm
+        run: cargo generate-rpm
+
+      - name: Stage artifacts
         run: |
-          strip target/release/glassy
-          cp target/release/glassy glassy-x86_64-linux
+          mkdir -p dist
+          cp target/release/${{ env.BIN }}          dist/${{ env.BIN }}-x86_64-linux
+          cp target/debian/${{ env.BIN }}_${{ steps.meta.outputs.version }}_amd64.deb dist/
+          # cargo-generate-rpm puts the rpm in target/generate-rpm/
+          find target/generate-rpm -name '*.rpm' -exec cp {} dist/ \;
+          # Source tarball (used by AUR / Homebrew sha256 verification).
+          tar -czf dist/${{ env.BIN }}-${{ steps.meta.outputs.version }}-src.tar.gz \
+            --transform "s|^\.|${BIN}-${{ steps.meta.outputs.version }}|" \
+            --exclude='./.git' --exclude='./target' .
 
-      - name: Build .deb package
-        run: cargo deb --no-build --output target/debian/glassy_amd64.deb
+      - name: Generate SHA256SUMS
+        working-directory: dist
+        run: sha256sum * > SHA256SUMS
 
-      - name: Publish release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-x86_64
+          path: dist/
+
+  # -------------------------------------------------------------------------
+  # Linux aarch64 (cross-compiled; best-effort)
+  # -------------------------------------------------------------------------
+  build-linux-aarch64:
+    name: Build — Linux aarch64
+    runs-on: ubuntu-latest
+    continue-on-error: true  # aarch64 cross not yet validated; flip to false once green
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract version
+        id: meta
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Install cross
+        run: cargo install cross --locked
+
+      - name: Install system dependencies (host tools only)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends pkg-config
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-gnu
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Cross-build aarch64
+        run: cross build --release --locked --target aarch64-unknown-linux-gnu
+
+      - name: Stage artifact
+        run: |
+          mkdir -p dist
+          cp target/aarch64-unknown-linux-gnu/release/${{ env.BIN }} \
+             dist/${{ env.BIN }}-aarch64-linux
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-aarch64
+          path: dist/
+
+  # -------------------------------------------------------------------------
+  # macOS universal binary (scaffolded; TODO: not yet green)
+  # -------------------------------------------------------------------------
+  build-macos:
+    name: Build — macOS (TODO)
+    runs-on: macos-latest
+    continue-on-error: true  # TODO: macOS build not yet verified; enable once deps resolved
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract version
+        id: meta
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin,aarch64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+
+      # TODO: install macOS-specific deps (e.g. via brew) when the build is wired up.
+      - name: Build x86_64
+        run: cargo build --release --locked --target x86_64-apple-darwin
+
+      - name: Build aarch64 (Apple Silicon)
+        run: cargo build --release --locked --target aarch64-apple-darwin
+
+      - name: Create universal binary with lipo
+        run: |
+          mkdir -p dist
+          lipo -create -output dist/${{ env.BIN }}-macos-universal \
+            target/x86_64-apple-darwin/release/${{ env.BIN }} \
+            target/aarch64-apple-darwin/release/${{ env.BIN }}
+
+      # TODO: sign and notarize; create .dmg with hdiutil/create-dmg.
+      - name: Stage macOS artifacts (unsigned)
+        run: |
+          cp dist/${{ env.BIN }}-macos-universal dist/${{ env.BIN }}-x86_64-macos
+          cp dist/${{ env.BIN }}-macos-universal dist/${{ env.BIN }}-aarch64-macos
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: dist/
+
+  # -------------------------------------------------------------------------
+  # Windows (scaffolded; TODO: not yet green)
+  # -------------------------------------------------------------------------
+  build-windows:
+    name: Build — Windows (TODO)
+    runs-on: windows-latest
+    continue-on-error: true  # TODO: Windows build not yet verified; enable once deps resolved
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # TODO: install Windows build deps (Vulkan SDK, fontconfig-windows, etc.).
+      - name: Build release
+        run: cargo build --release --locked
+
+      - name: Stage artifact
+        run: |
+          New-Item -ItemType Directory -Force dist
+          Copy-Item target\release\${{ env.BIN }}.exe dist\${{ env.BIN }}-x86_64-windows.exe
+        shell: pwsh
+
+      # TODO: create NSIS / WiX installer.
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: dist/
+
+  # -------------------------------------------------------------------------
+  # Publish GitHub Release — runs after all builds; uses whatever succeeded.
+  # -------------------------------------------------------------------------
+  publish:
+    name: Publish GitHub Release
+    needs: [build-linux-x86_64]
+    # Allow optional jobs to fail without blocking the release.
+    if: always() && needs.build-linux-x86_64.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract version
+        id: meta
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+
+      # Download all successfully-uploaded artifacts (pattern '*' catches
+      # linux-x86_64, and any of linux-aarch64 / macos / windows that passed).
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Merge artifacts + regenerate SHA256SUMS
+        run: |
+          mkdir -p release
+          # Flatten all artifact subdirs into release/, skipping directories.
+          find artifacts -type f ! -name 'SHA256SUMS' -exec cp {} release/ \;
+          cd release
+          sha256sum * > SHA256SUMS
+
+      - name: Create / update GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            glassy-x86_64-linux
-            target/debian/glassy_amd64.deb
-          fail_on_unmatched_files: true
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: glassy ${{ steps.meta.outputs.tag }}
+          body: |
+            ## glassy ${{ steps.meta.outputs.tag }}
+
+            ### Install
+
+            ```sh
+            curl -fsSL https://raw.githubusercontent.com/alliecatowo/glassy/main/scripts/install.sh | bash
+            ```
+
+            Or pick a package below:
+
+            | Platform | Package |
+            |----------|---------|
+            | Debian/Ubuntu | `glassy_${{ steps.meta.outputs.version }}_amd64.deb` |
+            | Fedora/RHEL/openSUSE | `glassy-${{ steps.meta.outputs.version }}-*.rpm` |
+            | Linux x86_64 (binary) | `glassy-x86_64-linux` |
+            | Linux aarch64 (binary) | `glassy-aarch64-linux` _(if green)_ |
+            | macOS (universal, unsigned) | `glassy-macos-universal` _(if green)_ |
+            | Windows | `glassy-x86_64-windows.exe` _(if green)_ |
+
+            Verify any download against `SHA256SUMS`.
+          files: release/*
+          fail_on_unmatched_files: false
+          draft: false
+          prerelease: false
+
+  # -------------------------------------------------------------------------
+  # Homebrew tap update (best-effort)
+  # -------------------------------------------------------------------------
+  update-homebrew:
+    name: Update Homebrew tap
+    needs: [publish]
+    if: always() && needs.publish.result == 'success'
+    runs-on: ubuntu-latest
+    continue-on-error: true  # tap repo may not exist yet
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download linux-x86_64 artifacts for sha256
+        uses: actions/download-artifact@v4
+        with:
+          name: linux-x86_64
+          path: artifacts/linux-x86_64
+
+      - name: Compute source tarball sha256
+        id: sha
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          SRC_FILE="artifacts/linux-x86_64/${{ env.BIN }}-${VERSION}-src.tar.gz"
+          SHA=$(sha256sum "$SRC_FILE" | awk '{print $1}')
+          echo "sha256=$SHA" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Patch formula with real version + sha256
+        run: |
+          VERSION="${{ steps.sha.outputs.version }}"
+          SHA="${{ steps.sha.outputs.sha256 }}"
+          sed -i \
+            -e "s|GLASSY_VERSION_PLAIN|${VERSION}|g" \
+            -e "s|GLASSY_VERSION|v${VERSION}|g" \
+            -e "s|GLASSY_SHA256|${SHA}|g" \
+            packaging/homebrew/glassy.rb
+
+      # TODO: configure a tap repo and push the patched formula there via
+      # a PR. Requires a Personal Access Token stored as HOMEBREW_TAP_TOKEN.
+      # Uncomment when the tap is set up:
+      #
+      # - name: Open PR against homebrew-glassy tap
+      #   uses: peter-evans/create-pull-request@v6
+      #   with:
+      #     token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+      #     repository: alliecatowo/homebrew-glassy
+      #     path: tap
+      #     branch: bump/glassy-${{ steps.sha.outputs.version }}
+      #     title: "glassy ${{ steps.sha.outputs.version }}"
+      #     body: "Automated formula bump from release workflow."
+
+      - name: Show patched formula (debug)
+        run: cat packaging/homebrew/glassy.rb
+
+  # -------------------------------------------------------------------------
+  # AUR update (best-effort)
+  # -------------------------------------------------------------------------
+  update-aur:
+    name: Update AUR package
+    needs: [publish]
+    if: always() && needs.publish.result == 'success'
+    runs-on: ubuntu-latest
+    continue-on-error: true  # AUR SSH key may not be configured
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download linux-x86_64 artifacts for sha256
+        uses: actions/download-artifact@v4
+        with:
+          name: linux-x86_64
+          path: artifacts/linux-x86_64
+
+      - name: Compute checksums
+        id: sha
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          SRC_FILE="artifacts/linux-x86_64/${{ env.BIN }}-${VERSION}-src.tar.gz"
+          BIN_FILE="artifacts/linux-x86_64/${{ env.BIN }}-x86_64-linux"
+          SRC_SHA=$(sha256sum "$SRC_FILE" | awk '{print $1}')
+          BIN_SHA=$(sha256sum "$BIN_FILE" | awk '{print $1}')
+          echo "src_sha=$SRC_SHA" >> "$GITHUB_OUTPUT"
+          echo "bin_sha=$BIN_SHA" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Patch PKGBUILD + .SRCINFO with real checksums
+        run: |
+          VERSION="${{ steps.sha.outputs.version }}"
+          SRC_SHA="${{ steps.sha.outputs.src_sha }}"
+          BIN_SHA="${{ steps.sha.outputs.bin_sha }}"
+
+          # Source PKGBUILD.
+          sed -i \
+            -e "s/^pkgver=.*/pkgver=${VERSION}/" \
+            -e "s/sha256sums=('SKIP')/sha256sums=('${SRC_SHA}')/" \
+            packaging/aur/PKGBUILD
+
+          # .SRCINFO.
+          sed -i \
+            -e "s/^\tpkgver = .*/\tpkgver = ${VERSION}/" \
+            -e "s/sha256sums = SKIP/sha256sums = ${SRC_SHA}/" \
+            packaging/aur/.SRCINFO
+
+          # -bin PKGBUILD.
+          sed -i \
+            -e "s/^pkgver=.*/pkgver=${VERSION}/" \
+            -e "s/sha256sums=('SKIP'/sha256sums=('${BIN_SHA}'/" \
+            -e "s/'SKIP')$/'${SRC_SHA}')/" \
+            packaging/aur/PKGBUILD-bin
+
+      # TODO: push to AUR via SSH. Requires AUR_SSH_PRIVATE_KEY secret.
+      # Uncomment when the AUR package is registered:
+      #
+      # - name: Push PKGBUILD to AUR
+      #   uses: nicholasgasior/action-aur-publish@v1
+      #   with:
+      #     aur_package_name: glassy
+      #     aur_ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+      #     pkgbuild_dir: packaging/aur
+
+      - name: Show patched PKGBUILD (debug)
+        run: cat packaging/aur/PKGBUILD
