@@ -2,6 +2,7 @@ mod app;
 mod bell;
 mod color;
 mod config;
+mod gui;
 mod image;
 mod input;
 mod pane;

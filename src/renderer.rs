@@ -314,6 +314,11 @@ pub struct Renderer {
     text: Text,
     metrics: CellMetrics,
     pad: f32,
+    /// Extra vertical inset (physical px) reserved ABOVE the terminal grid for the
+    /// real-GUI tab bar. The grid's first row starts at `pad + grid_origin_y`; the
+    /// chrome paints into the band `[0, grid_origin_y)`. Zero when no GUI chrome is
+    /// active (the default), so the legacy single-pane path is unchanged.
+    grid_origin_y: f32,
     /// Explicit padding override in physical px (from config). When `Some`, it is
     /// used verbatim instead of the cell-derived `pad_for`, and is preserved
     /// across runtime font resizes.
@@ -988,6 +993,7 @@ impl Renderer {
             text,
             metrics,
             pad: pad_for(metrics.height),
+            grid_origin_y: 0.0,
             pad_override: None,
             font_px,
             font_family,
@@ -1552,6 +1558,76 @@ impl Renderer {
                 cell_h,
             );
         }
+    }
+
+    /// Queue a rounded-rectangle overlay fill in PIXEL coordinates. Emits ONE
+    /// [`FgInstance`] with `flags == 3` into the text-on-glass channel (so it
+    /// composites above `push_overlay_px` quads, like overlay glyphs). The shader
+    /// draws an antialiased SDF rounded rect; `radius` is the corner radius in px
+    /// (clamped to the box in the shader, so 0 = sharp rect). `color` is straight
+    /// RGBA; the shader premultiplies. This is the GUI layer's surface primitive.
+    pub fn push_overlay_rrect_px(&mut self, x: f32, y: f32, w: f32, h: f32, radius: f32, color: [f32; 4]) {
+        if w <= 0.0 || h <= 0.0 {
+            return;
+        }
+        // Atlas UVs are unused for flags==3; we smuggle the radius through uv_min.x
+        // (see vs_fg), and set uv to a clean 0..1 local coord via uv_min/uv_max.
+        self.overlay_text.push(FgInstance {
+            pos: [x, y],
+            size: [w, h],
+            uv_min: [radius, 0.0],
+            uv_max: [radius, 1.0],
+            color,
+            flags: 3,
+            _pad: [0; 3],
+        });
+    }
+
+    /// Push a single panel glyph at an arbitrary PIXEL position (top-left of the
+    /// glyph's cell box), in color `fg`, into the text-on-glass channel. This is
+    /// the pixel-positioned counterpart of [`Renderer::push_overlay_glyph`] — it
+    /// frees chrome text from the cell grid so the GUI layer can place labels at
+    /// any sub-cell coordinate. No background quad is emitted.
+    pub fn push_overlay_glyph_px(&mut self, x: f32, y: f32, ch: char, fg: [f32; 4]) {
+        if ch == ' ' || ch == '\0' {
+            return;
+        }
+        let cell_w = self.metrics.width;
+        let cell_h = self.metrics.height;
+        let baseline = y + self.metrics.ascent;
+        self.ensure_glyphs(ch, false, false);
+        if let Some(glyphs) = self.glyph_cache.get(&(ch, false, false)) {
+            Self::place_glyphs(
+                &mut self.overlay_text,
+                glyphs,
+                fg,
+                x,
+                baseline,
+                cell_w,
+                cell_w,
+                cell_h,
+            );
+        }
+    }
+
+    /// Width in physical px that `s` occupies when drawn with the panel glyph
+    /// path. The font is monospace, so this is exact: one cell advance per char.
+    /// Used by the GUI layer for centering / right-alignment of labels.
+    pub fn text_width_px(&self, s: &str) -> f32 {
+        s.chars().count() as f32 * self.metrics.width
+    }
+
+    /// Reserve `px` physical pixels above the terminal grid for the GUI tab bar.
+    /// Pass 0 to restore the legacy (no-chrome) layout. Wired into the grid's row
+    /// origin in a later wave; stored here so the renderer owns the single source
+    /// of truth for where cell row 0 begins.
+    pub fn set_grid_origin_y(&mut self, px: f32) {
+        self.grid_origin_y = px.max(0.0);
+    }
+
+    /// The current grid top inset in physical px (see [`set_grid_origin_y`]).
+    pub fn grid_origin_y(&self) -> f32 {
+        self.grid_origin_y
     }
 
     /// Push a single solid-color rectangle as a [`BgInstance`]. Coordinates are
@@ -2455,27 +2531,19 @@ impl Renderer {
             }
         }
 
-        // Subtle focused-pane border: four thin accent rails just inside the
-        // pane rect, in the bg pass (after the pane's cell backgrounds, before
-        // glyphs) and clipped by this pane's scissor so it never overruns.
+        // Focused-pane marker: a single 1px accent LEFT rail just inside the pane
+        // rect, in the bg pass (after the pane's cell backgrounds, before glyphs)
+        // and clipped by this pane's scissor. Downgraded from the former four-rail
+        // box now that pane headers carry the primary focus chrome (GUI layer).
         if build.focused {
             let th = (self.metrics.height / 12.0).round().max(1.0);
             let s = build.scissor;
             if s.w > 0 && s.h > 0 {
                 let x = s.x as f32;
                 let y = s.y as f32;
-                let w = s.w as f32;
                 let h = s.h as f32;
                 let c = crate::color::accent();
-                self.mp.bg.push(BgInstance { pos: [x, y], size: [w, th], color: c }); // top
-                self.mp
-                    .bg
-                    .push(BgInstance { pos: [x, y + h - th], size: [w, th], color: c }); // bottom
                 self.mp.bg.push(BgInstance { pos: [x, y], size: [th, h], color: c }); // left
-                self.mp
-                    .bg
-                    .push(BgInstance { pos: [x + w - th, y], size: [th, h], color: c });
-                // right
             }
         }
 

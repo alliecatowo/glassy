@@ -26,6 +26,7 @@ use winit::window::{Window, WindowId};
 
 use crate::bell::{self, AudioBell};
 use crate::color;
+use crate::gui;
 use crate::input::{MouseReport, encode_key, encode_mouse};
 use crate::pane;
 use crate::pty::{Pty, UserEvent};
@@ -804,6 +805,24 @@ pub struct App {
     /// rebuild (selections only change during interactive drags, which are rare
     /// relative to streaming output).
     prev_has_selection: bool,
+
+    // --- Real-GUI chrome layer (immediate-mode; see src/gui.rs). ---
+    /// The widget currently latched by a left-button press, carried across frames
+    /// so press→release resolves on the same widget.
+    gui_pressed: Option<gui::WidgetId>,
+    /// The widget holding keyboard focus (Tab/arrow nav), carried across frames.
+    gui_focused: Option<gui::WidgetId>,
+    /// Per-widget animations (hover fades, toggle slides). The event loop stays on
+    /// `ControlFlow::Poll` only while some entry here is unsettled; otherwise it
+    /// parks on `Wait` (0% idle).
+    gui_anims: std::collections::HashMap<gui::WidgetId, gui::Anim>,
+    /// Press→release click edge captured by the MouseInput handler and consumed by
+    /// the next chrome paint. Set on left-release, cleared after the GUI frame.
+    gui_click_edge: bool,
+    /// Last instant the GUI animations were stepped, for dt computation.
+    gui_anim_last: Instant,
+    /// Temporary: render the Wave-0 GUI-primitive demo (GLASSY_GUI_DEMO set).
+    gui_demo: bool,
 }
 
 impl App {
@@ -865,6 +884,12 @@ impl App {
             prev_cursor: None,
             prev_display_offset: 0,
             prev_has_selection: false,
+            gui_pressed: None,
+            gui_focused: None,
+            gui_anims: std::collections::HashMap::new(),
+            gui_click_edge: false,
+            gui_anim_last: Instant::now(),
+            gui_demo: std::env::var_os("GLASSY_GUI_DEMO").is_some(),
         }
     }
 
@@ -2156,6 +2181,66 @@ impl App {
         bar
     }
 
+    /// Temporary Wave-0 demo: lay out a button, an icon button, a toggle, a
+    /// segmented control, a slider and a stepper on a floating panel, exercising
+    /// every primitive (AA rounded rects, edge-lit rails, focus rings, pixel
+    /// glyphs) plus the hover/press/focus state machine and animations. Gated by
+    /// GLASSY_GUI_DEMO; not part of the normal chrome path.
+    #[allow(clippy::too_many_arguments)]
+    fn paint_gui_demo(
+        renderer: &mut Renderer,
+        cell_w: f32,
+        cell_h: f32,
+        mouse: (f32, f32),
+        mouse_down: bool,
+        clicked: bool,
+        gui_pressed: &mut Option<gui::WidgetId>,
+        gui_focused: &mut Option<gui::WidgetId>,
+        gui_anims: &mut std::collections::HashMap<gui::WidgetId, gui::Anim>,
+    ) {
+        let mut ui = gui::Ui::new(
+            renderer,
+            cell_w,
+            cell_h,
+            mouse,
+            mouse_down,
+            clicked,
+            gui_pressed,
+            gui_focused,
+            gui_anims,
+        );
+
+        let met = ui.m;
+        let panel = gui::Rect::new(60.0, 60.0, met.cell_w * 34.0, met.row_h * 8.0 + met.pad * 2.0);
+        let inner = ui.panel(panel, met.card_radius);
+        ui.label(inner.x, inner.y, "glassy — gui demo", gui::fg());
+
+        let mut y = inner.y + met.row_h;
+        let row = |y: f32| gui::Rect::new(inner.x, y, inner.w, met.row_h - met.gap);
+
+        let _ = ui.button(gui::id("demo/button"), row(y), "Button");
+        y += met.row_h;
+
+        let r = row(y);
+        let _ = ui.icon_button(gui::id("demo/icon"), gui::Rect::new(r.x, r.y, met.row_h, r.h), '⚙');
+        y += met.row_h;
+
+        let r = row(y);
+        let _ = ui.toggle(gui::id("demo/toggle"), gui::Rect::new(r.x, r.y, met.row_h * 2.0, r.h), true);
+        y += met.row_h;
+
+        let r = row(y);
+        let _ = ui.segmented(gui::id("demo/seg"), gui::Rect::new(r.x, r.y, met.ctrl_w, r.h), &["Off", "Visual", "Audible"], 1);
+        y += met.row_h;
+
+        let r = row(y);
+        let _ = ui.slider(gui::id("demo/slider"), gui::Rect::new(r.x, r.y, met.ctrl_w, r.h), 0.6, 0.0, 1.0, 0.05);
+        y += met.row_h;
+
+        let r = row(y);
+        let _ = ui.stepper(gui::id("demo/step"), gui::Rect::new(r.x, r.y, met.ctrl_w, r.h), "14px");
+    }
+
     fn render(&mut self) {
         // Split tabs take the dedicated multi-pane path; a single-pane tab (the
         // common case) falls through to the byte-identical fast path below.
@@ -2166,6 +2251,12 @@ impl App {
                 self.first_frame_done = true;
             }
             return;
+        }
+
+        // The GUI demo's glass panel must sit over freshly-painted terminal rows
+        // (the push_overlay_px invariant), so force a full rebuild while it is on.
+        if self.gui_demo {
+            self.force_full_redraw = true;
         }
 
         // The OSC8 hyperlink under the pointer, underlined for affordance.
@@ -2559,12 +2650,35 @@ impl App {
             draw_dropdown_menu(renderer, self.rows, self.cols, items, self.menu_sel, left, top);
         }
 
+        // Temporary GUI-primitive demo (gated behind GLASSY_GUI_DEMO) — proves the
+        // Wave-0 primitives render with correct AA corners + hover/press/focus. No
+        // user-visible chrome in the normal path. Inlined here (disjoint field
+        // borrows) so it can reuse the live `renderer` borrow.
+        if self.gui_demo {
+            let m = renderer.cell_metrics();
+            let mouse = (self.mouse_px.0 as f32, self.mouse_px.1 as f32);
+            let mouse_down = self.held_button == Some(0);
+            Self::paint_gui_demo(
+                renderer,
+                m.width,
+                m.height,
+                mouse,
+                mouse_down,
+                self.gui_click_edge,
+                &mut self.gui_pressed,
+                &mut self.gui_focused,
+                &mut self.gui_anims,
+            );
+        }
+
         // Record the state this frame drew from, so the next frame can repaint only
         // what changed (the cursor's old/new row, selection, scroll position).
         self.prev_cursor = cur_cursor_cell;
         self.prev_display_offset = display_offset;
         self.prev_has_selection = has_selection;
         self.force_full_redraw = false;
+        // The chrome paint consumed this frame's click edge.
+        self.gui_click_edge = false;
 
         // The renderer self-heals lost/outdated surfaces internally. If a frame is
         // dropped (e.g. transient surface loss), the damage we consumed + the rows
@@ -3573,6 +3687,10 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.mouse_px = (position.x, position.y);
+                // GUI demo: repaint so hover/press tracking follows the pointer.
+                if self.gui_demo {
+                    self.mark_dirty(event_loop);
+                }
                 let cell = self.px_to_cell(position.x, position.y);
                 let moved = cell != self.mouse_cell;
                 self.mouse_cell = cell;
@@ -3645,6 +3763,17 @@ impl ApplicationHandler<UserEvent> for App {
                 let pressed = state == ElementState::Pressed;
                 // Track the held button for drag reports regardless of mode.
                 self.held_button = if pressed { Some(base) } else { None };
+                // Real-GUI chrome: capture the left press→release as a click edge for
+                // the next chrome paint, and release the press latch on button-up.
+                if button == MouseButton::Left {
+                    if pressed {
+                        self.gui_click_edge = false;
+                    } else {
+                        self.gui_click_edge = true;
+                        self.gui_pressed = None;
+                    }
+                    self.mark_dirty(event_loop);
+                }
                 if !pressed {
                     self.dragging_tab = None; // end any tab drag-reorder on release
                     // Release any pressed toolbar item so its inset clears.
@@ -3936,6 +4065,21 @@ impl ApplicationHandler<UserEvent> for App {
 
         let now = Instant::now();
 
+        // Real-GUI chrome animations: while any widget animation (hover fade,
+        // toggle slide) is unsettled, advance it and keep the frame dirty so the
+        // chrome repaints. This is the ONLY case where we run `ControlFlow::Poll`;
+        // once everything settles we fall back to `Wait` (0% idle).
+        let gui_active = if gui::any_unsettled(&self.gui_anims) {
+            let dt = (now - self.gui_anim_last).as_secs_f32().min(0.1);
+            gui::step_anims(&mut self.gui_anims, dt, 12.0);
+            self.gui_anim_last = now;
+            self.dirty = true;
+            true
+        } else {
+            self.gui_anim_last = now;
+            false
+        };
+
         // Cursor blink: only runs while focused and the child asked for a blinking
         // cursor. When that holds, advance the phase at each `blink_at` deadline and
         // mark dirty so the cursor redraws; otherwise the cursor stays solid and we
@@ -4002,9 +4146,14 @@ impl ApplicationHandler<UserEvent> for App {
         if !self.dirty {
             // Idle: stay parked on `Wait` (0% CPU) unless a blink flip, a flash
             // boundary, or a spinner frame is pending — then wake at the earliest.
-            match self.next_wake(blink_active, flash_active, spin_active) {
-                Some(at) => event_loop.set_control_flow(ControlFlow::WaitUntil(at)),
-                None => event_loop.set_control_flow(ControlFlow::Wait),
+            // A live GUI animation overrides everything with `Poll` until it settles.
+            if gui_active {
+                event_loop.set_control_flow(ControlFlow::Poll);
+            } else {
+                match self.next_wake(blink_active, flash_active, spin_active) {
+                    Some(at) => event_loop.set_control_flow(ControlFlow::WaitUntil(at)),
+                    None => event_loop.set_control_flow(ControlFlow::Wait),
+                }
             }
             return;
         }
@@ -4016,10 +4165,14 @@ impl ApplicationHandler<UserEvent> for App {
             self.next_frame = now + self.refresh;
             // RedrawRequested will clear `dirty`. Keep a wakeup scheduled for the
             // next blink flip, flash boundary, or spinner frame; else wait for an
-            // event.
-            match self.next_wake(blink_active, flash_active, spin_active) {
-                Some(at) => event_loop.set_control_flow(ControlFlow::WaitUntil(at)),
-                None => event_loop.set_control_flow(ControlFlow::Wait),
+            // event. A live GUI animation keeps us on `Poll` until it settles.
+            if gui_active {
+                event_loop.set_control_flow(ControlFlow::Poll);
+            } else {
+                match self.next_wake(blink_active, flash_active, spin_active) {
+                    Some(at) => event_loop.set_control_flow(ControlFlow::WaitUntil(at)),
+                    None => event_loop.set_control_flow(ControlFlow::Wait),
+                }
             }
         } else {
             event_loop.set_control_flow(ControlFlow::WaitUntil(self.next_frame));

@@ -49,16 +49,22 @@ struct FgOut {
     // For the undercurl path: the local quad size in px (for x-period + stroke
     // width) carried via uv_min/uv_max repurposed below; see vs_fg.
     @location(3) @interpolate(flat) quad_px: vec2<f32>,
+    // For the rounded-rect path (flags==3): the corner radius in px, carried out
+    // of band in uv_min.x so the interpolated `uv` stays a clean 0..1 local coord.
+    @location(4) @interpolate(flat) radius_px: f32,
 };
 @vertex fn vs_fg(in: FgIn) -> FgOut {
     let px = in.pos + in.unit * in.size;
     let ndc = vec2<f32>(px.x / u.screen.x * 2.0 - 1.0, 1.0 - px.y / u.screen.y * 2.0);
     var o: FgOut;
     o.clip = vec4<f32>(ndc, 0.0, 1.0);
-    o.uv = mix(in.uv_min, in.uv_max, in.unit);
+    // For flags==3 the atlas UVs are unused, so the caller sets uv_min=(radius,0)
+    // and uv_max=(radius,1); `unit` then gives the 0..1 local coord directly.
+    o.uv = select(mix(in.uv_min, in.uv_max, in.unit), in.unit, in.flags == 3u);
     o.color = in.color;
     o.flags = in.flags;
     o.quad_px = in.size;
+    o.radius_px = in.uv_min.x;
     return o;
 }
 
@@ -81,6 +87,13 @@ fn undercurl_coverage(uv: vec2<f32>, quad_px: vec2<f32>) -> f32 {
     // Distance from this fragment to the wave centerline, softened to ~1px for AA.
     let d = abs(y - wave);
     return 1.0 - smoothstep(half - 0.75, half + 0.75, d);
+}
+
+// Signed distance to a rounded rectangle centered at the origin. `half` is the
+// box half-extent, `r` the corner radius; negative inside, positive outside.
+fn sdf_rrect(p: vec2<f32>, half: vec2<f32>, r: f32) -> f32 {
+    let q = abs(p) - half + vec2<f32>(r, r);
+    return min(max(q.x, q.y), 0.0) + length(max(q, vec2<f32>(0.0, 0.0))) - r;
 }
 
 // sRGB transfer functions (IEC 61966-2-1). The surface is a plain UNORM (non-
@@ -117,6 +130,17 @@ fn coverage_blend(color: vec3<f32>, cov: f32) -> vec4<f32> {
 // correctly over a translucent backdrop, so every branch below returns a
 // premultiplied color (rgb already scaled by the output alpha).
 @fragment fn fs_fg(in: FgOut) -> @location(0) vec4<f32> {
+    if (in.flags == 3u) {
+        // Rounded-rect solid fill: exact SDF from the flat-interpolated quad size
+        // and the 0..1 local coord, ~1px antialiased edge. The radius is clamped
+        // to the box so it degrades to a plain rect when 0 and a stadium when big.
+        let half = in.quad_px * 0.5;
+        let p = in.uv * in.quad_px - half;
+        let r = min(in.radius_px, min(half.x, half.y));
+        let d = sdf_rrect(p, half, r);
+        let cov = (1.0 - smoothstep(-0.75, 0.75, d)) * in.color.a;
+        return vec4<f32>(in.color.rgb * cov, cov);
+    }
     if (in.flags == 2u) {
         // Undercurl: procedural sine-wave coverage tinted with the decoration
         // color, blended in linear space like the coverage-mask glyph path.
