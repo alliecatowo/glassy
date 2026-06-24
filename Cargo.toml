@@ -74,7 +74,7 @@ priority = "optional"
 # Runtime shared libraries glassy links against. cargo-deb also auto-detects
 # some of these via dpkg-shlibdeps, but we pin the key ones explicitly so the
 # package is installable on a clean system.
-depends = "libc6, libxkbcommon0, libwayland-client0, libvulkan1, libasound2, libfontconfig1, libgcc-s1"
+depends = "libc6, libxkbcommon0, libwayland-client0, libvulkan1, libfontconfig1, libgcc-s1"
 assets = [
     ["target/release/glassy", "usr/bin/", "755"],
     ["assets/icons/glassy-16.png", "usr/share/icons/hicolor/16x16/apps/glassy.png", "644"],
