@@ -19,6 +19,7 @@
 //! theme_light = rose-pine-dawn         # theme used in system Light mode
 //! theme_dark  = tokyo-night            # theme used in system Dark mode
 //! status_bar  = false                  # show status bar at the bottom (default off)
+//! pane_headers= true                   # show per-pane title bars + accent rail in splits (default on)
 //! color.fg    = #c0caf5                # override theme foreground (hex format)
 //! color.bg    = #1a1b26                # override theme background (hex format)
 //! color.cursor = #7dcfff               # override cursor color
@@ -100,6 +101,7 @@ struct RawConfig {
     theme_light: Option<String>,
     theme_dark: Option<String>,
     status_bar: Option<bool>,
+    pane_headers: Option<bool>,
     // Custom theme colors (hex format, e.g., "color.fg = #c0caf5")
     color_fg: Option<String>,
     color_bg: Option<String>,
@@ -187,6 +189,7 @@ impl RawConfig {
             theme_light,
             theme_dark,
             status_bar: self.status_bar.unwrap_or(false),
+            pane_headers: self.pane_headers.unwrap_or(true),
         };
 
         Ok(Settings { config, theme })
@@ -389,6 +392,9 @@ fn apply_kv(key: &str, value: &str, raw: &mut RawConfig) -> Result<()> {
         "status_bar" => {
             raw.status_bar = Some(parse_bool(value, "status_bar")?);
         }
+        "pane_headers" => {
+            raw.pane_headers = Some(parse_bool(value, "pane_headers")?);
+        }
         // Custom theme colors: color.fg, color.bg, color.cursor, color.selection_bg, color.ansi0..15
         "color.fg" => {
             parse_hex_color(value)?; // Validate but store the string for later use
@@ -537,6 +543,10 @@ fn parse_cli(args: impl Iterator<Item = String>, raw: &mut RawConfig) -> Result<
                 let v = next_value(&mut args, "--status-bar")?;
                 raw.status_bar = Some(parse_bool(&v, "--status-bar")?);
             }
+            "--pane-headers" => {
+                let v = next_value(&mut args, "--pane-headers")?;
+                raw.pane_headers = Some(parse_bool(&v, "--pane-headers")?);
+            }
             // `-e`/`--command`: everything after it is the program + its args
             // (the conventional terminal contract). Consume the rest verbatim.
             "-e" | "--command" => {
@@ -581,6 +591,7 @@ OPTIONS:
     --theme-light <NAME>   Theme used in system Light mode (e.g. rose-pine-dawn)
     --theme-dark <NAME>    Theme used in system Dark mode (e.g. tokyo-night)
     --status-bar <BOOL>    Show status bar at the bottom (default false)
+    --pane-headers <BOOL>  Show per-pane title bars in splits (default true)
     -e, --command <CMD>    Run CMD (with the remaining args) instead of the shell
     -h, --help             Print this help and exit
     -V, --version          Print version and exit
@@ -590,7 +601,7 @@ CONFIG FILE:
     macOS: ~/Library/Application Support/glassy/glassy.conf
     KEY=VALUE lines: font_family, font_size, theme, opacity, padding,
     shell, scrollback, bell_visual, bell_audible, follow_system,
-    theme_light, theme_dark, status_bar, color.*. CLI flags override the file.",
+    theme_light, theme_dark, status_bar, pane_headers, color.*. CLI flags override the file.",
         env!("CARGO_PKG_VERSION")
     );
 }

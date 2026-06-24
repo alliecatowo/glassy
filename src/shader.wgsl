@@ -52,19 +52,26 @@ struct FgOut {
     // For the rounded-rect path (flags==3): the corner radius in px, carried out
     // of band in uv_min.x so the interpolated `uv` stays a clean 0..1 local coord.
     @location(4) @interpolate(flat) radius_px: f32,
+    // For the per-corner rounded-rect path (flags==4): the four corner radii in px
+    // (top-left, top-right, bottom-right, bottom-left), carried out of band via
+    // uv_min/uv_max so the interpolated `uv` stays a clean 0..1 local coord.
+    @location(5) @interpolate(flat) radii4: vec4<f32>,
 };
 @vertex fn vs_fg(in: FgIn) -> FgOut {
     let px = in.pos + in.unit * in.size;
     let ndc = vec2<f32>(px.x / u.screen.x * 2.0 - 1.0, 1.0 - px.y / u.screen.y * 2.0);
     var o: FgOut;
     o.clip = vec4<f32>(ndc, 0.0, 1.0);
-    // For flags==3 the atlas UVs are unused, so the caller sets uv_min=(radius,0)
-    // and uv_max=(radius,1); `unit` then gives the 0..1 local coord directly.
-    o.uv = select(mix(in.uv_min, in.uv_max, in.unit), in.unit, in.flags == 3u);
+    // For flags==3/4 the atlas UVs are unused, so the caller smuggles radius data
+    // through uv_min/uv_max; `unit` then gives the 0..1 local coord directly.
+    let rrect = in.flags == 3u || in.flags == 4u;
+    o.uv = select(mix(in.uv_min, in.uv_max, in.unit), in.unit, rrect);
     o.color = in.color;
     o.flags = in.flags;
     o.quad_px = in.size;
     o.radius_px = in.uv_min.x;
+    // flags==4: per-corner radii packed as uv_min=(tl,tr), uv_max=(br,bl).
+    o.radii4 = vec4<f32>(in.uv_min.x, in.uv_min.y, in.uv_max.x, in.uv_max.y);
     return o;
 }
 
@@ -94,6 +101,21 @@ fn undercurl_coverage(uv: vec2<f32>, quad_px: vec2<f32>) -> f32 {
 fn sdf_rrect(p: vec2<f32>, half: vec2<f32>, r: f32) -> f32 {
     let q = abs(p) - half + vec2<f32>(r, r);
     return min(max(q.x, q.y), 0.0) + length(max(q, vec2<f32>(0.0, 0.0))) - r;
+}
+
+// Signed distance to a rounded rectangle with independent per-corner radii.
+// `radii` is (top-left, top-right, bottom-right, bottom-left) — i.e. the order
+// (-x,-y), (+x,-y), (+x,+y), (-x,+y) in this y-down clip space (top = -y). The
+// radius for the quadrant `p` falls in is selected, then the standard rrect SDF
+// is evaluated against that single radius.
+fn sdf_rrect4(p: vec2<f32>, half: vec2<f32>, radii: vec4<f32>) -> f32 {
+    // Select the radius for the quadrant this fragment falls in. Top row (p.y<0)
+    // uses tl/tr; bottom row uses bl/br; left column (p.x<0) picks the *-left value.
+    let r_top = select(radii.y, radii.x, p.x < 0.0); // tr vs tl
+    let r_bot = select(radii.z, radii.w, p.x < 0.0); // br vs bl
+    let rr = select(r_bot, r_top, p.y < 0.0);
+    let q = abs(p) - half + vec2<f32>(rr, rr);
+    return min(max(q.x, q.y), 0.0) + length(max(q, vec2<f32>(0.0, 0.0))) - rr;
 }
 
 // sRGB transfer functions (IEC 61966-2-1). The surface is a plain UNORM (non-
@@ -130,6 +152,19 @@ fn coverage_blend(color: vec3<f32>, cov: f32) -> vec4<f32> {
 // correctly over a translucent backdrop, so every branch below returns a
 // premultiplied color (rgb already scaled by the output alpha).
 @fragment fn fs_fg(in: FgOut) -> @location(0) vec4<f32> {
+    if (in.flags == 4u) {
+        // Per-corner rounded-rect solid fill. Same AA treatment as flags==3 but
+        // each corner gets its own radius (top-rounded tabs etc.). Radii are
+        // clamped to the box half-extent so they degrade gracefully.
+        let half = in.quad_px * 0.5;
+        let p = in.uv * in.quad_px - half;
+        let lim = min(half.x, half.y);
+        let radii = min(in.radii4, vec4<f32>(lim, lim, lim, lim));
+        let d = sdf_rrect4(p, half, radii);
+        let fw = clamp(0.5 * fwidth(d), 0.25, 1.5);
+        let cov = (1.0 - smoothstep(-fw, fw, d)) * in.color.a;
+        return vec4<f32>(in.color.rgb * cov, cov);
+    }
     if (in.flags == 3u) {
         // Rounded-rect solid fill: exact SDF from the flat-interpolated quad size
         // and the 0..1 local coord, fwidth-based AA band so corners are crisp at

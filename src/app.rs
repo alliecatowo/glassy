@@ -588,6 +588,10 @@ pub struct Config {
     pub theme_dark: String,
     /// Show the status bar at the bottom of the window. Default false.
     pub status_bar: bool,
+    /// Show per-pane title bars (with the close box / split menu) and the accent
+    /// top-rail on each pane when the tab is split. Default true. When false,
+    /// panes use their full height with no header chrome.
+    pub pane_headers: bool,
 }
 
 /// A tab's split layout: the tiling tree (whose leaf ids are pty/pane ids) plus
@@ -1628,8 +1632,17 @@ impl App {
         let m = r.cell_metrics();
         let (cw, ch) = (m.width.round() as u16, m.height.round() as u16);
         let focused = self.panes.as_ref().unwrap().layout.focused();
+        let hdr_h = if self.config.pane_headers { Self::PANE_HEADER_H } else { 0 };
         for (id, rect) in rects {
-            let (cols, rows) = self.pane_grid(rect);
+            // Mirror render_split's body rect: the cell grid starts below the
+            // (optional) pane header, so the PTY must be sized to that body height.
+            let body = pane::Rect {
+                x: rect.x,
+                y: rect.y + hdr_h,
+                w: rect.w,
+                h: (rect.h - hdr_h).max(0),
+            };
+            let (cols, rows) = self.pane_grid(body);
             if id == focused {
                 if let Some(pty) = &self.pty {
                     pty.resize(cols, rows, cw, ch);
@@ -1865,7 +1878,7 @@ impl App {
     /// the pointer is in the right-edge ⋮ button hit-zone. `None` when not split,
     /// or when the pointer is outside all header strips.
     fn pane_header_at(&self, x: f64, y: f64) -> Option<(usize, bool)> {
-        if !self.is_split() {
+        if !self.is_split() || !self.config.pane_headers {
             return None;
         }
         let area = self.content_area()?;
@@ -2495,9 +2508,11 @@ impl App {
                         StripItem::NewTab => '+',
                         // U+003F QUESTION MARK — clean, universally supported.
                         StripItem::Help => '?',
-                        // U+2699 GEAR — settings/cog; supported in Nerd Fonts and most
-                        // modern monospace fonts (DejaVu, JetBrains, Fira Code, etc.).
-                        StripItem::Settings => '\u{2699}',
+                        // U+F013 nf-fa-cog — Nerd Font gear icon; present in FiraCode Nerd
+                        // Font (the default) and any Nerd Font patched face. Falls back to
+                        // U+2699 GEAR via the standard symbol fallback chain on systems
+                        // without a Nerd Font installed.
+                        StripItem::Settings => '\u{F013}',
                         // U+2261 IDENTICAL TO (≡) — triple bar reads as "hamburger menu";
                         // BMP, ASCII-width, universally rasterized in monospace fonts.
                         _ => '\u{2261}',
@@ -2696,12 +2711,18 @@ impl App {
         let _ = busy;
         if active {
             // E2+ raised body: brighter/more opaque than the bar and inactive chips
-            // so the active tab clearly reads as "in focus". Top corners rounded,
-            // body is flush to bar bottom via a square-off fill.
-            renderer.push_overlay_rrect_px(r.x, r.y, r.w, r.h, TAB_RADIUS, active_surface);
-            // Square off the bottom so it sits fully flush with the content area.
-            let bb = TAB_RADIUS;
-            renderer.push_overlay_px(r.x, r.y + r.h - bb, r.w, bb, active_surface);
+            // so the active tab clearly reads as "in focus". Only the TOP corners are
+            // rounded; the bottom edge is square and flush to the content seam. The
+            // per-corner rrect means there is no bottom corner feather to leak
+            // background through, so the connector patch below is gap-free.
+            renderer.push_overlay_rrect4_px(
+                r.x,
+                r.y,
+                r.w,
+                r.h,
+                [TAB_RADIUS, TAB_RADIUS, 0.0, 0.0],
+                active_surface,
+            );
             // Connector: extends 4px below the bar bottom hairline, matching the
             // active-tab color, so the chip visually "opens into" the content surface.
             renderer.push_overlay_px(r.x, bar_h - 2.0, r.w, 4.0, active_surface);
@@ -2867,6 +2888,7 @@ impl App {
             open,
             saved,
             status_bar: config.status_bar,
+            pane_headers: config.pane_headers,
         };
         ui.build_settings((sw as f32, sh as f32), &view)
     }
@@ -2929,6 +2951,10 @@ impl App {
         }
         if ev.status_bar_toggle {
             self.toggle_status_bar();
+            changed = true;
+        }
+        if ev.pane_headers_toggle {
+            self.toggle_pane_headers();
             changed = true;
         }
         if ev.copy_path {
@@ -3577,7 +3603,10 @@ impl App {
         // Precompute every leaf's rect + grid size (whole-`self` method calls)
         // BEFORE taking disjoint field borrows for the render loop below.
         let rects = self.panes.as_ref().unwrap().layout.rects(area, Self::PANE_GAP);
-        let hdr_h = Self::PANE_HEADER_H;
+        // Per-pane header chrome is runtime-configurable. When off, panes get their
+        // full height and no header is painted (hdr_h == 0 collapses the body inset).
+        let pane_headers = self.config.pane_headers;
+        let hdr_h = if pane_headers { Self::PANE_HEADER_H } else { 0 };
         // Each pane_spec carries: (id, full_rect, body_rect, cols, rows).
         // The body_rect is the full rect minus the PANE_HEADER_H header at the top;
         // `pane_grid` and `begin_pane` receive the body rect so the cell grid
@@ -3813,16 +3842,19 @@ impl App {
         // Pane title bars: one per leaf, drawn as overlay quads+glyphs so they
         // composite above the cell grid but below the tab bar. Single-pane case
         // is handled by the caller never reaching render_split, so zero cost.
-        Self::paint_pane_headers(
-            renderer,
-            &pane_specs,
-            &pane_header_titles,
-            focused_pane,
-            win_focused,
-            pane_menu_open,
-            pane_menu_sel,
-            mouse_px_f,
-        );
+        // Gated on the runtime-configurable `pane_headers` setting.
+        if pane_headers {
+            Self::paint_pane_headers(
+                renderer,
+                &pane_specs,
+                &pane_header_titles,
+                focused_pane,
+                win_focused,
+                pane_menu_open,
+                pane_menu_sel,
+                mouse_px_f,
+            );
+        }
 
         // Status bar (§3.4): same as the single-pane path.
         // Only painted when enabled in the config.
@@ -4234,7 +4266,7 @@ impl App {
     /// for Tab / Shift+Tab / Up / Down focus movement (the form itself collects
     /// the live order each paint, but key handling runs between paints so it walks
     /// this fixed list — identical ordering keeps focus stable).
-    fn settings_focus_order() -> [gui::WidgetId; 9] {
+    fn settings_focus_order() -> [gui::WidgetId; 10] {
         [
             gui::id("settings/font_size"),
             gui::id("settings/opacity"),
@@ -4243,6 +4275,7 @@ impl App {
             gui::id("settings/font_family"),
             gui::id("settings/scrollback"),
             gui::id("settings/status_bar"),
+            gui::id("settings/pane_headers"),
             gui::id("settings/config"),
             gui::id("settings/save"),
         ]
@@ -4361,6 +4394,8 @@ impl App {
             self.set_bell_index(((cur + 1).rem_euclid(3)) as usize);
         } else if f == Some(gui::id("settings/status_bar")) {
             self.toggle_status_bar();
+        } else if f == Some(gui::id("settings/pane_headers")) {
+            self.toggle_pane_headers();
         } else {
             self.save_settings();
         }
@@ -4382,6 +4417,20 @@ impl App {
                     pty.resize(cols, rows, m.width.round() as u16, m.height.round() as u16);
                 }
             }
+        }
+        self.force_full_redraw = true;
+    }
+
+    /// Flip per-pane title bars on/off and reflow split panes so they reclaim or
+    /// reserve the header band. Shared by the settings toggle (mouse + keyboard)
+    /// and the menu action. A no-op for the grid in single-pane mode beyond the
+    /// flag flip (single-pane tabs never paint pane headers).
+    fn toggle_pane_headers(&mut self) {
+        self.config.pane_headers = !self.config.pane_headers;
+        // Reflow split panes: their body height (and thus PTY grid) depends on the
+        // header band, so the per-pane PTYs must be resized when it appears/vanishes.
+        if self.is_split() {
+            self.resize_panes();
         }
         self.force_full_redraw = true;
     }
@@ -6057,8 +6106,9 @@ mod tests {
         assert_eq!(order[4], gui::id("settings/font_family"));
         assert_eq!(order[5], gui::id("settings/scrollback"));
         assert_eq!(order[6], gui::id("settings/status_bar"));
-        assert_eq!(order[7], gui::id("settings/config"));
-        assert_eq!(order[8], gui::id("settings/save"));
+        assert_eq!(order[7], gui::id("settings/pane_headers"));
+        assert_eq!(order[8], gui::id("settings/config"));
+        assert_eq!(order[9], gui::id("settings/save"));
         for (i, a) in order.iter().enumerate() {
             for b in order.iter().skip(i + 1) {
                 assert_ne!(a, b);

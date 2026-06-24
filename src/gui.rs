@@ -393,6 +393,8 @@ pub struct SettingsView<'a> {
     pub saved: bool,
     /// Show the status bar at the bottom.
     pub status_bar: bool,
+    /// Show per-pane title bars + accent rail in splits.
+    pub pane_headers: bool,
 }
 
 /// Everything the settings form reported this frame. The App applies each
@@ -428,6 +430,8 @@ pub struct SettingsEvents {
     pub panel: Rect,
     /// Status bar toggle was clicked.
     pub status_bar_toggle: bool,
+    /// Pane-headers toggle was clicked.
+    pub pane_headers_toggle: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -983,7 +987,7 @@ impl<'r> Ui<'r> {
 
         // Centered panel. Width ≈ 40 columns; height grows with the row count.
         let pw = (m.cell_w * 42.0).min(surface.0 - 2.0 * m.pad).max(m.cell_w * 24.0);
-        const ROWS: usize = 8; // font, opacity, bell, theme, font, scrollback, status_bar, path
+        const ROWS: usize = 9; // font, opacity, bell, theme, font, scrollback, status_bar, pane_headers, path
         let header_h = m.row_h;
         let footer_h = m.row_h + m.gap;
         let body_h = ROWS as f32 * (m.row_h + m.gap);
@@ -1086,6 +1090,20 @@ impl<'r> Ui<'r> {
         let new_status_bar = self.toggle(id("settings/status_bar"), toggle_rect, v.status_bar);
         if new_status_bar != v.status_bar {
             ev.status_bar_toggle = true;
+        }
+        y += step;
+
+        // -- Pane headers (toggle) -------------------------------------------
+        row_label(self, y, "Pane headers");
+        let ph_toggle_rect = Rect::new(
+            ctrl_x,
+            (y + (ctrl_h - toggle_h) * 0.5).round(),
+            toggle_w,
+            toggle_h,
+        );
+        let new_pane_headers = self.toggle(id("settings/pane_headers"), ph_toggle_rect, v.pane_headers);
+        if new_pane_headers != v.pane_headers {
+            ev.pane_headers_toggle = true;
         }
         y += step;
 
@@ -1730,6 +1748,7 @@ mod tests {
             id("settings/font_family"),
             id("settings/scrollback"),
             id("settings/status_bar"),
+            id("settings/pane_headers"),
             id("settings/config"),
             id("settings/save"),
             id("settings/close"),

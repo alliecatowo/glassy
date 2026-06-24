@@ -1799,6 +1799,37 @@ impl Renderer {
         });
     }
 
+    /// Queue a rounded-rectangle overlay fill with INDEPENDENT per-corner radii.
+    /// `radii` is (top-left, top-right, bottom-right, bottom-left) in px. Emits one
+    /// `FgInstance` with `flags == 4`; the four radii are smuggled through
+    /// `uv_min`/`uv_max` (the atlas UVs are unused on this path — see vs_fg). This
+    /// lets the active tab round only its top corners while keeping its bottom edge
+    /// square and flush to the content seam, so the connector patch no longer leaks
+    /// background through the rrect corner feather. A single radius via
+    /// [`push_overlay_rrect_px`] remains the common path.
+    pub fn push_overlay_rrect4_px(
+        &mut self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        radii: [f32; 4],
+        color: [f32; 4],
+    ) {
+        if w <= 0.0 || h <= 0.0 {
+            return;
+        }
+        self.overlay_text.push(FgInstance {
+            pos: [x, y],
+            size: [w, h],
+            uv_min: [radii[0], radii[1]],
+            uv_max: [radii[2], radii[3]],
+            color,
+            flags: 4,
+            _pad: [0; 3],
+        });
+    }
+
     /// Push a single panel glyph at an arbitrary PIXEL position (top-left of the
     /// glyph's cell box), in color `fg`, into the text-on-glass channel. This is
     /// the pixel-positioned counterpart of [`Renderer::push_overlay_glyph`] — it
