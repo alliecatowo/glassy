@@ -290,6 +290,23 @@ fn darken(c: [f32; 4], f: f32) -> [f32; 4] {
     [c[0] * f, c[1] * f, c[2] * f, c[3]]
 }
 
+/// Active-chip fill by interaction state: PRESSED insets (darkens), hover gives
+/// a perceptible shift, idle is the flat accent. On near-white accents (Dracula
+/// cream) `lighten` clamps to no-op, so hover DARKENS instead — guaranteeing the
+/// active chip has live hover tactility on every theme, not just dark accents.
+fn active_chip_bg(active_bg: [f32; 4], hovered: bool, pressed: bool) -> [f32; 4] {
+    if pressed {
+        darken(active_bg, 0.75)
+    } else if hovered {
+        // If the accent is already bright, lifting it further does nothing —
+        // dial it back so the hover always registers; otherwise brighten it.
+        let lum = 0.299 * active_bg[0] + 0.587 * active_bg[1] + 0.114 * active_bg[2];
+        if lum > 0.7 { darken(active_bg, 0.9) } else { lighten(active_bg, 0.08) }
+    } else {
+        active_bg
+    }
+}
+
 /// Lighten an RGB color toward white by `amount`, keeping alpha. Used for the
 /// raised help-panel surface.
 fn lighten(c: [f32; 4], amount: f32) -> [f32; 4] {
@@ -314,12 +331,19 @@ fn draw_modal(renderer: &mut Renderer, rows: usize, cols: usize, lines: &[&str])
     // a thin accent border. No cream interior, no per-row wipe — the panel composites
     // over the live terminal via the overlay pipeline (drawn after the grid). Colors
     // are straight RGBA; `push_overlay_*` premultiplies.
-    let backdrop = [0.0, 0.0, 0.0, 0.30];
+    // Backdrop is dim enough that the modal text clearly wins over the live
+    // terminal underneath (0.30 left the bright `ls` filenames legible).
+    let backdrop = [0.0, 0.0, 0.0, 0.50];
     let body = {
         let b = color::default_bg();
         [b[0], b[1], b[2], 0.82]
     };
-    let border = color::accent();
+    // Translucent border: the accent at 0.6 composites as a glass rail instead of
+    // a solid opaque cream band (accent == cursor, near-white on Dracula et al).
+    let border = {
+        let a = color::accent();
+        [a[0], a[1], a[2], 0.6]
+    };
     let text_fg = color::default_fg();
     let title_fg = lighten(color::accent(), 0.1);
 
@@ -410,13 +434,20 @@ fn draw_dropdown_menu(
         let b = color::default_bg();
         [b[0], b[1], b[2], 0.82]
     };
-    let border = color::accent();
-    let text_fg = color::default_fg();
-    let sel_bg = {
+    // Translucent border (see draw_modal): glass rail, not an opaque cream band.
+    let border = {
         let a = color::accent();
-        [a[0], a[1], a[2], 0.55] // translucent accent highlight on the selected row
+        [a[0], a[1], a[2], 0.6]
     };
-    let sel_fg = lighten(color::accent(), 0.1);
+    let text_fg = color::default_fg();
+    // Selection highlight uses the theme's chromatic selection tint, not the
+    // (often near-white) cursor-derived accent — so the selected row reads as a
+    // brand-colored bar instead of flat grey on light-accent themes (Dracula).
+    let sel_bg = {
+        let s = color::selection_bg();
+        [s[0], s[1], s[2], 0.85]
+    };
+    let sel_fg = color::default_fg();
 
     // Clamp the panel to the screen so rails / text stay on-grid.
     let total_rows = rows + TAB_STRIP_ROWS;
@@ -2042,13 +2073,10 @@ impl App {
                 // can turn red on hover (the bug fix) and show a dim idle ✕.
                 StripItem::TabClose(_) if is_active => (
                     if hovered { danger } else { active_fg },
-                    if pressed { darken(active_bg, 0.75) } else if hovered { lighten(active_bg, 0.08) } else { active_bg },
+                    active_chip_bg(active_bg, hovered, pressed),
                 ),
-                // Active chip body: insets while pressed, brightens on hover.
-                _ if is_active => (
-                    active_fg,
-                    if pressed { darken(active_bg, 0.75) } else if hovered { lighten(active_bg, 0.08) } else { active_bg },
-                ),
+                // Active chip body: insets while pressed, shifts on hover.
+                _ if is_active => (active_fg, active_chip_bg(active_bg, hovered, pressed)),
                 StripItem::Tab(_) if !multi => (base_fg, surface(chip_idle)), // single-tab: still a chip
                 StripItem::Tab(_) => (
                     if is_busy { accent } else { base_fg },
