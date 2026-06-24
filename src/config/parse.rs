@@ -16,6 +16,7 @@ const DEFAULT_SCROLLBACK: usize = 10_000;
 
 /// Accumulated raw configuration before validation/finalization. Every field is
 /// optional so the file and CLI layers can each set a subset.
+#[derive(Default)]
 pub(super) struct RawConfig {
     pub font_family: Option<String>,
     pub font_size: Option<f32>,
@@ -49,42 +50,6 @@ pub(super) struct RawConfig {
     pub keybinding_overrides: Vec<(String, String)>,
 }
 
-impl Default for RawConfig {
-    fn default() -> Self {
-        RawConfig {
-            font_family: None,
-            font_size: None,
-            theme: None,
-            opacity: None,
-            padding: None,
-            padding_top: None,
-            padding_bottom: None,
-            padding_left: None,
-            padding_right: None,
-            shell: None,
-            scrollback: None,
-            bell_visual: None,
-            bell_audible: None,
-            follow_system: None,
-            theme_light: None,
-            theme_dark: None,
-            status_bar: None,
-            pane_headers: None,
-            word_separator: None,
-            ligatures: None,
-            font_features: None,
-            cwd: None,
-            restore_session: None,
-            color_fg: None,
-            color_bg: None,
-            color_cursor: None,
-            color_selection_bg: None,
-            color_ansi: None,
-            profiles: HashMap::new(),
-            keybinding_overrides: Vec::new(),
-        }
-    }
-}
 
 impl RawConfig {
     pub fn into_settings(self) -> Result<super::Settings> {

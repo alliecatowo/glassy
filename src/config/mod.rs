@@ -108,11 +108,10 @@ impl Settings {
         let mut raw = parse::RawConfig::default();
 
         // 2. Load config file if it exists.
-        if let Some(path) = parse::path() {
-            if let Ok(text) = std::fs::read_to_string(&path) {
-                parse::parse_config_file(&text, &mut raw)
-                    .with_context(|| format!("parsing {}", path.display()))?;
-            }
+        if let Some(path) = parse::path()
+            && let Ok(text) = std::fs::read_to_string(&path) {
+            parse::parse_config_file(&text, &mut raw)
+                .with_context(|| format!("parsing {}", path.display()))?;
         }
 
         // 3. Pre-scan CLI for `--profile` and activate it if present.
