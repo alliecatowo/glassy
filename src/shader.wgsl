@@ -132,13 +132,20 @@ fn coverage_blend(color: vec3<f32>, cov: f32) -> vec4<f32> {
 @fragment fn fs_fg(in: FgOut) -> @location(0) vec4<f32> {
     if (in.flags == 3u) {
         // Rounded-rect solid fill: exact SDF from the flat-interpolated quad size
-        // and the 0..1 local coord, ~1px antialiased edge. The radius is clamped
-        // to the box so it degrades to a plain rect when 0 and a stadium when big.
+        // and the 0..1 local coord, fwidth-based AA band so corners are crisp at
+        // all DPIs and scale factors. The radius is clamped to the box so it
+        // degrades to a plain rect when 0 and a stadium when big.
         let half = in.quad_px * 0.5;
         let p = in.uv * in.quad_px - half;
         let r = min(in.radius_px, min(half.x, half.y));
         let d = sdf_rrect(p, half, r);
-        let cov = (1.0 - smoothstep(-1.0, 1.0, d)) * in.color.a;
+        // Use fwidth to derive the AA half-band from the actual screen-space
+        // derivative of the SDF: 0.5*fwidth(d) is the exact pixel-radius of the
+        // transition zone at any DPI / zoom. Clamp to [0.25, 1.5] so the edge
+        // never collapses to a hard step on very small radii or spreads too
+        // widely on low-DPI displays.
+        let fw = clamp(0.5 * fwidth(d), 0.25, 1.5);
+        let cov = (1.0 - smoothstep(-fw, fw, d)) * in.color.a;
         return vec4<f32>(in.color.rgb * cov, cov);
     }
     if (in.flags == 2u) {
