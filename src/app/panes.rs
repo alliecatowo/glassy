@@ -99,6 +99,7 @@ impl App {
             self.config.shell.clone(),
             cwd,
             self.config.scrollback,
+            &self.config.word_separator,
         ) {
             Ok(p) => p,
             Err(e) => {

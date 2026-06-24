@@ -152,12 +152,11 @@ pub fn encode_key(
         if kitty.active() {
             // Try the named-key kitty form first (modified OR forced).
             let has_mods = kitty_mods != 1;
-            if has_mods || force_kitty {
-                if let Some(seq) = kitty_named(named, kitty_mods, event_type,
+            if (has_mods || force_kitty)
+                && let Some(seq) = kitty_named(named, kitty_mods, event_type,
                                                kitty.report_event_types,
                                                kitty.report_all_keys_as_esc) {
-                    return Some(seq);
-                }
+                return Some(seq);
             }
         }
 
@@ -287,13 +286,12 @@ pub fn encode_key(
 
         // modifyOtherKeys level 2 for Alt+printable combos not handled by kitty:
         // emit CSI 27 ; mods ; codepoint ~.
-        if !kitty.active() && (alt || (ctrl && shift)) && modify_other_keys == ModifyOtherKeys::EnableAll {
-            if let Some(c) = text.chars().next() {
-                let mok_mods = xterm_mod_param(shift, alt, ctrl, super_);
-                return Some(
-                    format!("\x1b[27;{};{}~", mok_mods, c as u32).into_bytes()
-                );
-            }
+        if !kitty.active() && (alt || (ctrl && shift)) && modify_other_keys == ModifyOtherKeys::EnableAll
+            && let Some(c) = text.chars().next() {
+            let mok_mods = xterm_mod_param(shift, alt, ctrl, super_);
+            return Some(
+                format!("\x1b[27;{};{}~", mok_mods, c as u32).into_bytes()
+            );
         }
 
         let mut out = Vec::with_capacity(text.len() + 1);

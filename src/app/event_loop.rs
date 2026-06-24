@@ -87,6 +87,7 @@ impl ApplicationHandler<UserEvent> for App {
             self.config.shell.clone(),
             None,
             self.config.scrollback,
+            &self.config.word_separator,
         ) {
             Ok(p) => p,
             Err(e) => {
@@ -885,9 +886,13 @@ impl ApplicationHandler<UserEvent> for App {
                     if let Some(button) = motion_button(mode, self.held_button) {
                         self.report_mouse(button, true, true, mode);
                     } else if !mode.intersects(TermMode::MOUSE_MODE) {
-                        // Track the hovered OSC8 hyperlink so it can be underlined.
+                        // Track the hovered link so it can be underlined and
+                        // Ctrl+clicked.  OSC 8 links take priority; for cells
+                        // with no OSC 8 annotation we fall back to the
+                        // plain-text URL/path scanner.
                         let (c, r) = self.mouse_cell;
-                        let link = self.cell_hyperlink(c, r);
+                        let link = self.cell_hyperlink(c, r)
+                            .or_else(|| self.plain_link_at(c, r));
                         if link != self.hovered_link {
                             self.hovered_link = link;
                             self.mark_dirty(event_loop);
@@ -1079,11 +1084,13 @@ impl ApplicationHandler<UserEvent> for App {
                 }
 
                 let mode = self.term_mode();
-                // Ctrl+Left opens an OSC8 hyperlink under the pointer, overriding
-                // application mouse handling (the common terminal convention).
+                // Ctrl+Click opens the link under the pointer.  OSC 8 links
+                // take priority; plain-text URLs/paths are the fallback.
                 if button == MouseButton::Left && pressed && self.mods.control_key() {
                     let (c, r) = self.mouse_cell;
-                    if let Some(uri) = self.cell_hyperlink(c, r) {
+                    let uri = self.cell_hyperlink(c, r)
+                        .or_else(|| self.plain_link_at(c, r));
+                    if let Some(uri) = uri {
                         Self::open_url(&uri);
                         return;
                     }

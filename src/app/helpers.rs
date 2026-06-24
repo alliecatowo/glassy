@@ -563,9 +563,43 @@ impl App {
             self.force_full_redraw = true;
         }
 
-        // Word separator for selection: just update the config.
+        // Word separator for selection: update the config and push the merged
+        // semantic_escape_chars to all live PTYs so double-click word selection
+        // honours the new setting immediately without restarting.
         if new_config.word_separator != self.config.word_separator {
             self.config.word_separator = new_config.word_separator.clone();
+            let escape_chars = crate::pty::merge_word_separators(
+                alacritty_terminal::term::SEMANTIC_ESCAPE_CHARS,
+                &self.config.word_separator,
+            );
+            // Push to all PTYs: active pane, non-focused panes of the active
+            // tab, and every parked background tab.
+            let push = |pty: &crate::pty::Pty, escape: &str| {
+                use alacritty_terminal::term::Config as TermConfig;
+                let scrollback = pty.term.lock().grid().history_size();
+                let new_term_cfg = TermConfig {
+                    scrolling_history: scrollback,
+                    semantic_escape_chars: escape.to_owned(),
+                    ..TermConfig::default()
+                };
+                pty.term.lock().set_options(new_term_cfg);
+            };
+            if let Some(pty) = self.pty.as_ref() {
+                push(pty, &escape_chars);
+            }
+            if let Some(g) = self.panes.as_ref() {
+                for pty in g.others.values() {
+                    push(pty, &escape_chars);
+                }
+            }
+            for s in &self.background {
+                push(&s.pty, &escape_chars);
+                if let Some(g) = s.panes.as_ref() {
+                    for pty in g.others.values() {
+                        push(pty, &escape_chars);
+                    }
+                }
+            }
         }
 
         // Theme: hot-swap the global theme. If follow_system is on, also recompute

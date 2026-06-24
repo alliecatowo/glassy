@@ -43,6 +43,7 @@ mod settings;
 mod event_loop;
 mod search;
 mod palette;
+mod selection;
 
 pub(crate) use helpers::*;
 pub(crate) use search::SearchState;

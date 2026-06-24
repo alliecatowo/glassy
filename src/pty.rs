@@ -254,6 +254,10 @@ pub struct Pty {
 
 impl Pty {
     /// Spawn the shell + the read/parse loop thread, returning a handle.
+    ///
+    /// `word_separator` is merged with alacritty's default `SEMANTIC_ESCAPE_CHARS`
+    /// so the configured extra characters act as word boundaries for double-click
+    /// semantic selection.
     #[allow(clippy::too_many_arguments)]
     pub fn spawn(
         proxy: EventLoopProxy<UserEvent>,
@@ -265,6 +269,7 @@ impl Pty {
         shell: Option<Shell>,
         working_directory: Option<PathBuf>,
         scrollback: usize,
+        word_separator: &str,
     ) -> anyhow::Result<Pty> {
         tty::setup_env();
 
@@ -279,8 +284,14 @@ impl Pty {
 
         let event_proxy = EventProxy { proxy, id };
         let grid = GridSize { cols, rows };
+        // Merge user-configured word separators with the default set, deduped.
+        let semantic_escape_chars = merge_word_separators(
+            alacritty_terminal::term::SEMANTIC_ESCAPE_CHARS,
+            word_separator,
+        );
         let config = Config {
             scrolling_history: scrollback,
+            semantic_escape_chars,
             ..Config::default()
         };
         let term = Arc::new(FairMutex::new(Term::new(config, &grid, event_proxy.clone())));
@@ -786,9 +797,26 @@ fn run_loop(
     }
 }
 
+/// Merge extra word-separator characters into alacritty's default
+/// `SEMANTIC_ESCAPE_CHARS` string, deduplicating. Used at `Pty::spawn` time
+/// so the configured separators act as word boundaries for double-click
+/// semantic selection from the first frame.
+pub fn merge_word_separators(defaults: &str, extras: &str) -> String {
+    if extras.is_empty() {
+        return defaults.to_owned();
+    }
+    let mut chars: Vec<char> = defaults.chars().collect();
+    for c in extras.chars() {
+        if !chars.contains(&c) {
+            chars.push(c);
+        }
+    }
+    chars.iter().collect()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{scan_modify_other_keys, scan_sync_2026, ModifyOtherKeys};
+    use super::{merge_word_separators, scan_modify_other_keys, scan_sync_2026, ModifyOtherKeys};
 
     // ---- scan_modify_other_keys tests ----------------------------------------
 
@@ -871,5 +899,19 @@ mod tests {
         // DECSET 1049 (alt screen) must not count.
         let (begin, end) = scan_sync_2026(b"\x1b[?1049h\x1b[?1049l");
         assert_eq!((begin, end), (0, 0));
+    }
+
+    // ---- merge_word_separators tests -----------------------------------------
+
+    #[test]
+    fn merge_word_seps_empty_extras_returns_defaults() {
+        assert_eq!(merge_word_separators(",│", ""), ",│");
+    }
+
+    #[test]
+    fn merge_word_seps_appends_and_dedups() {
+        let out = merge_word_separators(",│", ",@");
+        assert!(out.contains('@'));
+        assert_eq!(out.matches(',').count(), 1);
     }
 }
