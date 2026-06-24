@@ -225,7 +225,7 @@ const HELP_LINES: &[&str] = &[
     "  glassy — keybindings",
     "",
     "  Ctrl+Shift+T      New tab",
-    "  Ctrl+Shift+W      Close tab",
+    "  Ctrl+Shift+W      Close pane / tab",
     "  Ctrl+Tab          Next tab",
     "  Ctrl+Shift+Tab    Previous tab",
     "  Ctrl+Shift+C / V  Copy / Paste",
@@ -234,6 +234,12 @@ const HELP_LINES: &[&str] = &[
     "  Shift+Home/End    Scroll top / bottom",
     "  Ctrl+Click        Open hyperlink",
     "  Ctrl+,            Settings",
+    "",
+    "  Ctrl+Shift+E      Split pane (vertical)",
+    "  Ctrl+Shift+O      Split pane (horizontal)",
+    "  Alt+Arrow         Move focus to adjacent pane",
+    "",
+    "  Right-click       Copy / Paste / New tab menu",
     "",
     "  F1 or Esc         Close this help",
 ];
@@ -1950,14 +1956,16 @@ impl App {
         let base_bg = mul(color::default_bg());
         let accent = mul(color::accent());
         let danger = mul(color::danger());
-        let dim_fg = [base_fg[0] * 0.55, base_fg[1] * 0.55, base_fg[2] * 0.55, base_fg[3]];
+        let dim_fg = [base_fg[0] * 0.65, base_fg[1] * 0.65, base_fg[2] * 0.65, base_fg[3]];
         // Raised chip surfaces: idle chips sit slightly above the bar, the
         // active chip is an accent fill, hovered chips brighten, and a PRESSED
         // chip insets (darker than the bar) — giving the inline strip tactile
         // "chips" instead of a flat run of text.
-        let chip_idle = lighten(bar_bg, 0.05);
-        let chip_hover = lighten(bar_bg, 0.13);
-        let chip_press = darken(bar_bg, 0.7); // inset: darker than the bar
+        let chip_idle = lighten(bar_bg, 0.09);
+        let chip_hover = lighten(bar_bg, 0.15);
+        // Inset: anchor against the terminal bg, not the already-dim bar, so the
+        // pressed state has real contrast on every theme.
+        let chip_press = darken(color::default_bg(), 0.85);
         let active_bg = accent;
         let active_fg = base_bg; // dark text on the accent chip
 
@@ -2030,9 +2038,18 @@ impl App {
                 }
             };
             let (fg, sbg) = match seg.item {
-                // Even the active chip insets while pressed, for tactile feedback.
-                _ if is_active => (active_fg, if pressed { chip_press } else { active_bg }),
-                StripItem::Tab(_) if !multi => (base_fg, surface(bar_bg)), // single-tab title
+                // Active tab's ✕: must escape the active-chip catch-all below so it
+                // can turn red on hover (the bug fix) and show a dim idle ✕.
+                StripItem::TabClose(_) if is_active => (
+                    if hovered { danger } else { active_fg },
+                    if pressed { darken(active_bg, 0.75) } else if hovered { lighten(active_bg, 0.08) } else { active_bg },
+                ),
+                // Active chip body: insets while pressed, brightens on hover.
+                _ if is_active => (
+                    active_fg,
+                    if pressed { darken(active_bg, 0.75) } else if hovered { lighten(active_bg, 0.08) } else { active_bg },
+                ),
+                StripItem::Tab(_) if !multi => (base_fg, surface(chip_idle)), // single-tab: still a chip
                 StripItem::Tab(_) => (
                     if is_busy { accent } else { base_fg },
                     surface(chip_idle),
