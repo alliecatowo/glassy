@@ -464,4 +464,233 @@ f11 = none\n\
         // The theme = dracula (before the section) IS applied.
         assert_eq!(raw.theme.as_deref(), Some("dracula"));
     }
+
+    // -----------------------------------------------------------------------
+    // Additional chord/action/keymap coverage
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_chord_all_modifiers() {
+        let c = parse_chord("ctrl+alt+shift+meta+x").unwrap();
+        assert!(c.ctrl && c.alt && c.shift && c.meta);
+        assert_eq!(c.key, "x");
+    }
+
+    #[test]
+    fn parse_chord_option_alias_for_alt() {
+        let c = parse_chord("option+a").unwrap();
+        assert!(c.alt);
+        assert_eq!(c.key, "a");
+    }
+
+    #[test]
+    fn parse_chord_super_alias_for_meta() {
+        let c = parse_chord("super+a").unwrap();
+        assert!(c.meta);
+    }
+
+    #[test]
+    fn parse_chord_cmd_alias_for_meta() {
+        let c = parse_chord("cmd+a").unwrap();
+        assert!(c.meta);
+    }
+
+    #[test]
+    fn parse_chord_shift_pageup() {
+        let c = parse_chord("shift+pageup").unwrap();
+        assert!(c.shift);
+        assert_eq!(c.key, "pageup");
+    }
+
+    #[test]
+    fn parse_chord_f1_through_f12() {
+        for n in 1..=12 {
+            let s = format!("f{n}");
+            let c = parse_chord(&s).unwrap();
+            assert_eq!(c.key, s);
+        }
+    }
+
+    #[test]
+    fn parse_chord_space_key() {
+        // "ctrl+space" should parse correctly.
+        let c = parse_chord("ctrl+space").unwrap();
+        assert!(c.ctrl);
+        assert_eq!(c.key, "space");
+    }
+
+    #[test]
+    fn parse_chord_unrecognized_modifier_errors() {
+        assert!(parse_chord("superduper+t").is_err());
+    }
+
+    #[test]
+    fn parse_chord_display_f11() {
+        let c = parse_chord("f11").unwrap();
+        let d = c.display();
+        assert_eq!(d, "F11");
+    }
+
+    #[test]
+    fn parse_chord_display_ctrl_comma() {
+        let c = parse_chord("ctrl+,").unwrap();
+        let d = c.display();
+        assert!(d.contains("Ctrl"), "{d}");
+        assert!(d.contains(','), "{d}");
+    }
+
+    #[test]
+    fn parse_chord_display_ctrl_plus() {
+        let c = parse_chord("ctrl++").unwrap();
+        let d = c.display();
+        assert!(d.contains("Ctrl"), "{d}");
+        assert!(d.contains('+'), "{d}");
+    }
+
+    #[test]
+    fn parse_chord_equality_order_independent() {
+        // ctrl+shift+t and shift+ctrl+t must be equal chords.
+        let a = parse_chord("ctrl+shift+t").unwrap();
+        let b = parse_chord("shift+ctrl+t").unwrap();
+        assert_eq!(a, b, "modifier order must not matter");
+    }
+
+    #[test]
+    fn parse_action_all_known_actions() {
+        let known = [
+            "new_tab", "close_pane", "next_tab", "prev_tab",
+            "split_vertical", "split_horizontal",
+            "toggle_fullscreen", "toggle_maximize",
+            "settings", "help", "search", "command_palette",
+            "copy", "paste", "toggle_status_bar",
+            "font_increase", "font_decrease", "font_reset",
+            "scroll_up", "scroll_down", "scroll_top", "scroll_bottom",
+        ];
+        for name in &known {
+            let r = parse_action(name);
+            assert!(r.is_ok() && r.unwrap().is_some(), "'{name}' must parse to Some(action)");
+        }
+    }
+
+    #[test]
+    fn parse_action_none_variants() {
+        for v in ["none", "disabled", "disable"] {
+            assert_eq!(parse_action(v).unwrap(), None, "'{v}' must parse to None");
+        }
+    }
+
+    #[test]
+    fn parse_action_case_insensitive() {
+        assert_eq!(parse_action("NEW_TAB").unwrap(), Some(super::keymap::KeyAction::NewTab));
+        assert_eq!(parse_action("NONE").unwrap(), None);
+    }
+
+    #[test]
+    fn build_keymap_adds_new_chord() {
+        let base = default_keymap();
+        let overrides = vec![("ctrl+alt+q".to_string(), "close_pane".to_string())];
+        let km = build_keymap(base, &overrides);
+        let chord = parse_chord("ctrl+alt+q").unwrap();
+        assert_eq!(km.get(&chord), Some(&super::keymap::KeyAction::ClosePane));
+    }
+
+    #[test]
+    fn build_keymap_bad_action_leaves_default_intact() {
+        let base = default_keymap();
+        let overrides = vec![("ctrl+shift+t".to_string(), "not_an_action".to_string())];
+        // Bad action: must log a warning but not panic.
+        let km = build_keymap(base, &overrides);
+        // The original ctrl+shift+t binding (new_tab) is unchanged.
+        let chord = parse_chord("ctrl+shift+t").unwrap();
+        assert_eq!(km.get(&chord), Some(&super::keymap::KeyAction::NewTab));
+    }
+
+    #[test]
+    fn build_keymap_multiple_overrides_applied_in_order() {
+        let base = default_keymap();
+        // First override disables f11; second adds it back as settings.
+        let overrides = vec![
+            ("f11".to_string(), "none".to_string()),
+            ("f11".to_string(), "settings".to_string()),
+        ];
+        let km = build_keymap(base, &overrides);
+        let chord = parse_chord("f11").unwrap();
+        assert_eq!(km.get(&chord), Some(&super::keymap::KeyAction::Settings));
+    }
+
+    #[test]
+    fn default_keymap_has_expected_defaults() {
+        let km = default_keymap();
+        let checks: &[(&str, super::keymap::KeyAction)] = &[
+            ("ctrl+shift+w",   super::keymap::KeyAction::ClosePane),
+            ("ctrl+tab",       super::keymap::KeyAction::NextTab),
+            ("ctrl+shift+tab", super::keymap::KeyAction::PrevTab),
+            ("ctrl+shift+e",   super::keymap::KeyAction::SplitVertical),
+            ("ctrl+shift+o",   super::keymap::KeyAction::SplitHorizontal),
+            ("ctrl+,",         super::keymap::KeyAction::Settings),
+            ("f1",             super::keymap::KeyAction::Help),
+            ("ctrl+shift+f",   super::keymap::KeyAction::Search),
+            ("ctrl+shift+p",   super::keymap::KeyAction::CommandPalette),
+            ("ctrl+shift+c",   super::keymap::KeyAction::Copy),
+            ("ctrl+shift+v",   super::keymap::KeyAction::Paste),
+            ("ctrl+shift+b",   super::keymap::KeyAction::ToggleStatusBar),
+            ("ctrl++",         super::keymap::KeyAction::FontIncrease),
+            ("ctrl+-",         super::keymap::KeyAction::FontDecrease),
+            ("ctrl+0",         super::keymap::KeyAction::FontReset),
+            ("shift+pageup",   super::keymap::KeyAction::ScrollUp),
+            ("shift+pagedown", super::keymap::KeyAction::ScrollDown),
+            ("shift+home",     super::keymap::KeyAction::ScrollTop),
+            ("shift+end",      super::keymap::KeyAction::ScrollBottom),
+        ];
+        for (chord_str, expected_action) in checks {
+            let chord = parse_chord(chord_str).unwrap();
+            assert_eq!(
+                km.get(&chord),
+                Some(expected_action),
+                "chord '{chord_str}' should map to {expected_action:?}"
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Profile activation + CLI precedence
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn profile_override_does_not_affect_other_keys() {
+        let mut raw = RawConfig::default();
+        parse_config_file("scrollback = 5000\n[profile.compact]\nfont_size = 10\n", &mut raw).unwrap();
+        // Before activation: scrollback was set, font_size not.
+        assert_eq!(raw.scrollback, Some(5000));
+        assert_eq!(raw.font_size, None);
+        raw.activate_profile("compact").unwrap();
+        // After activation: profile's font_size is applied, scrollback unchanged.
+        assert_eq!(raw.font_size, Some(10.0));
+        assert_eq!(raw.scrollback, Some(5000));
+    }
+
+    #[test]
+    fn profile_activation_is_idempotent() {
+        let mut raw = RawConfig::default();
+        parse_config_file("[profile.a]\nfont_size = 12\n", &mut raw).unwrap();
+        raw.activate_profile("a").unwrap();
+        raw.activate_profile("a").unwrap(); // second call must not panic
+        assert_eq!(raw.font_size, Some(12.0));
+    }
+
+    #[test]
+    fn multiple_profiles_independent() {
+        // Two separate parses of the same config text with different profile activations.
+        let text = "[profile.dev]\nfont_size = 14\n[profile.present]\nfont_size = 18\n";
+        let mut raw_dev = RawConfig::default();
+        parse_config_file(text, &mut raw_dev).unwrap();
+        raw_dev.activate_profile("dev").unwrap();
+
+        let mut raw_present = RawConfig::default();
+        parse_config_file(text, &mut raw_present).unwrap();
+        raw_present.activate_profile("present").unwrap();
+
+        assert_eq!(raw_dev.font_size, Some(14.0));
+        assert_eq!(raw_present.font_size, Some(18.0));
+    }
 }

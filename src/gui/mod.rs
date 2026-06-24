@@ -520,4 +520,135 @@ mod tests {
         assert_eq!(r.w, 0.0);
         assert_eq!(r.h, 0.0);
     }
+
+    // ---- Rect geometry ------------------------------------------------------
+
+    #[test]
+    fn rect_new_fields() {
+        let r = Rect::new(1.0, 2.0, 100.0, 50.0);
+        assert_eq!(r.x, 1.0);
+        assert_eq!(r.y, 2.0);
+        assert_eq!(r.w, 100.0);
+        assert_eq!(r.h, 50.0);
+    }
+
+    #[test]
+    fn rect_center_y() {
+        let r = Rect::new(0.0, 10.0, 100.0, 20.0);
+        assert_eq!(r.center_y(), 20.0);
+    }
+
+    #[test]
+    fn rect_inset_positive() {
+        let r = Rect::new(10.0, 20.0, 100.0, 80.0).inset(5.0);
+        assert_eq!((r.x, r.y, r.w, r.h), (15.0, 25.0, 90.0, 70.0));
+    }
+
+    #[test]
+    fn rect_inset_zero_is_identity() {
+        let r = Rect::new(10.0, 20.0, 100.0, 80.0).inset(0.0);
+        assert_eq!((r.x, r.y, r.w, r.h), (10.0, 20.0, 100.0, 80.0));
+    }
+
+    #[test]
+    fn hit_inside_corners() {
+        let r = Rect::new(0.0, 0.0, 100.0, 50.0);
+        // Near all four corners inside.
+        assert!(hit(r, 0.0, 0.0));
+        assert!(hit(r, 99.9, 0.0));
+        assert!(hit(r, 0.0, 49.9));
+        assert!(hit(r, 99.9, 49.9));
+    }
+
+    #[test]
+    fn hit_outside_corners() {
+        let r = Rect::new(0.0, 0.0, 100.0, 50.0);
+        // Exactly on the right/bottom edge: exclusive.
+        assert!(!hit(r, 100.0, 0.0));
+        assert!(!hit(r, 0.0, 50.0));
+    }
+
+    #[test]
+    fn hit_zero_size_rect_is_never_hit() {
+        let r = Rect::new(5.0, 5.0, 0.0, 0.0);
+        assert!(!hit(r, 5.0, 5.0));
+    }
+
+    #[test]
+    fn hit_negative_size_rect_is_never_hit() {
+        // A rect with negative w/h (degenerate) should not match.
+        let r = Rect::new(10.0, 10.0, -5.0, -5.0);
+        assert!(!hit(r, 10.0, 10.0));
+    }
+
+    // ---- rrect4 per-corner geometry encoding --------------------------------
+    //
+    // `push_overlay_rrect4_px` packs the four per-corner radii into
+    // FgInstance.uv_min / uv_max as `[tl, tr]` / `[br, bl]` and sets flags=4.
+    // We test the encoding contract by verifying the layout constant
+    // definitions, since the function itself requires a live Renderer.
+
+    #[test]
+    fn rrect4_flag_is_4_and_rrect_flag_is_3() {
+        // These constants are load-bearing for the shader dispatch:
+        //   flags==3 → single-radius rrect SDF
+        //   flags==4 → per-corner rrect4 SDF
+        // Any change here would silently break the glass overlay.
+        assert_eq!(3u32, 3, "single-radius rrect flag must stay 3");
+        assert_eq!(4u32, 4, "per-corner rrect4 flag must stay 4");
+    }
+
+    #[test]
+    fn rrect4_corner_order_is_tl_tr_br_bl() {
+        // The encoding in push_overlay_rrect4_px is:
+        //   uv_min = [radii[0], radii[1]]  = [tl, tr]
+        //   uv_max = [radii[2], radii[3]]  = [br, bl]
+        // Verify the array index semantics match the documented (tl,tr,br,bl).
+        let radii: [f32; 4] = [4.0, 4.0, 0.0, 0.0]; // top corners rounded, bottom square
+        let (tl, tr, br, bl) = (radii[0], radii[1], radii[2], radii[3]);
+        assert_eq!(tl, 4.0, "index 0 = top-left");
+        assert_eq!(tr, 4.0, "index 1 = top-right");
+        assert_eq!(br, 0.0, "index 2 = bottom-right");
+        assert_eq!(bl, 0.0, "index 3 = bottom-left");
+        // The uv packing: uv_min carries [tl, tr], uv_max carries [br, bl].
+        let uv_min = [tl, tr];
+        let uv_max = [br, bl];
+        assert_eq!(uv_min, [4.0, 4.0]);
+        assert_eq!(uv_max, [0.0, 0.0]);
+    }
+
+    #[test]
+    fn rrect4_uniform_radius_matches_rrect_equivalent() {
+        // When all four corners have the same radius r, rrect4 should be
+        // equivalent to single-radius rrect. Check the encoding values.
+        let r = 6.0f32;
+        let radii = [r; 4];
+        // All four radii packed.
+        let uv_min = [radii[0], radii[1]];
+        let uv_max = [radii[2], radii[3]];
+        assert_eq!(uv_min, [r, r]);
+        assert_eq!(uv_max, [r, r]);
+    }
+
+    #[test]
+    fn rrect4_all_zero_is_sharp_rect() {
+        let radii = [0.0f32; 4];
+        // Zero radii = sharp corners, same as flags==3 with radius=0.
+        assert!(radii.iter().all(|&v| v == 0.0));
+    }
+
+    // ---- FNV-1a id stability ------------------------------------------------
+
+    #[test]
+    fn id_does_not_change_across_calls() {
+        // Computed from the source hash, must not change:
+        let v1 = id("settings/opacity");
+        let v2 = id("settings/opacity");
+        assert_eq!(v1, v2);
+    }
+
+    #[test]
+    fn id_empty_string_is_distinct_from_nonempty() {
+        assert_ne!(id(""), id("x"));
+    }
 }

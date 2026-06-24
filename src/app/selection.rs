@@ -326,4 +326,195 @@ mod tests {
         assert_eq!(links[0].uri, "http://a.com");
         assert_eq!(links[1].uri, "https://b.org");
     }
+
+    // ---- additional URL/path detection edge cases ---------------------------
+
+    #[test]
+    fn file_scheme_url_detected() {
+        let text = "file:///tmp/test.log";
+        let col_map = col_map_identity(text.chars().count());
+        let links = scan_plain_links(text, &col_map);
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].uri, "file:///tmp/test.log");
+    }
+
+    #[test]
+    fn url_with_fragment_detected() {
+        let text = "https://docs.rs/crate#section";
+        let col_map = col_map_identity(text.chars().count());
+        let links = scan_plain_links(text, &col_map);
+        assert_eq!(links.len(), 1);
+        assert!(links[0].uri.contains('#'));
+    }
+
+    #[test]
+    fn url_with_query_params_detected() {
+        let text = "https://search.engine/?q=foo+bar&lang=en";
+        let col_map = col_map_identity(text.chars().count());
+        let links = scan_plain_links(text, &col_map);
+        assert_eq!(links.len(), 1);
+        assert!(links[0].uri.contains('?'));
+        assert!(links[0].uri.contains('='));
+    }
+
+    #[test]
+    fn url_at_start_of_text() {
+        let text = "https://example.com is a site";
+        let col_map = col_map_identity(text.chars().count());
+        let links = scan_plain_links(text, &col_map);
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].col_start, 0);
+    }
+
+    #[test]
+    fn url_at_end_of_text() {
+        let text = "see https://example.com";
+        let col_map = col_map_identity(text.chars().count());
+        let links = scan_plain_links(text, &col_map);
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].uri, "https://example.com");
+        assert_eq!(links[0].col_end, text.chars().count());
+    }
+
+    #[test]
+    fn trims_trailing_colon() {
+        // A trailing colon (common in "see URL:" sentences) must be trimmed.
+        let text = "https://example.com:";
+        let col_map = col_map_identity(text.chars().count());
+        let links = scan_plain_links(text, &col_map);
+        // Port numbers ("https://example.com:8080") would NOT be trimmed because
+        // ':' is in is_url_char and the trailing-trim loop removes trailing colons.
+        // "https://example.com:" → trim the trailing ':'.
+        assert_eq!(links[0].uri, "https://example.com");
+    }
+
+    #[test]
+    fn trims_trailing_semicolon() {
+        let text = "https://example.com;";
+        let col_map = col_map_identity(text.chars().count());
+        let links = scan_plain_links(text, &col_map);
+        assert_eq!(links[0].uri, "https://example.com");
+    }
+
+    #[test]
+    fn trims_trailing_single_quote() {
+        let text = "https://example.com'";
+        let col_map = col_map_identity(text.chars().count());
+        let links = scan_plain_links(text, &col_map);
+        assert_eq!(links[0].uri, "https://example.com");
+    }
+
+    #[test]
+    fn trims_trailing_double_quote() {
+        let text = "https://example.com\"";
+        let col_map = col_map_identity(text.chars().count());
+        let links = scan_plain_links(text, &col_map);
+        assert_eq!(links[0].uri, "https://example.com");
+    }
+
+    #[test]
+    fn false_positive_rejection_plain_words() {
+        // Plain words that don't start with a URL scheme or / must not be detected.
+        let text = "just plain text without any links";
+        let col_map = col_map_identity(text.chars().count());
+        let links = scan_plain_links(text, &col_map);
+        assert!(links.is_empty(), "plain text must produce no links");
+    }
+
+    #[test]
+    fn false_positive_rejection_bare_slash_in_path() {
+        // A lone '/' is not a link.
+        let text = "a/b";
+        let col_map = col_map_identity(text.chars().count());
+        // 'a' before '/' means it's not a word-boundary start.
+        let links = scan_plain_links(text, &col_map);
+        assert!(links.is_empty(), "'a/b' not at word boundary: no link");
+    }
+
+    #[test]
+    fn bare_path_tilde_slash_detected() {
+        let text = "edit ~/projects/foo";
+        let col_map = col_map_identity(text.chars().count());
+        let links = scan_plain_links(text, &col_map);
+        assert_eq!(links.len(), 1);
+        // The URI must be a file:// form.
+        assert!(links[0].uri.starts_with("file://"), "tilde path must be file:// URI: {}", links[0].uri);
+    }
+
+    #[test]
+    fn bare_path_tilde_alone_not_a_link() {
+        let text = "~ is home";
+        let col_map = col_map_identity(text.chars().count());
+        let links = scan_plain_links(text, &col_map);
+        // "~" alone (not "~/") is not a path prefix.
+        assert!(links.is_empty(), "'~' alone should not be a link");
+    }
+
+    #[test]
+    fn col_map_maps_correctly_for_unicode() {
+        // When the text contains multibyte chars the col_map must still produce
+        // valid column indices (identity in this case, since we pass identical sizes).
+        let text = "https://café.example.com";
+        let n = text.chars().count();
+        let col_map = col_map_identity(n);
+        let links = scan_plain_links(text, &col_map);
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].col_start, 0);
+    }
+
+    #[test]
+    fn url_body_trims_multiple_trailing_punctuation() {
+        // Multiple trailing "),." should all be stripped.
+        let text = "https://example.com).";
+        let col_map = col_map_identity(text.chars().count());
+        let links = scan_plain_links(text, &col_map);
+        assert_eq!(links[0].uri, "https://example.com");
+    }
+
+    #[test]
+    fn no_link_in_empty_text() {
+        let links = scan_plain_links("", &[]);
+        assert!(links.is_empty());
+    }
+
+    #[test]
+    fn https_case_insensitive_detection() {
+        // The scheme match is case-insensitive.
+        let text = "HTTPS://example.com/path";
+        let col_map = col_map_identity(text.chars().count());
+        let links = scan_plain_links(text, &col_map);
+        assert_eq!(links.len(), 1);
+        assert!(links[0].uri.contains("example.com"));
+    }
+
+    #[test]
+    fn sentinel_null_breaks_url_scan_mid_scheme() {
+        // A null byte inside the scheme must prevent matching.
+        let text = "http\0://example.com";
+        let col_map = col_map_identity(text.chars().count());
+        let links = scan_plain_links(text, &col_map);
+        assert!(links.is_empty(), "null sentinel must break the scheme match");
+    }
+
+    #[test]
+    fn path_starting_after_sentinel_is_detected() {
+        // A valid path starting immediately after a sentinel must be detected.
+        let text = "\0/etc/passwd";
+        let col_map = col_map_identity(text.chars().count());
+        let links = scan_plain_links(text, &col_map);
+        assert_eq!(links.len(), 1);
+        assert!(links[0].uri.contains("/etc/passwd"));
+    }
+
+    #[test]
+    fn col_span_is_correct() {
+        // Verify that col_start and col_end point to the right columns.
+        let text = "see http://x.io here";
+        let col_map = col_map_identity(text.chars().count());
+        let links = scan_plain_links(text, &col_map);
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].col_start, 4, "URL starts at col 4 ('h' of 'http')");
+        // "http://x.io" has 11 chars; col_end = 4 + 11 = 15.
+        assert_eq!(links[0].col_end, 15);
+    }
 }

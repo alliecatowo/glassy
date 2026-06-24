@@ -420,3 +420,146 @@ fn collect_matches<T>(
     }
     out
 }
+
+/// Pure helper: translate a match's grid-line coordinate to a screen row and
+/// decide whether to clip it. Used by `search_highlights` and exposed here for
+/// unit tests.
+///
+/// `line` is the match's grid line index (negative = scrollback, 0 = top of
+/// the visible area in an unscrolled terminal, positive = further down).
+/// `display_offset` is `term.grid().display_offset()` cast to i32 (the number
+/// of rows the viewport has scrolled up). `rows` is the terminal height.
+///
+/// Returns `Some(screen_row)` when the match is on screen, `None` when it is
+/// scrolled off.
+#[cfg(test)]
+pub(crate) fn match_screen_row(line: i32, display_offset: i32, rows: i32) -> Option<usize> {
+    let screen = line + display_offset;
+    if screen >= 0 && screen < rows {
+        Some(screen as usize)
+    } else {
+        None
+    }
+}
+
+/// Pure helper: compute the scroll delta needed to center a match at `line`
+/// in a viewport of height `rows`, given the current `display_offset`.
+/// Returns the delta to pass to `term.scroll_display(Scroll::Delta(delta))`.
+#[cfg(test)]
+pub(crate) fn reveal_delta(line: i32, display_offset: i32, rows: i32) -> i32 {
+    let screen_row = line + display_offset;
+    let want = rows / 2;
+    want - screen_row
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- find_bar_h ----------------------------------------------------------
+
+    #[test]
+    fn find_bar_h_scales_with_cell_h() {
+        // Must be strictly taller than the cell height.
+        for cell_h in [8.0f32, 12.0, 14.0, 16.0, 20.0, 24.0] {
+            let bar = find_bar_h(cell_h);
+            assert!(
+                bar > cell_h,
+                "find_bar_h({cell_h}) = {bar} should be > cell_h"
+            );
+        }
+    }
+
+    #[test]
+    fn find_bar_h_is_rounded() {
+        // The result must be an integer (i.e. fract == 0.0) for pixel-perfect rendering.
+        for cell_h in [8.0f32, 12.0, 14.0, 16.0, 20.0] {
+            let bar = find_bar_h(cell_h);
+            assert_eq!(
+                bar.fract(),
+                0.0,
+                "find_bar_h({cell_h}) = {bar} must be an integer"
+            );
+        }
+    }
+
+    // ---- match_screen_row -----------------------------------------------
+
+    #[test]
+    fn match_screen_row_visible_line() {
+        // Line 0 with display_offset=0 is screen row 0.
+        assert_eq!(match_screen_row(0, 0, 24), Some(0));
+    }
+
+    #[test]
+    fn match_screen_row_last_visible_line() {
+        // Line 23 with offset 0, rows=24 — last row.
+        assert_eq!(match_screen_row(23, 0, 24), Some(23));
+    }
+
+    #[test]
+    fn match_screen_row_scrolled_into_view() {
+        // Line -5 (scrollback) + display_offset=5 → screen row 0.
+        assert_eq!(match_screen_row(-5, 5, 24), Some(0));
+    }
+
+    #[test]
+    fn match_screen_row_negative_line_out_of_viewport() {
+        // Line -10 with display_offset=0 → off screen.
+        assert_eq!(match_screen_row(-10, 0, 24), None);
+    }
+
+    #[test]
+    fn match_screen_row_below_viewport() {
+        // screen = 24 + 0 = 24 but rows = 24 → out of [0, 24).
+        assert_eq!(match_screen_row(24, 0, 24), None);
+    }
+
+    #[test]
+    fn match_screen_row_deep_scrollback_with_offset() {
+        // Scrolled 100 lines up, match is at line -90: screen = -90 + 100 = 10.
+        assert_eq!(match_screen_row(-90, 100, 24), Some(10));
+    }
+
+    // ---- reveal_delta --------------------------------------------------------
+
+    #[test]
+    fn reveal_delta_already_centered_gives_zero() {
+        // rows=24, want=12; line 12 with offset=0 is already at row 12.
+        let delta = reveal_delta(12, 0, 24);
+        assert_eq!(delta, 0);
+    }
+
+    #[test]
+    fn reveal_delta_moves_up_for_near_bottom_match() {
+        // Line=20, offset=0, rows=24 → screen_row=20, want=12, delta=-8.
+        let delta = reveal_delta(20, 0, 24);
+        assert_eq!(delta, -8, "must scroll down (negative delta) to center a near-bottom match");
+    }
+
+    #[test]
+    fn reveal_delta_moves_down_for_near_top_match() {
+        // Line=2, offset=0, rows=24 → screen_row=2, want=12, delta=10.
+        let delta = reveal_delta(2, 0, 24);
+        assert_eq!(delta, 10, "must scroll up (positive delta) to center a near-top match");
+    }
+
+    #[test]
+    fn reveal_delta_scrollback_line_negative() {
+        // Line=-50 (deep scrollback), current display_offset=60, rows=24.
+        // screen=-50+60=10, want=12, delta=2.
+        let delta = reveal_delta(-50, 60, 24);
+        assert_eq!(delta, 2);
+    }
+
+    // ---- SearchState construction --------------------------------------------
+
+    #[test]
+    fn search_state_new_has_empty_matches() {
+        let st = SearchState::new();
+        assert!(st.query.is_empty());
+        assert!(st.matches.is_empty());
+        assert!(st.current.is_none());
+        assert!(!st.bad_regex);
+    }
+}

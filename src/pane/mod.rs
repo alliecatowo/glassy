@@ -418,4 +418,70 @@ mod tests {
             assert!(rc.w >= 0 && rc.h >= 0);
         }
     }
+
+    // ---- LayoutDesc id-remap edge cases ------------------------------------
+
+    #[test]
+    fn from_desc_unknown_focused_falls_back_to_first_leaf() {
+        // If the focused id is not in the rebuilt tree, focus falls to the first leaf.
+        let desc = LayoutDesc {
+            root: NodeDesc::Split {
+                dir: Dir::Vertical,
+                ratio: 0.5,
+                first:  Box::new(NodeDesc::Leaf(0)),
+                second: Box::new(NodeDesc::Leaf(1)),
+            },
+            focused: 99, // does not exist
+        };
+        // Map 0->10, 1->11; id 99 is not in the tree.
+        let rebuilt = Layout::from_desc(&desc, &|id| id + 10);
+        // first_leaf of the rebuilt tree is 10.
+        assert_eq!(rebuilt.focused(), 10);
+    }
+
+    #[test]
+    fn to_desc_and_from_desc_with_identity_map_preserves_geometry() {
+        let mut l = Layout::new(0);
+        l.split(Dir::Vertical, 1);
+        l.split(Dir::Horizontal, 2);
+        let desc = l.to_desc(&|x| x); // identity remap
+        let rebuilt = Layout::from_desc(&desc, &|x| x);
+        let orig = l.rects(AREA, 0);
+        let new  = rebuilt.rects(AREA, 0);
+        assert_eq!(orig, new);
+    }
+
+    #[test]
+    fn layout_with_zero_area_produces_zero_size_rects() {
+        let mut l = Layout::new(1);
+        l.split(Dir::Vertical, 2);
+        let zero_area = Rect { x: 0, y: 0, w: 0, h: 0 };
+        let r = l.rects(zero_area, 0);
+        for (_, rc) in &r {
+            assert_eq!(rc.w, 0);
+            assert_eq!(rc.h, 0);
+        }
+    }
+
+    #[test]
+    fn cross_overlap_positive_when_intervals_overlap() {
+        use crate::pane::layout::cross_overlap;
+        // [0, 100) and [50, 150) overlap by 50.
+        assert_eq!(cross_overlap(0, 100, 50, 100), 50);
+    }
+
+    #[test]
+    fn cross_overlap_zero_when_adjacent() {
+        use crate::pane::layout::cross_overlap;
+        // [0, 100) and [100, 200): touching but not overlapping.
+        assert_eq!(cross_overlap(0, 100, 100, 100), 0);
+    }
+
+    #[test]
+    fn cross_overlap_negative_when_disjoint() {
+        use crate::pane::layout::cross_overlap;
+        // [0, 50) and [100, 200): gap of 50.
+        let v = cross_overlap(0, 50, 100, 100);
+        assert!(v <= 0, "disjoint intervals must have non-positive overlap");
+    }
 }

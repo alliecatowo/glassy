@@ -625,4 +625,115 @@ mod tests {
     fn fuzzy_empty_needle_matches_everything() {
         assert_eq!(fuzzy_score("anything", ""), Some(0));
     }
+
+    // ---- additional fuzzy_score coverage ------------------------------------
+
+    #[test]
+    fn fuzzy_no_match_returns_none() {
+        assert!(fuzzy_score("new tab", "xyz").is_none());
+        assert!(fuzzy_score("", "a").is_none());
+        assert!(fuzzy_score("abc", "abcd").is_none());
+    }
+
+    #[test]
+    fn fuzzy_empty_haystack_empty_needle_scores_zero() {
+        assert_eq!(fuzzy_score("", ""), Some(0));
+    }
+
+    #[test]
+    fn fuzzy_contiguous_bonus_makes_prefix_score_higher() {
+        // Matching the first N chars contiguously should outscore spread matches.
+        let contiguous = fuzzy_score("new tab", "new").unwrap();
+        let spread = fuzzy_score("new tab", "ntb").unwrap();
+        assert!(
+            contiguous > spread,
+            "contiguous prefix match ({contiguous}) should outscore spread ({spread})"
+        );
+    }
+
+    #[test]
+    fn fuzzy_word_start_slash_separator_bonus() {
+        // '/' counts as a word-start separator (file paths).
+        let with_slash = fuzzy_score("split vertical (left / right)", "r").unwrap();
+        // Match at position 0 (word start) vs a buried 'r'.
+        let at_word_start = fuzzy_score("right side", "r").unwrap();
+        // Both should match; the word-start bonus means starting with 'r' scores well.
+        assert!(at_word_start > 0);
+        assert!(with_slash > 0);
+    }
+
+    #[test]
+    fn fuzzy_shorter_haystack_preferred_over_longer_for_same_needle() {
+        // Both match "tab"; the shorter haystack should outscore the longer one
+        // (the -len/32 penalty slightly penalizes the longer haystack).
+        let short = fuzzy_score("new tab", "tab").unwrap();
+        let long_hay = fuzzy_score("this very long string has a tab word in it somewhere", "tab").unwrap();
+        // The short haystack has a stronger tighter-match score.
+        assert!(
+            short >= long_hay,
+            "shorter haystack {short} should be >= longer {long_hay}"
+        );
+    }
+
+    #[test]
+    fn fuzzy_case_folded_caller_responsibility() {
+        // The function does NOT lowercase; callers must pre-fold.
+        // If needle is lowercase and haystack is uppercase they won't match.
+        assert!(fuzzy_score("NEW TAB", "new").is_none());
+        // But if both are lowercase they do.
+        assert!(fuzzy_score("new tab", "new").is_some());
+    }
+
+    #[test]
+    fn fuzzy_dash_separator_bonus() {
+        // '-' also triggers word-start bonus.
+        let score = fuzzy_score("tokyo-night", "n").unwrap();
+        assert!(score > 1, "dash-separated word start should get bonus score");
+    }
+
+    #[test]
+    fn fuzzy_ranking_order() {
+        // "nt" applied to the palette display strings:
+        // "Tab  New tab" hits word-start N in "New" and then t in "tab"
+        // vs some non-word-start match — the palette ranking should order the best match first.
+        let new_tab = fuzzy_score("tab  new tab", "nt").unwrap();
+        let buried   = fuzzy_score("abcntxyz", "nt").unwrap();
+        assert!(new_tab > buried, "word-start match should rank higher than buried");
+    }
+
+    #[test]
+    fn fuzzy_single_char_needle() {
+        // Single-char needle at word start gets word-start bonus.
+        let word_start = fuzzy_score("new tab", "n").unwrap();
+        let buried     = fuzzy_score("xnew", "n").unwrap();
+        assert!(word_start > buried);
+    }
+
+    #[test]
+    fn palette_cmd_category_label_consistency() {
+        // Every non-SetTheme PaletteCmd should have a non-empty label.
+        use PaletteCmd::*;
+        let cmds = [
+            NewTab, CloseTab, NextTab, PrevTab,
+            SplitVertical, SplitHorizontal, ClosePane,
+            OpenSettings, OpenHelp, OpenSearch,
+            Copy, Paste,
+            ToggleFullscreen,
+            FontIncrease, FontDecrease, FontReset,
+            ToggleStatusBar, TogglePaneHeaders,
+            BellOff, BellVisual, BellAudible,
+            ScrollbackIncrease, ScrollbackDecrease,
+            NextTheme, PrevTheme,
+        ];
+        for cmd in cmds {
+            assert!(!cmd.label().is_empty(), "{cmd:?} should have a non-empty label");
+            assert!(!cmd.category().is_empty(), "{cmd:?} should have a non-empty category");
+        }
+    }
+
+    #[test]
+    fn set_theme_label_is_empty() {
+        // SetTheme defers label generation to the registry; the bare method returns "".
+        assert_eq!(PaletteCmd::SetTheme(0).label(), "");
+    }
 }
