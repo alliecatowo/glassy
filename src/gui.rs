@@ -190,6 +190,14 @@ pub fn glass_raised() -> [f32; 4] {
     with_alpha(lighten(color::default_bg(), 0.12), GLASS_SURFACE_ALPHA)
 }
 
+/// E2+ active-tab chip fill — one stop brighter and fully opaque so the active
+/// tab clearly stands apart from both the bar and the recessed inactive chips.
+/// Derived from the theme's background + extra lightening so it reads as
+/// "the open surface" on any theme without hard-coding a color.
+pub fn glass_active_tab() -> [f32; 4] {
+    with_alpha(lighten(color::default_bg(), 0.22), 1.0)
+}
+
 /// E3 floating surface fill (dropdowns / dialogs / drag-ghost).
 pub fn glass_float() -> [f32; 4] {
     with_alpha(lighten(color::selection_bg(), 0.12), GLASS_FLOAT_ALPHA)

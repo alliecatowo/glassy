@@ -2411,20 +2411,21 @@ impl App {
 
         let bar_bg = mul(gui::glass_body());
         let surface = mul(gui::glass_raised());
+        // Active-tab chip is lifted one more stop above the bar (E2+): noticeably
+        // brighter/more opaque than inactive chips so it clearly reads as "foreground".
+        let active_surface = mul(gui::glass_active_tab());
         let accent = mul(color::accent());
         let danger = mul(color::danger());
         let fg = mul(gui::fg());
         let fg_dim = mul(gui::fg_dim());
-        // Active-tab label color derived from the LUMA of the chip body it sits on
-        // (E2 raised glass), not a fixed `default_bg()` — on a LIGHT theme the
-        // background is light, so dark-on-dark text would vanish. Pick near-black
-        // on a light chip, near-white on a dark one, for guaranteed contrast.
-        let raised = gui::glass_raised();
+        // Active-tab label color derived from the LUMA of the ACTIVE chip body so
+        // it is always legible (near-black on light themes, near-white on dark ones).
+        let raised = gui::glass_active_tab();
         let chip_luma = 0.2126 * raised[0] + 0.7152 * raised[1] + 0.0722 * raised[2];
         let active_fg = if chip_luma > 0.5 {
-            mul([0.06, 0.06, 0.07, 1.0])
+            mul([0.04, 0.04, 0.05, 1.0])
         } else {
-            mul([0.96, 0.96, 0.97, 1.0])
+            mul([0.97, 0.97, 0.98, 1.0])
         };
 
         // 1) Bar backdrop (E1) + top accent rail + bottom hairline (content seam).
@@ -2466,7 +2467,7 @@ impl App {
                     }
                     Self::paint_tab_chip(
                         renderer, r, m.height, m.width, i, &seg.label, active, busy, is_spinning,
-                        is_hover, is_held, spin, bar_h, surface, accent, active_fg, fg, fg_dim,
+                        is_hover, is_held, spin, bar_h, surface, active_surface, accent, active_fg, fg, fg_dim,
                         dragging == Some(i), multi,
                     );
                 }
@@ -2490,10 +2491,16 @@ impl App {
                 }
                 StripItem::NewTab | StripItem::Help | StripItem::Settings | StripItem::Menu => {
                     let glyph = match seg.item {
+                        // U+002B PLUS SIGN — universally rasterized, clearly "new tab".
                         StripItem::NewTab => '+',
+                        // U+003F QUESTION MARK — clean, universally supported.
                         StripItem::Help => '?',
-                        StripItem::Settings => '*',
-                        _ => '#',
+                        // U+2699 GEAR — settings/cog; supported in Nerd Fonts and most
+                        // modern monospace fonts (DejaVu, JetBrains, Fira Code, etc.).
+                        StripItem::Settings => '\u{2699}',
+                        // U+2261 IDENTICAL TO (≡) — triple bar reads as "hamburger menu";
+                        // BMP, ASCII-width, universally rasterized in monospace fonts.
+                        _ => '\u{2261}',
                     };
                     let base = surface;
                     if is_held {
@@ -2675,6 +2682,7 @@ impl App {
         spin: char,
         bar_h: f32,
         surface: [f32; 4],
+        active_surface: [f32; 4],
         accent: [f32; 4],
         active_fg: [f32; 4],
         fg: [f32; 4],
@@ -2687,38 +2695,45 @@ impl App {
         }
         let _ = busy;
         if active {
-            // E2 raised body, top corners rounded, flush to the bar bottom; a 3px
-            // connector quad overpaints the content seam so the tab "opens into"
-            // the content surface, and a top accent rail crowns it.
-            renderer.push_overlay_rrect_px(r.x, r.y, r.w, r.h, TAB_RADIUS, surface);
-            // Square off the bottom so it sits flush (rrect rounds all corners): a
-            // small fill over the bottom band.
+            // E2+ raised body: brighter/more opaque than the bar and inactive chips
+            // so the active tab clearly reads as "in focus". Top corners rounded,
+            // body is flush to bar bottom via a square-off fill.
+            renderer.push_overlay_rrect_px(r.x, r.y, r.w, r.h, TAB_RADIUS, active_surface);
+            // Square off the bottom so it sits fully flush with the content area.
             let bb = TAB_RADIUS;
-            renderer.push_overlay_px(r.x, r.y + r.h - bb, r.w, bb, surface);
-            // Connector: overpaint the bar's bottom hairline for the chip width.
-            renderer.push_overlay_px(r.x, bar_h - 2.0, r.w, 3.0, surface);
-            // Top accent rail.
+            renderer.push_overlay_px(r.x, r.y + r.h - bb, r.w, bb, active_surface);
+            // Connector: extends 4px below the bar bottom hairline, matching the
+            // active-tab color, so the chip visually "opens into" the content surface.
+            renderer.push_overlay_px(r.x, bar_h - 2.0, r.w, 4.0, active_surface);
+            // Top accent rail (full accent opacity, 3px) crowns the active chip.
             renderer.push_overlay_px(r.x, r.y, r.w, 3.0, accent);
+            // Side edge highlight: faint left/right 1px strips echo the accent rail.
+            let side_a = [accent[0], accent[1], accent[2], accent[3] * 0.35];
+            renderer.push_overlay_px(r.x, r.y + 3.0, 1.0, r.h - 3.0, side_a);
+            renderer.push_overlay_px(r.x + r.w - 1.0, r.y + 3.0, 1.0, r.h - 3.0, side_a);
         } else {
-            // Inactive: recessed E1 chip sitting a touch above the bar bottom.
-            let rr = gui::Rect::new(r.x, r.y + 2.0, r.w, r.h - 4.0);
+            // Inactive: strongly recessed chip — clearly subordinate to the active tab.
+            // Inset by 2px top and shrink 4px total height so it visually "recedes".
+            let rr = gui::Rect::new(r.x, r.y + 3.0, r.w, r.h - 5.0);
             let fill = if held {
-                [surface[0] * 0.85, surface[1] * 0.85, surface[2] * 0.85, surface[3]]
+                // Press: briefly brighten to surface level.
+                [surface[0], surface[1], surface[2], surface[3] * 0.70]
             } else if hover {
-                gui::state_fill(surface, 0.7, false)
+                // Hover: lift partway toward active.
+                [surface[0], surface[1], surface[2], surface[3] * 0.55]
             } else {
-                // Recede inactive chips harder so the active tab clearly reads as
-                // the foreground one (was 0.55 — too close to active).
-                [surface[0], surface[1], surface[2], surface[3] * 0.35]
+                // Rest: very recessed (alpha 0.20) so active tab contrast is obvious.
+                [surface[0], surface[1], surface[2], surface[3] * 0.20]
             };
             renderer.push_overlay_rrect_px(rr.x, rr.y, rr.w, rr.h, TAB_RADIUS, fill);
-            // A 1px bottom groove anchors the inactive chip below the active one.
+            // Bottom groove anchors inactive chip visually.
             if !hover && !held {
                 let h = gui::hairline();
-                renderer.push_overlay_px(rr.x, rr.y + rr.h - 1.0, rr.w, 1.0, [h[0], h[1], h[2], h[3] * 0.6]);
+                renderer.push_overlay_px(rr.x, rr.y + rr.h - 1.0, rr.w, 1.0, [h[0], h[1], h[2], h[3] * 0.4]);
             }
+            // Hover accent rail (dim) signals interactability.
             if hover && !held {
-                renderer.push_overlay_px(rr.x, rr.y, rr.w, 1.0, accent);
+                renderer.push_overlay_px(rr.x, rr.y, rr.w, 1.0, [accent[0], accent[1], accent[2], accent[3] * 0.6]);
             }
         }
         let label_fg = if active { active_fg } else { fg_dim };
