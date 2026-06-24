@@ -1512,7 +1512,7 @@ opacity = 0.80
     // -----------------------------------------------------------------------
     // Keybinding tests
     // -----------------------------------------------------------------------
-    use super::{Chord, KeyAction, build_keymap, default_keymap, parse_chord, parse_action};
+    use super::{KeyAction, build_keymap, default_keymap, parse_chord, parse_action};
 
     #[test]
     fn parse_chord_simple_letter() {
