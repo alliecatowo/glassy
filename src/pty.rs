@@ -200,9 +200,10 @@ impl Pty {
         };
         let term = Arc::new(FairMutex::new(Term::new(config, &grid, event_proxy.clone())));
 
+        // Safely convert cols/rows from usize to u16, capping at u16::MAX if needed.
         let window_size = WindowSize {
-            num_cols: cols as u16,
-            num_lines: rows as u16,
+            num_cols: u16::try_from(cols).unwrap_or(u16::MAX),
+            num_lines: u16::try_from(rows).unwrap_or(u16::MAX),
             cell_width,
             cell_height,
         };
@@ -249,13 +250,39 @@ impl Pty {
     }
 
     /// Paste clipboard text, wrapping it in bracketed-paste markers when the
-    /// application enabled DECSET 2004 and stripping any embedded end marker.
+    /// application enabled DECSET 2004 and stripping any embedded markers and
+    /// broader C1/ESC control sequences.
     pub fn paste(&self, text: &str, bracketed: bool) {
         if text.is_empty() {
             return;
         }
         if bracketed {
-            let sanitized = text.replace("\x1b[201~", "");
+            // Strip both bracketed-paste markers (200~ and 201~) and broader C1/ESC
+            // sequences that could interfere with correct pasting.
+            let step1 = text.replace("\x1b[200~", "").replace("\x1b[201~", "");
+            // Filter out ESC-based control sequences (OSC, CSI, etc.) that shouldn't
+            // be pasted, preserving only safe printable/whitespace characters.
+            let mut sanitized = String::new();
+            let mut i = 0;
+            let bytes = step1.as_bytes();
+            while i < bytes.len() {
+                if bytes[i] == 0x1b {
+                    // Skip ESC-based sequences: ESC X ... terminator
+                    i += 1;
+                    while i < bytes.len() && bytes[i] < 0x40 {
+                        i += 1;
+                    }
+                    if i < bytes.len() {
+                        i += 1; // Skip the terminator
+                    }
+                } else if bytes[i] < 0x20 && bytes[i] != b'\t' && bytes[i] != b'\n' && bytes[i] != b'\r' {
+                    // Skip other control characters except tab, newline, carriage return
+                    i += 1;
+                } else {
+                    sanitized.push(bytes[i] as char);
+                    i += 1;
+                }
+            }
             let mut out = Vec::with_capacity(sanitized.len() + 12);
             out.extend_from_slice(b"\x1b[200~");
             out.extend_from_slice(sanitized.as_bytes());
@@ -268,9 +295,10 @@ impl Pty {
 
     /// Inform the PTY + terminal of a new grid size.
     pub fn resize(&self, cols: usize, rows: usize, cell_width: u16, cell_height: u16) {
+        // Safely convert cols/rows from usize to u16, capping at u16::MAX if needed.
         let window_size = WindowSize {
-            num_cols: cols as u16,
-            num_lines: rows as u16,
+            num_cols: u16::try_from(cols).unwrap_or(u16::MAX),
+            num_lines: u16::try_from(rows).unwrap_or(u16::MAX),
             cell_width,
             cell_height,
         };
@@ -295,13 +323,21 @@ fn clears_screen(bytes: &[u8]) -> bool {
                 Some(b'c') => return true, // RIS
                 Some(b'[') => {
                     // CSI ... J — scan the (numeric) parameter up to the final 'J'.
+                    // Handle variants like CSI 2J, CSI ;2J, or CSI 0;2J.
                     let mut j = i + 2;
+                    let mut params = String::new();
                     while j < bytes.len() && (bytes[j].is_ascii_digit() || bytes[j] == b';') {
+                        params.push(bytes[j] as char);
                         j += 1;
                     }
                     if bytes.get(j) == Some(&b'J') {
-                        let param = &bytes[i + 2..j];
-                        if param == b"2" || param == b"3" {
+                        // Parse parameters numerically: empty or 0 = display,
+                        // 2 = all lines, 3 = scrollback+display. Check for 2 or 3.
+                        let has_erase_all = params.is_empty()
+                            || params.split(';').any(|p| {
+                                p.parse::<u32>().map(|v| v == 2 || v == 3).unwrap_or(false)
+                            });
+                        if has_erase_all {
                             return true;
                         }
                     }
