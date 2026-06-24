@@ -345,6 +345,8 @@ mod tests {
                 TapEvent::Display(_) => "display",
                 TapEvent::Delete(_) => "delete",
                 TapEvent::Cwd(_) => "cwd",
+                TapEvent::SemanticMark(_) => "mark",
+                TapEvent::Notification(_) => "notification",
             })
             .collect();
         assert_eq!(kinds, vec!["display", "delete"]);
@@ -593,5 +595,116 @@ mod tests {
             w.write_image_data(&row).unwrap();
         }
         assert!(decode_png(&png_bytes).is_none(), "oversized PNG must be rejected");
+    }
+
+    // -----------------------------------------------------------------------
+    // OSC 9 / OSC 777 / OSC 133 shell-integration tests
+    // -----------------------------------------------------------------------
+
+    /// Helper: extract the first Notification body, if any.
+    fn first_notification(events: &[TapEvent]) -> Option<String> {
+        events.iter().find_map(|e| match e {
+            TapEvent::Notification(s) => Some(s.clone()),
+            _ => None,
+        })
+    }
+
+    /// Helper: extract all SemanticMark chars.
+    fn all_marks(events: &[TapEvent]) -> Vec<char> {
+        events.iter().filter_map(|e| match e {
+            TapEvent::SemanticMark(c) => Some(*c),
+            _ => None,
+        }).collect()
+    }
+
+    #[test]
+    fn osc9_notification_parsed() {
+        // `parse_osc9_notification` should extract the body after "9;".
+        use super::store::parse_osc9_notification;
+        let ev = parse_osc9_notification(b"9;build finished").expect("parsed");
+        match ev {
+            TapEvent::Notification(s) => assert_eq!(s, "build finished"),
+            _ => panic!("expected Notification"),
+        }
+        // Empty body is rejected.
+        assert!(parse_osc9_notification(b"9;").is_none());
+        // Wrong OSC code is rejected.
+        assert!(parse_osc9_notification(b"0;something").is_none());
+    }
+
+    #[test]
+    fn osc777_notification_parsed() {
+        use super::store::parse_osc777_notification;
+        // Full form: title + body.
+        let ev = parse_osc777_notification(b"777;notify;My App;Task done").expect("parsed");
+        match ev {
+            TapEvent::Notification(s) => assert_eq!(s, "My App \u{2014} Task done"),
+            _ => panic!("expected Notification"),
+        }
+        // Body only (empty title).
+        let ev = parse_osc777_notification(b"777;notify;;Just body").expect("parsed");
+        match ev {
+            TapEvent::Notification(s) => assert_eq!(s, "Just body"),
+            _ => panic!("expected Notification"),
+        }
+        // Wrong prefix rejected.
+        assert!(parse_osc777_notification(b"9;hello").is_none());
+    }
+
+    #[test]
+    fn osc133_mark_parsed() {
+        use super::store::parse_osc133_mark;
+        assert_eq!(parse_osc133_mark(b"133;A"), Some('A'));
+        assert_eq!(parse_osc133_mark(b"133;B"), Some('B'));
+        assert_eq!(parse_osc133_mark(b"133;C"), Some('C'));
+        // D with optional params (exit code).
+        assert_eq!(parse_osc133_mark(b"133;D;0"), Some('D'));
+        // Wrong OSC code or unknown mark.
+        assert_eq!(parse_osc133_mark(b"133;X"), None);
+        assert_eq!(parse_osc133_mark(b"7;A"), None);
+    }
+
+    #[test]
+    fn tap_osc9_passes_through_and_emits_notification() {
+        // OSC 9 body must reach the VT parser AND emit a Notification event.
+        let store = FairMutex::new(ImageStore::new());
+        let mut tap = StreamTap::new();
+        let events = tap.process(b"\x1b]9;build ok\x07", &store);
+        // The raw OSC bytes pass through to the VT parser.
+        assert_eq!(vt_bytes(&events), b"\x1b]9;build ok\x07");
+        assert_eq!(first_notification(&events), Some("build ok".to_string()));
+    }
+
+    #[test]
+    fn tap_osc133_a_mark_passes_through_and_emits_mark() {
+        // OSC 133;A should pass through AND emit a SemanticMark('A').
+        let store = FairMutex::new(ImageStore::new());
+        let mut tap = StreamTap::new();
+        let events = tap.process(b"\x1b]133;A\x07", &store);
+        assert_eq!(vt_bytes(&events), b"\x1b]133;A\x07");
+        assert_eq!(all_marks(&events), vec!['A']);
+    }
+
+    #[test]
+    fn tap_osc133_d_mark_with_exit_code_passes_through() {
+        // OSC 133;D;0 (exit code 0) must be recognized and passed through.
+        let store = FairMutex::new(ImageStore::new());
+        let mut tap = StreamTap::new();
+        let events = tap.process(b"\x1b]133;D;0\x07", &store);
+        assert_eq!(vt_bytes(&events), b"\x1b]133;D;0\x07");
+        assert_eq!(all_marks(&events), vec!['D']);
+    }
+
+    #[test]
+    fn tap_osc133_sequence_of_marks() {
+        // A full prompt: A → B → C → D sequence should emit all four marks.
+        let store = FairMutex::new(ImageStore::new());
+        let mut tap = StreamTap::new();
+        let mut input = Vec::new();
+        for mark in &['A', 'B', 'C', 'D'] {
+            input.extend_from_slice(format!("\x1b]133;{}\x07", mark).as_bytes());
+        }
+        let events = tap.process(&input, &store);
+        assert_eq!(all_marks(&events), vec!['A', 'B', 'C', 'D']);
     }
 }

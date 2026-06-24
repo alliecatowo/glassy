@@ -17,7 +17,7 @@ use std::io::{Read, Write};
 use std::num::NonZeroUsize;
 use std::os::fd::{AsRawFd, BorrowedFd};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 
 use alacritty_terminal::event::{Event, EventListener, OnResize, WindowSize};
@@ -61,6 +61,14 @@ pub enum UserEvent {
     /// it, runs the bytes through `formatter` (which produces the reply escape
     /// sequence), and writes the result back over the `PtyWrite` path.
     ClipboardLoad(usize, ClipboardType, ClipboardFormatter),
+    /// OSC 133 shell-integration semantic mark (`A`/`B`/`C`/`D`) received from
+    /// the shell. The PTY loop records the cursor row in the per-session
+    /// [`PromptTracker`] and forwards this event so the UI can update any
+    /// jump-to-prompt state (Shift+Up/Down).
+    SemanticMark(usize, char),
+    /// OSC 9 or OSC 777 desktop notification from the shell. Forwarded to the UI
+    /// thread so it can fire a native notification when the window is unfocused.
+    Notification(usize, String),
 }
 
 /// Wraps the `ClipboardLoad` reply-builder closure so `UserEvent` can keep its
@@ -131,6 +139,65 @@ impl EventListener for EventProxy {
     }
 }
 
+/// Maximum number of prompt-line offsets retained per session. Oldest offsets
+/// are evicted when the list grows beyond this, keeping memory bounded while
+/// still providing a deep enough history for realistic interactive use.
+const MAX_PROMPT_OFFSETS: usize = 1024;
+
+/// Tracks the terminal row of every `OSC 133 ; A` (prompt start) mark received
+/// from the shell for one PTY session. The rows are *absolute* grid rows
+/// (including scrollback): `cursor.line.0 + display_offset`. Jump-to-prompt
+/// (Shift+Up / Shift+Down in the UI) reads this list.
+///
+/// The list is sorted ascending by row (marks arrive in stream order) and is
+/// capped at [`MAX_PROMPT_OFFSETS`] entries.
+///
+/// The navigation methods are not yet called by the UI (pending the Shift+Up/Down
+/// keybind wiring in `app/input.rs`); they are `#[allow(dead_code)]` until then.
+#[allow(dead_code)]
+#[derive(Default)]
+pub struct PromptTracker {
+    /// Absolute grid rows of `A` (prompt-start) marks, sorted ascending.
+    pub rows: Vec<i32>,
+}
+
+#[allow(dead_code)]
+impl PromptTracker {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record a prompt-start row. Duplicate rows (same prompt, re-drawn) are
+    /// silently deduped; the list is kept sorted and bounded.
+    pub fn push(&mut self, row: i32) {
+        if self.rows.last() == Some(&row) {
+            return; // skip exact duplicate at the tail (common on prompt redraws)
+        }
+        if self.rows.len() >= MAX_PROMPT_OFFSETS {
+            self.rows.remove(0);
+        }
+        self.rows.push(row);
+    }
+
+    /// Return the row of the previous prompt relative to `current_row`, or
+    /// `None` if there is no earlier prompt.
+    ///
+    /// Wire-up: `app/input.rs` — bind Shift+Up to
+    /// `pty.prompts.lock().prev_prompt(display_offset)` and scroll there.
+    pub fn prev_prompt(&self, current_row: i32) -> Option<i32> {
+        self.rows.iter().rev().find(|&&r| r < current_row).copied()
+    }
+
+    /// Return the row of the next prompt relative to `current_row`, or `None`
+    /// if there is no later prompt.
+    ///
+    /// Wire-up: `app/input.rs` — bind Shift+Down to
+    /// `pty.prompts.lock().next_prompt(display_offset)` and scroll there.
+    pub fn next_prompt(&self, current_row: i32) -> Option<i32> {
+        self.rows.iter().find(|&&r| r > current_row).copied()
+    }
+}
+
 /// Trivial `Dimensions` implementation for sizing the grid.
 #[derive(Copy, Clone, Debug)]
 pub struct GridSize {
@@ -163,6 +230,16 @@ pub struct Pty {
     pub term: Arc<FairMutex<Term<EventProxy>>>,
     /// Decoded inline images received from the PTY, for the renderer to draw.
     pub images: Arc<FairMutex<ImageStore>>,
+    /// OSC 133 prompt-start row offsets, for Shift+Up/Down jump-to-prompt. The
+    /// PTY loop records a new row each time an `A` mark is seen; the UI reads
+    /// this via `prompts.lock()` without taking any other lock.
+    ///
+    /// Wire-up (CAPABILITIES backlog — OSC 133 p1 item): in `app/input.rs`
+    /// handle Shift+Up/Shift+Down by calling `pty.prompts.lock().prev_prompt` /
+    /// `next_prompt` against the current `display_offset` and issuing a
+    /// `term.scroll_display(Scroll::Delta)` to jump there.
+    #[allow(dead_code)]
+    pub prompts: Arc<Mutex<PromptTracker>>,
     tx: Sender<LoopMsg>,
     poller: Arc<Poller>,
 }
@@ -222,17 +299,19 @@ impl Pty {
         let (tx, rx) = channel::<LoopMsg>();
         let poller = Arc::new(Poller::new()?);
         let images = Arc::new(FairMutex::new(ImageStore::new()));
+        let prompts = Arc::new(Mutex::new(PromptTracker::new()));
 
         let loop_term = term.clone();
         let loop_poller = poller.clone();
         let loop_images = images.clone();
+        let loop_prompts = prompts.clone();
         std::thread::Builder::new()
             .name(format!("glassy-pty-{id}"))
             .spawn(move || {
-                run_loop(pty, loop_term, event_proxy, rx, loop_poller, loop_images);
+                run_loop(pty, loop_term, event_proxy, rx, loop_poller, loop_images, loop_prompts);
             })?;
 
-        Ok(Pty { term, images, tx, poller })
+        Ok(Pty { term, images, prompts, tx, poller })
     }
 
     fn send(&self, msg: LoopMsg) {
@@ -353,7 +432,7 @@ fn clears_screen(bytes: &[u8]) -> bool {
 }
 
 /// PTY read/parse loop: waits on the master fd, drains control messages, reads
-/// available bytes, taps image sequences, and feeds the rest to the VT parser.
+/// available bytes, taps image/OSC sequences, and feeds the rest to the VT parser.
 fn run_loop(
     mut pty: tty::Pty,
     term: Arc<FairMutex<Term<EventProxy>>>,
@@ -361,6 +440,7 @@ fn run_loop(
     rx: Receiver<LoopMsg>,
     poller: Arc<Poller>,
     images: Arc<FairMutex<ImageStore>>,
+    prompts: Arc<Mutex<PromptTracker>>,
 ) {
     const PTY_KEY: usize = 1;
     let mut processor: Processor = Processor::new();
@@ -459,6 +539,31 @@ fn run_loop(
                                 // OSC 7: surface the shell's cwd to the UI thread so
                                 // new tabs/splits of this session can inherit it.
                                 proxy.send_user(UserEvent::Cwd(proxy.id, path));
+                            }
+                            crate::image::TapEvent::SemanticMark(mark) => {
+                                // OSC 133: record prompt-start rows (mark 'A') in the
+                                // shared PromptTracker so the UI can jump to them via
+                                // Shift+Up/Down. Other marks (B/C/D) are forwarded to
+                                // the UI for potential future use (e.g. command timing).
+                                if mark == 'A' {
+                                    // Capture the current cursor row as an absolute
+                                    // grid offset (display_offset + cursor.line). `term`
+                                    // is already locked (the MutexGuard from above), so
+                                    // read through the guard directly.
+                                    let row = {
+                                        let c = term.renderable_content();
+                                        c.cursor.point.line.0 + c.display_offset as i32
+                                    };
+                                    if let Ok(mut p) = prompts.lock() {
+                                        p.push(row);
+                                    }
+                                }
+                                proxy.send_user(UserEvent::SemanticMark(proxy.id, mark));
+                            }
+                            crate::image::TapEvent::Notification(text) => {
+                                // OSC 9 / OSC 777: forward to the UI thread so it can
+                                // fire a native desktop notification when unfocused.
+                                proxy.send_user(UserEvent::Notification(proxy.id, text));
                             }
                         }
                     }

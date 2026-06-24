@@ -181,6 +181,15 @@ pub enum TapEvent {
     /// only). Surfaced so the UI can store it per-session for new-tab/split cwd
     /// inheritance. The original OSC bytes are still passed through to the parser.
     Cwd(std::path::PathBuf),
+    /// OSC 133 shell-integration semantic mark. The mark character is one of:
+    /// `A` (prompt start), `B` (command start), `C` (command executed), `D`
+    /// (command finished). The original OSC bytes are still passed through to the
+    /// VT parser. Used to record prompt-line offsets for Shift+Up/Down navigation.
+    SemanticMark(char),
+    /// OSC 9 (iTerm2 / ConEmu style) or OSC 777 (terminal-notifier style) desktop
+    /// notification request from the running shell. The payload is the notification
+    /// body text. The original OSC bytes are still passed through to the VT parser.
+    Notification(String),
 }
 
 #[derive(PartialEq, Eq)]
@@ -405,13 +414,32 @@ impl StreamTap {
         Some(TapEvent::Display(PendingDisplay { id, cols: 0, rows: 0 }))
     }
 
-    /// Finish a buffered OSC. If it is OSC 7 (`7;file://<host>/<path>`) for the
-    /// local host, return a `Cwd` event with the percent-decoded path. The OSC
-    /// bytes were already passed through to the parser; this only observes them.
+    /// Finish a buffered OSC. Dispatches to specialised parsers for:
+    /// - OSC 7: cwd (returns a [`TapEvent::Cwd`])
+    /// - OSC 9 / OSC 777: desktop notification request (returns a
+    ///   [`TapEvent::Notification`])
+    /// - OSC 133: shell-integration semantic mark (returns a
+    ///   [`TapEvent::SemanticMark`])
+    ///
+    /// The raw OSC bytes are always passed through to the VT parser already (before
+    /// this method is called); this only observes them for side-effects.
     /// Always clears the buffer.
     fn finish_osc(&mut self) -> Option<TapEvent> {
         let osc = std::mem::take(&mut self.osc);
-        parse_osc7_cwd(&osc).map(TapEvent::Cwd)
+        // Try OSC 7 first — most common shell-integration sequence.
+        if let Some(path) = parse_osc7_cwd(&osc) {
+            return Some(TapEvent::Cwd(path));
+        }
+        // OSC 9 — iTerm2 / ConEmu desktop notification: `9;<message>`
+        if let Some(ev) = parse_osc9_notification(&osc) {
+            return Some(ev);
+        }
+        // OSC 777 — terminal-notifier / Kitty desktop notification: `777;notify;<title>;<body>`
+        if let Some(ev) = parse_osc777_notification(&osc) {
+            return Some(ev);
+        }
+        // OSC 133 — shell-integration semantic marks: `133;A`, `133;B`, etc.
+        parse_osc133_mark(&osc).map(TapEvent::SemanticMark)
     }
 }
 
@@ -437,6 +465,57 @@ pub(crate) fn parse_osc7_cwd(body: &[u8]) -> Option<std::path::PathBuf> {
         return None;
     }
     Some(std::path::PathBuf::from(path))
+}
+
+/// Parse an OSC 9 body (`9;<message>`) into a desktop notification body. OSC 9
+/// is the iTerm2 / ConEmu desktop-notification format: `ESC ] 9 ; <text> ST`.
+/// Returns a [`TapEvent::Notification`] with the message text, or `None` if the
+/// body is not an OSC 9 notification.
+pub(crate) fn parse_osc9_notification(body: &[u8]) -> Option<TapEvent> {
+    let body = std::str::from_utf8(body).ok()?;
+    let msg = body.strip_prefix("9;")?;
+    if msg.is_empty() {
+        return None;
+    }
+    Some(TapEvent::Notification(msg.to_string()))
+}
+
+/// Parse an OSC 777 body (`777;notify;<title>;<body>`) into a desktop
+/// notification body. This is the terminal-notifier / some Kitty variant format.
+/// We concatenate title + body (separated by " — ") when both are non-empty, or
+/// use whichever is present. Returns `None` if the body is not OSC 777.
+pub(crate) fn parse_osc777_notification(body: &[u8]) -> Option<TapEvent> {
+    let body = std::str::from_utf8(body).ok()?;
+    // Expected: `777;notify;<title>;<message>`
+    let rest = body.strip_prefix("777;notify;")?;
+    // Split on the first ';' to separate title from body.
+    let text = match rest.split_once(';') {
+        Some((title, msg)) if !title.is_empty() && !msg.is_empty() => {
+            format!("{title} — {msg}")
+        }
+        Some((title, "")) if !title.is_empty() => title.to_string(),
+        Some(("", msg)) if !msg.is_empty() => msg.to_string(),
+        None if !rest.is_empty() => rest.to_string(),
+        _ => return None,
+    };
+    Some(TapEvent::Notification(text))
+}
+
+/// Parse an OSC 133 body (`133;<mark>`) into a shell-integration semantic mark.
+/// Valid marks are `A` (prompt start), `B` (command start), `C` (command
+/// executed), `D` (command finished). Extra params after the mark (e.g.
+/// `D;0` for exit code) are ignored — we only care about the mark type here.
+/// Returns the mark character, or `None` if not a valid OSC 133 sequence.
+pub(crate) fn parse_osc133_mark(body: &[u8]) -> Option<char> {
+    let body = std::str::from_utf8(body).ok()?;
+    let rest = body.strip_prefix("133;")?;
+    // The mark is the first character; optional params follow after ';'.
+    let mark = rest.chars().next()?;
+    if matches!(mark, 'A' | 'B' | 'C' | 'D') {
+        Some(mark)
+    } else {
+        None
+    }
 }
 
 /// Whether an OSC 7 `file://` authority refers to the local machine: empty,
