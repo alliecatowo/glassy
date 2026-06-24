@@ -14,6 +14,9 @@
 //! scrollback  = 10000                  # lines of history
 //! bell_visual = true                   # flash the window on bell
 //! bell_audible= false                  # soft beep on bell (needs bell-audio build)
+//! follow_system = false                # track the OS light/dark color scheme
+//! theme_light = rose-pine-dawn         # theme used in system Light mode
+//! theme_dark  = tokyo-night            # theme used in system Dark mode
 //! ```
 //!
 //! CLI flags override the file: at minimum `--font-size <pt>`, `--opacity <f>`,
@@ -86,6 +89,9 @@ struct RawConfig {
     scrollback: Option<usize>,
     bell_visual: Option<bool>,
     bell_audible: Option<bool>,
+    follow_system: Option<bool>,
+    theme_light: Option<String>,
+    theme_dark: Option<String>,
 }
 
 impl RawConfig {
@@ -96,6 +102,19 @@ impl RawConfig {
             color::theme_by_name("tokyo-night").expect("default theme exists")
         });
         let theme_name = color::canonical_name(theme_input).to_string();
+
+        // Follow-system theming: defaults pick a sensible dark/light pair so a
+        // user only has to flip `follow_system = true`. Unknown names canonicalize
+        // (and fall back to tokyo-night) like the pinned `theme`.
+        let follow_system = self.follow_system.unwrap_or(false);
+        let theme_dark = color::canonical_name(
+            self.theme_dark.as_deref().unwrap_or(&theme_name),
+        )
+        .to_string();
+        let theme_light = color::canonical_name(
+            self.theme_light.as_deref().unwrap_or("rose-pine-dawn"),
+        )
+        .to_string();
 
         // A non-finite opacity (e.g. `--opacity nan`) survives `clamp` as NaN and
         // would poison the renderer's premultiply math, so fall back to the
@@ -122,6 +141,9 @@ impl RawConfig {
             bell_visual: self.bell_visual.unwrap_or(true),
             bell_audible: self.bell_audible.unwrap_or(false),
             theme: theme_name,
+            follow_system,
+            theme_light,
+            theme_dark,
         };
 
         Ok(Settings { config, theme })
@@ -274,6 +296,19 @@ fn apply_kv(key: &str, value: &str, raw: &mut RawConfig) -> Result<()> {
         "bell_audible" => {
             raw.bell_audible = Some(parse_bool(value, "bell_audible")?);
         }
+        "follow_system" => {
+            raw.follow_system = Some(parse_bool(value, "follow_system")?);
+        }
+        "theme_light" => {
+            if !value.is_empty() {
+                raw.theme_light = Some(value.to_string());
+            }
+        }
+        "theme_dark" => {
+            if !value.is_empty() {
+                raw.theme_dark = Some(value.to_string());
+            }
+        }
         other => {
             log::warn!("glassy: ignoring unknown config key '{other}'");
         }
@@ -317,7 +352,8 @@ fn parse_shell(value: &str) -> Option<Shell> {
 ///
 /// Recognized: `--font-size <pt>`, `--font-family <name>`, `--theme <name>`,
 /// `--opacity <f>`, `--padding <px>`, `--scrollback <n>`, `--bell-visual <bool>`,
-/// `--bell-audible <bool>`, `-e/--command <cmd…>` (consumes the rest of the args
+/// `--bell-audible <bool>`, `--follow-system <bool>`, `--theme-light <name>`,
+/// `--theme-dark <name>`, `-e/--command <cmd…>` (consumes the rest of the args
 /// as the program + its arguments), `-h/--help`, `-V/--version`.
 fn parse_cli(args: impl Iterator<Item = String>, raw: &mut RawConfig) -> Result<bool> {
     let mut args = args.peekable();
@@ -373,6 +409,16 @@ fn parse_cli(args: impl Iterator<Item = String>, raw: &mut RawConfig) -> Result<
                 let v = next_value(&mut args, "--bell-audible")?;
                 raw.bell_audible = Some(parse_bool(&v, "--bell-audible")?);
             }
+            "--follow-system" => {
+                let v = next_value(&mut args, "--follow-system")?;
+                raw.follow_system = Some(parse_bool(&v, "--follow-system")?);
+            }
+            "--theme-light" => {
+                raw.theme_light = Some(next_value(&mut args, "--theme-light")?);
+            }
+            "--theme-dark" => {
+                raw.theme_dark = Some(next_value(&mut args, "--theme-dark")?);
+            }
             // `-e`/`--command`: everything after it is the program + its args
             // (the conventional terminal contract). Consume the rest verbatim.
             "-e" | "--command" => {
@@ -413,6 +459,9 @@ OPTIONS:
     --scrollback <N>       Lines of scrollback history
     --bell-visual <BOOL>   Flash the window on the terminal bell (default true)
     --bell-audible <BOOL>  Soft beep on the terminal bell (default false)
+    --follow-system <BOOL> Track the OS light/dark color scheme (default false)
+    --theme-light <NAME>   Theme used in system Light mode (e.g. rose-pine-dawn)
+    --theme-dark <NAME>    Theme used in system Dark mode (e.g. tokyo-night)
     -e, --command <CMD>    Run CMD (with the remaining args) instead of the shell
     -h, --help             Print this help and exit
     -V, --version          Print version and exit
@@ -420,7 +469,8 @@ OPTIONS:
 CONFIG FILE:
     $XDG_CONFIG_HOME/glassy/glassy.conf  (or ~/.config/glassy/glassy.conf)
     KEY=VALUE lines: font_family, font_size, theme, opacity, padding,
-    shell, scrollback, bell_visual, bell_audible. CLI flags override the file.",
+    shell, scrollback, bell_visual, bell_audible, follow_system,
+    theme_light, theme_dark. CLI flags override the file.",
         env!("CARGO_PKG_VERSION")
     );
 }

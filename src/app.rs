@@ -614,6 +614,16 @@ pub struct Config {
     /// Canonical name of the active color theme (one of `color::THEME_NAMES`),
     /// tracked so the settings overlay can show, cycle, and save it.
     pub theme: String,
+    /// Follow the system light/dark color scheme: when true, the active theme is
+    /// chosen at startup and on `ThemeChanged` from `theme_light` / `theme_dark`
+    /// according to the OS preference, instead of pinning `theme`.
+    pub follow_system: bool,
+    /// Theme to use when the system prefers a LIGHT color scheme (and
+    /// `follow_system` is on). Canonical [`color::THEME_NAMES`] entry.
+    pub theme_light: String,
+    /// Theme to use when the system prefers a DARK color scheme (and
+    /// `follow_system` is on). Canonical [`color::THEME_NAMES`] entry.
+    pub theme_dark: String,
 }
 
 /// A tab's split layout: the tiling tree (whose leaf ids are pty/pane ids) plus
@@ -3067,6 +3077,35 @@ impl App {
         }
     }
 
+    /// Pick and install the theme that matches the system color scheme when
+    /// `follow_system` is on: `theme_light` in Light mode, `theme_dark` in Dark
+    /// mode (defaulting to dark when the OS doesn't report a preference). A no-op
+    /// when follow-system is off, so a pinned `theme` is left untouched. Returns
+    /// whether the active theme actually changed (so callers can skip a redundant
+    /// full redraw). The GUI tokens derive from the active theme, so the whole UI
+    /// adapts automatically once the palette swaps.
+    fn apply_system_theme(&mut self, scheme: Option<winit::window::Theme>) -> bool {
+        if !self.config.follow_system {
+            return false;
+        }
+        let want_light = matches!(scheme, Some(winit::window::Theme::Light));
+        let name = if want_light {
+            &self.config.theme_light
+        } else {
+            &self.config.theme_dark
+        };
+        if *name == self.config.theme {
+            return false;
+        }
+        if let Some(theme) = color::theme_by_name(name) {
+            color::set_theme(theme);
+            self.config.theme = name.clone();
+            true
+        } else {
+            false
+        }
+    }
+
     /// Persist the live-adjustable settings (font size in pt, opacity, bell) to
     /// the config file, preserving every other key/comment.
     fn save_settings(&mut self) {
@@ -3207,6 +3246,13 @@ impl ApplicationHandler<UserEvent> for App {
         window.set_ime_allowed(true);
         let ms = |t: Instant| t.elapsed().as_secs_f64() * 1000.0;
         log::info!("startup: window created at {:.1} ms", ms(self.started));
+
+        // Honor the system light/dark preference at startup (when follow_system is
+        // on): pick theme_light/theme_dark before the renderer reads the clear
+        // color, so the very first frame already matches the OS scheme.
+        if self.apply_system_theme(window.theme()) {
+            self.force_full_redraw = true;
+        }
 
         // Query the monitor refresh rate for the frame-coalescing throttle.
         if let Some(hz) = window
@@ -3479,16 +3525,17 @@ impl ApplicationHandler<UserEvent> for App {
                 self.reset_blink();
                 self.mark_dirty(event_loop);
             }
-            WindowEvent::ThemeChanged(_) => {
-                // The system light/dark color-scheme changed at runtime. Re-assert
-                // our palette so the terminal colors track the new preference —
-                // previously glassy only repainted (re-theming winit's client-side
-                // sctk-adwaita titlebar) but left the global color theme untouched.
-                // Every built-in theme is dark, and config pins a single named
-                // theme, so the coherent thing to do is re-apply that configured
-                // theme (safe to call repeatedly) rather than guess a light variant.
-                if let Some(theme) = color::theme_by_name(&self.config.theme) {
-                    color::set_theme(theme);
+            WindowEvent::ThemeChanged(scheme) => {
+                // The system light/dark color-scheme changed at runtime. When
+                // `follow_system` is on, swap to `theme_light`/`theme_dark` to match
+                // — glassy now ships real LIGHT themes, so Light mode actually goes
+                // light. When following is off we keep the pinned `theme` but still
+                // re-assert it (safe, repeatable) so winit's re-themed CSD titlebar
+                // stays coherent with our palette.
+                if !self.apply_system_theme(Some(scheme)) {
+                    if let Some(theme) = color::theme_by_name(&self.config.theme) {
+                        color::set_theme(theme);
+                    }
                 }
                 self.force_full_redraw = true;
                 self.mark_dirty(event_loop);

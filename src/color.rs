@@ -252,6 +252,64 @@ const ROSE_PINE: Theme = Theme {
     ],
 };
 
+/// Rosé Pine Dawn: the official LIGHT sibling of Rosé Pine — a warm, low-glare
+/// off-white base with the same muted-pastel accent family, darkened for legible
+/// contrast on a light surface. Special entries use Text (fg) / Base (bg); cursor
+/// follows the Highlight High tint per the published terminal palette.
+const ROSE_PINE_DAWN: Theme = Theme {
+    fg: rgb(0x57, 0x52, 0x79),           // Text
+    bg: rgb(0xFA, 0xF4, 0xED),           // Base
+    cursor: rgb(0x57, 0x52, 0x79),       // Text (dark on light)
+    selection_bg: rgb(0xDF, 0xDA, 0xD9), // Highlight Med
+    ansi16: [
+        rgb(0xF2, 0xE9, 0xE1), // 0  black         (Overlay, light)
+        rgb(0xB4, 0x63, 0x7A), // 1  red           (Love)
+        rgb(0x28, 0x69, 0x83), // 2  green         (Pine)
+        rgb(0xEA, 0x9D, 0x34), // 3  yellow        (Gold)
+        rgb(0x56, 0x94, 0x9F), // 4  blue          (Foam)
+        rgb(0x90, 0x7A, 0xA9), // 5  magenta       (Iris)
+        rgb(0xD7, 0x82, 0x7E), // 6  cyan          (Rose)
+        rgb(0x57, 0x52, 0x79), // 7  white         (Text)
+        rgb(0x9D, 0x96, 0xB8), // 8  bright black   (Subtle)
+        rgb(0xB4, 0x63, 0x7A), // 9  bright red     (Love)
+        rgb(0x28, 0x69, 0x83), // 10 bright green   (Pine)
+        rgb(0xEA, 0x9D, 0x34), // 11 bright yellow  (Gold)
+        rgb(0x56, 0x94, 0x9F), // 12 bright blue    (Foam)
+        rgb(0x90, 0x7A, 0xA9), // 13 bright magenta (Iris)
+        rgb(0xD7, 0x82, 0x7E), // 14 bright cyan    (Rose)
+        rgb(0x57, 0x52, 0x79), // 15 bright white   (Text)
+    ],
+};
+
+/// Catppuccin Latte: the LIGHT member of the Catppuccin family — a crisp, bright
+/// off-white base (Base) with Text body color and the published light terminal
+/// accents, darkened so reds/greens/blues stay readable on white. Cursor uses
+/// Rosewater per the published spec.
+const CATPPUCCIN_LATTE: Theme = Theme {
+    fg: rgb(0x4C, 0x4F, 0x69),     // Text
+    bg: rgb(0xEF, 0xF1, 0xF5),     // Base
+    cursor: rgb(0xDC, 0x8A, 0x78), // Rosewater
+    selection_bg: rgb(0xCC, 0xD0, 0xDA),
+    ansi16: [
+        rgb(0x5C, 0x5F, 0x77), // 0  black   (Subtext1)
+        rgb(0xD2, 0x0F, 0x39), // 1  red     (Red)
+        rgb(0x40, 0xA0, 0x2B), // 2  green   (Green)
+        rgb(0xDF, 0x8E, 0x1D), // 3  yellow  (Yellow)
+        rgb(0x1E, 0x66, 0xF5), // 4  blue    (Blue)
+        rgb(0xEA, 0x76, 0xCB), // 5  magenta (Pink)
+        rgb(0x17, 0x92, 0x99), // 6  cyan    (Teal)
+        rgb(0xAC, 0xB0, 0xBE), // 7  white   (Surface2)
+        rgb(0x6C, 0x6F, 0x85), // 8  bright black  (Subtext0)
+        rgb(0xD2, 0x0F, 0x39), // 9  bright red
+        rgb(0x40, 0xA0, 0x2B), // 10 bright green
+        rgb(0xDF, 0x8E, 0x1D), // 11 bright yellow
+        rgb(0x1E, 0x66, 0xF5), // 12 bright blue
+        rgb(0xEA, 0x76, 0xCB), // 13 bright magenta
+        rgb(0x17, 0x92, 0x99), // 14 bright cyan
+        rgb(0xBC, 0xC0, 0xCC), // 15 bright white (Surface1)
+    ],
+};
+
 /// Resolve a theme by (case-insensitive, separator-insensitive) name. Returns
 /// `None` for an unknown name so the caller can warn and keep the default.
 pub fn theme_by_name(name: &str) -> Option<Theme> {
@@ -269,6 +327,8 @@ pub fn theme_by_name(name: &str) -> Option<Theme> {
         "nord" => Some(NORD),
         "solarizeddark" | "solarized" => Some(SOLARIZED_DARK),
         "rosepine" | "rose" => Some(ROSE_PINE),
+        "rosepinedawn" | "dawn" => Some(ROSE_PINE_DAWN),
+        "catppuccinlatte" | "latte" => Some(CATPPUCCIN_LATTE),
         _ => None,
     }
 }
@@ -283,7 +343,16 @@ pub const THEME_NAMES: &[&str] = &[
     "nord",
     "solarized-dark",
     "rose-pine",
+    "rose-pine-dawn",
+    "catppuccin-latte",
 ];
+
+/// Whether a named theme is a LIGHT theme (light background, dark text). Used to
+/// pick a sensible default when following the system color scheme. Unknown names
+/// are treated as dark (every original built-in is dark).
+pub fn is_light(name: &str) -> bool {
+    matches!(canonical_name(name), "rose-pine-dawn" | "catppuccin-latte")
+}
 
 /// Map any accepted theme name/alias to its canonical [`THEME_NAMES`] entry,
 /// defaulting to `tokyo-night`. Lets the app store + cycle + save a stable name.
@@ -301,6 +370,8 @@ pub fn canonical_name(input: &str) -> &'static str {
         "nord" => "nord",
         "solarizeddark" | "solarized" => "solarized-dark",
         "rosepine" | "rose" => "rose-pine",
+        "rosepinedawn" | "dawn" => "rose-pine-dawn",
+        "catppuccinlatte" | "latte" => "catppuccin-latte",
         _ => "tokyo-night",
     }
 }
@@ -466,5 +537,29 @@ mod query_index_tests {
         assert_eq!((red.r, red.g, red.b), (0xF7, 0x76, 0x8E));
         let cube = query_index(196); // pure red in 6x6x6 cube
         assert_eq!((cube.r, cube.g, cube.b), (255, 0, 0));
+    }
+
+    #[test]
+    fn light_themes_are_light_and_named() {
+        // Both light themes resolve and are flagged light; every dark built-in is
+        // flagged dark.
+        for name in ["rose-pine-dawn", "dawn", "catppuccin-latte", "latte"] {
+            assert!(theme_by_name(name).is_some(), "{name} should resolve");
+            assert!(is_light(name), "{name} should be light");
+        }
+        for name in THEME_NAMES.iter().filter(|n| !is_light(n)) {
+            let t = theme_by_name(name).expect("theme resolves");
+            // A dark theme's background should be darker than its foreground.
+            let lum = |c: Rgb| c.r as u32 + c.g as u32 + c.b as u32;
+            assert!(lum(t.bg) < lum(t.fg), "{name} bg should be darker than fg");
+        }
+        // A light theme's background is brighter than its foreground.
+        let dawn = theme_by_name("rose-pine-dawn").unwrap();
+        let lum = |c: Rgb| c.r as u32 + c.g as u32 + c.b as u32;
+        assert!(lum(dawn.bg) > lum(dawn.fg));
+        // Every THEME_NAMES entry resolves (catches typos / missing arms).
+        for name in THEME_NAMES {
+            assert!(theme_by_name(name).is_some(), "{name} in THEME_NAMES resolves");
+        }
     }
 }
