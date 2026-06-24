@@ -41,6 +41,8 @@ mod render;
 mod multipane;
 mod settings;
 mod event_loop;
+mod keys;
+mod mouse;
 mod search;
 mod palette;
 mod selection;

@@ -626,3 +626,90 @@ impl App {
     }
 }
 
+/// Fire a desktop notification with `app_name` as the summary prefix and `body`
+/// as the message. Called on the UI thread when an OSC 9 / OSC 777 notification
+/// arrives and the window is unfocused.
+///
+/// Uses a detached thread so the D-Bus round-trip never blocks the UI loop.
+/// Errors are logged at debug level (a missing notification daemon is a
+/// non-fatal, common desktop configuration).
+pub(super) fn fire_desktop_notification(app_name: &str, body: &str) {
+    use notify_rust::Notification;
+    let summary = app_name.to_string();
+    let body = body.to_string();
+    std::thread::Builder::new()
+        .name("glassy-notify".to_string())
+        .spawn(move || {
+            let result = Notification::new()
+                .summary(&summary)
+                .body(&body)
+                .appname("glassy")
+                .timeout(notify_rust::Timeout::Milliseconds(5000))
+                .show();
+            if let Err(e) = result {
+                log::debug!("desktop notification failed: {e}");
+            }
+        })
+        .ok(); // ignore thread-spawn failure (extremely unlikely)
+}
+
+/// Spawn a background thread to watch the config file for changes.
+/// Uses notify crate (debounced) to avoid spamming reloads during rapid edits.
+pub(super) fn spawn_config_watcher(
+    config_path: std::path::PathBuf,
+    proxy: winit::event_loop::EventLoopProxy<crate::pty::UserEvent>,
+) {
+    use notify::{Watcher, RecursiveMode, Result as NotifyResult};
+    use notify::recommended_watcher;
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+    use std::thread;
+
+    thread::spawn(move || {
+        let last_reload = Arc::new(Mutex::new(Instant::now() - Duration::from_secs(10)));
+        let config_dir = config_path.parent().unwrap_or_else(|| std::path::Path::new("."));
+        let config_filename = config_path.file_name().unwrap_or_default().to_owned();
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        let mut watcher = match recommended_watcher(move |res: NotifyResult<_>| {
+            let _ = tx.send(res);
+        }) {
+            Ok(w) => w,
+            Err(e) => {
+                log::warn!("failed to create config watcher: {e}");
+                return;
+            }
+        };
+
+        if let Err(e) = watcher.watch(config_dir, RecursiveMode::NonRecursive) {
+            log::warn!("failed to watch config dir {}: {e}", config_dir.display());
+            return;
+        }
+
+        for event_result in rx {
+            match event_result {
+                Ok(event) => {
+                    let is_config_change = event
+                        .paths
+                        .iter()
+                        .any(|p| p.file_name().is_some_and(|n| n == config_filename));
+                    if is_config_change {
+                        let now = Instant::now();
+                        let mut last = last_reload.lock().unwrap();
+                        if now.duration_since(*last) >= Duration::from_millis(500) {
+                            *last = now;
+                            drop(last);
+                            if let Err(e) = proxy.send_event(crate::pty::UserEvent::ConfigReload) {
+                                log::debug!("failed to send ConfigReload: {e}");
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    log::debug!("config watcher error: {e}");
+                }
+            }
+        }
+    });
+}
+
