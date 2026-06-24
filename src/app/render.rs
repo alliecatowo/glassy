@@ -58,6 +58,15 @@ impl App {
             None => (0, 0),
         };
         let tab_snapshot = self.tab_bar_snapshot();
+        // Inline tab-rename editor (drawn over its chip after the tab bar). The
+        // blinking caret is omitted (static) so it never forces extra repaints.
+        // Resolve the chip rect here (under `&self`) so the painter just draws.
+        let rename_inputs = self.tab_rename_state().and_then(|(pos, buf)| {
+            self.tab_layout()
+                .into_iter()
+                .find(|s| s.item == StripItem::Tab(pos))
+                .map(|s| (s.rect, buf))
+        });
         let tab_focused = self.focused;
         let tab_hovered = self.hovered_strip_item;
         let tab_held = self.held_strip_item;
@@ -598,6 +607,12 @@ impl App {
             renderer.commit_tab_overlay();
         } else {
             renderer.replay_tab_overlay();
+        }
+
+        // Inline tab-rename editor: an opaque text field drawn over the chip being
+        // renamed, on top of the (cached) tab bar so the caret/edits are live.
+        if let Some((rect, buf)) = &rename_inputs {
+            Self::paint_tab_rename(renderer, *rect, buf);
         }
 
         // Status bar (§3.4): E1 bar at the very bottom, always above the terminal

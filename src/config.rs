@@ -21,6 +21,18 @@
 //! status_bar  = false                  # show status bar at the bottom (default off)
 //! pane_headers= true                   # show per-pane title bars + accent rail in splits (default on)
 //! ligatures   = false                  # enable OpenType ligature shaping across cells (default off)
+//! cwd         = /home/me/projects      # working directory for the first tab's shell
+//! restore_session = false              # restore previous tabs/splits/cwds on launch
+//! ```
+//!
+//! Named profiles live in `[profile.NAME]` sections (activate with `--profile NAME`):
+//!
+//! ```text
+//! [profile.work]
+//! theme = catppuccin-mocha
+//! font_size = 16
+//! cwd = /home/me/work
+//! shell = /usr/bin/zsh -l
 //! color.fg    = #c0caf5                # override theme foreground (hex format)
 //! color.bg    = #1a1b26                # override theme background (hex format)
 //! color.cursor = #7dcfff               # override cursor color
@@ -32,6 +44,7 @@
 //! and `-e <cmd> [args…]` (run a command instead of the shell). `--help` and
 //! `--version` print and exit.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use alacritty_terminal::tty::Shell;
@@ -59,10 +72,15 @@ impl Settings {
     /// Returns `Ok(None)` when a flag (`--help`/`--version`) has already printed
     /// its output and the process should exit successfully without launching.
     pub fn resolve(args: impl Iterator<Item = String>) -> Result<Option<Settings>> {
+        // Materialize args once so we can pre-scan for `--profile` (which must be
+        // applied after the file load but before the rest of the CLI overrides).
+        let args: Vec<String> = args.collect();
+
         // 1. Start from defaults.
         let mut raw = RawConfig::default();
 
-        // 2. Layer the config file (if present and readable).
+        // 2. Layer the config file (if present and readable). This populates any
+        //    `[profile.NAME]` sections so `--profile` can activate one below.
         if let Some(path) = config_path() {
             match std::fs::read_to_string(&path) {
                 Ok(text) => {
@@ -76,8 +94,15 @@ impl Settings {
             }
         }
 
-        // 3. Layer CLI overrides (and handle --help/--version).
-        if !parse_cli(args, &mut raw)? {
+        // 3. Activate a `--profile NAME`, overlaying its keys before CLI flags so
+        //    individual CLI overrides still win over the profile.
+        if let Some(name) = profile_from_args(&args) {
+            raw.activate_profile(&name)?;
+        }
+
+        // 4. Layer CLI overrides (and handle --help/--version). `--profile` is a
+        //    no-op here (already applied above).
+        if !parse_cli(args.into_iter(), &mut raw)? {
             return Ok(None);
         }
 
@@ -105,12 +130,18 @@ struct RawConfig {
     pane_headers: Option<bool>,
     word_separator: Option<String>,
     ligatures: Option<bool>,
+    cwd: Option<String>,
+    restore_session: Option<bool>,
     // Custom theme colors (hex format, e.g., "color.fg = #c0caf5")
     color_fg: Option<String>,
     color_bg: Option<String>,
     color_cursor: Option<String>,
     color_selection_bg: Option<String>,
     color_ansi: Option<[Option<String>; 16]>,
+    /// Named profiles parsed from `[profile.NAME]` sections: NAME -> raw key/value
+    /// pairs. Applied over the base config when the matching profile is activated
+    /// (via `--profile NAME`). Lower-cased keys, same grammar as top-level keys.
+    profiles: HashMap<String, Vec<(String, String)>>,
 }
 
 impl RawConfig {
@@ -195,6 +226,8 @@ impl RawConfig {
             pane_headers: self.pane_headers.unwrap_or(true),
             word_separator: self.word_separator.unwrap_or_default(),
             ligatures: self.ligatures.unwrap_or(false),
+            initial_cwd: self.cwd.filter(|s| !s.is_empty()).map(PathBuf::from),
+            restore_session: self.restore_session.unwrap_or(false),
         };
 
         Ok(Settings { config, theme })
@@ -290,9 +323,22 @@ fn config_path() -> Option<PathBuf> {
 /// stripped from values. An unknown key is warned about but not fatal; a value
 /// that fails to parse for a known key is a hard error (with the line number).
 fn parse_config_file(text: &str, raw: &mut RawConfig) -> Result<()> {
+    // The active section. `None` is the top-level (global) config; `Some(name)`
+    // collects keys into the named `[profile.NAME]` block instead of applying them.
+    let mut profile: Option<String> = None;
     for (i, line) in text.lines().enumerate() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+            continue;
+        }
+        // Section header: `[profile.NAME]` switches the active profile; any other
+        // `[...]` header resets to the global section (forward-compatible).
+        if line.starts_with('[') && line.ends_with(']') {
+            let name = line[1..line.len() - 1].trim();
+            profile = name
+                .strip_prefix("profile.")
+                .map(|n| n.trim().to_ascii_lowercase())
+                .filter(|n| !n.is_empty());
             continue;
         }
         let Some((key, value)) = line.split_once('=') else {
@@ -300,9 +346,38 @@ fn parse_config_file(text: &str, raw: &mut RawConfig) -> Result<()> {
         };
         let key = key.trim().to_ascii_lowercase();
         let value = unquote(value.trim());
-        apply_kv(&key, value, raw).with_context(|| format!("line {}", i + 1))?;
+        match &profile {
+            None => apply_kv(&key, value, raw).with_context(|| format!("line {}", i + 1))?,
+            Some(name) => {
+                // Defer validation: keys are applied via apply_kv only when the
+                // profile is activated, so an unused profile with a bad value is
+                // not fatal at load.
+                raw.profiles
+                    .entry(name.clone())
+                    .or_default()
+                    .push((key, value.to_string()));
+            }
+        }
     }
     Ok(())
+}
+
+impl RawConfig {
+    /// Apply the named profile's key/value pairs over the base config, returning an
+    /// error if the profile is unknown or one of its values fails to parse. Called
+    /// after the file load and before CLI overrides, so the CLI still wins.
+    fn activate_profile(&mut self, name: &str) -> Result<()> {
+        let key = name.to_ascii_lowercase();
+        let pairs = self
+            .profiles
+            .get(&key)
+            .cloned()
+            .with_context(|| format!("unknown profile '{name}' (no [profile.{name}] section)"))?;
+        for (k, v) in &pairs {
+            apply_kv(k, v, self).with_context(|| format!("in [profile.{name}]"))?;
+        }
+        Ok(())
+    }
 }
 
 /// Strip one layer of matching single or double quotes from `s`, if present.
@@ -405,6 +480,14 @@ fn apply_kv(key: &str, value: &str, raw: &mut RawConfig) -> Result<()> {
         }
         "ligatures" => {
             raw.ligatures = Some(parse_bool(value, "ligatures")?);
+        }
+        "cwd" => {
+            if !value.is_empty() {
+                raw.cwd = Some(value.to_string());
+            }
+        }
+        "restore_session" => {
+            raw.restore_session = Some(parse_bool(value, "restore_session")?);
         }
         // Custom theme colors: color.fg, color.bg, color.cursor, color.selection_bg, color.ansi0..15
         "color.fg" => {
@@ -708,6 +791,28 @@ fn parse_cli(args: impl Iterator<Item = String>, raw: &mut RawConfig) -> Result<
             "--word-separator" => {
                 raw.word_separator = Some(next_value(&mut args, "--word-separator")?);
             }
+            "--restore-session" => {
+                // Optional bool value; bare `--restore-session` means true.
+                match args.peek().map(|s| s.as_str()) {
+                    Some(v) if matches!(v.to_ascii_lowercase().as_str(),
+                        "true" | "yes" | "on" | "1" | "false" | "no" | "off" | "0") =>
+                    {
+                        let v = args.next().unwrap();
+                        raw.restore_session = Some(parse_bool(&v, "--restore-session")?);
+                    }
+                    _ => raw.restore_session = Some(true),
+                }
+            }
+            "--profile" => {
+                // Already applied in `resolve`'s pre-scan; consume its value here so
+                // the main parse doesn't reject it as an unknown argument.
+                let _ = next_value(&mut args, "--profile")?;
+            }
+            // `--profile=NAME` inline form (also pre-scanned in `resolve`).
+            a if a.starts_with("--profile=") => {}
+            "--working-directory" | "--cwd" => {
+                raw.cwd = Some(next_value(&mut args, "--working-directory")?);
+            }
             // `-e`/`--command`: everything after it is the program + its args
             // (the conventional terminal contract). Consume the rest verbatim.
             "-e" | "--command" => {
@@ -721,6 +826,21 @@ fn parse_cli(args: impl Iterator<Item = String>, raw: &mut RawConfig) -> Result<
         }
     }
     Ok(true)
+}
+
+/// Pre-scan the CLI args for `--profile NAME`, returning the name if present. Used
+/// so the profile is activated after the file load but before CLI overrides.
+fn profile_from_args(args: &[String]) -> Option<String> {
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if a == "--profile" {
+            return it.next().cloned();
+        }
+        if let Some(v) = a.strip_prefix("--profile=") {
+            return Some(v.to_string());
+        }
+    }
+    None
 }
 
 /// Pull the value following a flag, erroring if it is missing.
@@ -755,6 +875,9 @@ OPTIONS:
     --pane-headers <BOOL>  Show per-pane title bars in splits (default true)
     --word-separator <STR> Extra word separators for text selection
     --import-theme <PATH>  Import Alacritty/base16 theme from TOML/YAML file
+    --profile <NAME>       Activate a [profile.NAME] config section's overrides
+    --cwd <PATH>           Working directory for the first tab's shell
+    --restore-session [B]  Restore the previous session's tabs/splits (default off)
     -e, --command <CMD>    Run CMD (with the remaining args) instead of the shell
     -h, --help             Print this help and exit
     -V, --version          Print version and exit
@@ -841,6 +964,70 @@ opacity = 0.80
         let settings = RawConfig::default().into_settings().unwrap();
         assert!(settings.config.bell_visual); // default on
         assert!(!settings.config.bell_audible); // default off
+    }
+
+    #[test]
+    fn profile_section_collected_and_activated() {
+        let mut raw = RawConfig::default();
+        parse_config_file(
+            "theme = tokyo-night\nfont_size = 14\n\n[profile.work]\nfont_size = 18\ntheme = catppuccin-mocha\ncwd = /home/me/work\n",
+            &mut raw,
+        )
+        .unwrap();
+        // The profile keys are collected, not applied to the base config.
+        assert_eq!(raw.font_size, Some(14.0));
+        assert!(raw.profiles.contains_key("work"));
+        // Activating overlays the profile's keys.
+        raw.activate_profile("work").unwrap();
+        assert_eq!(raw.font_size, Some(18.0));
+        assert_eq!(raw.cwd.as_deref(), Some("/home/me/work"));
+        let s = raw.into_settings().unwrap();
+        assert_eq!(s.config.font_size, 18.0);
+        assert_eq!(s.config.initial_cwd.as_deref().map(|p| p.to_str().unwrap()), Some("/home/me/work"));
+    }
+
+    #[test]
+    fn activate_unknown_profile_errors() {
+        let mut raw = RawConfig::default();
+        assert!(raw.activate_profile("nope").is_err());
+    }
+
+    #[test]
+    fn profile_name_is_case_insensitive() {
+        let mut raw = RawConfig::default();
+        parse_config_file("[profile.Dev]\ntheme = dracula\n", &mut raw).unwrap();
+        // Stored lower-cased; activation lower-cases the requested name too.
+        assert!(raw.profiles.contains_key("dev"));
+        raw.activate_profile("DEV").unwrap();
+        assert_eq!(raw.theme.as_deref(), Some("dracula"));
+    }
+
+    #[test]
+    fn profile_from_args_finds_both_forms() {
+        use super::profile_from_args;
+        let a = vec!["--profile".to_string(), "work".to_string()];
+        assert_eq!(profile_from_args(&a), Some("work".to_string()));
+        let b = vec!["--profile=home".to_string()];
+        assert_eq!(profile_from_args(&b), Some("home".to_string()));
+        let c = vec!["--font-size".to_string(), "14".to_string()];
+        assert_eq!(profile_from_args(&c), None);
+    }
+
+    #[test]
+    fn restore_session_defaults_off_and_parses() {
+        let settings = RawConfig::default().into_settings().unwrap();
+        assert!(!settings.config.restore_session);
+        let mut raw = RawConfig::default();
+        parse_config_file("restore_session = true\n", &mut raw).unwrap();
+        assert_eq!(raw.restore_session, Some(true));
+    }
+
+    #[test]
+    fn cwd_key_sets_initial_cwd() {
+        let mut raw = RawConfig::default();
+        parse_config_file("cwd = /tmp/here\n", &mut raw).unwrap();
+        let s = raw.into_settings().unwrap();
+        assert_eq!(s.config.initial_cwd.as_deref().map(|p| p.to_str().unwrap()), Some("/tmp/here"));
     }
 
     #[test]
