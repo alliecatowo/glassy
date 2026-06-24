@@ -122,6 +122,14 @@ impl App {
             None
         };
 
+        // Find-bar (search) inputs snapshotted before the disjoint renderer/pty
+        // borrows. `search_highlights` + `search_readout` both lock the term.
+        let search_inputs = self
+            .search_readout()
+            .map(|r| (r, self.search_highlights()));
+        // Command-palette inputs snapshotted before the borrow.
+        let palette_inputs = self.palette_snapshot();
+
         let (Some(renderer), Some(pty)) = (self.renderer.as_mut(), self.pty.as_ref()) else {
             return;
         };
@@ -418,7 +426,7 @@ impl App {
         // stored row is viewport-relative at display time; translate by the current
         // scroll offset so images move with the buffer as the user scrolls.
         // Suppressed while a modal or dropdown is up so images don't punch through it.
-        if !self.help_open && !self.settings_open && !self.menu_open {
+        if !self.help_open && !self.settings_open && !self.menu_open && self.palette.is_none() {
             let store = pty.images.lock();
             if !store.placements().is_empty() {
                 let m = renderer.cell_metrics();
@@ -480,6 +488,38 @@ impl App {
                 sb_sel_len,
                 sb_focused,
             );
+        }
+
+        // Find bar (Ctrl+Shift+F): match highlights + bottom bar. Drawn above the
+        // grid/status bar but below the palette/settings/help modals (a modal scrim
+        // dims it like everything else). Highlights are anchored to the grid by the
+        // same pixel origin as the cells (grid_origin_y).
+        if let Some(((query, count, current, bad_regex), highlights)) = &search_inputs {
+            let (sw, sh) = renderer.surface_size();
+            let pad = renderer.pad();
+            let goy = renderer.grid_origin_y();
+            Self::paint_search(
+                renderer,
+                (sw as f32, sh as f32),
+                (pad, pad + goy),
+                query,
+                *count,
+                *current,
+                *bad_regex,
+                highlights,
+            );
+        }
+
+        // Command palette (Ctrl+Shift+P): centered fuzzy action list over a scrim.
+        // Topmost modal. The row rects it returns are stored for mouse hit-testing
+        // (mouse_px is read up-front so no `self` borrow collides with `renderer`).
+        if let Some((query, rows, sel)) = &palette_inputs {
+            let (sw, sh) = renderer.surface_size();
+            let mouse = (self.mouse_px.0 as f32, self.mouse_px.1 as f32);
+            let row_refs: Vec<(&str, Option<&str>)> =
+                rows.iter().map(|(l, h)| (l.as_str(), *h)).collect();
+            self.palette_rows =
+                Self::paint_palette(renderer, (sw as f32, sh as f32), query, &row_refs, *sel, mouse);
         }
 
         // Modal overlays (help / settings): centered panels over a dimmed backdrop.

@@ -165,6 +165,23 @@ impl App {
             None
         };
 
+        // Find-bar + palette inputs, snapshotted BEFORE the disjoint borrows
+        // (both may lock the focused term). The find-bar highlights are positioned
+        // relative to the focused pane's body rect (its on-screen pixel origin).
+        let search_inputs = self
+            .search_readout()
+            .map(|r| (r, self.search_highlights()));
+        let search_origin = {
+            // The focused pane's body rect origin + pad, mirroring px_to_cell.
+            let pad = self.renderer.as_ref().map(|r| r.pad()).unwrap_or(0.0);
+            pane_specs
+                .iter()
+                .find(|(id, ..)| *id == focused_pane)
+                .map(|(_, _full, body, _, _)| (body.x as f32 + pad, body.y as f32 + pad))
+                .unwrap_or((pad, pad))
+        };
+        let palette_inputs = self.palette_snapshot();
+
         // Damage/incremental decision for each pane, made BEFORE the disjoint
         // borrows (it locks the panes' terms). A pane is rebuilt only when:
         //   * a full redraw is forced (layout change / resize / theme / toggle), OR
@@ -412,6 +429,31 @@ impl App {
         if let Some((ref entries2, ax2, ay2, sel2, mouse2, md2, click2)) = menu_snapshot2 {
             let m = renderer.cell_metrics();
             let _ = gui::menu(renderer, m.width, m.height, mouse2, md2, click2, ax2, ay2, entries2, sel2);
+        }
+
+        // Find bar + match highlights (Ctrl+Shift+F) in split mode. Highlights are
+        // anchored to the focused pane's body rect (search targets the focused pane).
+        if let Some(((query, count, current, bad_regex), highlights)) = &search_inputs {
+            let (sw, sh) = renderer.surface_size();
+            Self::paint_search(
+                renderer,
+                (sw as f32, sh as f32),
+                search_origin,
+                query,
+                *count,
+                *current,
+                *bad_regex,
+                highlights,
+            );
+        }
+
+        // Command palette (Ctrl+Shift+P) in split mode: topmost modal.
+        if let Some((query, rows, sel)) = &palette_inputs {
+            let (sw, sh) = renderer.surface_size();
+            let row_refs: Vec<(&str, Option<&str>)> =
+                rows.iter().map(|(l, h)| (l.as_str(), *h)).collect();
+            self.palette_rows =
+                Self::paint_palette(renderer, (sw as f32, sh as f32), query, &row_refs, *sel, mouse_px_f);
         }
 
         // This frame consumed the forced-full-redraw request (every pane was

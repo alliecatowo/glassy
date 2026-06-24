@@ -135,6 +135,32 @@ impl ApplicationHandler<UserEvent> for App {
             self.menu_open = true;
             self.force_full_redraw = true;
         }
+        // Headless: open the command palette at startup; GLASSY_PALETTE's value (if
+        // non-empty) pre-fills the query so the fuzzy filter can be captured.
+        if let Some(q) = std::env::var_os("GLASSY_PALETTE") {
+            self.open_palette(event_loop);
+            let q = q.to_string_lossy().to_string();
+            if !q.is_empty()
+                && let Some(p) = self.palette.as_mut()
+            {
+                p.query = q;
+                self.refilter_palette();
+            }
+            self.force_full_redraw = true;
+        }
+        // Headless: open the find bar at startup; GLASSY_SEARCH's value (if
+        // non-empty) is the query, so match highlighting can be captured.
+        if let Some(q) = std::env::var_os("GLASSY_SEARCH") {
+            self.open_search(event_loop);
+            let q = q.to_string_lossy().to_string();
+            if !q.is_empty()
+                && let Some(st) = self.search.as_mut()
+            {
+                st.query = q;
+            }
+            self.recompute_search();
+            self.force_full_redraw = true;
+        }
         // Headless: open N tabs at startup to capture the multi-tab toolbar.
         if let Ok(n) = std::env::var("GLASSY_TABS")
             && let Ok(n) = n.parse::<usize>()
@@ -383,6 +409,24 @@ impl ApplicationHandler<UserEvent> for App {
                     return;
                 }
 
+                // The command palette and the find bar own the keyboard while
+                // open: every key is routed to them (query edit, list nav, jump,
+                // Esc) and never reaches the child or the chrome shortcuts below.
+                // Checked before the Ctrl+Shift block so typing letters into the
+                // query isn't stolen by the clipboard/tab combos.
+                if event.state.is_pressed() && self.palette.is_some() {
+                    if self.handle_palette_key(&event.logical_key, event_loop) {
+                        return;
+                    }
+                    return; // consume everything while the palette is up
+                }
+                if event.state.is_pressed() && self.search.is_some() {
+                    if self.handle_search_key(&event.logical_key, event_loop) {
+                        return;
+                    }
+                    return; // consume everything while the find bar is up
+                }
+
                 // Ctrl+Shift clipboard combos are consumed by glassy and never
                 // reach the child. Intercepted before `encode_key` so the control
                 // byte for C/V isn't sent to the PTY.
@@ -409,6 +453,17 @@ impl ApplicationHandler<UserEvent> for App {
                             // Close the focused pane; falls back to closing the tab
                             // when the tab has only a single pane.
                             self.close_pane(event_loop);
+                            return;
+                        }
+                        // Ctrl+Shift+P opens the command palette (fuzzy action +
+                        // settings list). Ctrl+Shift+F opens the in-terminal find
+                        // bar. Both own the keyboard while open; handled below.
+                        "P" | "p" => {
+                            self.open_palette(event_loop);
+                            return;
+                        }
+                        "F" | "f" => {
+                            self.open_search(event_loop);
                             return;
                         }
                         // Split the focused pane: E = vertical (left|right),
@@ -682,6 +737,8 @@ impl ApplicationHandler<UserEvent> for App {
                 if self.settings_open
                     || self.help_open
                     || self.pane_menu_open.is_some()
+                    || self.palette.is_some()
+                    || self.search.is_some()
                 {
                     self.mark_dirty(event_loop);
                     return;
@@ -844,6 +901,34 @@ impl ApplicationHandler<UserEvent> for App {
                 if self.help_open {
                     return;
                 }
+
+                // The command palette owns the pointer: a left press on a listed
+                // row activates it; a press anywhere else (the scrim) closes it.
+                if self.palette.is_some() {
+                    if button == MouseButton::Left && pressed {
+                        let (mx, my) = (self.mouse_px.0 as f32, self.mouse_px.1 as f32);
+                        let hit = self
+                            .palette_rows
+                            .iter()
+                            .find(|(_, r)| gui::hit(*r, mx, my))
+                            .map(|(idx, _)| *idx);
+                        match hit {
+                            Some(idx) => self.palette_activate_index(idx, event_loop),
+                            None => self.close_palette(event_loop),
+                        }
+                    }
+                    self.held_button = None;
+                    return;
+                }
+
+                // The find bar owns the pointer too: a click outside the bottom bar
+                // is consumed (no terminal selection beneath the overlay). Clicking
+                // the bar itself is a no-op (text editing is keyboard-driven).
+                if self.search.is_some() {
+                    self.held_button = None;
+                    return;
+                }
+
                 if !pressed {
                     self.dragging_tab = None; // end any tab drag-reorder on release
                     // End any gutter drag; re-evaluate the cursor for the spot we
@@ -1192,6 +1277,12 @@ impl ApplicationHandler<UserEvent> for App {
         // dump it to disk, and exit.
         if let Some(deadline) = self.capture_deadline {
             if Instant::now() >= deadline {
+                // Headless search verification: the GLASSY_SEARCH hook runs in
+                // `resumed()` before the shell's output lands, so recompute the
+                // match list against the now-populated grid before capturing.
+                if self.search.is_some() {
+                    self.recompute_search();
+                }
                 let split = self.is_split();
                 self.render();
                 if let (Some(renderer), Some(path)) =

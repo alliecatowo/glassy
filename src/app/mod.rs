@@ -41,8 +41,12 @@ mod render;
 mod multipane;
 mod settings;
 mod event_loop;
+mod search;
+mod palette;
 
 pub(crate) use helpers::*;
+pub(crate) use search::SearchState;
+pub(crate) use palette::PaletteState;
 
 /// A runtime font-size adjustment requested via Ctrl +/-/0.
 #[derive(Clone, Copy)]
@@ -338,6 +342,18 @@ pub struct App {
     gui_click_edge: bool,
     /// Last instant the GUI animations were stepped, for dt computation.
     gui_anim_last: Instant,
+
+    /// In-terminal find bar (Ctrl+Shift+F). `Some` exactly while it is open; it
+    /// owns the keyboard and paints a bottom bar + match highlights. See
+    /// [`search`].
+    search: Option<SearchState>,
+    /// Command palette (Ctrl+Shift+P). `Some` exactly while it is open; it owns
+    /// the keyboard and paints a centered fuzzy action list. See [`palette`].
+    palette: Option<PaletteState>,
+    /// Filtered-row rects of the palette list from the last paint, for mouse
+    /// hover/click hit-testing. Each is `(filtered_index, rect)`. Rebuilt every
+    /// palette paint; empty when the palette is closed.
+    palette_rows: Vec<(usize, gui::Rect)>,
 }
 
 

@@ -75,6 +75,9 @@ impl App {
             gui_anims: std::collections::HashMap::new(),
             gui_click_edge: false,
             gui_anim_last: Instant::now(),
+            search: None,
+            palette: None,
+            palette_rows: Vec::new(),
         }
     }
 
