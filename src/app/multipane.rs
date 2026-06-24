@@ -75,7 +75,7 @@ impl App {
             .and_then(|p| p.pane_info.cwd.clone())
             .or_else(|| self.active_cwd.clone());
         let sb_git_branch: Option<String> = sb_cwd.as_deref()
-            .and_then(|p| crate::app::helpers::read_git_branch(p));
+            .and_then(crate::app::helpers::read_git_branch);
         let sb_progress = self.active_progress;
 
         // Tab-bar state snapshot (owned data) for the pixel-overlay painter, taken

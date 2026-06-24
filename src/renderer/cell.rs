@@ -54,18 +54,22 @@ impl Renderer {
 
     /// Get the effective padding on each side (physical px). Per-side overrides
     /// take precedence; otherwise the uniform `pad` is used.
+    #[allow(dead_code)]
     pub fn pad_top(&self) -> f32 {
         self.pad_top.unwrap_or(self.pad)
     }
 
+    #[allow(dead_code)]
     pub fn pad_bottom(&self) -> f32 {
         self.pad_bottom.unwrap_or(self.pad)
     }
 
+    #[allow(dead_code)]
     pub fn pad_left(&self) -> f32 {
         self.pad_left.unwrap_or(self.pad)
     }
 
+    #[allow(dead_code)]
     pub fn pad_right(&self) -> f32 {
         self.pad_right.unwrap_or(self.pad)
     }
@@ -506,10 +510,8 @@ impl Renderer {
                 return;
             }
         }
-        if is_powerline {
-            if self.draw_powerline(ch, origin_x, origin_y, fg, bg) {
-                return;
-            }
+        if is_powerline && self.draw_powerline(ch, origin_x, origin_y, fg, bg) {
+            return;
         }
 
         self.ensure_glyphs(ch, bold, italic);

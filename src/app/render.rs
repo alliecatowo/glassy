@@ -109,7 +109,7 @@ impl App {
             .and_then(|p| p.pane_info.cwd.clone())
             .or_else(|| self.active_cwd.clone()); // fallback to OSC 7 path
         let sb_git_branch: Option<String> = sb_cwd.as_deref()
-            .and_then(|p| crate::app::helpers::read_git_branch(p));
+            .and_then(crate::app::helpers::read_git_branch);
         let sb_progress = self.active_progress;
 
         // Settings-form inputs (whole-`self` method calls) snapshotted BEFORE the

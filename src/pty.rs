@@ -123,12 +123,12 @@ fn read_foreground_comm(shell_pid: u32) -> Option<String> {
                 let after = s.rfind(')')?;
                 let tokens: Vec<&str> = s[after + 1..].split_whitespace().collect();
                 let pg: u32 = tokens.get(2)?.parse().ok()?;
-                if pg == tpgid {
-                    if let Ok(comm) = std::fs::read_to_string(format!("/proc/{pid}/comm")) {
-                        let name = comm.trim().to_string();
-                        if !name.is_empty() {
-                            return Some(name);
-                        }
+                if pg == tpgid
+                    && let Ok(comm) = std::fs::read_to_string(format!("/proc/{pid}/comm"))
+                {
+                    let name = comm.trim().to_string();
+                    if !name.is_empty() {
+                        return Some(name);
                     }
                 }
             }

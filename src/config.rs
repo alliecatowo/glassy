@@ -540,7 +540,7 @@ fn apply_kv(key: &str, value: &str, raw: &mut RawConfig) -> Result<()> {
             // must be a non-negative integer.  Unknown tags are forwarded as-is
             // to cosmic-text and ignored by shaping engines that lack them.
             let features: Vec<String> = value
-                .split(|c: char| c == ',' || c == ' ')
+                .split([',', ' '])
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
                 .map(|token| {
@@ -891,7 +891,7 @@ fn parse_cli(args: impl Iterator<Item = String>, raw: &mut RawConfig) -> Result<
                 let v = next_value(&mut args, "--font-features")?;
                 // Same grammar as the config key: comma-or-space separated tags.
                 let features: Vec<String> = v
-                    .split(|c: char| c == ',' || c == ' ')
+                    .split([',', ' '])
                     .map(str::trim)
                     .filter(|s| !s.is_empty())
                     .map(str::to_string)

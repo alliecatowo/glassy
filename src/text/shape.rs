@@ -101,6 +101,7 @@ fn build_attrs<'a>(family: Family<'a>, bold: bool, italic: bool, features: &Font
 /// `FontFeatures` struct. Each entry is either:
 ///   - a bare 4-char tag, e.g. `"ss01"` (enabled, value = 1), or
 ///   - `"tag=N"` where N is a `u32`, e.g. `"calt=0"` (disabled).
+///
 /// Entries that cannot be parsed are logged and skipped.
 fn parse_font_features(raw: &[String]) -> FontFeatures {
     let mut ff = FontFeatures::new();
