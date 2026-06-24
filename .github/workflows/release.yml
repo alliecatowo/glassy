@@ -135,15 +135,15 @@ jobs:
   # -------------------------------------------------------------------------
   # macOS — universal .app bundle + .dmg (first-class artifact)
   #
-  # continue-on-error stays true until glassy's Linux-only deps are ported
-  # (winit/wgpu Wayland plumbing, etc.).  The job is written so it "just
-  # works" the moment `cargo build` goes green on macOS — flip
-  # continue-on-error to false then.
+  # Builds x86_64 + aarch64-apple-darwin universal binary with arboard
+  # target-gated to exclude Wayland/X11 dependencies. Produces .app bundle
+  # with Info.plist + .icns icon, then creates drag-to-Applications .dmg.
+  # Optional code signing supported via APPLE_CERTIFICATE + APPLE_IDENTITY
+  # secrets. Notarization not yet configured.
   # -------------------------------------------------------------------------
   build-macos:
     name: Build — macOS (.app + .dmg)
     runs-on: macos-latest
-    continue-on-error: true  # flip to false once macOS source-compat is merged
     steps:
       - uses: actions/checkout@v4
 
@@ -361,12 +361,14 @@ jobs:
           path: dist/
 
   # -------------------------------------------------------------------------
-  # Publish GitHub Release — runs after all builds; uses whatever succeeded.
+  # Publish GitHub Release — runs after all builds; includes macOS now
+  # that build-macos is no longer best-effort. Linux x86_64 is required;
+  # macos, linux-aarch64, and windows are optional (if they passed).
   # -------------------------------------------------------------------------
   publish:
     name: Publish GitHub Release
-    needs: [build-linux-x86_64]
-    # Allow optional jobs to fail without blocking the release.
+    needs: [build-linux-x86_64, build-macos]
+    # Publish if Linux x86_64 succeeded; allow optional jobs to fail.
     if: always() && needs.build-linux-x86_64.result == 'success'
     runs-on: ubuntu-latest
     steps:
@@ -426,14 +428,14 @@ jobs:
           prerelease: false
 
   # -------------------------------------------------------------------------
-  # Homebrew tap update (best-effort)
+  # Homebrew tap update (best-effort; requires tap repo to exist)
   # -------------------------------------------------------------------------
   update-homebrew:
     name: Update Homebrew tap
     needs: [publish]
     if: always() && needs.publish.result == 'success'
     runs-on: ubuntu-latest
-    continue-on-error: true  # tap repo may not exist yet
+    continue-on-error: true  # skip if HOMEBREW_TAP_TOKEN not configured
     steps:
       - uses: actions/checkout@v4
 
