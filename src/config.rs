@@ -102,6 +102,7 @@ struct RawConfig {
     theme_dark: Option<String>,
     status_bar: Option<bool>,
     pane_headers: Option<bool>,
+    word_separator: Option<String>,
     // Custom theme colors (hex format, e.g., "color.fg = #c0caf5")
     color_fg: Option<String>,
     color_bg: Option<String>,
@@ -190,6 +191,7 @@ impl RawConfig {
             theme_dark,
             status_bar: self.status_bar.unwrap_or(false),
             pane_headers: self.pane_headers.unwrap_or(true),
+            word_separator: self.word_separator.unwrap_or_default(),
         };
 
         Ok(Settings { config, theme })
@@ -395,6 +397,9 @@ fn apply_kv(key: &str, value: &str, raw: &mut RawConfig) -> Result<()> {
         "pane_headers" => {
             raw.pane_headers = Some(parse_bool(value, "pane_headers")?);
         }
+        "word_separator" => {
+            raw.word_separator = Some(value.to_string());
+        }
         // Custom theme colors: color.fg, color.bg, color.cursor, color.selection_bg, color.ansi0..15
         "color.fg" => {
             parse_hex_color(value)?; // Validate but store the string for later use
@@ -465,6 +470,139 @@ fn parse_shell(value: &str) -> Option<Shell> {
     Some(Shell::new(program, args))
 }
 
+/// Import a color theme from a TOML/YAML file (Alacritty-compatible or base16 format).
+/// Supports both inline Alacritty color tables and base16 palette arrays.
+fn import_theme_from_file(path: &str) -> Result<Theme> {
+    use std::fs;
+
+    let text = fs::read_to_string(path)
+        .with_context(|| format!("could not read theme file '{path}'"))?;
+
+    // Try to parse as TOML first (covers Alacritty format).
+    if let Ok(theme) = import_theme_toml(&text) {
+        return Ok(theme);
+    }
+
+    // Try YAML (base16, iTerm2, etc.)
+    if let Ok(theme) = import_theme_yaml(&text) {
+        return Ok(theme);
+    }
+
+    bail!("could not parse '{path}' as a valid theme file (TOML or YAML)")
+}
+
+/// Parse Alacritty TOML theme format (has [colors] section with various keys).
+fn import_theme_toml(text: &str) -> Result<Theme> {
+    // Simple TOML parser for just the colors section (don't want toml dependency).
+    let mut fg = None;
+    let mut bg = None;
+    let mut cursor = None;
+    let mut ansi16 = [None; 16];
+
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+
+        // Look for color definitions like: foreground = "#ffffff"
+        if let Some((key, value)) = line.split_once('=') {
+            let key = key.trim().to_lowercase();
+            let value = unquote(value.trim());
+
+            match key.as_str() {
+                "foreground" => fg = Some(parse_hex_color(value)?),
+                "background" => bg = Some(parse_hex_color(value)?),
+                "cursor" => cursor = Some(parse_hex_color(value)?),
+                k if k.starts_with("color") => {
+                    // Handle color0..color15
+                    if let Some(idx_str) = k.strip_prefix("color") {
+                        if let Ok(idx) = idx_str.parse::<usize>() {
+                            if idx < 16 {
+                                ansi16[idx] = Some(parse_hex_color(value)?);
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // Default values if not provided.
+    let fg = fg.unwrap_or(color::TOKYO_NIGHT.fg);
+    let bg = bg.unwrap_or(color::TOKYO_NIGHT.bg);
+    let cursor = cursor.unwrap_or(color::TOKYO_NIGHT.cursor);
+    let selection_bg = color::TOKYO_NIGHT.selection_bg;
+
+    // Fill any missing ANSI colors with Tokyo Night defaults.
+    let mut final_ansi = color::TOKYO_NIGHT.ansi16;
+    for (i, rgb) in ansi16.iter().enumerate() {
+        if let Some(c) = rgb {
+            final_ansi[i] = *c;
+        }
+    }
+
+    Ok(Theme {
+        fg,
+        bg,
+        cursor,
+        selection_bg,
+        ansi16: final_ansi,
+    })
+}
+
+/// Parse base16 YAML format (e.g., https://github.com/chriskempson/base16).
+/// Format: base00: "#ffffff" ... base0f: "#000000"
+fn import_theme_yaml(text: &str) -> Result<Theme> {
+    let mut colors = [None; 16];
+
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+
+        if let Some((key, value)) = line.split_once(':') {
+            let key = key.trim().to_lowercase();
+            let value = unquote(value.trim().trim_start_matches('"').trim_end_matches('"'));
+
+            if let Some(hex) = key.strip_prefix("base") {
+                if hex.len() == 2 {
+                    if let Ok(idx) = u8::from_str_radix(hex, 16) {
+                        if (idx as usize) < 16 {
+                            colors[idx as usize] = Some(parse_hex_color(value)?);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Map base16 palette (base00-0f) to standard terminal colors.
+    // base00=black, base01=red, ..., base0f=white (simplified mapping).
+    let mut ansi16 = color::TOKYO_NIGHT.ansi16;
+    for (i, color) in colors.iter().enumerate() {
+        if let Some(c) = color {
+            ansi16[i] = *c;
+        }
+    }
+
+    // Derive fg/bg from base05/base00 (text/background in base16).
+    let fg = colors[5].unwrap_or(color::TOKYO_NIGHT.fg);
+    let bg = colors[0].unwrap_or(color::TOKYO_NIGHT.bg);
+    let cursor = colors[7].unwrap_or(color::TOKYO_NIGHT.cursor); // base07 = white
+    let selection_bg = color::TOKYO_NIGHT.selection_bg; // Use default if not specified
+
+    Ok(Theme {
+        fg,
+        bg,
+        cursor,
+        selection_bg,
+        ansi16,
+    })
+}
+
 /// Parse CLI arguments, overriding fields in `raw`.
 ///
 /// Returns `Ok(true)` to continue launching, `Ok(false)` when `--help`/`--version`
@@ -473,8 +611,8 @@ fn parse_shell(value: &str) -> Option<Shell> {
 /// Recognized: `--font-size <pt>`, `--font-family <name>`, `--theme <name>`,
 /// `--opacity <f>`, `--padding <px>`, `--scrollback <n>`, `--bell-visual <bool>`,
 /// `--bell-audible <bool>`, `--follow-system <bool>`, `--theme-light <name>`,
-/// `--theme-dark <name>`, `-e/--command <cmd…>` (consumes the rest of the args
-/// as the program + its arguments), `-h/--help`, `-V/--version`.
+/// `--theme-dark <name>`, `--import-theme <path>`, `-e/--command <cmd…>` (consumes
+/// the rest of the args as the program + its arguments), `-h/--help`, `-V/--version`.
 fn parse_cli(args: impl Iterator<Item = String>, raw: &mut RawConfig) -> Result<bool> {
     let mut args = args.peekable();
     while let Some(arg) = args.next() {
@@ -486,6 +624,23 @@ fn parse_cli(args: impl Iterator<Item = String>, raw: &mut RawConfig) -> Result<
             "-V" | "--version" => {
                 println!("glassy {}", env!("CARGO_PKG_VERSION"));
                 return Ok(false);
+            }
+            "--import-theme" => {
+                let path = next_value(&mut args, "--import-theme")?;
+                let theme = import_theme_from_file(&path)?;
+                raw.color_fg = Some(format!("#{:02x}{:02x}{:02x}", theme.fg.r, theme.fg.g, theme.fg.b));
+                raw.color_bg = Some(format!("#{:02x}{:02x}{:02x}", theme.bg.r, theme.bg.g, theme.bg.b));
+                raw.color_cursor = Some(format!("#{:02x}{:02x}{:02x}", theme.cursor.r, theme.cursor.g, theme.cursor.b));
+                raw.color_selection_bg = Some(format!("#{:02x}{:02x}{:02x}", theme.selection_bg.r, theme.selection_bg.g, theme.selection_bg.b));
+                if raw.color_ansi.is_none() {
+                    raw.color_ansi = Some(Default::default());
+                }
+                if let Some(ref mut ansi) = raw.color_ansi {
+                    for (i, rgb) in theme.ansi16.iter().enumerate() {
+                        ansi[i] = Some(format!("#{:02x}{:02x}{:02x}", rgb.r, rgb.g, rgb.b));
+                    }
+                }
+                return Ok(true);
             }
             "--font-size" => {
                 let v = next_value(&mut args, "--font-size")?;
@@ -547,6 +702,9 @@ fn parse_cli(args: impl Iterator<Item = String>, raw: &mut RawConfig) -> Result<
                 let v = next_value(&mut args, "--pane-headers")?;
                 raw.pane_headers = Some(parse_bool(&v, "--pane-headers")?);
             }
+            "--word-separator" => {
+                raw.word_separator = Some(next_value(&mut args, "--word-separator")?);
+            }
             // `-e`/`--command`: everything after it is the program + its args
             // (the conventional terminal contract). Consume the rest verbatim.
             "-e" | "--command" => {
@@ -592,6 +750,8 @@ OPTIONS:
     --theme-dark <NAME>    Theme used in system Dark mode (e.g. tokyo-night)
     --status-bar <BOOL>    Show status bar at the bottom (default false)
     --pane-headers <BOOL>  Show per-pane title bars in splits (default true)
+    --word-separator <STR> Extra word separators for text selection
+    --import-theme <PATH>  Import Alacritty/base16 theme from TOML/YAML file
     -e, --command <CMD>    Run CMD (with the remaining args) instead of the shell
     -h, --help             Print this help and exit
     -V, --version          Print version and exit
@@ -601,7 +761,7 @@ CONFIG FILE:
     macOS: ~/Library/Application Support/glassy/glassy.conf
     KEY=VALUE lines: font_family, font_size, theme, opacity, padding,
     shell, scrollback, bell_visual, bell_audible, follow_system,
-    theme_light, theme_dark, status_bar, pane_headers, color.*. CLI flags override the file.",
+    theme_light, theme_dark, status_bar, pane_headers, word_separator, color.*. CLI flags override the file.",
         env!("CARGO_PKG_VERSION")
     );
 }

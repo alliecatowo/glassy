@@ -525,3 +525,70 @@ pub(crate) fn build_grapheme(cells: &[Indexed<&Cell>], start: usize, line: i32) 
 /// Physical-pixel step per Ctrl +/- font-size adjustment.
 pub(crate) const FONT_STEP_PX: f32 = 2.0;
 
+/// Apply live-reloadable config settings. Called when UserEvent::ConfigReload is
+/// received (config file was modified). Only opacity/bell_visual/status_bar/
+/// pane_headers/word_separator apply live; font changes require a full reload.
+impl App {
+    pub(crate) fn apply_config_reload(&mut self, new_config: &Config) {
+        // Opacity changes take effect immediately in the renderer.
+        if new_config.opacity != self.config.opacity {
+            self.config.opacity = new_config.opacity;
+            if let Some(r) = &mut self.renderer {
+                r.set_opacity(self.config.opacity);
+            }
+            self.dirty = true;
+        }
+
+        // Bell flags can be toggled without a reload.
+        if new_config.bell_visual != self.config.bell_visual {
+            self.config.bell_visual = new_config.bell_visual;
+        }
+        if new_config.bell_audible != self.config.bell_audible {
+            self.config.bell_audible = new_config.bell_audible;
+        }
+
+        // Status bar toggle: resize layout and force a full redraw.
+        // Note: we can't call handle_resize here since it needs the ActiveEventLoop,
+        // so we rely on the next window event to trigger a resize update naturally.
+        if new_config.status_bar != self.config.status_bar {
+            self.config.status_bar = new_config.status_bar;
+            self.dirty = true;
+            self.force_full_redraw = true;
+        }
+
+        // Pane headers toggle: affects split panes and forces a redraw.
+        if new_config.pane_headers != self.config.pane_headers {
+            self.config.pane_headers = new_config.pane_headers;
+            self.dirty = true;
+            self.force_full_redraw = true;
+        }
+
+        // Word separator for selection: just update the config.
+        if new_config.word_separator != self.config.word_separator {
+            self.config.word_separator = new_config.word_separator.clone();
+        }
+
+        // Theme: hot-swap the global theme. If follow_system is on, also recompute
+        // the active theme based on the system preference.
+        if new_config.follow_system {
+            self.config.follow_system = new_config.follow_system;
+            self.config.theme_light = new_config.theme_light.clone();
+            self.config.theme_dark = new_config.theme_dark.clone();
+            if let Some(window) = &self.window {
+                if self.apply_system_theme(window.theme()) {
+                    self.force_full_redraw = true;
+                    self.dirty = true;
+                }
+            }
+        } else if new_config.theme != self.config.theme {
+            self.config.theme = new_config.theme.clone();
+            self.force_full_redraw = true;
+            self.dirty = true;
+            // Theme is a global, so we need to notify the color module.
+            if let Some(theme) = crate::color::theme_by_name(&self.config.theme) {
+                crate::color::set_theme(theme);
+            }
+        }
+    }
+}
+

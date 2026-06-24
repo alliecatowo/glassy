@@ -91,6 +91,10 @@ pub struct Config {
     /// top-rail on each pane when the tab is split. Default true. When false,
     /// panes use their full height with no header chrome.
     pub pane_headers: bool,
+    /// Word separator characters for text selection. Whitespace chars from this string
+    /// (plus the default whitespace + punctuation) are used as word boundaries.
+    /// Empty string means use defaults only.
+    pub word_separator: String,
 }
 
 /// A tab's split layout: the tiling tree (whose leaf ids are pty/pane ids) plus

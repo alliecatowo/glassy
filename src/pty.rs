@@ -61,6 +61,8 @@ pub enum UserEvent {
     /// it, runs the bytes through `formatter` (which produces the reply escape
     /// sequence), and writes the result back over the `PtyWrite` path.
     ClipboardLoad(usize, ClipboardType, ClipboardFormatter),
+    /// The config file was modified; reload from disk.
+    ConfigReload,
 }
 
 /// Wraps the `ClipboardLoad` reply-builder closure so `UserEvent` can keep its
