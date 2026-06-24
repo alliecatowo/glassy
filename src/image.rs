@@ -75,12 +75,25 @@ pub struct GraphicsCommand {
     pub rows: u32,
 }
 
+/// Maximum number of simultaneously-pending (chunked, `m=1`) kitty image streams.
+/// A single kitty image may arrive in many APC chunks; we key them by id. Bounding
+/// this prevents a malicious sequence from opening thousands of never-finished
+/// streams and growing `pending` without limit.
+const MAX_PENDING_STREAMS: usize = 64;
+
+/// Maximum accumulated base64-decoded bytes per pending stream. A single kitty
+/// image is at most MAX_IMAGE_DIM²·4 bytes; capping here prevents buffering an
+/// arbitrarily large payload before we even know the format.
+const MAX_PENDING_PAYLOAD_BYTES: usize = MAX_IMAGE_BYTES;
+
 /// Accumulates kitty graphics commands across APC chunks (`m=1` continuations)
 /// and yields a `GraphicsCommand` once a command completes (`m=0`).
 #[derive(Default)]
 pub struct KittyParser {
     /// Pending payloads keyed by image id, plus the controls from the first chunk.
     pending: HashMap<u32, Pending>,
+    /// Monotonic counter for assigning synthetic ids to `i=0` streams.
+    next_anon_id: u32,
 }
 
 struct Pending {
@@ -102,18 +115,67 @@ impl KittyParser {
             Some((c, p)) => (c, p),
             None => (body, ""),
         };
-        let controls = Controls::parse(control_str);
+        let mut controls = Controls::parse(control_str);
         let chunk = b64_decode(payload_b64.trim());
+
+        // An `i=0` (unset) id means "this is a standalone, anonymous image".
+        // Without synthetic ids, every i=0 chunk would share the same pending
+        // slot — causing unrelated images to merge their payloads. We assign a
+        // fresh monotonic id on the *first* chunk of each i=0 stream (when
+        // `more=true` or the command is self-contained).
+        //
+        // The anonymous id range lives just below SIXEL_ID_BASE (0x4000_0000+)
+        // so it never collides with app-assigned kitty ids or sixel ids.
+        if controls.id == 0 {
+            // An `i=0` command carries no stable id. Without remapping, every
+            // i=0 chunk shares the same HashMap slot and images merge across
+            // unrelated transmissions.
+            //
+            // Strategy: if there is already an open anonymous stream (a pending
+            // entry in the ANON_ID_BASE range — meaning a prior m=1 chunk was
+            // received), continue it. Otherwise allocate a fresh synthetic id.
+            // This correctly handles:
+            //   - standalone i=0 command (m=0): no prior slot → fresh id.
+            //   - multi-chunk i=0 stream: first m=1 → fresh id; subsequent
+            //     m=1/m=0 chunks → reuse that slot (the only open anon slot).
+            let open_anon = self
+                .pending
+                .keys()
+                .copied()
+                .filter(|&k| k >= ANON_ID_BASE && k < SIXEL_ID_BASE)
+                .max(); // take highest (most recent) open anon slot
+            controls.id = match open_anon {
+                Some(existing) => existing, // continue in-progress anon stream
+                None => {
+                    // Start a new anon stream with a fresh id.
+                    let offset = self.next_anon_id;
+                    self.next_anon_id = self.next_anon_id.wrapping_add(1);
+                    ANON_ID_BASE.wrapping_add(offset)
+                }
+            };
+        }
 
         let id = controls.id;
         let more = controls.more;
+
+        // If we are about to start a new stream (id not yet in pending) and the
+        // pending map is already full, evict the oldest entry first so we never
+        // exceed MAX_PENDING_STREAMS. Do this before touching `entry` so the
+        // borrow checker doesn't see two mutable borrows of `self.pending`.
+        if !self.pending.contains_key(&id) && self.pending.len() >= MAX_PENDING_STREAMS {
+            if let Some(&oldest) = self.pending.keys().min() {
+                self.pending.remove(&oldest);
+            }
+        }
 
         // Append to (or start) the pending buffer for this id.
         let entry = self.pending.entry(id).or_insert_with(|| Pending {
             controls: controls.clone(),
             payload: Vec::new(),
         });
-        entry.payload.extend_from_slice(&chunk);
+        // Clamp per-stream payload to avoid OOM from an oversized i=1 flood.
+        let remaining = MAX_PENDING_PAYLOAD_BYTES.saturating_sub(entry.payload.len());
+        entry.payload.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
 
         if more {
             return None; // wait for further chunks
@@ -182,7 +244,12 @@ impl Controls {
 
 /// Maximum accepted image dimension (px) per side for raw/sixel decoding. Guards
 /// against malformed escape sequences declaring absurd sizes (overflow / OOM).
-const MAX_IMAGE_DIM: u32 = 16384;
+/// At 4096 px/side the worst-case RGBA allocation is 4096²·4 = 64 MB per image —
+/// a tight but workable cap.
+const MAX_IMAGE_DIM: u32 = 4096;
+
+/// Maximum total bytes for a single decoded RGBA image (64 MB = MAX_IMAGE_DIM²·4).
+const MAX_IMAGE_BYTES: usize = (MAX_IMAGE_DIM as usize) * (MAX_IMAGE_DIM as usize) * 4;
 
 /// Maximum sixel canvas dimension (px) per side. Tighter than [`MAX_IMAGE_DIM`]
 /// because sixel RLE (`!count`) can amplify a tiny stream into a huge canvas, so
@@ -232,10 +299,23 @@ fn decode_png(bytes: &[u8]) -> Option<DecodedImage> {
     // Normalize to 8-bit channels: expand palette/low-bit-depth and tRNS, and
     // strip 16-bit down to 8 so the color-type match below always sees 8bpp.
     decoder.set_transformations(png::Transformations::normalize_to_color8());
+    // Limit total bytes the decoder may allocate to prevent OOM from crafted PNGs.
+    decoder.set_limits(png::Limits { bytes: MAX_IMAGE_BYTES });
     let mut reader = decoder.read_info().ok()?;
+    // Validate header dimensions before allocating the output buffer.
+    {
+        let info = reader.info();
+        if info.width > MAX_IMAGE_DIM || info.height > MAX_IMAGE_DIM {
+            return None;
+        }
+    }
     let mut buf = vec![0u8; reader.output_buffer_size()];
     let info = reader.next_frame(&mut buf).ok()?;
     let (w, h) = (info.width, info.height);
+    // Belt-and-suspenders: verify decoded dims even though we checked the header.
+    if w > MAX_IMAGE_DIM || h > MAX_IMAGE_DIM {
+        return None;
+    }
     let data = &buf[..info.buffer_size()];
     let rgba = match info.color_type {
         png::ColorType::Rgba => data.to_vec(),
@@ -554,6 +634,18 @@ impl ImageStore {
     pub fn apply(&mut self, cmd: GraphicsCommand) -> Option<TapEvent> {
         if let Some(image) = cmd.image {
             self.by_id.insert(cmd.id, image);
+            // Cap kitty images (below SIXEL_ID_BASE) at MAX_KITTY_IMAGES. Evict
+            // numerically-lowest id (oldest) plus any placements that reference it.
+            let kitty_count =
+                self.by_id.keys().filter(|&&k| k < SIXEL_ID_BASE).count();
+            if kitty_count > MAX_KITTY_IMAGES {
+                if let Some(&oldest) =
+                    self.by_id.keys().filter(|&&k| k < SIXEL_ID_BASE).min()
+                {
+                    self.by_id.remove(&oldest);
+                    self.placements.retain(|p| p.id != oldest);
+                }
+            }
             self.revision += 1;
         }
         match cmd.action {
@@ -607,9 +699,13 @@ impl ImageStore {
 
     /// Anchor an image at a screen cell with its requested cell size. Ignored if
     /// the id has no stored pixels (e.g. a display of a never-transmitted id).
+    /// Caps the placement list at [`MAX_PLACEMENTS`] by dropping the oldest entry.
     pub fn place(&mut self, id: u32, row: i32, col: usize, cols: u32, rows: u32) {
         if !self.by_id.contains_key(&id) {
             return;
+        }
+        if self.placements.len() >= MAX_PLACEMENTS {
+            self.placements.remove(0);
         }
         self.placements.push(Placement { id, row, col, cols, rows });
         self.revision += 1;
@@ -632,6 +728,13 @@ impl ImageStore {
     }
 }
 
+/// Maximum bytes buffered per APC/DCS/OSC accumulation buffer in [`StreamTap`].
+/// A single kitty or sixel payload should never exceed one decoded image worth of
+/// base64 (≈ 87 MB at 4096² but almost always far smaller); we cap at 1 MB which
+/// is generous for all realistic sequences. Bytes beyond the cap are simply
+/// dropped — the sequence will fail to decode cleanly rather than OOM the process.
+const TAP_BUF_CAP: usize = 1 << 20; // 1 MiB
+
 /// Extracts kitty-graphics APC sequences from a PTY byte stream, feeding them to
 /// a [`KittyParser`] (and an [`ImageStore`]) while returning the remaining bytes
 /// for the VT parser. State persists across reads, so a sequence split across
@@ -652,14 +755,26 @@ pub struct StreamTap {
     next_sixel_id: u32,
 }
 
+/// Synthetic ids for anonymous (`i=0`) kitty streams live in this range, well
+/// above typical app-assigned ids and below the sixel range.
+const ANON_ID_BASE: u32 = 0x4000_0000;
+
 /// Sixel images have no protocol id, so they get synthetic ids from a high range
-/// that cannot collide with app-chosen kitty ids in normal use.
+/// that cannot collide with app-chosen kitty ids or anonymous kitty ids.
 const SIXEL_ID_BASE: u32 = 0x8000_0000;
 
 /// Max number of decoded sixel images retained at once. Sixels are never
 /// redisplayed, so old ones are evicted oldest-first — bounds memory for sixel
 /// animations/video while keeping plenty of recent frames available.
 const MAX_SIXEL_IMAGES: usize = 64;
+
+/// Max number of kitty (non-sixel) images in `ImageStore::by_id`. When exceeded,
+/// the numerically-lowest id (oldest assigned) is evicted plus its placements.
+const MAX_KITTY_IMAGES: usize = 256;
+
+/// Max number of placements recorded at once. When exceeded the oldest (index 0)
+/// is dropped before the new one is appended, keeping the list bounded.
+const MAX_PLACEMENTS: usize = 1024;
 
 /// One ordered item produced by [`StreamTap::process`]: either VT bytes for the
 /// parser, or a point at which an image should be displayed (anchored at the
@@ -762,24 +877,29 @@ impl StreamTap {
                     } else if b == 0x07 {
                         finish!(); // BEL terminator
                         self.state = TapState::Normal;
-                    } else {
+                    } else if self.apc.len() < TAP_BUF_CAP {
                         self.apc.push(b);
                     }
+                    // Bytes beyond cap are silently dropped; the sequence will fail
+                    // to decode but the process won't OOM.
                 }
                 TapState::ApcEscape => {
                     if b == b'\\' {
                         finish!(); // ST terminator (ESC \)
                         self.state = TapState::Normal;
                     } else {
-                        self.apc.push(0x1b); // ESC was body, not terminator
-                        self.apc.push(b);
+                        // ESC was body, not terminator — push both if room.
+                        if self.apc.len() + 1 < TAP_BUF_CAP {
+                            self.apc.push(0x1b);
+                            self.apc.push(b);
+                        }
                         self.state = TapState::Apc;
                     }
                 }
                 TapState::Dcs => {
                     if b == 0x1b {
                         self.state = TapState::DcsEscape;
-                    } else {
+                    } else if self.dcs.len() < TAP_BUF_CAP {
                         self.dcs.push(b);
                     }
                 }
@@ -805,8 +925,11 @@ impl StreamTap {
                         }
                         self.state = TapState::Normal;
                     } else {
-                        self.dcs.push(0x1b); // ESC was body, not terminator
-                        self.dcs.push(b);
+                        // ESC was body, not terminator — push both if room.
+                        if self.dcs.len() + 1 < TAP_BUF_CAP {
+                            self.dcs.push(0x1b);
+                            self.dcs.push(b);
+                        }
                         self.state = TapState::Dcs;
                     }
                 }
@@ -823,8 +946,10 @@ impl StreamTap {
                         }
                         self.state = TapState::Normal;
                     } else {
-                        out.push(b); // mirror body byte to the parser
-                        self.osc.push(b); // and observe it for OSC 7
+                        out.push(b); // mirror body byte to the parser always
+                        if self.osc.len() < TAP_BUF_CAP {
+                            self.osc.push(b); // observe for OSC 7 only while under cap
+                        }
                     }
                 }
                 TapState::OscEscape => {
@@ -841,8 +966,10 @@ impl StreamTap {
                     } else {
                         out.push(0x1b); // ESC was body, not terminator
                         out.push(b);
-                        self.osc.push(0x1b);
-                        self.osc.push(b);
+                        if self.osc.len() + 1 < TAP_BUF_CAP {
+                            self.osc.push(0x1b);
+                            self.osc.push(b);
+                        }
                         self.state = TapState::Osc;
                     }
                 }
@@ -923,17 +1050,17 @@ fn parse_osc7_cwd(body: &[u8]) -> Option<std::path::PathBuf> {
 /// Whether an OSC 7 `file://` authority refers to the local machine: empty,
 /// `localhost`, or the current hostname (case-insensitive). Remote hosts are
 /// rejected so a cwd from another machine is never used to spawn a local shell.
+///
+/// Hostname is read from `/proc/sys/kernel/hostname` only — never from `$HOSTNAME`
+/// which is a user-controlled environment variable and could be spoofed by a
+/// malicious program running in the terminal.
 fn host_is_local(host: &str) -> bool {
     if host.is_empty() || host.eq_ignore_ascii_case("localhost") {
         return true;
     }
-    std::env::var("HOSTNAME")
+    std::fs::read_to_string("/proc/sys/kernel/hostname")
         .ok()
-        .or_else(|| {
-            std::fs::read_to_string("/proc/sys/kernel/hostname")
-                .ok()
-                .map(|s| s.trim().to_string())
-        })
+        .map(|s| s.trim().to_string())
         .is_some_and(|h| {
             // Match either the full hostname or its short (pre-dot) form.
             h.eq_ignore_ascii_case(host)
@@ -1308,5 +1435,54 @@ mod tests {
         store.delete(5);
         assert_eq!(store.placements().len(), 0); // placement gone
         assert!(store.image(5).is_some()); // pixels retained for redisplay
+    }
+
+    #[test]
+    fn id0_streams_get_distinct_synthetic_ids() {
+        // Two consecutive i=0 images must not merge their payloads.
+        // Each is a 1x1 RGBA pixel: red then green.
+        let mut p = KittyParser::new();
+        // Red pixel: base64 of [255,0,0,255] = "/wAA/w=="
+        let cmd1 = p.feed(b"a=T,f=32,s=1,v=1,i=0;/wAA/w==").expect("first command");
+        // Green pixel: base64 of [0,255,0,255] = "AP8A/w=="
+        let cmd2 = p.feed(b"a=T,f=32,s=1,v=1,i=0;AP8A/w==").expect("second command");
+        // The ids assigned must be distinct.
+        assert_ne!(cmd1.id, cmd2.id, "i=0 images must get distinct synthetic ids");
+        let img1 = cmd1.image.expect("first image decoded");
+        let img2 = cmd2.image.expect("second image decoded");
+        assert_eq!(img1.rgba, vec![255, 0, 0, 255], "first image should be red");
+        assert_eq!(img2.rgba, vec![0, 255, 0, 255], "second image should be green");
+    }
+
+    #[test]
+    fn placements_are_bounded() {
+        // Placements must not grow past MAX_PLACEMENTS; old ones are dropped.
+        let mut store = ImageStore::new();
+        let img = DecodedImage { width: 1, height: 1, rgba: vec![1, 2, 3, 4] };
+        store.by_id.insert(1, img);
+        for i in 0..(MAX_PLACEMENTS + 10) as i32 {
+            store.place(1, i, 0, 0, 0);
+        }
+        assert_eq!(store.placements().len(), MAX_PLACEMENTS);
+        // The most recently placed row must be present; the very first must be gone.
+        assert_eq!(store.placements().last().unwrap().row, MAX_PLACEMENTS as i32 + 9);
+    }
+
+    #[test]
+    fn png_size_limit_rejects_oversized_declared_dim() {
+        // A PNG that declares dimensions beyond MAX_IMAGE_DIM must be rejected.
+        // We construct a valid PNG but with an intentionally oversized header.
+        // Because max dim is now 4096, a 4097x1 PNG should be rejected.
+        // Build a minimal 4097x1 RGBA PNG.
+        let mut png_bytes = Vec::new();
+        {
+            let mut enc = png::Encoder::new(&mut png_bytes, MAX_IMAGE_DIM + 1, 1);
+            enc.set_color(png::ColorType::Rgba);
+            enc.set_depth(png::BitDepth::Eight);
+            let mut w = enc.write_header().unwrap();
+            let row = vec![0u8; (MAX_IMAGE_DIM as usize + 1) * 4];
+            w.write_image_data(&row).unwrap();
+        }
+        assert!(decode_png(&png_bytes).is_none(), "oversized PNG must be rejected");
     }
 }
