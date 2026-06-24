@@ -1,6 +1,6 @@
 .\" Man page for glassy -- a minimal GPU-accelerated terminal emulator.
 .\" Render locally with:  man ./extra/glassy.1
-.TH GLASSY 1 "2026-06-20" "glassy" "User Commands"
+.TH GLASSY 1 "2026-06-24" "glassy" "User Commands"
 .SH NAME
 glassy \- a minimal, GPU-accelerated terminal emulator
 .SH SYNOPSIS
@@ -10,51 +10,55 @@ glassy \- a minimal, GPU-accelerated terminal emulator
 .IR COMMAND " [" ARGS ...]]
 .SH DESCRIPTION
 .B glassy
-is a small, fast, GPU-accelerated terminal emulator written in Rust. It draws
-the grid with an instanced
+is a small, fast, GPU-accelerated terminal emulator written in Rust.
+It draws the terminal grid with an instanced
 .B wgpu
-renderer fed by a dynamic glyph atlas, supports 24-bit truecolor, color emoji
-and CJK fallback, procedural box-drawing, text decorations, mouse reporting,
-selection, clipboard, scrollback, OSC 8 hyperlinks, tabs, inline images (the
-kitty graphics protocol and sixel), live-switchable themes, and in-app
-settings (\fBCtrl+,\fR) and help (\fBF1\fR) overlays.
+renderer fed by a dynamic glyph atlas, and stays at 0% idle CPU by
+rendering strictly on demand and only re-rasterizing the cells that
+actually changed.
 .PP
-Rendering is on-demand and damage-based: with nothing changing on screen glassy
-issues no frames and consumes no CPU, and when the screen does change only the
-cells that actually changed are re-rasterized.
-.PP
-Configuration is read from a simple
-.I KEY=VALUE
-file (see
-.B CONFIGURATION
-below); command-line options override the file.
+Key capabilities include: 24-bit truecolor and 256-color, color emoji
+and CJK fallback, procedural box-drawing, text decorations, mouse
+reporting, text selection, clipboard, scrollback, tabs (drag to reorder,
+double-click to rename, activity dots), split panes (resize + pane
+headers), inline images (kitty graphics protocol and sixel), real-GUI
+chrome (settings form, command palette, in-terminal search, help overlay,
+menus), 10 live-switchable themes including two light themes,
+follow-system light/dark, custom color overrides, theme import, kitty
+keyboard protocol levels 1\[en]5, DECCKM, modifyOtherKeys, synchronized
+output (DECSET 2026), OSC 7/8/9/52/133 shell integration, URL detection,
+session restore, named profiles, config hot-reload, ligatures,
+OpenType font features, Powerline glyphs, status bar, configurable
+pane headers, per-side padding, fullscreen/maximize, iGPU-default plus
+.B GLASSY_GPU
+override, and release packages for deb/rpm/AUR/Flatpak/Homebrew/dmg.
 .SH OPTIONS
 .TP
 .BI \-\-font\-size " PT"
-Font size in points. Must be a positive number.
+Font size in points. Must be a positive number. Default:
+.BR 14 .
 .TP
 .BI \-\-font\-family " NAME"
 Font family name, or a path to a font file.
 .TP
 .BI \-\-theme " NAME"
-Color theme. One of
-.BR tokyo\-night " (default), " catppuccin\-mocha ", " catppuccin\-macchiato ", "
-.BR gruvbox\-dark ", " dracula ", " nord ", " solarized\-dark ", or " rose\-pine .
-An unknown name falls back to Tokyo Night with a warning. The theme can also be
-changed live in the settings overlay (\fBCtrl+,\fR).
+Color theme. See
+.B THEMES
+below. Default:
+.BR tokyo-night .
+An unknown name falls back to Tokyo Night with a warning.
 .TP
 .BI \-\-opacity " F"
-Window opacity as a float from
-.B 0.0
-(fully transparent) to
-.B 1.0
-(fully opaque). Values are clamped to that range.
+Window background opacity, 0.0 (fully transparent) to 1.0 (fully opaque).
+Clamped to [0,\|1]. Default:
+.BR 0.92 .
 .TP
 .BI \-\-padding " PX"
-Grid inset padding in logical pixels. Must be \[>=] 0.
+Grid inset on all sides in logical pixels (\[>=] 0).
 .TP
 .BI \-\-scrollback " N"
-Number of lines of scrollback history to retain.
+Lines of scrollback history. Default:
+.BR 10000 .
 .TP
 .BI \-\-bell\-visual " BOOL"
 Flash the window on the terminal bell. Default
@@ -67,14 +71,83 @@ Emit a soft beep on the terminal bell. Default
 .BR false .
 Requires a build with the
 .B bell\-audio
-feature. Accepts the same boolean spellings as
-.BR \-\-bell\-visual .
+feature.
+.TP
+.BI \-\-follow\-system " BOOL"
+Track the OS light/dark color scheme. When true, the active theme is
+chosen from
+.B \-\-theme\-light
+or
+.B \-\-theme\-dark
+according to the system preference. Default
+.BR false .
+.TP
+.BI \-\-theme\-light " NAME"
+Theme used in system Light mode when
+.B \-\-follow\-system
+is on. Default
+.BR rose\-pine\-dawn .
+.TP
+.BI \-\-theme\-dark " NAME"
+Theme used in system Dark mode when
+.B \-\-follow\-system
+is on. Default
+.BR tokyo\-night .
+.TP
+.BI \-\-import\-theme " PATH"
+Import a color theme from an Alacritty\-compatible TOML file or a base16
+YAML file.
+.TP
+.BI \-\-status\-bar " BOOL"
+Show the status bar at the bottom. Default
+.BR false .
+.TP
+.BI \-\-pane\-headers " BOOL"
+Show per-pane title bars (with the close box and split menu) when the
+tab is split. Default
+.BR true .
+.TP
+.BI \-\-ligatures " BOOL"
+Enable OpenType
+.B liga
+ligature shaping across cell runs. Default
+.BR false .
+.TP
+.BI \-\-font\-features " LIST"
+Comma- or space-separated list of OpenType feature tags to force on or
+off, e.g.
+.BR "ss01,calt=0" .
+Each entry is a bare 4-char tag (enable) or
+.BI tag = N
+(explicit value; 0 = disable).
+.TP
+.BI \-\-word\-separator " STR"
+Extra characters treated as word boundaries during double-click
+selection.
+.TP
+.BI \-\-cwd " PATH"
+Working directory for the first tab's shell.
+.TP
+.BI \-\-restore\-session " [BOOL]"
+Restore the previous session's tabs, splits, and working directories.
+Bare
+.B \-\-restore\-session
+is equivalent to
+.BR \-\-restore\-session\~true .
+Default
+.BR false .
+.TP
+.BI \-\-profile " NAME"
+Activate a
+.B [profile.NAME]
+section from the config file. Profile keys are overlaid before CLI
+flags, so CLI flags still win.
 .TP
 .BI \-e ", " \-\-command " COMMAND " [ ARGS ...]
 Run
 .I COMMAND
-(with the remaining arguments) instead of the login shell. This consumes the
-rest of the command line verbatim, so it must come last.
+(with the remaining arguments) instead of the login shell. This consumes
+the rest of the command line, so it must come last.
 .TP
 .BR \-h ", " \-\-help
 Print a usage summary and exit.
@@ -87,95 +160,156 @@ reads
 .I $XDG_CONFIG_HOME/glassy/glassy.conf
 (falling back to
 .IR ~/.config/glassy/glassy.conf ).
+On macOS:
+.IR "~/Library/Application Support/glassy/glassy.conf" .
 The file is a list of
 .I KEY=VALUE
 lines. Blank lines and lines beginning with
 .B #
 or
 .B ;
-are ignored. Surrounding whitespace and a single layer of matching single or
-double quotes are stripped from values. Command-line options override the file.
+are ignored. Surrounding whitespace and one layer of matching quotes are
+stripped from values. Command-line options override the file.
 .PP
-Recognized keys:
+Recognized keys (defaults in brackets):
 .TP
 .B font_family
-Font family name, or a path to a font file.
+Font family name or path to a font file. [FiraCode Nerd Font Mono]
 .TP
 .B font_size
-Font size in points (positive number). Default
-.BR 14 .
+Font size in points. [14]
 .TP
 .B theme
-Color theme:
-.BR tokyo\-night ", " catppuccin\-mocha ", " catppuccin\-macchiato ", " gruvbox\-dark ", "
-.BR dracula ", " nord ", " solarized\-dark ", or " rose\-pine .
-Default
-.BR tokyo\-night .
+Active color theme. See
+.B THEMES
+below. [tokyo-night]
 .TP
 .B opacity
-Window opacity from
-.B 0.0
-to
-.BR 1.0 .
-Default
-.BR 0.92 .
+Window background opacity 0.0\[en]1.0. [0.92]
 .TP
 .B padding
-Grid inset in logical pixels (\[>=] 0).
+Uniform grid inset in logical px (\[>=] 0). [6]
+.TP
+.BR padding_top ", " padding_bottom ", " padding_left ", " padding_right
+Per-side padding overrides. When set, override the uniform
+.B padding
+for that side.
 .TP
 .B shell
-Program plus arguments to run instead of the login shell, e.g.
+Program plus arguments, e.g.
 .IR "/usr/bin/zsh -l" .
+[login shell]
 .TP
 .B scrollback
-Lines of scrollback history. Default
-.BR 10000 .
+Lines of scrollback history (0\[en]1000000). [10000]
 .TP
 .B bell_visual
-Flash the window on the bell. Default
-.BR true .
+Flash the window on the terminal bell. [true]
 .TP
 .B bell_audible
-Soft beep on the bell. Default
-.BR false " (needs the " bell\-audio " build)."
+Soft beep on the bell (needs
+.B bell\-audio
+build). [false]
+.TP
+.B follow_system
+Track the OS light/dark color scheme. [false]
+.TP
+.B theme_light
+Theme used when the system is in Light mode. [rose-pine-dawn]
+.TP
+.B theme_dark
+Theme used when the system is in Dark mode. [tokyo-night]
+.TP
+.B status_bar
+Show the status bar at the bottom. [false]
+.TP
+.B pane_headers
+Show per-pane title bars in splits. [true]
+.TP
+.B ligatures
+Enable OpenType
+.B liga
+shaping across cell runs. [false]
+.TP
+.B font_features
+Comma- or space-separated OpenType feature tags to force on/off,
+e.g.\&
+.BR "ss01, calt=0" .
+[empty]
+.TP
+.B word_separator
+Extra characters treated as word boundaries for double-click selection.
+[empty]
+.TP
+.B cwd
+Initial working directory for the first tab's shell.
+.TP
+.B restore_session
+Restore the previous session's tabs/splits/cwds on launch. [false]
 .PP
-Example
-.IR glassy.conf :
+Custom color overrides (6-digit hex, with or without leading
+.BR # ):
+.TP
+.BR color.fg ", " color.bg ", " color.cursor ", " color.selection_bg
+Override the theme's corresponding special color.
+.TP
+.BI color.ansi N
+Override ANSI palette entry
+.I N
+(0\[en]15).
+.SS PROFILES
+Named profiles live in
+.B [profile.NAME]
+sections. Any top-level key (including
+.B color.*
+overrides) is valid inside a profile. Activate a profile with
+.BR \-\-profile\~NAME .
+Example:
 .PP
 .RS
 .EX
-font_family  = FiraCode Nerd Font Mono
-font_size    = 14
-theme        = tokyo\-night
-opacity      = 0.92
-padding      = 6
-scrollback   = 10000
-bell_visual  = true
-bell_audible = false
-shell        = /usr/bin/zsh \-l
+[profile.work]
+theme    = catppuccin\-mocha
+font_size = 16
+cwd      = /home/me/work
+color.fg = #cdd6f4
 .EE
 .RE
+.SH THEMES
+Ten built-in themes selectable by name:
+.PP
+.RS
+.TS
+l l.
+\fBtokyo-night\fR	dark (default)
+\fBcatppuccin-mocha\fR	dark
+\fBcatppuccin-macchiato\fR	dark
+\fBgruvbox-dark\fR	dark
+\fBdracula\fR	dark
+\fBnord\fR	dark
+\fBsolarized-dark\fR	dark
+\fBrose-pine\fR	dark
+\fBrose-pine-dawn\fR	light
+\fBcatppuccin-latte\fR	light
+.TE
+.RE
+.PP
+Names are case-insensitive and separator-insensitive (e.g.
+.BR "tokyo night" " = " tokyonight " = " tokyo-night ).
+Themes can be switched live in the settings overlay
+.RB ( Ctrl+, )
+or via the command palette
+.RB ( Ctrl+Shift+P ).
+An external Alacritty TOML or base16 YAML theme can be imported with
+.BR \-\-import\-theme .
 .SH KEYBINDINGS
-.TP
-.B F1
-Toggle the help overlay (a keybinding cheat-sheet).
-.TP
-.B Ctrl+,
-Toggle the settings overlay: arrow keys select and change font size, opacity,
-bell, and theme (font size, opacity, and theme apply live); Enter saves the
-changes to the config file; Esc closes.
-.TP
-.B Ctrl+Shift+C
-Copy the current selection to the clipboard.
-.TP
-.B Ctrl+Shift+V
-Paste from the clipboard.
+.SS Tabs
 .TP
 .B Ctrl+Shift+T
 Open a new tab.
 .TP
 .B Ctrl+Shift+W
-Close the current tab.
+Close the focused pane; falls back to closing the tab when only one pane remains.
 .TP
 .B Ctrl+Tab
 Switch to the next tab.
@@ -183,32 +317,124 @@ Switch to the next tab.
 .B Ctrl+Shift+Tab
 Switch to the previous tab.
 .TP
-.B Ctrl++
+.B Double-click tab chip
+Open the inline rename editor (Enter commits, Esc cancels).
+.TP
+.B Drag tab chip
+Reorder tabs by dragging a chip left or right.
+.SS Split panes
+.TP
+.B Ctrl+Shift+E
+Split the focused pane vertically (left | right).
+.TP
+.B Ctrl+Shift+O
+Split the focused pane horizontally (top / bottom).
+.TP
+.B Alt+Arrow
+Move focus to the adjacent pane in the arrow direction (Left / Right / Up / Down).
+.TP
+.B Drag gutter
+Resize the pane by dragging the divider.
+.SS Clipboard
+.TP
+.B Ctrl+Shift+C
+Copy the current selection to the clipboard.
+.TP
+.B Ctrl+Shift+V
+Paste from the clipboard.
+.TP
+.B Ctrl+Left-click
+Open the OSC 8 hyperlink (or plain-text URL) under the pointer.
+.TP
+.B Right-click
+Context menu (copy / paste / open link).
+.SS Overlays and tools
+.TP
+.B Ctrl+,
+Settings overlay: font size, opacity, bell, theme, font family, scrollback,
+status bar, pane headers. Tab/arrows navigate fields, Enter saves to the
+config file, Esc closes.
+.TP
+.B Ctrl+Shift+P
+Command palette: fuzzy-searchable list of every action and setting.
+.TP
+.B Ctrl+Shift+F
+In-terminal search: regex find bar with match highlighting;
+Enter = next match, Shift+Enter = previous match, Esc closes.
+.TP
+.B F1
+Help overlay: scrollable keybinding cheat-sheet.
+.TP
+.B Esc
+Close the active overlay (settings, help, palette, search).
+.SS View and font
+.TP
+.BR "Ctrl++" ", " "Ctrl+="
 Increase the font size.
 .TP
-.B Ctrl+\-
+.B Ctrl+-
 Decrease the font size.
 .TP
 .B Ctrl+0
 Reset the font size to its configured value.
 .TP
-.B Shift+PageUp ", " Shift+PageDown
+.B Ctrl+Shift+B
+Toggle the status bar.
+.TP
+.BR Shift+PageUp ", " Shift+PageDown
 Scroll up / down through the scrollback.
 .TP
-.B Shift+Home ", " Shift+End
+.BR Shift+Home ", " Shift+End
 Scroll to the top / bottom of the scrollback.
+.SS Window
 .TP
-.B Ctrl+Left\-click
-Open the OSC 8 hyperlink under the pointer.
+.B F11
+Toggle borderless fullscreen.
+.TP
+.B F10
+Toggle maximize.
+.SH ENVIRONMENT
+.TP
+.B GLASSY_GPU=high
+.TQ
+.B GLASSY_GPU=discrete
+Use the high-performance (discrete) GPU instead of the default
+integrated / low-power adapter.
+.TP
+.B GLASSY_GPU=low
+.TQ
+.B GLASSY_GPU=integrated
+Explicit low-power GPU selection (same as the default).
+.TP
+.B WGPU_ADAPTER_NAME=<name>
+Pin a specific wgpu adapter by name.
+.TP
+.B GLASSY_CAPTURE=<path.ppm>
+Headless mode: render after a short delay, write a PPM screenshot,
+then exit. Useful for CI and testing.
+.TP
+.B GLASSY_CAPTURE_MS=<ms>
+Override the headless capture delay (default ~100 ms).
 .SH FILES
 .TP
 .I $XDG_CONFIG_HOME/glassy/glassy.conf
-Primary configuration file.
+Primary configuration file (Linux).
 .TP
 .I ~/.config/glassy/glassy.conf
-Configuration file used when
+Fallback configuration file (Linux, when
 .B $XDG_CONFIG_HOME
-is unset.
+is unset).
+.TP
+.I ~/Library/Application Support/glassy/glassy.conf
+Configuration file on macOS.
+.TP
+.I $XDG_STATE_HOME/glassy/session.json
+.TQ
+.I ~/.local/state/glassy/session.json
+Session persistence file (tabs, splits, cwds). Written on exit;
+loaded on launch when
+.B restore_session = true
+is set.
 .TP
 .I ~/.local/share/glassy/fonts/NotoColorEmoji.ttf
 Bundled color-emoji font loaded at runtime, if present.
