@@ -244,7 +244,7 @@ fn strip_layout(tabs: &[TabDesc], bar_w: f32, bar_h: f32, cell_w: f32) -> Vec<St
     if tabs.len() <= 1 {
         // Single tab: one wide chip spanning the available width (no close box —
         // closing it quits). It still reads as a real connected tab.
-        let w = avail.min(TAB_MAX_W * 1.6).max(0.0);
+        let w = avail.clamp(0.0, TAB_MAX_W * 1.6);
         if w > 0.0 {
             segs.push(StripSeg {
                 item: StripItem::Tab(0),
@@ -313,31 +313,6 @@ fn move_in_order<T>(v: &mut Vec<T>, from: usize, to: usize) {
     }
 }
 
-/// Lines shown in the F1 help overlay (left column = keys, right = action). Kept
-/// as static text so the overlay costs nothing until it is opened.
-const HELP_LINES: &[&str] = &[
-    "  glassy — keybindings",
-    "",
-    "  Ctrl+Shift+T      New tab",
-    "  Ctrl+Shift+W      Close pane / tab",
-    "  Ctrl+Tab          Next tab",
-    "  Ctrl+Shift+Tab    Previous tab",
-    "  Ctrl+Shift+C / V  Copy / Paste",
-    "  Ctrl  +  /  -  / 0  Font bigger / smaller / reset",
-    "  Shift+PgUp/PgDn   Scroll history",
-    "  Shift+Home/End    Scroll top / bottom",
-    "  Ctrl+Click        Open hyperlink",
-    "  Ctrl+,            Settings",
-    "",
-    "  Ctrl+Shift+E      Split pane (vertical)",
-    "  Ctrl+Shift+O      Split pane (horizontal)",
-    "  Alt+Arrow         Move focus to adjacent pane",
-    "",
-    "  Right-click       Copy / Paste / New tab menu",
-    "",
-    "  F1 or Esc         Close this help",
-];
-
 /// Display path of the config file for the settings overlay.
 fn config_display_path() -> String {
     crate::config::path()
@@ -354,69 +329,6 @@ fn lighten(c: [f32; 4], amount: f32) -> [f32; 4] {
         (c[2] + amount).min(1.0),
         c[3],
     ]
-}
-
-/// Draw a centered modal overlay (`lines`) over a dimmed full-screen backdrop.
-/// The first line is rendered in the accent color as a title. Rebuilds every
-/// screen row (`rows` terminal rows + the strip) so terminal content underneath
-/// is fully replaced. Associated (not `&self`) so it composes with the active
-/// `&mut Renderer` borrow in `render`. Used by the F1 help and Ctrl+, settings
-/// overlays.
-fn draw_modal(renderer: &mut Renderer, rows: usize, cols: usize, lines: &[&str]) {
-    let total_rows = rows + TAB_STRIP_ROWS;
-
-    // Glass palette: a dim full-screen backdrop, a translucent dark panel body, and
-    // a thin accent border. No cream interior, no per-row wipe — the panel composites
-    // over the live terminal via the overlay pipeline (drawn after the grid). Colors
-    // are straight RGBA; `push_overlay_*` premultiplies.
-    // Backdrop is dim enough that the modal text clearly wins over the live
-    // terminal underneath (0.30 left the bright `ls` filenames legible).
-    let backdrop = [0.0, 0.0, 0.0, 0.50];
-    let body = {
-        let b = color::default_bg();
-        [b[0], b[1], b[2], 0.82]
-    };
-    // Translucent border: the accent at 0.6 composites as a glass rail instead of
-    // a solid opaque cream band (accent == cursor, near-white on Dracula et al).
-    let border = {
-        let a = color::accent();
-        [a[0], a[1], a[2], 0.6]
-    };
-    let text_fg = color::default_fg();
-    let title_fg = lighten(color::accent(), 0.1);
-
-    let content_w = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0);
-    let panel_w = (content_w + 4).min(cols.max(1));
-    let panel_h = (lines.len() + 2).min(total_rows.max(1));
-    let left = (cols.saturating_sub(panel_w)) / 2;
-    let top = (total_rows.saturating_sub(panel_h)) / 2;
-
-    // 1) Dim the whole screen.
-    renderer.push_overlay_cells(0, 0, cols, total_rows, backdrop);
-    // 2) Translucent panel body.
-    renderer.push_overlay_cells(left, top, panel_w, panel_h, body);
-    // 3) Thin accent border rails (1 cell thick), over the body.
-    renderer.push_overlay_cells(left, top, panel_w, 1, border); // top
-    renderer.push_overlay_cells(left, top + panel_h - 1, panel_w, 1, border); // bottom
-    renderer.push_overlay_cells(left, top, 1, panel_h, border); // left
-    renderer.push_overlay_cells(left + panel_w - 1, top, 1, panel_h, border); // right
-
-    // 4) Panel text — glyphs only, drawn ON TOP of the glass via the overlay-text
-    //    channel so they stay crisp.
-    for (li, line) in lines.iter().enumerate() {
-        let row = top + 1 + li;
-        if row >= top + panel_h - 1 {
-            break;
-        }
-        let fg = if li == 0 { title_fg } else { text_fg };
-        for (ci, ch) in line.chars().enumerate() {
-            let col = left + 1 + ci;
-            if col >= left + panel_w - 1 {
-                break;
-            }
-            renderer.push_overlay_glyph(col, row, ch, fg);
-        }
-    }
 }
 
 /// Actions available in the ≡ hamburger dropdown and the right-click context
@@ -452,8 +364,8 @@ impl MenuAction {
     /// Left-column icon glyph for the real GUI menu (§3.6).
     fn icon(self) -> char {
         match self {
-            MenuAction::Copy      => '⧉',
-            MenuAction::Paste     => '⊞',
+            MenuAction::Copy      => '🗐',
+            MenuAction::Paste     => '❏',
             MenuAction::NewTab    => '+',
             MenuAction::Settings  => '⚙',
             MenuAction::Help      => '?',
@@ -511,77 +423,6 @@ fn actions_to_entries(actions: &[MenuAction], has_selection: bool) -> Vec<gui::M
         prev = Some(a);
     }
     v
-}
-
-/// Draw a dropdown menu panel anchored at `(left, top)` in screen-row/col
-/// coordinates. `items` is the list to display; `sel` is the keyboard-
-/// highlighted row (0-based). `left`/`top` come from either the hamburger
-/// (top-right, below strip) or the context menu (pointer-anchored, clamped).
-/// Only repaints the rows the panel occupies; the rest keep their content.
-/// **Retained as a fallback** while `gui::menu` is integrated; both can coexist.
-fn draw_dropdown_menu(
-    renderer: &mut Renderer,
-    rows: usize,
-    cols: usize,
-    items: &[MenuAction],
-    sel: usize,
-    left: usize,
-    top: usize,
-) {
-    // Glass dropdown: translucent body + thin accent border, composited over the
-    // live terminal via the overlay pipeline. Unlike a modal, a menu does NOT dim
-    // the whole screen — the terminal stays visible beside it. Straight RGBA here;
-    // `push_overlay_*` premultiplies.
-    let body = {
-        let b = color::default_bg();
-        [b[0], b[1], b[2], 0.82]
-    };
-    // Translucent border (see draw_modal): glass rail, not an opaque cream band.
-    let border = {
-        let a = color::accent();
-        [a[0], a[1], a[2], 0.6]
-    };
-    let text_fg = color::default_fg();
-    // Selection highlight uses the theme's chromatic selection tint, not the
-    // (often near-white) cursor-derived accent — so the selected row reads as a
-    // brand-colored bar instead of flat grey on light-accent themes (Dracula).
-    let sel_bg = {
-        let s = color::selection_bg();
-        [s[0], s[1], s[2], 0.85]
-    };
-    let sel_fg = color::default_fg();
-
-    // Clamp the panel to the screen so rails / text stay on-grid.
-    let total_rows = rows + TAB_STRIP_ROWS;
-    let panel_w = (items.iter().map(|a| a.label().len()).max().unwrap_or(0) + 4)
-        .min(cols.saturating_sub(left).max(1));
-    let panel_h = (items.len() + 2).min(total_rows.saturating_sub(top).max(1));
-
-    renderer.push_overlay_cells(left, top, panel_w, panel_h, body);
-    renderer.push_overlay_cells(left, top, panel_w, 1, border); // top
-    renderer.push_overlay_cells(left, top + panel_h - 1, panel_w, 1, border); // bottom
-    renderer.push_overlay_cells(left, top, 1, panel_h, border); // left
-    renderer.push_overlay_cells(left + panel_w - 1, top, 1, panel_h, border); // right
-
-    for (li, item) in items.iter().enumerate() {
-        let row = top + 1 + li;
-        if row >= top + panel_h - 1 {
-            break;
-        }
-        let fg = if li == sel {
-            renderer.push_overlay_cells(left + 1, row, panel_w.saturating_sub(2), 1, sel_bg);
-            sel_fg
-        } else {
-            text_fg
-        };
-        for (ci, ch) in item.label().chars().enumerate() {
-            let col = left + 2 + ci; // 2-cell left pad (matches old layout)
-            if col >= left + panel_w - 1 {
-                break;
-            }
-            renderer.push_overlay_glyph(col, row, ch, fg);
-        }
-    }
 }
 
 /// Which mouse-button id to report for a pointer-motion event, or `None` to stay
@@ -962,8 +803,6 @@ pub struct App {
     gui_click_edge: bool,
     /// Last instant the GUI animations were stepped, for dt computation.
     gui_anim_last: Instant,
-    /// Temporary: render the Wave-0 GUI-primitive demo (GLASSY_GUI_DEMO set).
-    gui_demo: bool,
 }
 
 impl App {
@@ -1037,7 +876,6 @@ impl App {
             gui_anims: std::collections::HashMap::new(),
             gui_click_edge: false,
             gui_anim_last: Instant::now(),
-            gui_demo: std::env::var_os("GLASSY_GUI_DEMO").is_some(),
         }
     }
 
@@ -2830,106 +2668,10 @@ impl App {
         renderer.push_overlay_glyph_px_str(tx.round(), ty, &s, label_fg);
     }
 
-    /// Temporary Wave-0 demo: lay out a button, an icon button, a toggle, a
-    /// segmented control, a slider and a stepper on a floating panel, exercising
-    /// every primitive (AA rounded rects, edge-lit rails, focus rings, pixel
-    /// glyphs) plus the hover/press/focus state machine and animations. Gated by
-    /// GLASSY_GUI_DEMO; not part of the normal chrome path.
-    #[allow(clippy::too_many_arguments)]
-    fn paint_gui_demo(
-        renderer: &mut Renderer,
-        cell_w: f32,
-        cell_h: f32,
-        mouse: (f32, f32),
-        mouse_down: bool,
-        clicked: bool,
-        gui_pressed: &mut Option<gui::WidgetId>,
-        gui_focused: &mut Option<gui::WidgetId>,
-        gui_anims: &mut std::collections::HashMap<gui::WidgetId, gui::Anim>,
-    ) {
-        let mut ui = gui::Ui::new(
-            renderer,
-            cell_w,
-            cell_h,
-            mouse,
-            mouse_down,
-            clicked,
-            gui_pressed,
-            gui_focused,
-            gui_anims,
-        );
-
-        let met = ui.m;
-        let panel = gui::Rect::new(60.0, 60.0, met.cell_w * 38.0, met.row_h * 12.0 + met.pad * 2.0);
-        let inner = ui.panel(panel, met.card_radius);
-        ui.label(inner.x, inner.y, "glassy — gui demo", gui::fg());
-
-        let mut y = inner.y + met.row_h;
-        let row = |y: f32| gui::Rect::new(inner.x, y, inner.w, met.row_h - met.gap);
-
-        let _ = ui.button(gui::id("demo/button"), row(y), "Button");
-        y += met.row_h;
-
-        let r = row(y);
-        let _ = ui.icon_button(gui::id("demo/icon"), gui::Rect::new(r.x, r.y, met.row_h, r.h), '⚙');
-        y += met.row_h;
-
-        let r = row(y);
-        let _ = ui.toggle(gui::id("demo/toggle"), gui::Rect::new(r.x, r.y, met.row_h * 2.0, r.h), true);
-        y += met.row_h;
-
-        let r = row(y);
-        let _ = ui.segmented(gui::id("demo/seg"), gui::Rect::new(r.x, r.y, met.ctrl_w, r.h), &["Off", "Visual", "Audible"], 1);
-        y += met.row_h;
-
-        let r = row(y);
-        let _ = ui.slider(gui::id("demo/slider"), gui::Rect::new(r.x, r.y, met.ctrl_w, r.h), 0.6, 0.0, 1.0, 0.05);
-        y += met.row_h;
-
-        let r = row(y);
-        let _ = ui.stepper(gui::id("demo/step"), gui::Rect::new(r.x, r.y, met.ctrl_w, r.h), "14px");
-        y += met.row_h;
-
-        let r = row(y);
-        let _ = ui.dropdown(
-            gui::id("demo/dropdown"),
-            gui::Rect::new(r.x, r.y, met.ctrl_w, r.h),
-            "Solarized",
-            false,
-            Some(gui::fill_on()),
-        );
-        y += met.row_h;
-
-        let r = row(y);
-        let _ = ui.text_field_readonly(
-            gui::id("demo/field"),
-            gui::Rect::new(r.x, r.y, met.ctrl_w * 1.4, r.h),
-            "/home/allie/.config/glassy/glassy.toml",
-            true,
-            true,
-        );
-        y += met.row_h;
-
-        // List + scrollbar in a small scrolling region.
-        let list_h = met.row_h * 2.0;
-        let bar_w = met.gap.max(6.0);
-        let list_rect = gui::Rect::new(inner.x, y, met.ctrl_w, list_h);
-        let _ = ui.list(
-            gui::id("demo/list"),
-            list_rect,
-            &["one", "two", "three", "four", "five"],
-            1,
-            0.0,
-        );
-        let track = gui::Rect::new(list_rect.x + list_rect.w + 2.0, y, bar_w, list_h);
-        let _ = ui.scrollbar(gui::id("demo/scroll"), track, met.row_h * 5.0, list_h, 0.0);
-    }
-
     /// Paint the settings form (§3.5) as a centered glass panel over a full-screen
     /// scrim, returning the interaction events for the caller to apply. Static (no
     /// `&self`) so it composes with the live `&mut Renderer` borrow held in
-    /// `render`/`render_split`. Mirrors `paint_gui_demo`'s threading of the
-    /// App-owned persistent GUI state.
+    /// `render`/`render_split`, threading the App-owned persistent GUI state.
     #[allow(clippy::too_many_arguments)]
     fn paint_settings(
         renderer: &mut Renderer,
@@ -3095,12 +2837,6 @@ impl App {
                 self.first_frame_done = true;
             }
             return;
-        }
-
-        // The GUI demo's glass panel must sit over freshly-painted terminal rows
-        // (the push_overlay_px invariant), so force a full rebuild while it is on.
-        if self.gui_demo {
-            self.force_full_redraw = true;
         }
 
         // The OSC8 hyperlink under the pointer, underlined for affordance.
@@ -3630,27 +3366,6 @@ impl App {
                 None
             };
 
-        // Temporary GUI-primitive demo (gated behind GLASSY_GUI_DEMO) — proves the
-        // Wave-0 primitives render with correct AA corners + hover/press/focus. No
-        // user-visible chrome in the normal path. Inlined here (disjoint field
-        // borrows) so it can reuse the live `renderer` borrow.
-        if self.gui_demo {
-            let m = renderer.cell_metrics();
-            let mouse = (self.mouse_px.0 as f32, self.mouse_px.1 as f32);
-            let mouse_down = self.held_button == Some(0);
-            Self::paint_gui_demo(
-                renderer,
-                m.width,
-                m.height,
-                mouse,
-                mouse_down,
-                self.gui_click_edge,
-                &mut self.gui_pressed,
-                &mut self.gui_focused,
-                &mut self.gui_anims,
-            );
-        }
-
         // Record the state this frame drew from, so the next frame can repaint only
         // what changed (the cursor's old/new row, selection, scroll position).
         self.prev_cursor = cur_cursor_cell;
@@ -4176,7 +3891,7 @@ impl App {
             }
             let glyph_fg = if btn_hovered || is_menu_open { accent } else { fg_dim };
             let gx = btn_x + (menu_btn_w - m.width) * 0.5;
-            renderer.push_overlay_glyph_px(gx.round(), ty, '⋮', glyph_fg);
+            renderer.push_overlay_glyph_px(gx.round(), ty, '⋯', glyph_fg);
 
             // If this pane's ⋮ menu is open, draw the dropdown below the button.
             if is_menu_open {
@@ -5126,11 +4841,10 @@ impl ApplicationHandler<UserEvent> for App {
                 // light. When following is off we keep the pinned `theme` but still
                 // re-assert it (safe, repeatable) so winit's re-themed CSD titlebar
                 // stays coherent with our palette.
-                if !self.apply_system_theme(Some(scheme)) {
-                    if let Some(theme) = color::theme_by_name(&self.config.theme) {
+                if !self.apply_system_theme(Some(scheme))
+                    && let Some(theme) = color::theme_by_name(&self.config.theme) {
                         color::set_theme(theme);
                     }
-                }
                 self.force_full_redraw = true;
                 self.mark_dirty(event_loop);
             }
@@ -5406,9 +5120,9 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.mouse_px = (position.x, position.y);
-                // GUI demo / settings form: repaint so hover/press/slider-drag
-                // tracking follows the pointer.
-                if self.gui_demo || self.settings_open {
+                // Settings form: repaint so hover/press/slider-drag tracking
+                // follows the pointer.
+                if self.settings_open {
                     self.mark_dirty(event_loop);
                 }
                 // While the settings form is open it owns the pointer; don't let the
@@ -5572,8 +5286,8 @@ impl ApplicationHandler<UserEvent> for App {
                 // start a text selection or focus-swap. Highest priority among
                 // press handlers (the gutter sits in the inter-pane gap, not in any
                 // pane's cell area, so this never steals a content click).
-                if button == MouseButton::Left && pressed {
-                    if let Some(handle) = self.gutter_at(self.mouse_px.0, self.mouse_px.1) {
+                if button == MouseButton::Left && pressed
+                    && let Some(handle) = self.gutter_at(self.mouse_px.0, self.mouse_px.1) {
                         self.apply_gutter_cursor(Some(&handle));
                         self.hovered_gutter = Some(handle.clone());
                         self.dragging_gutter = Some(handle);
@@ -5581,7 +5295,6 @@ impl ApplicationHandler<UserEvent> for App {
                         self.mark_dirty(event_loop);
                         return;
                     }
-                }
 
                 // A click anywhere while the dropdown is open: either invoke the
                 // selected item (left-click inside panel) or dismiss the menu.
@@ -5607,7 +5320,7 @@ impl ApplicationHandler<UserEvent> for App {
                 // A left press while the pane ⋮ menu is open: invoke or dismiss.
                 if button == MouseButton::Left && pressed && self.pane_menu_open.is_some() {
                     let (mx, my) = self.mouse_px;
-                    if let Some(idx) = self.pane_menu_hit_test(mx as f64, my as f64) {
+                    if let Some(idx) = self.pane_menu_hit_test(mx, my) {
                         self.invoke_pane_menu_action(idx, event_loop);
                     } else {
                         // Click outside the menu dismisses it; may still be a header
@@ -5624,7 +5337,7 @@ impl ApplicationHandler<UserEvent> for App {
                 // the top of each pane tile, not the inter-pane gap).
                 if button == MouseButton::Left && pressed {
                     let (mx, my) = self.mouse_px;
-                    if self.pane_header_click(mx as f64, my as f64, event_loop) {
+                    if self.pane_header_click(mx, my, event_loop) {
                         self.held_button = None;
                         return;
                     }

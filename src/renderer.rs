@@ -1515,6 +1515,7 @@ impl Renderer {
 
     /// Cell-rect convenience for overlay quads: covers `cols` x `rows` cells from
     /// cell origin (`col`,`row`). Matches `push_cell`'s pixel math.
+    #[allow(dead_code)]
     pub fn push_overlay_cells(
         &mut self,
         col: usize,
@@ -1536,6 +1537,7 @@ impl Renderer {
     /// over the glass body). Mirrors `push_cell`'s ordinary glyph path; box/block
     /// procedural drawing and decorations are intentionally omitted (panel text is
     /// plain labels). No background quad is emitted (the glass shows through).
+    #[allow(dead_code)]
     pub fn push_overlay_glyph(&mut self, col: usize, row: usize, ch: char, fg: [f32; 4]) {
         if ch == ' ' || ch == '\0' {
             return;

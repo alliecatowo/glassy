@@ -14,6 +14,12 @@
 //!
 //! Idle stays at 0% CPU: an [`Anim`] only steps while it is unsettled, and `App`
 //! requests `ControlFlow::Poll` solely while some `Anim` is in flight.
+//!
+//! This is a small self-contained widget toolkit: it intentionally exposes the
+//! full §2.5 component vocabulary (button, toggle, slider, segmented, dropdown,
+//! list, scrollbar, …) and its design tokens as reusable API even where a given
+//! surface does not yet consume every one of them.
+#![allow(dead_code)]
 
 use std::collections::HashMap;
 
@@ -833,7 +839,7 @@ impl<'r> Ui<'r> {
         if with_copy {
             right -= icon_w;
             let ir = Rect::new(right, rect.y, icon_w, rect.h);
-            if self.icon_button(id_combine(wid, 1), ir, '⧉').clicked {
+            if self.icon_button(id_combine(wid, 1), ir, '🗐').clicked {
                 evt = FieldEvt::Copy;
             }
         }
@@ -1209,6 +1215,7 @@ pub enum MenuEntry<'a> {
 /// Menus never have a scrim — the terminal stays visible beside them (matching
 /// today's behaviour). The panel is drawn last so it composites above everything.
 /// `ax`/`ay` is the top-left anchor in physical pixels.
+#[allow(clippy::too_many_arguments)]
 pub fn menu(
     renderer:   &mut Renderer,
     cell_w:     f32,

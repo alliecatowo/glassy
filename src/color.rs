@@ -350,6 +350,7 @@ pub const THEME_NAMES: &[&str] = &[
 /// Whether a named theme is a LIGHT theme (light background, dark text). Used to
 /// pick a sensible default when following the system color scheme. Unknown names
 /// are treated as dark (every original built-in is dark).
+#[allow(dead_code)]
 pub fn is_light(name: &str) -> bool {
     matches!(canonical_name(name), "rose-pine-dawn" | "catppuccin-latte")
 }
@@ -430,6 +431,7 @@ pub fn accent() -> [f32; 4] {
 /// The UI danger color of the active theme, derived from ANSI red — used for
 /// destructive affordances (the hovered tab-close ✕) so "danger" reads as red
 /// in whatever red the theme actually uses.
+#[allow(dead_code)]
 pub fn danger() -> [f32; 4] {
     to_f32(active().ansi16[1])
 }
