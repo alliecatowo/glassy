@@ -33,6 +33,47 @@ use winit::event_loop::EventLoopProxy;
 use crate::image::ImageStore;
 use crate::input::ModifyOtherKeys;
 
+// ---- Terminfo availability check ------------------------------------------------
+
+/// Check if a terminfo entry is available in the system terminfo database.
+/// Returns true if the entry can be found, false otherwise.
+/// This is a conservative check that doesn't fail; we just return false if the entry is missing.
+fn terminfo_available(name: &str) -> bool {
+    // Try standard terminfo paths in order:
+    // 1. $TERMINFO (user override)
+    // 2. $HOME/.terminfo (user's personal database)
+    // 3. /usr/share/terminfo (system database)
+    // 4. /lib/terminfo (fallback system location)
+    // 5. /etc/terminfo (another common location)
+
+    if let Ok(terminfo_path) = std::env::var("TERMINFO") {
+        let path = PathBuf::from(terminfo_path).join(&name[0..1]).join(name);
+        if path.exists() {
+            return true;
+        }
+    }
+
+    if let Ok(home) = std::env::var("HOME") {
+        let path = PathBuf::from(home)
+            .join(".terminfo")
+            .join(&name[0..1])
+            .join(name);
+        if path.exists() {
+            return true;
+        }
+    }
+
+    // Check system locations
+    for base in &["/usr/share/terminfo", "/lib/terminfo", "/etc/terminfo"] {
+        let path = PathBuf::from(base).join(&name[0..1]).join(name);
+        if path.exists() {
+            return true;
+        }
+    }
+
+    false
+}
+
 // ---- /proc-based pane-info helpers ------------------------------------------
 
 /// Cheap cached snapshot of one pane's runtime identity: cwd and the name of
@@ -393,13 +434,31 @@ impl Pty {
         tty::setup_env();
 
         let mut env = HashMap::new();
-        env.insert("TERM".to_string(), "xterm-256color".to_string());
+
+        // Attempt to use glassy-256color terminfo if available, else fall back to xterm-256color.
+        // The terminfo is installed by the package; if not available, the app still works correctly.
+        let term = if terminfo_available("glassy-256color") {
+            "glassy-256color".to_string()
+        } else {
+            "xterm-256color".to_string()
+        };
+        env.insert("TERM".to_string(), term);
+
         env.insert("COLORTERM".to_string(), "truecolor".to_string());
         env.insert("TERM_PROGRAM".to_string(), "glassy".to_string());
         env.insert(
             "TERM_PROGRAM_VERSION".to_string(),
             env!("CARGO_PKG_VERSION").to_string(),
         );
+
+        // Set WINDOWID and GLASSY_WINDOW_ID for compatibility with shell integration and X11 tools.
+        // WINDOWID is commonly used by X11 applications; GLASSY_WINDOW_ID is glassy-specific.
+        // The actual window ID would be set by the app after window creation (not available at spawn time).
+        // For now, these are placeholders that can be overridden by the application or environment.
+        env.insert("GLASSY_WINDOW_ID".to_string(), "".to_string());
+        // WINDOWID traditionally holds an X11 window ID (as hex or decimal). We leave it empty/unset
+        // unless provided by the environment, since the window may not exist at spawn time.
+        // Applications can check for GLASSY_WINDOW_ID to detect running under glassy.
 
         let event_proxy = EventProxy { proxy, id };
         let grid = GridSize { cols, rows };

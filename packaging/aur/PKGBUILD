@@ -50,6 +50,9 @@ package() {
     install -Dm0644 "extra/$pkgname.1" \
         "$pkgdir/usr/share/man/man1/$pkgname.1"
 
+    # Terminfo database (compiled via tic).
+    tic -x -o "$pkgdir/usr/share/terminfo" "terminfo/$pkgname.terminfo"
+
     # License.
     install -Dm0644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
 }
