@@ -27,7 +27,7 @@ pub struct ImageStore {
 
 /// An image queued for display: the loop will anchor it at the cursor cell once
 /// the VT bytes preceding the image in the stream have advanced the cursor.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct PendingDisplay {
     pub id: u32,
     pub cols: u32,
@@ -168,9 +168,24 @@ pub struct StreamTap {
 
 
 
+/// OSC 9;4 progress state. Mirrors the ConEmu/Windows Terminal progress-state API.
+/// The sequence is `ESC ] 9 ; 4 ; <state> ; <pct> ST` where `pct` is 0-100.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProgressState {
+    /// state=0: remove the progress indicator.
+    Remove,
+    /// state=1: active progress at the given percentage (0-100).
+    Set(u8),
+    /// state=2: error state (failed / exit ≠ 0). Percentage is advisory.
+    Error(u8),
+    /// state=3: indeterminate / no percentage known.
+    Indeterminate,
+}
+
 /// One ordered item produced by [`StreamTap::process`]: either VT bytes for the
 /// parser, or a point at which an image should be displayed (anchored at the
 /// cursor *after* the preceding `Vt` bytes have advanced it).
+#[derive(Debug)]
 pub enum TapEvent {
     Vt(Vec<u8>),
     Display(PendingDisplay),
@@ -190,6 +205,10 @@ pub enum TapEvent {
     /// notification request from the running shell. The payload is the notification
     /// body text. The original OSC bytes are still passed through to the VT parser.
     Notification(String),
+    /// OSC 9;4 progress report. Forwarded to the UI thread so it can render a
+    /// subtle progress indicator in the status bar and/or tab chip. The original
+    /// OSC bytes are still passed through to the VT parser unchanged.
+    Progress(ProgressState),
 }
 
 #[derive(PartialEq, Eq)]
@@ -416,6 +435,7 @@ impl StreamTap {
 
     /// Finish a buffered OSC. Dispatches to specialised parsers for:
     /// - OSC 7: cwd (returns a [`TapEvent::Cwd`])
+    /// - OSC 9;4: progress report (returns a [`TapEvent::Progress`])
     /// - OSC 9 / OSC 777: desktop notification request (returns a
     ///   [`TapEvent::Notification`])
     /// - OSC 133: shell-integration semantic mark (returns a
@@ -429,6 +449,12 @@ impl StreamTap {
         // Try OSC 7 first — most common shell-integration sequence.
         if let Some(path) = parse_osc7_cwd(&osc) {
             return Some(TapEvent::Cwd(path));
+        }
+        // OSC 9;4 — progress report: `9;4;<state>;<pct>`. Check BEFORE the
+        // generic OSC 9 notification so `9;4;...` is not mis-parsed as a
+        // notification whose body starts with "4;...".
+        if let Some(ev) = parse_osc9_progress(&osc) {
+            return Some(ev);
         }
         // OSC 9 — iTerm2 / ConEmu desktop notification: `9;<message>`
         if let Some(ev) = parse_osc9_notification(&osc) {
@@ -478,6 +504,32 @@ pub(crate) fn parse_osc9_notification(body: &[u8]) -> Option<TapEvent> {
         return None;
     }
     Some(TapEvent::Notification(msg.to_string()))
+}
+
+/// Parse an OSC 9;4 progress body (`9;4;<state>;<pct>`) into a
+/// [`TapEvent::Progress`]. The format is from the ConEmu / Windows Terminal
+/// progress-bar protocol: state 0=remove, 1=set progress (pct 0-100), 2=error,
+/// 3=indeterminate. Returns `None` for any body that is not a valid OSC 9;4
+/// sequence (wrong prefix, missing fields, etc.).
+pub(crate) fn parse_osc9_progress(body: &[u8]) -> Option<TapEvent> {
+    let body = std::str::from_utf8(body).ok()?;
+    // Must start with "9;4;"
+    let rest = body.strip_prefix("9;4;")?;
+    // Split into state and optional pct fields.
+    let (state_str, pct_str) = match rest.split_once(';') {
+        Some((s, p)) => (s, p),
+        None => (rest, ""),
+    };
+    let state: u8 = state_str.parse().ok()?;
+    let pct: u8 = pct_str.parse().unwrap_or(0).min(100);
+    let progress = match state {
+        0 => ProgressState::Remove,
+        1 => ProgressState::Set(pct),
+        2 => ProgressState::Error(pct),
+        3 => ProgressState::Indeterminate,
+        _ => return None,
+    };
+    Some(TapEvent::Progress(progress))
 }
 
 /// Parse an OSC 777 body (`777;notify;<title>;<body>`) into a desktop

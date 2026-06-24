@@ -33,6 +33,112 @@ use winit::event_loop::EventLoopProxy;
 use crate::image::ImageStore;
 use crate::input::ModifyOtherKeys;
 
+// ---- /proc-based pane-info helpers ------------------------------------------
+
+/// Cheap cached snapshot of one pane's runtime identity: cwd and the name of
+/// the foreground process group leader (the program currently running, e.g.
+/// `vim`, `cargo`, or `bash` when idle). Reading `/proc` is cheap but not free;
+/// we cache and re-read only on explicit invalidation (pane focus) or the
+/// periodic 2-second background poll so idle terminals stay at 0% CPU.
+#[derive(Clone, Default, Debug)]
+pub struct PaneInfo {
+    /// Current working directory, read from `/proc/<shell_pid>/cwd` (a symlink).
+    pub cwd: Option<PathBuf>,
+    /// `comm` of the tty's foreground process group leader (the name of the running
+    /// command, max 15 chars per Linux). `None` when the shell is the foreground
+    /// leader (idle) or the read fails.
+    pub foreground_comm: Option<String>,
+}
+
+impl PaneInfo {
+    /// Refresh from `/proc` for the shell with `shell_pid`. Reads the pty's tty
+    /// foreground pgid from `/proc/<shell_pid>/stat` field 8, then reads that
+    /// process's `comm` and the shell's `cwd` symlink. All reads are best-effort
+    /// (`None` on any failure).
+    pub fn read(shell_pid: u32) -> Self {
+        let cwd = read_proc_cwd(shell_pid);
+        let foreground_comm = read_foreground_comm(shell_pid);
+        Self { cwd, foreground_comm }
+    }
+}
+
+/// Read `/proc/<pid>/cwd` (a symlink to the process's cwd).
+fn read_proc_cwd(pid: u32) -> Option<PathBuf> {
+    let path = format!("/proc/{pid}/cwd");
+    std::fs::read_link(&path).ok()
+}
+
+/// Read the name of the tty's foreground process group leader for `shell_pid`.
+///
+/// 1. Parse `/proc/<shell_pid>/stat` field index 7 (0-based) to get the tty's
+///    foreground pgid (`tpgid`). This is the pgid of the process group currently
+///    owning the terminal's foreground slot.
+/// 2. Find a process in that pgid via `/proc/<tpgid>/comm` (most foreground
+///    commands will have that as their pid). Falls back to scanning `/proc` for
+///    a process whose `stat` `pgrp` field matches.
+/// 3. Return the `comm` string, or `None` if the shell itself is foreground
+///    (tpgid == shell's pgid) or any read fails.
+fn read_foreground_comm(shell_pid: u32) -> Option<String> {
+    // Parse /proc/<shell_pid>/stat to get tpgid (field index 7, 0-based after
+    // stripping the comm field in parens). The stat line format is:
+    //   pid (comm) state ppid pgrp session tty_nr tpgid ...
+    // We parse by finding the closing ')' and counting whitespace-separated
+    // tokens after it.
+    let stat = std::fs::read_to_string(format!("/proc/{shell_pid}/stat")).ok()?;
+    let after_comm = stat.rfind(')')?;
+    let rest = &stat[after_comm + 1..];
+    let fields: Vec<&str> = rest.split_whitespace().collect();
+    // After ')': state ppid pgrp session tty_nr tpgid ...
+    // tpgid is at index 5 (0-based).
+    let tpgid: i32 = fields.get(5)?.parse().ok()?;
+    if tpgid <= 0 {
+        return None;
+    }
+    let tpgid = tpgid as u32;
+    // Get the shell's own pgid to detect "shell is foreground" (idle).
+    let shell_pgid: u32 = fields.get(2)?.parse().ok()?;
+    if tpgid == shell_pgid {
+        return None; // shell is foreground (idle prompt)
+    }
+    // Try /proc/<tpgid>/comm first (works when the pgid leader has that pid).
+    if let Ok(comm) = std::fs::read_to_string(format!("/proc/{tpgid}/comm")) {
+        let name = comm.trim().to_string();
+        if !name.is_empty() {
+            return Some(name);
+        }
+    }
+    // Fallback: scan /proc for a process whose pgid matches tpgid.
+    if let Ok(rd) = std::fs::read_dir("/proc") {
+        for entry in rd.flatten() {
+            let fname = entry.file_name();
+            let fname = fname.to_string_lossy();
+            if !fname.chars().all(|c| c.is_ascii_digit()) {
+                continue;
+            }
+            let pid: u32 = fname.parse().unwrap_or(0);
+            if pid == 0 {
+                continue;
+            }
+            if let Ok(s) = std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+                let after = s.rfind(')')?;
+                let tokens: Vec<&str> = s[after + 1..].split_whitespace().collect();
+                let pg: u32 = tokens.get(2)?.parse().ok()?;
+                if pg == tpgid {
+                    if let Ok(comm) = std::fs::read_to_string(format!("/proc/{pid}/comm")) {
+                        let name = comm.trim().to_string();
+                        if !name.is_empty() {
+                            return Some(name);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+// ---- /proc-based pane-info helpers (end) ------------------------------------
+
 /// Events delivered from the PTY thread (and timers) into the winit loop. Each
 /// carries the id of the session (tab) it came from so the UI can route it.
 #[derive(Debug, Clone)]
@@ -71,6 +177,9 @@ pub enum UserEvent {
     /// OSC 9 or OSC 777 desktop notification from the shell. Forwarded to the UI
     /// thread so it can fire a native notification when the window is unfocused.
     Notification(usize, String),
+    /// OSC 9;4 progress report from the running application. The UI thread stores
+    /// the latest state per-session and renders a subtle progress indicator.
+    Progress(usize, crate::image::ProgressState),
     /// The config file was modified; reload from disk.
     ConfigReload,
     /// The running application changed the xterm modifyOtherKeys level via
@@ -248,6 +357,16 @@ pub struct Pty {
     /// `term.scroll_display(Scroll::Delta)` to jump there.
     #[allow(dead_code)]
     pub prompts: Arc<Mutex<PromptTracker>>,
+    /// PID of the spawned shell process. Used to read `/proc/<shell_pid>/cwd`
+    /// and the tty foreground pgid for the pane header and status bar.
+    pub shell_pid: u32,
+    /// Cached `/proc`-based pane info (cwd + foreground comm). Refreshed on
+    /// pane focus and periodically (see `App::refresh_proc_info`). Read under
+    /// the UI thread only; no locking needed.
+    pub pane_info: PaneInfo,
+    /// When the cached `pane_info` was last refreshed. Used by the periodic
+    /// background poller to avoid re-reading on every frame.
+    pub pane_info_at: Instant,
     tx: Sender<LoopMsg>,
     poller: Arc<Poller>,
 }
@@ -315,6 +434,9 @@ impl Pty {
         };
         let pty = tty::new(&pty_options, window_size, id as u64)?;
 
+        // Capture the shell PID before moving `pty` into the PTY loop thread.
+        let shell_pid = pty.child().id();
+
         let (tx, rx) = channel::<LoopMsg>();
         let poller = Arc::new(Poller::new()?);
         let images = Arc::new(FairMutex::new(ImageStore::new()));
@@ -330,7 +452,10 @@ impl Pty {
                 run_loop(pty, loop_term, event_proxy, rx, loop_poller, loop_images, loop_prompts);
             })?;
 
-        Ok(Pty { term, images, prompts, tx, poller })
+        // Read the initial cwd eagerly so the pane header shows the right path on
+        // the first frame (before the shell emits its first OSC 7).
+        let pane_info = PaneInfo::read(shell_pid);
+        Ok(Pty { term, images, prompts, shell_pid, pane_info, pane_info_at: Instant::now(), tx, poller })
     }
 
     fn send(&self, msg: LoopMsg) {
@@ -758,6 +883,12 @@ fn run_loop(
                                 // OSC 9 / OSC 777: forward to the UI thread so it can
                                 // fire a native desktop notification when unfocused.
                                 proxy.send_user(UserEvent::Notification(proxy.id, text));
+                            }
+                            crate::image::TapEvent::Progress(state) => {
+                                // OSC 9;4: progress report — forward to the UI thread
+                                // so it can render the progress indicator in the status
+                                // bar / tab chip.
+                                proxy.send_user(UserEvent::Progress(proxy.id, state));
                             }
                         }
                     }

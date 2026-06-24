@@ -425,6 +425,18 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 return;
             }
+            UserEvent::Progress(id, state) => {
+                // OSC 9;4 progress report: update the active session's indicator.
+                // Non-active sessions' progress is ignored (only the focused session
+                // renders a progress bar). On Remove, clear the indicator.
+                if id == self.active_id {
+                    self.active_progress = match state {
+                        crate::image::ProgressState::Remove => None,
+                        other => Some(other),
+                    };
+                }
+                // Progress changes are visual — mark dirty so the status bar repaints.
+            }
         }
         self.mark_dirty(event_loop);
     }
@@ -520,6 +532,18 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // Periodically refresh /proc-based pane info (cwd + foreground process).
+        // Only done for panes of the active tab; background tabs refresh on focus.
+        // This is cheap (a few symlink reads) and keeps the header/status bar live.
+        if let Some(pty) = self.pty.as_mut() {
+            Self::maybe_refresh_proc_info(pty);
+        }
+        if let Some(g) = self.panes.as_mut() {
+            for pty in g.others.values_mut() {
+                Self::maybe_refresh_proc_info(pty);
+            }
+        }
+
         // Flush a pending session re-persist (tab/split structure changed). Gated on
         // `restore_session`; cheap (a small JSON write) and coalesced to once per
         // settle. The authoritative save also happens in `exiting`.

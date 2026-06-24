@@ -102,6 +102,15 @@ impl App {
         };
         let sb_focused = self.focused;
         let sb_surface_h = self.renderer.as_ref().map(|r| r.surface_size().1).unwrap_or(0);
+        // Status-bar cwd + git branch: read from the active PTY's cached PaneInfo.
+        // Evaluated here (before the renderer borrow) once per frame; PaneInfo is
+        // refreshed at most every 2 s (PROC_REFRESH_INTERVAL) by about_to_wait.
+        let sb_cwd: Option<std::path::PathBuf> = self.pty.as_ref()
+            .and_then(|p| p.pane_info.cwd.clone())
+            .or_else(|| self.active_cwd.clone()); // fallback to OSC 7 path
+        let sb_git_branch: Option<String> = sb_cwd.as_deref()
+            .and_then(|p| crate::app::helpers::read_git_branch(p));
+        let sb_progress = self.active_progress;
 
         // Settings-form inputs (whole-`self` method calls) snapshotted BEFORE the
         // disjoint `renderer`/`pty` borrows below.
@@ -627,6 +636,9 @@ impl App {
                 sb_hist,
                 sb_sel_len,
                 sb_focused,
+                sb_cwd.as_deref(),
+                sb_git_branch.as_deref(),
+                sb_progress,
             );
         }
 

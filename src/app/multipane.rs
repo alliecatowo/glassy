@@ -70,6 +70,13 @@ impl App {
         };
         let sb_focused = self.focused;
         let sb_surface_h = self.renderer.as_ref().map(|r| r.surface_size().1).unwrap_or(0);
+        // Status-bar cwd + git branch (same as single-pane path in render.rs).
+        let sb_cwd: Option<std::path::PathBuf> = self.pty.as_ref()
+            .and_then(|p| p.pane_info.cwd.clone())
+            .or_else(|| self.active_cwd.clone());
+        let sb_git_branch: Option<String> = sb_cwd.as_deref()
+            .and_then(|p| crate::app::helpers::read_git_branch(p));
+        let sb_progress = self.active_progress;
 
         // Tab-bar state snapshot (owned data) for the pixel-overlay painter, taken
         // under the immutable `&self` borrow.
@@ -91,12 +98,41 @@ impl App {
         let blink_on = self.blink_on;
         let hovered_link = self.hovered_link.clone();
 
-        // Pane-header snapshot: per-leaf titles + focused pane + open pane menu.
+        // Pane-header snapshot: per-leaf titles + proc info (cwd, foreground comm).
+        // The proc info is read from the cached PaneInfo on each pane's Pty so we
+        // never hold a term lock here. OSC title is still used as the primary title
+        // (fallback = empty); the cwd and comm are displayed as a secondary subtitle.
         let pane_header_titles: Vec<(usize, String)> = {
             let g = self.panes.as_ref().unwrap();
             pane_specs.iter().map(|(id, _, _, _, _)| {
                 let title = g.others_titles.get(id).cloned().unwrap_or_default();
                 (*id, title)
+            }).collect()
+        };
+        // Per-pane cwd + foreground comm subtitle for the pane header.
+        // Tuple: (pane_id, cwd_last_component, Option<comm>)
+        let pane_header_proc: Vec<(usize, Option<String>, Option<String>)> = {
+            let g = self.panes.as_ref().unwrap();
+            let focused_pane_id = g.layout.focused();
+            pane_specs.iter().map(|(id, _, _, _, _)| {
+                let pty = if *id == focused_pane_id {
+                    self.pty.as_ref()
+                } else {
+                    g.others.get(id)
+                };
+                let (cwd, comm) = pty.map(|p| {
+                    let cwd = p.pane_info.cwd.as_ref().map(|path| {
+                        // Show only the last component (basename) of the path to fit
+                        // the narrow header. The full path is in the status bar.
+                        path.file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("~")
+                            .to_string()
+                    });
+                    let comm = p.pane_info.foreground_comm.clone();
+                    (cwd, comm)
+                }).unwrap_or((None, None));
+                (*id, cwd, comm)
             }).collect()
         };
         let pane_menu_open = self.pane_menu_open;
@@ -357,6 +393,7 @@ impl App {
                 renderer,
                 &pane_specs,
                 &pane_header_titles,
+                &pane_header_proc,
                 focused_pane,
                 win_focused,
                 pane_menu_open,
@@ -376,6 +413,9 @@ impl App {
                 sb_hist,
                 sb_sel_len,
                 sb_focused,
+                sb_cwd.as_deref(),
+                sb_git_branch.as_deref(),
+                sb_progress,
             );
         }
 
@@ -515,6 +555,7 @@ impl App {
         renderer: &mut Renderer,
         pane_specs: &[(usize, pane::Rect, pane::Rect, usize, usize)],
         titles: &[(usize, String)],
+        proc_info: &[(usize, Option<String>, Option<String>)],
         focused_pane: usize,
         win_focused: bool,
         pane_menu_open: Option<usize>,
@@ -571,16 +612,41 @@ impl App {
             // Vertical centering: glyph top = (hdr_h - cell_h) / 2.
             let ty = (ry + (hdr_h - m.height) * 0.5).round();
 
+            // /proc cwd + foreground comm for this pane.
+            let (pi_cwd, pi_comm) = proc_info.iter()
+                .find(|(tid, _, _)| *tid == *id)
+                .map(|(_, c, k)| (c.as_deref(), k.as_deref()))
+                .unwrap_or((None, None));
+            // Build a compact right-side annotation: "cwd" or "cwd  comm" (dim).
+            // Reserve space for this annotation before computing the title width.
+            let annotation: Option<String> = match (pi_cwd, pi_comm) {
+                (Some(c), Some(k)) => Some(format!("{c}  {k}")),
+                (Some(c), None) => Some(c.to_string()),
+                (None, Some(k)) => Some(k.to_string()),
+                (None, None) => None,
+            };
+            // Annotation goes right-aligned, just left of the ⋮ button.
+            let annotation_w = annotation.as_deref().map(|s| {
+                let nchars = s.chars().count() as f32;
+                nchars * m.width + pad
+            }).unwrap_or(0.0);
+
             // Focus dot.
             let mut tx = rx + pad;
             renderer.push_overlay_glyph_px(tx.round(), ty, dot, dot_fg);
             tx += m.width + 2.0;
 
-            // Title (fit to available width, leaving room for the ⋮ button).
-            let avail = rw - (tx - rx) - menu_btn_w - pad;
+            // Title (fit to available width, leaving room for annotation + ⋮ button).
+            let avail = rw - (tx - rx) - annotation_w - menu_btn_w - pad;
             let max_chars = (avail / m.width).floor() as usize;
             let label = fit_label(title, max_chars.max(1));
             renderer.push_overlay_glyph_px_str(tx.round(), ty, &label, text_fg);
+
+            // Proc annotation (cwd + comm): dim, right-aligned before ⋮.
+            if let Some(ann) = &annotation {
+                let ann_x = rx + rw - menu_btn_w - annotation_w;
+                renderer.push_overlay_glyph_px_str(ann_x.round(), ty, ann, fg_dim);
+            }
 
             // ⋮ pane-menu button (right-aligned in the header).
             let btn_x = rx + rw - menu_btn_w;

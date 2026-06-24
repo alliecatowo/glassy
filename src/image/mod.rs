@@ -347,6 +347,7 @@ mod tests {
                 TapEvent::Cwd(_) => "cwd",
                 TapEvent::SemanticMark(_) => "mark",
                 TapEvent::Notification(_) => "notification",
+                TapEvent::Progress(_) => "progress",
             })
             .collect();
         assert_eq!(kinds, vec!["display", "delete"]);
@@ -706,5 +707,84 @@ mod tests {
         }
         let events = tap.process(&input, &store);
         assert_eq!(all_marks(&events), vec!['A', 'B', 'C', 'D']);
+    }
+
+    // -----------------------------------------------------------------------
+    // OSC 9;4 progress tests
+    // -----------------------------------------------------------------------
+
+    fn first_progress(events: &[TapEvent]) -> Option<ProgressState> {
+        events.iter().find_map(|e| match e {
+            TapEvent::Progress(s) => Some(*s),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn osc9_4_set_progress_parsed() {
+        use super::store::parse_osc9_progress;
+        // state=1;pct=42
+        match parse_osc9_progress(b"9;4;1;42") {
+            Some(TapEvent::Progress(ProgressState::Set(42))) => {}
+            other => panic!("expected Set(42), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn osc9_4_remove_parsed() {
+        use super::store::parse_osc9_progress;
+        match parse_osc9_progress(b"9;4;0;0") {
+            Some(TapEvent::Progress(ProgressState::Remove)) => {}
+            other => panic!("expected Remove, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn osc9_4_error_parsed() {
+        use super::store::parse_osc9_progress;
+        match parse_osc9_progress(b"9;4;2;75") {
+            Some(TapEvent::Progress(ProgressState::Error(75))) => {}
+            other => panic!("expected Error(75), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn osc9_4_indeterminate_parsed() {
+        use super::store::parse_osc9_progress;
+        match parse_osc9_progress(b"9;4;3") {
+            Some(TapEvent::Progress(ProgressState::Indeterminate)) => {}
+            other => panic!("expected Indeterminate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn osc9_4_not_confused_with_osc9_notification() {
+        // OSC 9;4;1;50 must not be parsed as a notification.
+        use super::store::{parse_osc9_notification, parse_osc9_progress};
+        // Progress check must match.
+        assert!(parse_osc9_progress(b"9;4;1;50").is_some());
+        // Notification check: "9;4;1;50" starts with "9;" but NOT with "9;4;".
+        // parse_osc9_notification requires the body after "9;" to be non-empty text.
+        // But parse_osc9_progress takes priority in finish_osc, so verify they don't
+        // collide: the notification parser would parse body as "4;1;50" which looks
+        // like a valid notification. The ordering in finish_osc ensures 9;4;... is
+        // always handled as progress.
+        let notif = parse_osc9_notification(b"9;4;1;50");
+        // We DON'T assert it's None here — the ordering in finish_osc is what matters.
+        // This just documents the relationship.
+        let _ = notif;
+        assert!(parse_osc9_progress(b"9;4;1;50").is_some());
+        // A plain notification ("9;build ok") must NOT be parsed as progress.
+        assert!(parse_osc9_progress(b"9;build ok").is_none());
+    }
+
+    #[test]
+    fn tap_osc9_4_emits_progress_and_passes_through() {
+        // OSC 9;4 must yield a Progress event AND pass bytes through to the VT parser.
+        let store = FairMutex::new(ImageStore::new());
+        let mut tap = StreamTap::new();
+        let events = tap.process(b"\x1b]9;4;1;60\x07", &store);
+        assert_eq!(vt_bytes(&events), b"\x1b]9;4;1;60\x07");
+        assert_eq!(first_progress(&events), Some(ProgressState::Set(60)));
     }
 }

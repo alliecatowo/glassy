@@ -653,6 +653,57 @@ pub(super) fn fire_desktop_notification(app_name: &str, body: &str) {
         .ok(); // ignore thread-spawn failure (extremely unlikely)
 }
 
+/// Read the git branch name for a directory by reading
+/// `.git/HEAD` relative to the closest ancestor that contains a `.git` entry.
+/// This is a pure filesystem read — no child process, no blocking I/O beyond
+/// a few small file reads — so it is safe to call from the UI thread at low
+/// frequency.
+///
+/// Returns `None` when the directory is not inside a git repository or the
+/// branch name cannot be determined.
+pub(crate) fn read_git_branch(cwd: &std::path::Path) -> Option<String> {
+    // Walk upward from cwd until we find a directory containing `.git`.
+    let mut dir = Some(cwd);
+    while let Some(d) = dir {
+        let git_head = d.join(".git/HEAD");
+        if git_head.exists() {
+            // Parse the HEAD file: `ref: refs/heads/<branch>` or a bare SHA.
+            if let Ok(content) = std::fs::read_to_string(&git_head) {
+                let trimmed = content.trim();
+                if let Some(branch) = trimmed.strip_prefix("ref: refs/heads/") {
+                    return Some(branch.to_string());
+                }
+                // Detached HEAD — show first 7 chars of the SHA.
+                if trimmed.len() >= 7 && trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
+                    return Some(format!(":{}", &trimmed[..7]));
+                }
+            }
+            return None;
+        }
+        dir = d.parent();
+    }
+    None
+}
+
+/// How often (minimum) to re-read `/proc` for pane info. 2 seconds is cheap
+/// enough to feel live but never blocks idle frames at 0% CPU.
+pub(super) const PROC_REFRESH_INTERVAL: std::time::Duration =
+    std::time::Duration::from_secs(2);
+
+impl App {
+    /// Refresh the cached `/proc` pane info for a single PTY when the cache is
+    /// stale (older than `PROC_REFRESH_INTERVAL`). Called on pane focus and in
+    /// `about_to_wait` for the periodic background poll. Cheap: skipped if the
+    /// cache is fresh.
+    pub(crate) fn maybe_refresh_proc_info(pty: &mut crate::pty::Pty) {
+        let now = std::time::Instant::now();
+        if now.duration_since(pty.pane_info_at) >= PROC_REFRESH_INTERVAL {
+            pty.pane_info = crate::pty::PaneInfo::read(pty.shell_pid);
+            pty.pane_info_at = now;
+        }
+    }
+}
+
 /// Spawn a background thread to watch the config file for changes.
 /// Uses notify crate (debounced) to avoid spamming reloads during rapid edits.
 pub(super) fn spawn_config_watcher(

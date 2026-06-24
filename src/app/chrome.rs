@@ -210,6 +210,9 @@ impl App {
         history_size: usize,
         sel_len: usize,
         win_focused: bool,
+        cwd: Option<&std::path::Path>,
+        git_branch: Option<&str>,
+        progress: Option<crate::image::ProgressState>,
     ) {
         let m = renderer.cell_metrics();
         let (sw, _sh) = renderer.surface_size();
@@ -293,7 +296,65 @@ impl App {
         }
         let _ = rx; // git/cwd slots reserved here for future waves
 
-        // 3) Left margin: a small decorative separator mark.
+        // 3) Left section: cwd (basename) and git branch. These fill the reserved
+        //    left slots that were previously empty ("git/cwd slots reserved here").
+        {
+            let left_margin = m.width;
+            let mut lx = left_margin;
+
+            // cwd: last path component, or "~" for $HOME, or full path if short.
+            if let Some(path) = cwd {
+                let cwd_str: String = if path.as_os_str().is_empty() {
+                    "~".to_string()
+                } else {
+                    // Show last two components for context (e.g. "glassy/src").
+                    let components: Vec<_> = path.components().collect();
+                    let n = components.len();
+                    if n >= 2 {
+                        format!("{}/{}",
+                            components[n - 2].as_os_str().to_string_lossy(),
+                            components[n - 1].as_os_str().to_string_lossy())
+                    } else if n == 1 {
+                        components[0].as_os_str().to_string_lossy().to_string()
+                    } else {
+                        "~".to_string()
+                    }
+                };
+                let w = renderer.text_width_px(&cwd_str);
+                renderer.push_overlay_glyph_px_str(lx.round(), ty, &cwd_str, fg_dim);
+                lx += w + m.width;
+
+                // Git branch (if in a repo): " branch_name" in accent.
+                if let Some(branch) = git_branch {
+                    let branch_str = format!("\u{E0A0} {branch}"); // nf-pl-branch glyph
+                    let w = renderer.text_width_px(&branch_str);
+                    renderer.push_overlay_glyph_px_str(lx.round(), ty, &branch_str, accent);
+                    lx += w;
+                }
+            }
+            let _ = lx;
+        }
+
+        // 4) OSC 9;4 progress indicator: a thin filled bar at the very bottom of
+        //    the status bar (1px tall) spanning a fraction of the bar width, colored
+        //    by state (accent = active, red = error, dim = indeterminate). Subtle and
+        //    non-intrusive — it sits inside the status bar's existing pixel budget.
+        if let Some(prog) = progress {
+            use crate::image::ProgressState;
+            let bar_bottom = bar_y + bar_h - 1.0; // 1px at the very bottom
+            let (pct, color) = match prog {
+                ProgressState::Set(p) => (p as f32 / 100.0, accent),
+                ProgressState::Error(p) => (p as f32 / 100.0, mul(color::danger())),
+                ProgressState::Indeterminate => (1.0, fg_dim),
+                ProgressState::Remove => (0.0, fg_dim),
+            };
+            if pct > 0.0 {
+                let prog_w = (bar_w * pct).max(2.0);
+                renderer.push_overlay_px(0.0, bar_bottom, prog_w, 1.0, color);
+            }
+        }
+
+        // 5) Left margin: a small decorative separator mark.
         renderer.push_overlay_px(0.0, bar_y, 1.0, bar_h, mul(gui::rail()));
     }
 

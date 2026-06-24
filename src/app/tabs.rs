@@ -84,6 +84,7 @@ impl App {
             search: None,
             palette: None,
             palette_rows: Vec::new(),
+            active_progress: None,
         }
     }
 

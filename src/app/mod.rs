@@ -405,6 +405,10 @@ pub struct App {
     /// hover/click hit-testing. Each is `(filtered_index, rect)`. Rebuilt every
     /// palette paint; empty when the palette is closed.
     palette_rows: Vec<(usize, gui::Rect)>,
+
+    /// Latest OSC 9;4 progress state for the active session. `None` once
+    /// `ProgressState::Remove` is received or the session exits.
+    active_progress: Option<crate::image::ProgressState>,
 }
 
 
