@@ -32,7 +32,7 @@ const fn rgb(r: u8, g: u8, b: u8) -> Rgb {
 /// Tokyo Night: a deep, slightly cool near-black background, a soft lavender-gray
 /// foreground, a bright cyan cursor accent, and a cohesive saturated-but-soft
 /// ANSI palette. The default theme.
-const TOKYO_NIGHT: Theme = Theme {
+pub(crate) const TOKYO_NIGHT: Theme = Theme {
     fg: rgb(0xC0, 0xCA, 0xF5),
     bg: rgb(0x1A, 0x1B, 0x26),
     cursor: rgb(0x7D, 0xCF, 0xFF),

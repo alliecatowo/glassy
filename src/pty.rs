@@ -69,6 +69,8 @@ pub enum UserEvent {
     /// OSC 9 or OSC 777 desktop notification from the shell. Forwarded to the UI
     /// thread so it can fire a native notification when the window is unfocused.
     Notification(usize, String),
+    /// The config file was modified; reload from disk.
+    ConfigReload,
 }
 
 /// Wraps the `ClipboardLoad` reply-builder closure so `UserEvent` can keep its

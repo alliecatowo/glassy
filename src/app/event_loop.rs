@@ -99,6 +99,12 @@ impl ApplicationHandler<UserEvent> for App {
         self.renderer = Some(renderer);
         self.pty = Some(pty);
 
+        // Set up config file watcher for live reload. Uses notify crate to watch
+        // the config file and send ConfigReload events when it changes (debounced).
+        if let Some(config_path) = crate::config::path() {
+            spawn_config_watcher(config_path, self.proxy.clone());
+        }
+
         // Headless input/resize harness (used with GLASSY_CAPTURE for autonomous
         // verification of the custom PTY loop's write + resize paths):
         //   GLASSY_INPUT  - bytes to write through the real input channel; `\n`
@@ -355,6 +361,21 @@ impl ApplicationHandler<UserEvent> for App {
                 // spurious notifications from noisy programs.
                 if !self.focused {
                     fire_desktop_notification("glassy", &text);
+                }
+                return;
+            }
+            UserEvent::ConfigReload => {
+                // Config file changed; reload from disk and apply live-reloadable settings.
+                match crate::config::Settings::resolve(std::iter::empty()) {
+                    Ok(Some(settings)) => {
+                        self.apply_config_reload(&settings.config);
+                    }
+                    Ok(None) => {
+                        log::debug!("config reload: --help/--version");
+                    }
+                    Err(e) => {
+                        log::warn!("config reload failed: {e}");
+                    }
                 }
                 return;
             }
@@ -1482,3 +1503,68 @@ fn fire_desktop_notification(app_name: &str, body: &str) {
         .ok(); // ignore thread-spawn failure (extremely unlikely)
 }
 
+/// Spawn a background thread to watch the config file for changes.
+/// Uses notify crate (debounced) to avoid spamming reloads during rapid edits.
+fn spawn_config_watcher(config_path: std::path::PathBuf, proxy: EventLoopProxy<UserEvent>) {
+    use notify::{Watcher, RecursiveMode, Result as NotifyResult};
+    use notify::recommended_watcher;
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+    use std::thread;
+
+    thread::spawn(move || {
+        // Debounce guard: track the last reload time to avoid spamming the UI thread.
+        let last_reload = Arc::new(Mutex::new(Instant::now() - Duration::from_secs(10)));
+
+        let config_dir = config_path.parent().unwrap_or_else(|| std::path::Path::new("."));
+        let config_filename = config_path.file_name().unwrap_or_default().to_owned();
+
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        // Create a watcher that sends events on file changes.
+        let mut watcher = match recommended_watcher(move |res: NotifyResult<_>| {
+            let _ = tx.send(res);
+        }) {
+            Ok(w) => w,
+            Err(e) => {
+                log::warn!("failed to create config watcher: {e}");
+                return;
+            }
+        };
+
+        // Watch the config directory (not the file directly, since rename/swap
+        // operations trigger file system events that are easier to catch at the dir level).
+        if let Err(e) = watcher.watch(config_dir, RecursiveMode::NonRecursive) {
+            log::warn!("failed to watch config dir {}: {e}", config_dir.display());
+            return;
+        }
+
+        // Process events from the watcher in the background thread.
+        for event_result in rx {
+            match event_result {
+                Ok(event) => {
+                    // Check if the event involves our config file.
+                    let is_config_change = event.paths.iter().any(|p| {
+                        p.file_name().map_or(false, |n| n == config_filename)
+                    });
+
+                    if is_config_change {
+                        // Debounce: only reload if at least 500ms have passed since the last one.
+                        let now = Instant::now();
+                        let mut last = last_reload.lock().unwrap();
+                        if now.duration_since(*last) >= Duration::from_millis(500) {
+                            *last = now;
+                            drop(last);
+                            if let Err(e) = proxy.send_event(UserEvent::ConfigReload) {
+                                log::debug!("failed to send ConfigReload: {e}");
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    log::debug!("config watcher error: {e}");
+                }
+            }
+        }
+    });
+}
