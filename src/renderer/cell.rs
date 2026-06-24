@@ -1,0 +1,534 @@
+//! Per-cell rendering: push_cell, glyph placement, row management.
+
+use super::*;
+
+impl Renderer {
+    pub fn resize(&mut self, width: u32, height: u32) {
+        if width == 0 || height == 0 {
+            return;
+        }
+        // Skip the (expensive) surface.configure() call when the size is unchanged.
+        // This is common at startup when the app calls resize() twice: once with the
+        // initial 1×1 placeholder and once with the real window size, plus any
+        // redundant resize events the compositor fires. configure() can stall the
+        // driver for a swapchain recreation even when the size hasn't changed.
+        if width == self.config.width && height == self.config.height {
+            return;
+        }
+        self.config.width = width;
+        self.config.height = height;
+        self.surface.configure(&self.device, &self.config);
+        self.queue.write_buffer(
+            &self.uniform_buffer,
+            0,
+            bytemuck::bytes_of(&Uniform {
+                screen: [width as f32, height as f32, 0.0, 0.0],
+            }),
+        );
+    }
+
+    pub fn cell_metrics(&self) -> CellMetrics {
+        self.metrics
+    }
+
+    /// Physical-pixel inset applied to the grid on all sides. The app must
+    /// account for this when computing how many cells fit in the surface.
+    pub fn pad(&self) -> f32 {
+        self.pad
+    }
+
+    /// The current font size in physical pixels.
+    pub fn font_px(&self) -> f32 {
+        self.font_px
+    }
+
+    /// The current surface size in physical pixels `(width, height)`. Used by the
+    /// split-pane layout to tile the full surface below the tab strip.
+    pub fn surface_size(&self) -> (u32, u32) {
+        (self.config.width, self.config.height)
+    }
+
+    /// Override the grid padding (inset) with an explicit physical-pixel value,
+    /// preserved across runtime font resizes. The caller must recompute the grid.
+    pub fn set_pad(&mut self, pad: f32) {
+        let pad = pad.max(0.0);
+        self.pad_override = Some(pad);
+        self.pad = pad;
+    }
+
+    /// Set the window background opacity at runtime. Only has a visible effect on
+    /// a transparent surface (the compositor must composite alpha); the caller
+    /// should trigger a full redraw afterward so every cell background repaints.
+    pub fn set_opacity(&mut self, opacity: f32) {
+        self.opacity = opacity.clamp(0.0, 1.0);
+    }
+
+    /// Reload the font at a new physical pixel size, recomputing the cell metrics
+    /// and padding and rebuilding the glyph atlas. On failure the previous font
+    /// is retained (the error is logged) so a bad size never breaks rendering.
+    ///
+    /// The caller is responsible for re-querying `cell_metrics()`/`pad()` and
+    /// resizing the PTY grid afterward (the renderer does not know the grid).
+    pub fn set_font_size(&mut self, font_px: f32) {
+        let font_px = font_px.clamp(4.0, 300.0);
+        if (font_px - self.font_px).abs() < 0.01 {
+            return;
+        }
+        let (text, metrics) = match Text::load(self.font_family.as_deref(), font_px) {
+            Ok(loaded) => loaded,
+            Err(e) => {
+                log::warn!("glassy: font resize to {font_px:.1}px failed: {e:#}");
+                return;
+            }
+        };
+        self.text = text;
+        self.metrics = metrics;
+        self.pad = self.pad_override.unwrap_or_else(|| pad_for(metrics.height));
+        self.font_px = font_px;
+
+        // The atlases hold glyphs rasterized at the old size; reset both packers
+        // and caches so glyphs are re-rasterized at the new size on demand.
+        self.packer.reset();
+        self.color_packer.reset();
+        self.glyph_cache.clear();
+        self.cluster_cache.clear();
+
+        // Pre-warm printable ASCII (regular + bold) at the new size for a
+        // rasterize-free first frame after a font-size change.
+        for byte in 0x20u8..=0x7E {
+            self.ensure_glyphs(byte as char, false, false);
+            self.ensure_glyphs(byte as char, true, false);
+        }
+    }
+
+    /// Take the "atlas was repacked" flag (clearing it). When true, the caller
+    /// should force a full row rebuild + repaint so no row keeps stale glyph UVs.
+    pub fn pull_atlas_reset(&mut self) -> bool {
+        std::mem::take(&mut self.atlas_reset)
+    }
+
+    /// Size the persistent per-row instance storage to `rows` grid rows, clearing
+    /// every row. The app calls this whenever the grid height changes (resize /
+    /// font resize) so subsequent per-row rebuilds index a correctly-sized table.
+    /// Forces a full re-upload on the next `end_frame` (offsets are invalidated).
+    pub fn resize_grid(&mut self, rows: usize) {
+        // Drop or grow to exactly `rows` entries, clearing all so a fresh full
+        // rebuild populates them. `RowInstances::default` is empty.
+        self.rows.clear();
+        self.rows.resize_with(rows, RowInstances::default);
+        // Offsets no longer describe the buffer; clearing them forces end_frame to
+        // reflatten and reupload everything.
+        self.bg_row_offsets.clear();
+        self.fg_row_offsets.clear();
+        self.dirty_rows.clear();
+    }
+
+    /// Begin a frame: set the clear color. Unlike a full rebuild this does NOT
+    /// clear the per-row instance storage — only the rows the app re-pushes via
+    /// [`Renderer::begin_row`] are rewritten; the rest are reused from last frame.
+    pub fn begin_frame(&mut self, default_bg: [f32; 4]) {
+        // The clear color paints the (translucent) window backdrop, so it takes
+        // the window opacity (and the visual-bell flash) just like the per-cell
+        // default-background quads.
+        self.clear_color = self.glass_bg(default_bg);
+        // Image quads are not damage-tracked; they are rebuilt from live
+        // placements every frame, so clear last frame's overlay here.
+        self.image_overlay.clear();
+        // Panel overlay (modals / menus) is likewise rebuilt every frame.
+        self.overlay_quads.clear();
+        self.overlay_text.clear();
+    }
+
+    /// Queue an inline image to be drawn this frame at pixel rect
+    /// `(x, y, dst_w, dst_h)`. `rgba` is straight-alpha RGBA8, `img_w`x`img_h`.
+    /// The pixels are uploaded into the image atlas once per `id` and cached;
+    /// subsequent frames only push a quad. Oversized images (larger than the
+    /// atlas) are skipped.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_image(
+        &mut self,
+        id: u32,
+        rgba: &[u8],
+        img_w: u32,
+        img_h: u32,
+        x: f32,
+        y: f32,
+        dst_w: f32,
+        dst_h: f32,
+    ) {
+        if img_w == 0 || img_h == 0 || rgba.len() < (img_w * img_h * 4) as usize {
+            return;
+        }
+        let glyph = match self.image_cache.get(&id).copied() {
+            Some(g) => g,
+            None => {
+                let (px, py) = match self.image_packer.alloc(img_w, img_h) {
+                    Some(o) => o,
+                    None => {
+                        // Atlas full: drop cached images and repack from scratch.
+                        self.image_cache.clear();
+                        self.image_packer.reset();
+                        match self.image_packer.alloc(img_w, img_h) {
+                            Some(o) => o,
+                            None => return, // image larger than the atlas
+                        }
+                    }
+                };
+                self.queue.write_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &self.image_atlas_texture,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d { x: px, y: py, z: 0 },
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    rgba,
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(img_w * 4),
+                        rows_per_image: Some(img_h),
+                    },
+                    wgpu::Extent3d {
+                        width: img_w,
+                        height: img_h,
+                        depth_or_array_layers: 1,
+                    },
+                );
+                let inv = 1.0 / IMAGE_ATLAS_SIZE as f32;
+                let g = AtlasGlyph {
+                    uv_min: [px as f32 * inv, py as f32 * inv],
+                    uv_max: [(px + img_w) as f32 * inv, (py + img_h) as f32 * inv],
+                    px_w: img_w as f32,
+                    px_h: img_h as f32,
+                    left: 0,
+                    top: 0,
+                    is_color: true,
+                };
+                self.image_cache.insert(id, g);
+                g
+            }
+        };
+        self.image_overlay.push(FgInstance {
+            pos: [x, y],
+            size: [dst_w, dst_h],
+            uv_min: glyph.uv_min,
+            uv_max: glyph.uv_max,
+            color: [1.0, 1.0, 1.0, 1.0],
+            flags: 1,
+            _pad: [0; 3],
+        });
+    }
+
+    /// Begin (re)building grid row `row`: subsequent `push_cell`/`push_cursor`
+    /// calls land in this row's instance storage, replacing its previous contents.
+    /// Out-of-range rows are ignored (clamped to a scratch slot) so a stale cursor
+    /// row past a shrink never panics.
+    pub fn begin_row(&mut self, row: usize) {
+        if row >= self.rows.len() {
+            // Should not happen if the app keeps the grid in sync, but stay safe:
+            // grow so the index is valid rather than panicking mid-frame.
+            self.rows.resize_with(row + 1, RowInstances::default);
+            self.bg_row_offsets.clear();
+            self.fg_row_offsets.clear();
+        }
+        self.cur_row = row;
+        self.rows[row].bg.clear();
+        self.rows[row].fg.clear();
+        self.dirty_rows.push(row);
+    }
+
+    /// Re-target pushes at an already-built row WITHOUT clearing it, so callers can
+    /// append to a row after its cells were laid down (the cursor overlay is pushed
+    /// this way so it lands on top of the cursor row's cell backgrounds). The row
+    /// must already have been built via [`Renderer::begin_row`] this frame.
+    pub fn set_cur_row(&mut self, row: usize) {
+        if row < self.rows.len() {
+            self.cur_row = row;
+        }
+    }
+
+    /// Apply the window opacity to a cell-background color and premultiply it.
+    /// Backgrounds become translucent (alpha = `self.opacity`) so the desktop shows
+    /// through; the RGB is premultiplied to match the PreMultiplied surface and
+    /// the foreground pass's premultiplied blending. A no-op (and fully opaque)
+    /// when the compositor can't do translucency.
+    pub(crate) fn glass_bg(&self, color: [f32; 4]) -> [f32; 4] {
+        let color = self.apply_flash(color);
+        if !self.transparent {
+            return color;
+        }
+        let a = color[3] * self.opacity;
+        [color[0] * a, color[1] * a, color[2] * a, a]
+    }
+
+    /// Blend the active visual-bell flash (straight RGBA over) onto a straight
+    /// (non-premultiplied) background color, preserving its alpha. A no-op when no
+    /// flash is active. Applied to cell backgrounds and the clear color so the
+    /// whole window tints uniformly toward the flash color for the flash window.
+    pub(crate) fn apply_flash(&self, color: [f32; 4]) -> [f32; 4] {
+        match self.flash {
+            None => color,
+            Some([fr, fg, fb, fa]) => [
+                color[0] + (fr - color[0]) * fa,
+                color[1] + (fg - color[1]) * fa,
+                color[2] + (fb - color[2]) * fa,
+                color[3],
+            ],
+        }
+    }
+
+    /// Set (or clear) the visual-bell flash overlay color. `Some([r, g, b, a])`
+    /// blends that straight RGBA over the background for the next frames; `None`
+    /// restores the normal appearance. The caller drives the flash duration.
+    pub fn set_flash(&mut self, flash: Option<[f32; 4]>) {
+        self.flash = flash;
+    }
+
+    /// Save the wgpu pipeline cache to disk. Call once before the application
+    /// exits so the next launch can skip shader compilation. Failures are logged
+    /// but never fatal. On backends that don't support `PIPELINE_CACHE` this is
+    /// a no-op.
+    #[allow(dead_code)] // public API; wired in by app.rs in a subsequent wave
+    pub fn save_pipeline_cache(&self) {
+        if let Some(cache) = &self.pipeline_cache {
+            save_pipeline_cache(cache, &self.adapter_info);
+        }
+    }
+
+    /// Draw a thin scrollbar thumb in the right gutter of the terminal grid.
+    ///
+    /// `scroll_off` is the current scrollback offset (0 = at bottom, positive =
+    /// scrolled up by that many rows).  `scroll_hist` is the total history rows
+    /// available. `visible_rows` is the number of rows currently on screen.
+    /// `surface_h` is the surface height in physical pixels.
+    ///
+    /// The thumb is painted via `push_overlay_px` (premultiplied-blend overlay
+    /// pipeline) so it composites over the terminal content without touching the
+    /// cell data.  It is 2 px wide in the right-most gutter, invisible (no-op)
+    /// when there is nothing to scroll.
+    #[allow(dead_code)] // public API; wired in by app.rs in a subsequent wave
+    pub fn push_scrollbar_thumb(
+        &mut self,
+        scroll_off: usize,
+        scroll_hist: usize,
+        visible_rows: usize,
+        surface_h: f32,
+        color: [f32; 4],
+    ) {
+        let total = visible_rows + scroll_hist;
+        if total <= visible_rows || surface_h <= 0.0 {
+            return;
+        }
+        let track_h = surface_h;
+        let thumb_h = (track_h * visible_rows as f32 / total as f32)
+            .round()
+            .max(4.0)
+            .min(track_h);
+        // scroll_off=0 → thumb at bottom; scroll_off=scroll_hist → thumb at top.
+        let max_off = scroll_hist as f32;
+        let thumb_y = if scroll_hist == 0 {
+            track_h - thumb_h
+        } else {
+            let frac = scroll_off as f32 / max_off;
+            (track_h - thumb_h) * (1.0 - frac)
+        };
+        let sw = self.config.width as f32;
+        let thumb_w = 2.0_f32.max(1.0);
+        let x = sw - thumb_w - 1.0; // 1 px margin from window edge
+        let y = thumb_y.max(0.0).min(track_h - thumb_h);
+        self.push_overlay_px(x, y, thumb_w, thumb_h, color);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn push_cell(
+        &mut self,
+        col: usize,
+        row: usize,
+        ch: char,
+        combiners: &[char],
+        fg: [f32; 4],
+        bg: [f32; 4],
+        bold: bool,
+        italic: bool,
+        wide: bool,
+        decorations: Decorations,
+    ) {
+        let cell_w = self.metrics.width;
+        let cell_h = self.metrics.height;
+        let pad = self.pad;
+        // Grid origin of this cell, offset by the window padding (inset) and the
+        // GUI tab-bar inset (`grid_origin_y`, zero in the multi-pane path where
+        // each pane carries its own pixel origin).
+        let origin_x = col as f32 * cell_w + pad;
+        let origin_y = row as f32 * cell_h + pad + self.grid_origin_y;
+
+        // A double-width (CJK / wide-emoji) cell occupies two columns: its advance
+        // box spans `2 * cell_w`. The grid skips the trailing spacer cell, so we
+        // lay the glyph out across the full two-cell box here. Single-width cells
+        // keep the ordinary one-cell box.
+        let box_w = if wide { cell_w * 2.0 } else { cell_w };
+
+        // Push the cell background, but skip cells whose background equals the
+        // frame's clear color — the clear already paints those, so emitting a quad
+        // for every default cell is pure overdraw (the common case is most of the
+        // grid). Decorations and procedural box/block segments are separate
+        // instances pushed afterward, so they are unaffected by the skip. A wide
+        // cell's background spans both columns. Backgrounds take the window opacity
+        // (premultiplied) so the desktop shows through uniformly.
+        let glass = self.glass_bg(bg);
+        if glass != self.clear_color {
+            self.rows[self.cur_row].bg.push(BgInstance {
+                pos: [origin_x, origin_y],
+                size: [box_w, cell_h],
+                color: glass,
+            });
+        }
+
+        // Underline / strikethrough strokes span the full cell width so they join
+        // seamlessly across adjacent decorated cells. Pushed here (after the cell
+        // background, in the bg pass) so they paint over the background in the
+        // decoration color; glyphs draw on top in the later fg pass. The curly
+        // underline is emitted as a foreground decoration instance instead.
+        self.draw_decorations(origin_x, origin_y, decorations);
+
+        let baseline = origin_y + self.metrics.ascent;
+
+        // Grapheme cluster path: a base char with combining marks / ZWJ-joined
+        // codepoints (e.g. compound emoji like the trans flag). Shape the whole
+        // cluster as one unit so it resolves to its single combined glyph.
+        if !combiners.is_empty() {
+            let mut cluster = String::with_capacity(ch.len_utf8() + combiners.len() * 4);
+            cluster.push(ch);
+            cluster.extend(combiners.iter());
+            self.ensure_cluster_glyphs(&cluster, bold, italic);
+            if let Some(glyphs) = self.cluster_cache.get(&(cluster, bold, italic)) {
+                let cur = self.cur_row;
+                Self::place_glyphs(
+                    &mut self.rows[cur].fg,
+                    glyphs,
+                    fg,
+                    origin_x,
+                    baseline,
+                    cell_w,
+                    box_w,
+                    cell_h,
+                );
+            }
+            return;
+        }
+
+        if ch == ' ' || ch == '\0' {
+            return;
+        }
+
+        // PROCEDURAL box-drawing / block elements. Drawing these as font glyphs
+        // leaves hairline gaps between adjacent cells (lines fail to connect), so
+        // we paint them as solid foreground rectangles that span the full cell.
+        // These quads are pushed AFTER this cell's background quad, so in the
+        // painter-order bg pass they draw on top of it in the foreground color.
+        let cp = ch as u32;
+        let is_box = (0x2500..=0x257F).contains(&cp);
+        let is_block = (0x2580..=0x259F).contains(&cp);
+        if is_block {
+            self.draw_block(ch, origin_x, origin_y, fg, bg);
+            return;
+        }
+        if is_box {
+            // `draw_box` returns false for code points it does not handle, in
+            // which case we fall through to the normal glyph path so nothing
+            // renders blank.
+            if self.draw_box(ch, origin_x, origin_y, fg) {
+                return;
+            }
+        }
+
+        self.ensure_glyphs(ch, bold, italic);
+        if let Some(glyphs) = self.glyph_cache.get(&(ch, bold, italic)) {
+            let cur = self.cur_row;
+            Self::place_glyphs(
+                &mut self.rows[cur].fg,
+                glyphs,
+                fg,
+                origin_x,
+                baseline,
+                cell_w,
+                box_w,
+                cell_h,
+            );
+        }
+    }
+
+    /// Compute the on-screen quad placement (`pos`, `size`) for each atlas glyph
+    /// of a cell, given the cell's pen `origin_x`, text `baseline`, the advance
+    /// box width `box_w` (one cell, or two for a double-width cell), and the cell
+    /// height `cell_h`.
+    ///
+    /// The natural placement anchors a glyph at the single cell origin via its
+    /// left/top bearings (`origin_x + left`, `baseline - top`). That is correct
+    /// for a one-cell box. For a double-width box (`box_w == 2 * cell_w`) the
+    /// glyph should instead sit centered across both cells:
+    ///
+    ///   * Mask glyphs (CJK text, monochrome emoji) keep their rasterized size and
+    ///     their font bearings, plus a horizontal shift of `(box_w - cell_w) / 2`
+    ///     that recenters the single-cell-anchored glyph in the two-cell box. For
+    ///     a single-width cell that shift is zero, so ordinary text is unchanged.
+    ///   * Color emoji are scaled to fit the box height (preserving aspect, capped
+    ///     to the box width) and then centered both horizontally and vertically in
+    ///     the box, so a square emoji bitmap fills its box without overflowing a
+    ///     neighbour or clipping at the top/bottom.
+    ///
+    /// `cell_w` is the single-cell advance; `box_w` is this cell's advance box.
+    /// `fg` is the glyph color. Pushes one [`FgInstance`] per atlas glyph directly
+    /// into `out` (no per-cell temporary allocation — this runs for nearly every
+    /// rebuilt cell, so the hot path stays alloc-free).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn place_glyphs(
+        out: &mut Vec<FgInstance>,
+        glyphs: &[AtlasGlyph],
+        fg: [f32; 4],
+        origin_x: f32,
+        baseline: f32,
+        cell_w: f32,
+        box_w: f32,
+        cell_h: f32,
+    ) {
+        // Horizontal recentering for a wide box (0 for a single-width cell).
+        let center_dx = (box_w - cell_w) * 0.5;
+        for g in glyphs {
+            let (pos, size) = if g.is_color {
+                // Color emoji: scale to fit the box height-first (preserving
+                // aspect), capped to the box width, then center in the box.
+                let scale = if g.px_h > 0.0 {
+                    let s = cell_h / g.px_h;
+                    if g.px_w * s > box_w && g.px_w > 0.0 {
+                        box_w / g.px_w
+                    } else {
+                        s
+                    }
+                } else {
+                    1.0
+                };
+                let w = g.px_w * scale;
+                let h = g.px_h * scale;
+                let x = origin_x + (box_w - w) * 0.5;
+                let y = baseline - cell_h + (cell_h - h) * 0.5;
+                ([x, y], [w, h])
+            } else {
+                // Mask glyph: keep its size and bearings; shift right to recenter
+                // the single-cell-anchored glyph in the box.
+                let x = origin_x + g.left as f32 + center_dx;
+                let y = baseline - g.top as f32;
+                ([x, y], [g.px_w, g.px_h])
+            };
+            out.push(FgInstance {
+                pos,
+                size,
+                uv_min: g.uv_min,
+                uv_max: g.uv_max,
+                color: fg,
+                flags: if g.is_color { 1 } else { 0 },
+                _pad: [0; 3],
+            });
+        }
+    }
+
+}
