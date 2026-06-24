@@ -912,17 +912,27 @@ impl App {
         let Some(window) = self.window.as_ref() else {
             return;
         };
-        // Sanitize the OSC title before it reaches the native (CSD) titlebar:
-        // strip control chars, zero-width / directional marks, and variation
-        // selectors, which the titlebar font renders as a blank "tofu" box.
+        // Sanitize the OSC title before it reaches the native (CSD) titlebar: the
+        // titlebar uses a plain UI font, so drop the glyph classes it can't render
+        // (they show as a blank "tofu" box) — dingbats like Claude's spinner
+        // (✻ = U+273B), Nerd-Font private-use icons, emoji, and zero-width /
+        // variation-selector marks. (The full rich title lives in our own chrome.)
         let cleaned: String = self
             .active_title
             .chars()
             .filter(|&c| {
-                !c.is_control()
-                    && !('\u{200b}'..='\u{200f}').contains(&c)
-                    && !('\u{fe00}'..='\u{fe0f}').contains(&c)
-                    && c != '\u{feff}'
+                if c.is_control() {
+                    return false;
+                }
+                let u = c as u32;
+                !matches!(u,
+                    0x200B..=0x200F | 0x202A..=0x202E | 0x2060..=0x206F | 0xFEFF // zero-width / bidi
+                    | 0xFE00..=0xFE0F                  // variation selectors
+                    | 0x2600..=0x27BF                  // misc symbols + dingbats (✻ = U+273B)
+                    | 0xE000..=0xF8FF                  // private use (Nerd Fonts)
+                    | 0x1F000..=0x1FAFF                // emoji / pictographs
+                    | 0xF0000..=0x10FFFD               // supplementary private use
+                )
             })
             .collect();
         let base = cleaned.trim();
