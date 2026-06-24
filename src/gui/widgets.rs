@@ -109,19 +109,22 @@ impl<'r> Ui<'r> {
             .push_overlay_rrect_px(r.x, r.y, r.w, r.h, radius, color);
     }
 
-    /// Edge-lit signature: a 1px `rail` on the TOP edge + a 1px `hairline` on the
-    /// BOTTOM edge of a raised surface (two quads), reading as a beveled pane.
-    pub(crate) fn edge_light(&mut self, r: Rect) {
-        self.quad(Rect::new(r.x, r.y, r.w, 1.0), rail());
-        self.quad(Rect::new(r.x, r.y + r.h - 1.0, r.w, 1.0), hairline());
-    }
+    /// Soft elevation cue for a raised surface. The old version painted a 1px
+    /// bright accent rail on the top edge plus a 1px hairline on the bottom, which
+    /// read as harsh white/light lines on light-accent themes. Surfaces now lean
+    /// on their fill + radius alone; this is a deliberate no-op so edges stay
+    /// clean. Kept as a named hook so call sites and intent remain documented.
+    pub(crate) fn edge_light(&mut self, _r: Rect) {}
 
     /// A 1 px accent outline rrect — the keyboard-focus ring. Drawn as the
     /// outer rrect minus a 1 px inset inner rrect (SDF alpha difference), which
     /// produces clean rounded corners instead of the previous 4-quad approach
     /// that left mitre gaps.
     pub(crate) fn focus_ring(&mut self, r: Rect, radius: f32) {
-        let c = color::accent();
+        // Softened accent (was full-opacity accent, which read as a harsh bright
+        // ring on light themes). A translucent ring still clearly signals focus
+        // without a hard line.
+        let c = with_alpha(color::accent(), 0.55);
         // Outer filled rrect.
         self.rrect(r, radius, c);
         // Inner filled rrect in the panel background — subtracts to leave a 1 px ring.
@@ -208,9 +211,6 @@ impl<'r> Ui<'r> {
         );
         let fill = state_fill(glass_raised(), hover_t, it.pressed);
         self.rrect(rect, self.m.radius, fill);
-        if hover_t > 0.0 && !it.pressed {
-            self.quad(Rect::new(rect.x, rect.y, rect.w, 1.0), rail());
-        }
         if matches!(st, WState::Focus) {
             self.focus_ring(rect, self.m.radius);
         }
@@ -409,9 +409,6 @@ impl<'r> Ui<'r> {
         );
         let fill = state_fill(glass_raised(), hover_t, it.pressed || open);
         self.rrect(rect, self.m.radius, fill);
-        if hover_t > 0.0 && !it.pressed {
-            self.quad(Rect::new(rect.x, rect.y, rect.w, 1.0), rail());
-        }
         if matches!(st, WState::Focus) {
             self.focus_ring(rect, self.m.radius);
         }

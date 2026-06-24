@@ -60,10 +60,10 @@ impl App {
             mul([0.97, 0.97, 0.98, 1.0])
         };
 
-        // 1) Bar backdrop (E1) + top accent rail + bottom hairline (content seam).
+        // 1) Bar backdrop (E1). The old top accent rail + bottom hairline drew two
+        //    bright 1px seams that read as harsh white/light lines across the whole
+        //    bar on light-accent themes; dropped so the bar edge is clean soft glass.
         renderer.push_overlay_px(0.0, 0.0, bar_w, bar_h, bar_bg);
-        renderer.push_overlay_px(0.0, 0.0, bar_w, 1.0, mul(gui::rail()));
-        renderer.push_overlay_px(0.0, bar_h - 1.0, bar_w, 1.0, mul(gui::hairline()));
 
         // 2) Brand mark on the far left.
         let mark_y = (bar_h - m.height) * 0.5;
@@ -184,7 +184,6 @@ impl App {
                             gui_radius(m.height),
                             hover_fill(base),
                         );
-                        renderer.push_overlay_px(r.x, r.y, r.w, 1.0, mul(gui::rail()));
                     }
                     let nudge = if is_held { 1.0 } else { 0.0 };
                     let cfg = if is_hover || is_held { fg } else { fg_dim };
@@ -208,7 +207,13 @@ impl App {
                 TAB_RADIUS,
                 mul(gui::glass_float()),
             );
-            renderer.push_overlay_px(gr.x, gr.y, gr.w, 2.0, accent);
+            renderer.push_overlay_px(
+                gr.x,
+                gr.y,
+                gr.w,
+                2.0,
+                [accent[0], accent[1], accent[2], accent[3] * 0.5],
+            );
             Self::paint_tab_label(
                 renderer, gr, m.height, m.width, i, &label, true, false, false, spin, active_fg,
                 active_fg, multi,
@@ -425,8 +430,13 @@ impl App {
 
         // Opaque field surface so the chip text underneath never shows through.
         renderer.push_overlay_rrect_px(r.x, r.y, r.w, r.h, radius, gui::glass_float());
-        // Accent focus ring (1px): outer accent rrect minus an inset surface rrect.
-        renderer.push_overlay_rrect_px(r.x, r.y, r.w, r.h, radius, color::accent());
+        // Accent focus ring (1px, softened): outer accent rrect minus an inset
+        // surface rrect — a gentle halo rather than a harsh bright outline.
+        let ring = {
+            let a = color::accent();
+            [a[0], a[1], a[2], 0.55]
+        };
+        renderer.push_overlay_rrect_px(r.x, r.y, r.w, r.h, radius, ring);
         let inset = 1.0;
         if r.w > 2.0 * inset && r.h > 2.0 * inset {
             renderer.push_overlay_rrect_px(
@@ -512,15 +522,14 @@ impl App {
                 [TAB_RADIUS, TAB_RADIUS, 0.0, 0.0],
                 active_surface,
             );
-            // Connector: extends 4px below the bar bottom hairline, matching the
+            // Connector: extends 4px below the bar bottom seam, matching the
             // active-tab color, so the chip visually "opens into" the content surface.
             renderer.push_overlay_px(r.x, bar_h - 2.0, r.w, 4.0, active_surface);
-            // Top accent rail (full accent opacity, 3px) crowns the active chip.
-            renderer.push_overlay_px(r.x, r.y, r.w, 3.0, accent);
-            // Side edge highlight: faint left/right 1px strips echo the accent rail.
-            let side_a = [accent[0], accent[1], accent[2], accent[3] * 0.35];
-            renderer.push_overlay_px(r.x, r.y + 3.0, 1.0, r.h - 3.0, side_a);
-            renderer.push_overlay_px(r.x + r.w - 1.0, r.y + 3.0, 1.0, r.h - 3.0, side_a);
+            // Soft accent crown (2px, low alpha) — the active tab still reads as
+            // raised + crowned, but WITHOUT the old harsh bright 3px line + side
+            // strips that painted white/light edge artifacts on light themes.
+            let crown = [accent[0], accent[1], accent[2], accent[3] * 0.5];
+            renderer.push_overlay_px(r.x, r.y, r.w, 2.0, crown);
         } else {
             // Inactive: strongly recessed chip — clearly subordinate to the active tab.
             // Inset by 2px top and shrink 4px total height so it visually "recedes".
@@ -547,14 +556,15 @@ impl App {
                     [h[0], h[1], h[2], h[3] * 0.4],
                 );
             }
-            // Hover accent rail (dim) signals interactability.
+            // Hover accent crown (soft, low alpha) signals interactability without
+            // a harsh bright edge line.
             if hover && !held {
                 renderer.push_overlay_px(
                     rr.x,
                     rr.y,
                     rr.w,
                     1.0,
-                    [accent[0], accent[1], accent[2], accent[3] * 0.6],
+                    [accent[0], accent[1], accent[2], accent[3] * 0.25],
                 );
             }
         }

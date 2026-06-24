@@ -431,7 +431,7 @@ pub fn menu(
     // E3 floating panel with a 1 px accent rrect border (outer minus inner so
     // the border follows the rounded shape and does not bleed into corners).
     let float_fill = glass_float();
-    let border_col = with_alpha(color::accent(), 0.5);
+    let border_col = with_alpha(color::accent(), 0.22);
     let hairline_c = hairline();
     let menu_radius = 4.0_f32;
     // Border: outer rrect in accent, then inner rrect in glass to carve out the fill.

@@ -206,14 +206,20 @@ pub fn glass_float() -> [f32; 4] {
     with_alpha(lighten(color::selection_bg(), 0.12), GLASS_FLOAT_ALPHA)
 }
 
-/// Edge-lit accent rail (top edge of raised surfaces).
+/// Soft edge accent (was a bright 1px "edge-lit" rail). Kept extremely subtle so
+/// raised surfaces read as clean soft glass with NO thin bright line artifacts —
+/// on light-accent themes the old 0.60-alpha accent rail painted harsh white/light
+/// lines on every tab, header and panel edge. This low alpha lets the active tab
+/// still read as faintly crowned without a hard bright seam.
 pub fn rail() -> [f32; 4] {
-    with_alpha(color::accent(), 0.60)
+    with_alpha(color::accent(), 0.14)
 }
 
-/// Shadow-side hairline (bottom / right edge of raised surfaces).
+/// Shadow-side separator hairline. Very low alpha so it reads as a soft seam, not
+/// a visible drawn line. Used only where a faint group divider genuinely helps
+/// (separators, content seams) — never as an all-edges outline.
 pub fn hairline() -> [f32; 4] {
-    with_alpha(darken(color::default_bg(), 0.6), 0.50)
+    with_alpha(darken(color::default_bg(), 0.4), 0.22)
 }
 
 /// Off-state control track.
@@ -250,17 +256,18 @@ pub fn danger() -> [f32; 4] {
 /// `hover_t` is the eased hover animation value (0..1); press is instant.
 pub fn state_fill(base: [f32; 4], hover_t: f32, pressed: bool) -> [f32; 4] {
     if pressed {
-        return darken(base, 0.85);
+        return darken(base, 0.90);
     }
     if hover_t <= 0.0 {
         return base;
     }
-    // On near-white surfaces, lightening does nothing — darken to keep the hover
-    // perceptible (mirrors the app's active_chip_bg reasoning).
+    // A subtle tint either way — gentle enough that the hover never reads as a
+    // harsh bright/white box (the old behaviour). On near-white surfaces a faint
+    // darken keeps the hover perceptible without a glare; elsewhere a faint lift.
     let target = if luma(base) > 0.7 {
-        darken(base, 0.92)
+        darken(base, 0.95)
     } else {
-        lighten(base, 0.06)
+        lighten(base, 0.05)
     };
     [
         base[0] + (target[0] - base[0]) * hover_t,

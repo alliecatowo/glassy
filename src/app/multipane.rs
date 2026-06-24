@@ -669,14 +669,15 @@ impl App {
             let fill = if is_focused { body_e2 } else { body_e1 };
             renderer.push_overlay_px(rx, ry, rw, hdr_h, fill);
 
-            // Top accent rail (2 px on focused, 1 px hairline on unfocused).
+            // Soft accent crown on the focused header (low alpha, no harsh bright
+            // edge line). Unfocused headers get no top line at all so edges stay
+            // clean; focus is carried by the brighter E2 fill + soft crown.
             if is_focused {
-                renderer.push_overlay_px(rx, ry, rw, 2.0, accent);
-            } else {
-                renderer.push_overlay_px(rx, ry, rw, 1.0, hairline);
+                let crown = [accent[0], accent[1], accent[2], accent[3] * 0.5];
+                renderer.push_overlay_px(rx, ry, rw, 2.0, crown);
             }
 
-            // Bottom hairline separating header from cell body.
+            // Soft bottom seam separating header from cell body.
             renderer.push_overlay_px(rx, ry + hdr_h - 1.0, rw, 1.0, hairline);
 
             // Resolve the per-pane title from the snapshot.
@@ -789,18 +790,23 @@ impl App {
         let row_h = (m.height + 6.0).ceil();
         let panel_h = items.len() as f32 * row_h + 4.0;
 
-        // E3 floating panel.
+        // E3 floating panel with a soft rounded accent border carved as an
+        // outer-minus-inner rrect, so it follows the rounded shape and reads as a
+        // gentle halo instead of a hard 4-edge box of bright lines.
         let float_fill = gui::glass_float();
-        renderer.push_overlay_rrect_px(ax, ay, panel_w, panel_h, 4.0, float_fill);
-        // Thin accent border.
         let border = {
             let a = color::accent();
-            [a[0], a[1], a[2], 0.5]
+            [a[0], a[1], a[2], 0.22]
         };
-        renderer.push_overlay_px(ax, ay, panel_w, 1.0, border);
-        renderer.push_overlay_px(ax, ay + panel_h - 1.0, panel_w, 1.0, border);
-        renderer.push_overlay_px(ax, ay, 1.0, panel_h, border);
-        renderer.push_overlay_px(ax + panel_w - 1.0, ay, 1.0, panel_h, border);
+        renderer.push_overlay_rrect_px(ax, ay, panel_w, panel_h, 4.0, border);
+        renderer.push_overlay_rrect_px(
+            ax + 1.0,
+            ay + 1.0,
+            panel_w - 2.0,
+            panel_h - 2.0,
+            3.0,
+            float_fill,
+        );
 
         let fg = gui::fg();
         let sel_bg = gui::sel_bg();
