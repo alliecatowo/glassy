@@ -45,11 +45,10 @@ fn fc_cache_load() -> std::collections::HashMap<String, String> {
         Err(_) => return map,
     };
     for line in text.lines() {
-        if let Some((k, v)) = line.split_once('\t') {
-            if !k.is_empty() && !v.is_empty() {
+        if let Some((k, v)) = line.split_once('\t')
+            && !k.is_empty() && !v.is_empty() {
                 map.insert(k.to_string(), v.to_string());
             }
-        }
     }
     map
 }
@@ -63,12 +62,11 @@ fn fc_cache_insert(pattern: &str, file_path: &str) {
         Some(p) => p,
         None => return,
     };
-    if let Some(parent) = path.parent() {
-        if let Err(e) = std::fs::create_dir_all(parent) {
+    if let Some(parent) = path.parent()
+        && let Err(e) = std::fs::create_dir_all(parent) {
             log::debug!("glassy: fc-cache dir create failed: {e}");
             return;
         }
-    }
     // Append-only: one line per entry. The cache grows monotonically; a stale
     // entry is harmless because lookup also validates the path still exists.
     use std::io::Write;
@@ -571,11 +569,10 @@ fn load_fallback_fonts(
         let work: Vec<(&str, Resolution<'_, '_>)> = FALLBACK_PATTERNS
             .iter()
             .map(|pattern| {
-                if let Some(cached_path) = cache.get(*pattern) {
-                    if Path::new(cached_path).exists() {
+                if let Some(cached_path) = cache.get(*pattern)
+                    && Path::new(cached_path).exists() {
                         return (*pattern, Resolution::Cached(Some(cached_path.clone())));
                     }
-                }
                 let handle = s.spawn(move || fc_match_file_live(pattern));
                 (*pattern, Resolution::Spawned(handle, std::marker::PhantomData))
             })
@@ -638,11 +635,10 @@ fn load_primary_styles(
             .iter()
             .map(|pattern| {
                 // Cache hit: no thread needed.
-                if let Some(cached_path) = cache.get(pattern) {
-                    if Path::new(cached_path).exists() {
+                if let Some(cached_path) = cache.get(pattern)
+                    && Path::new(cached_path).exists() {
                         return (pattern.clone(), Ok(Some(cached_path.clone())));
                     }
-                }
                 let pattern_clone = pattern.clone();
                 let handle = s.spawn(move || fc_match_file_live(&pattern_clone));
                 (pattern.clone(), Err(handle))
@@ -751,12 +747,11 @@ fn fc_match_file_cached(
     cache: &std::collections::HashMap<String, String>,
 ) -> Option<String> {
     // Check the disk cache first — a valid hit avoids the subprocess.
-    if let Some(cached_path) = cache.get(pattern) {
-        if Path::new(cached_path).exists() {
+    if let Some(cached_path) = cache.get(pattern)
+        && Path::new(cached_path).exists() {
             log::debug!("glassy: fc-cache hit for '{pattern}': {cached_path}");
             return Some(cached_path.clone());
         }
-    }
     fc_match_file_live(pattern)
 }
 
@@ -958,12 +953,11 @@ fn fc_match_family_cached(
     // For family lookups we store the key as "family:<name>" to avoid
     // collisions with bare `fc_match_file` pattern keys.
     let key = format!("family:{family}");
-    if let Some(cached_path) = cache.get(&key) {
-        if Path::new(cached_path).exists() {
+    if let Some(cached_path) = cache.get(&key)
+        && Path::new(cached_path).exists() {
             log::debug!("glassy: fc-cache hit for family '{family}': {cached_path}");
             return Some(cached_path.clone());
         }
-    }
     fc_match_family_live(family)
 }
 
@@ -1007,12 +1001,11 @@ fn fc_match_monospace_cached(
     cache: &std::collections::HashMap<String, String>,
 ) -> Option<String> {
     let key = "monospace";
-    if let Some(cached_path) = cache.get(key) {
-        if Path::new(cached_path).exists() {
+    if let Some(cached_path) = cache.get(key)
+        && Path::new(cached_path).exists() {
             log::debug!("glassy: fc-cache hit for monospace: {cached_path}");
             return Some(cached_path.clone());
         }
-    }
     let output = Command::new("fc-match")
         .args(["-f", "%{file}", "monospace"])
         .output()

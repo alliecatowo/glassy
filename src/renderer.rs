@@ -30,6 +30,7 @@ fn pipeline_cache_dir() -> std::path::PathBuf {
 
 /// Save the pipeline cache bytes to disk atomically (write temp, rename over).
 /// Failures are logged and silently swallowed; a missing cache is never fatal.
+#[allow(dead_code)] // wired in by app.rs in a subsequent wave (call on exit)
 fn save_pipeline_cache(cache: &wgpu::PipelineCache, adapter_info: &wgpu::AdapterInfo) {
     let Some(key) = wgpu::util::pipeline_cache_key(adapter_info) else {
         return;
@@ -62,9 +63,8 @@ fn load_pipeline_cache_data(adapter_info: &wgpu::AdapterInfo) -> Option<Vec<u8>>
     let key = wgpu::util::pipeline_cache_key(adapter_info)?;
     let path = pipeline_cache_dir().join(&key);
     std::fs::read(&path)
-        .map(|d| {
+        .inspect(|d| {
             log::info!("glassy: pipeline cache loaded ({} B) from {:?}", d.len(), path);
-            d
         })
         .ok()
 }
@@ -310,8 +310,10 @@ pub struct Renderer {
     /// `PIPELINE_CACHE`; `None` on other backends. Passed to all three
     /// `create_render_pipeline` calls. Saved to disk on exit via
     /// [`Renderer::save_pipeline_cache`].
+    #[allow(dead_code)] // read by save_pipeline_cache, wired in by app.rs later
     pipeline_cache: Option<wgpu::PipelineCache>,
     /// GPU adapter info, used to derive the cache file name on save.
+    #[allow(dead_code)] // read by save_pipeline_cache, wired in by app.rs later
     adapter_info: wgpu::AdapterInfo,
 
     unit_quad: wgpu::Buffer,
@@ -1457,6 +1459,7 @@ impl Renderer {
     /// exits so the next launch can skip shader compilation. Failures are logged
     /// but never fatal. On backends that don't support `PIPELINE_CACHE` this is
     /// a no-op.
+    #[allow(dead_code)] // public API; wired in by app.rs in a subsequent wave
     pub fn save_pipeline_cache(&self) {
         if let Some(cache) = &self.pipeline_cache {
             save_pipeline_cache(cache, &self.adapter_info);
@@ -1474,6 +1477,7 @@ impl Renderer {
     /// pipeline) so it composites over the terminal content without touching the
     /// cell data.  It is 2 px wide in the right-most gutter, invisible (no-op)
     /// when there is nothing to scroll.
+    #[allow(dead_code)] // public API; wired in by app.rs in a subsequent wave
     pub fn push_scrollbar_thumb(
         &mut self,
         scroll_off: usize,

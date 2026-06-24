@@ -228,7 +228,7 @@ fn merge_config(existing: &str, updates: &[(&str, String)]) -> String {
         for (i, (k, v)) in updates.iter().enumerate() {
             if !written[i] && key == *k {
                 // Strip newlines and carriage returns from value to prevent injection.
-                let clean_v = v.replace('\n', "").replace('\r', "");
+                let clean_v = v.replace(['\n', '\r'], "");
                 *line = format!("{k} = {clean_v}");
                 written[i] = true;
             }
@@ -237,7 +237,7 @@ fn merge_config(existing: &str, updates: &[(&str, String)]) -> String {
     for (i, (k, v)) in updates.iter().enumerate() {
         if !written[i] {
             // Strip newlines and carriage returns from value to prevent injection.
-            let clean_v = v.replace('\n', "").replace('\r', "");
+            let clean_v = v.replace(['\n', '\r'], "");
             lines.push(format!("{k} = {clean_v}"));
         }
     }

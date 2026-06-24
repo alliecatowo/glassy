@@ -142,7 +142,7 @@ impl KittyParser {
                 .pending
                 .keys()
                 .copied()
-                .filter(|&k| k >= ANON_ID_BASE && k < SIXEL_ID_BASE)
+                .filter(|&k| (ANON_ID_BASE..SIXEL_ID_BASE).contains(&k))
                 .max(); // take highest (most recent) open anon slot
             controls.id = match open_anon {
                 Some(existing) => existing, // continue in-progress anon stream
@@ -162,11 +162,10 @@ impl KittyParser {
         // pending map is already full, evict the oldest entry first so we never
         // exceed MAX_PENDING_STREAMS. Do this before touching `entry` so the
         // borrow checker doesn't see two mutable borrows of `self.pending`.
-        if !self.pending.contains_key(&id) && self.pending.len() >= MAX_PENDING_STREAMS {
-            if let Some(&oldest) = self.pending.keys().min() {
+        if !self.pending.contains_key(&id) && self.pending.len() >= MAX_PENDING_STREAMS
+            && let Some(&oldest) = self.pending.keys().min() {
                 self.pending.remove(&oldest);
             }
-        }
 
         // Append to (or start) the pending buffer for this id.
         let entry = self.pending.entry(id).or_insert_with(|| Pending {
@@ -638,14 +637,13 @@ impl ImageStore {
             // numerically-lowest id (oldest) plus any placements that reference it.
             let kitty_count =
                 self.by_id.keys().filter(|&&k| k < SIXEL_ID_BASE).count();
-            if kitty_count > MAX_KITTY_IMAGES {
-                if let Some(&oldest) =
+            if kitty_count > MAX_KITTY_IMAGES
+                && let Some(&oldest) =
                     self.by_id.keys().filter(|&&k| k < SIXEL_ID_BASE).min()
                 {
                     self.by_id.remove(&oldest);
                     self.placements.retain(|p| p.id != oldest);
                 }
-            }
             self.revision += 1;
         }
         match cmd.action {
