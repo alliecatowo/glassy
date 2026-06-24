@@ -69,6 +69,11 @@ fn gui_radius(cell_h: f32) -> f32 {
     (cell_h * 0.28).round().clamp(4.0, 8.0)
 }
 
+/// Status-bar height in physical px. Fixed at 22 px (one cell-height equivalent
+/// at typical DPI). Drawn at the bottom of the window; `content_area()` and
+/// `grid_for()` subtract it so panes tile only between the tab bar and this bar.
+const STATUS_BAR_H: f32 = 22.0;
+
 /// What a wheel notch should do, given the terminal's current mode. Pure so it
 /// can be unit-tested without a window or PTY.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -998,9 +1003,11 @@ impl App {
         let usable_w = (size.width as f32 - 2.0 * pad).max(0.0);
         let usable_h = (size.height as f32 - 2.0 * pad).max(0.0);
         let cols = ((usable_w / cell_w).floor() as usize).max(1);
-        // Reserve the GUI tab bar (in PIXELS) at the top; the terminal grid fills
-        // the rest. The bar is inset via `Renderer::set_grid_origin_y`.
-        let rows = (((usable_h - tab_bar_h(cell_h)) / cell_h).floor() as usize).max(1);
+        // Reserve the GUI tab bar at the top and the status bar at the bottom (both
+        // in PIXELS). The tab-bar inset is applied via `Renderer::set_grid_origin_y`;
+        // the status bar simply removes pixels from the available height.
+        let rows = (((usable_h - tab_bar_h(cell_h) - STATUS_BAR_H) / cell_h).floor() as usize)
+            .max(1);
         (cols, rows)
     }
 
@@ -1560,15 +1567,17 @@ impl App {
     fn content_area(&self) -> Option<pane::Rect> {
         let r = self.renderer.as_ref()?;
         let m = r.cell_metrics();
-        // The content (panes/grid) begins below the GUI tab bar. The pixel inset
-        // is the bar height; the per-pane `pad` is applied by the pane sizing math.
+        // The content (panes/grid) begins below the GUI tab bar and ends above the
+        // status bar. Both insets are in pixels; the per-pane `pad` is applied by
+        // the pane sizing math independently.
         let strip_bottom = tab_bar_h(m.height).round() as i32;
+        let status_h = STATUS_BAR_H.round() as i32;
         let (sw, sh) = r.surface_size();
         Some(pane::Rect {
             x: 0,
             y: strip_bottom,
             w: sw as i32,
-            h: (sh as i32 - strip_bottom).max(0),
+            h: (sh as i32 - strip_bottom - status_h).max(0),
         })
     }
 
@@ -2489,6 +2498,117 @@ impl App {
         }
     }
 
+    /// Paint the Wave-4 status bar (§3.4): a `STATUS_BAR_H`-px E1 band at the
+    /// bottom of the window. Content is laid out as fixed-width right-aligned
+    /// segments so nothing jitters as values change:
+    ///
+    ///   `[mode]  …  [sel]  [scroll%]  [enc]`
+    ///
+    /// **mode** = `ALT` when the focused pane is in alt-screen, `MOUSE` when mouse
+    /// reporting is active (from `TermMode`). Both can be absent at once (normal
+    /// screen, no mouse reporting). **scroll%** = `⇡NN%` when scrolled back into
+    /// history (`display_offset > 0`). **sel** = glyph count when there is an
+    /// active text selection. **enc** = `UTF-8` (always, for now). git/cwd slots
+    /// are reserved but hidden until a follow-up lands `/proc`-based data.
+    ///
+    /// Associated fn (no `&self`) so it composes with the caller's `&mut Renderer`
+    /// borrow; all data arrives as plain parameters.
+    #[allow(clippy::too_many_arguments)]
+    fn paint_status_bar(
+        renderer: &mut Renderer,
+        surface_h: u32,
+        term_mode: TermMode,
+        display_offset: i32,
+        history_size: usize,
+        sel_len: usize,
+        win_focused: bool,
+    ) {
+        let m = renderer.cell_metrics();
+        let (sw, _sh) = renderer.surface_size();
+        let bar_w = sw as f32;
+        let bar_h = STATUS_BAR_H;
+        let bar_y = surface_h as f32 - bar_h;
+
+        if bar_w <= 0.0 || bar_h <= 0.0 {
+            return;
+        }
+
+        // Dim while window is unfocused, matching tab-bar convention.
+        let fdim = if win_focused { 1.0 } else { 0.7 };
+        let mul = |c: [f32; 4]| [c[0] * fdim, c[1] * fdim, c[2] * fdim, c[3]];
+
+        let bar_bg = mul(gui::glass_body());
+        let accent  = mul(color::accent());
+        let fg_dim  = mul(gui::fg_dim());
+        let fg      = mul(gui::fg());
+
+        // 1) Bar backdrop + top hairline (mirrors the tab bar's bottom seam).
+        renderer.push_overlay_px(0.0, bar_y, bar_w, bar_h, bar_bg);
+        renderer.push_overlay_px(0.0, bar_y, bar_w, 1.0, mul(gui::hairline()));
+
+        // Glyph vertical centre within the bar.
+        let ty = (bar_y + (bar_h - m.height) * 0.5).round();
+
+        // 2) Right-aligned fixed-width segments (right → left, each padded to a
+        //    fixed character count so a value change never shifts other segments).
+        //
+        //    Widths (in multiples of cell_w):
+        //      enc:    5 chars ("UTF-8") + 1 gap = 6 cw
+        //      scroll: 6 chars ("⇡100%") + 1 gap = 7 cw   (hidden when at bottom)
+        //      sel:    8 chars ("999 sel") + 1 gap = 9 cw  (hidden when no sel)
+        //      mode:   7 chars ("MOUSE  " or "ALT    ") + 1 gap = 8 cw (hidden when plain)
+        //
+        //    Right margin: 1 cw.
+        let right_margin = m.width;
+        let mut rx = bar_w - right_margin;
+
+        // Encoding (always shown, right-aligned anchor).
+        {
+            let s = "UTF-8";
+            let w = renderer.text_width_px(s);
+            renderer.push_overlay_glyph_px_str((rx - w).round(), ty, s, fg_dim);
+            rx -= (6.0 * m.width).round(); // fixed 6-char slot
+        }
+
+        // Scroll percent — shown only when scrolled back into history.
+        if display_offset > 0 {
+            let pct = if history_size > 0 {
+                ((display_offset as f32 / history_size as f32) * 100.0).round() as u32
+            } else {
+                100
+            }
+            .min(100);
+            let s = format!("⇡{pct:>3}%");
+            let w = renderer.text_width_px(&s);
+            renderer.push_overlay_glyph_px_str((rx - w).round(), ty, &s, accent);
+        }
+        rx -= (7.0 * m.width).round(); // fixed 7-char slot (even when hidden)
+
+        // Selection glyph count — shown only when a selection is active.
+        if sel_len > 0 {
+            let s = format!("{sel_len} sel");
+            let w = renderer.text_width_px(&s);
+            renderer.push_overlay_glyph_px_str((rx - w).round(), ty, &s, fg_dim);
+        }
+        rx -= (9.0 * m.width).round(); // fixed 9-char slot
+
+        // Mode flags (ALT / MOUSE) — shown only when non-standard.
+        {
+            let alt   = term_mode.contains(TermMode::ALT_SCREEN);
+            let mouse = term_mode.intersects(TermMode::MOUSE_MODE);
+            if alt || mouse {
+                let tag = if alt { "ALT" } else { "MOUSE" };
+                let w = renderer.text_width_px(tag);
+                renderer.push_overlay_glyph_px_str((rx - w).round(), ty, tag, fg);
+            }
+            rx -= (8.0 * m.width).round(); // fixed 8-char slot (even when hidden)
+        }
+        let _ = rx; // git/cwd slots reserved here for future waves
+
+        // 3) Left margin: a small decorative separator mark.
+        renderer.push_overlay_px(0.0, bar_y, 1.0, bar_h, mul(gui::rail()));
+    }
+
     /// Paint one tab chip's surface (connector + rail for active, recess for
     /// inactive) and its label. Split out so the drag-ghost can reuse the label
     /// pass without the surface.
@@ -2743,6 +2863,24 @@ impl App {
         let tab_mouse = (self.mouse_px.0 as f32, self.mouse_px.1 as f32);
         let tab_spinner = self.spinner_frame;
         let tab_count = self.tab_count();
+
+        // Status-bar snapshot: term mode, scroll position, selection count.
+        // Taken here (under the `&self` borrow) before we take `&mut self.renderer`.
+        let (sb_mode, sb_disp_off, sb_hist, sb_sel_len) = match self.pty.as_ref() {
+            Some(pty) => {
+                let t = pty.term.lock();
+                let mode = *t.mode();
+                let disp = t.grid().display_offset() as i32;
+                let hist = t.grid().history_size();
+                let sel = t.selection_to_string()
+                    .map(|s| s.chars().count())
+                    .unwrap_or(0);
+                (mode, disp, hist, sel)
+            }
+            None => (TermMode::empty(), 0, 0, 0),
+        };
+        let sb_focused = self.focused;
+        let sb_surface_h = self.renderer.as_ref().map(|r| r.surface_size().1).unwrap_or(0);
 
         let (Some(renderer), Some(pty)) = (self.renderer.as_mut(), self.pty.as_ref()) else {
             return;
@@ -3082,6 +3220,18 @@ impl App {
             strip_hist,
         );
 
+        // Status bar (§3.4): E1 bar at the very bottom, always above the terminal
+        // content because it is an overlay (drawn last, not a reserved cell row).
+        Self::paint_status_bar(
+            renderer,
+            sb_surface_h,
+            sb_mode,
+            sb_disp_off,
+            sb_hist,
+            sb_sel_len,
+            sb_focused,
+        );
+
         // Modal overlays (help / settings): centered panels over a dimmed backdrop.
         // Rebuild every screen row (cheap — only while open, and the screen is
         // static), replacing terminal content so nothing bleeds through. Settings
@@ -3220,6 +3370,25 @@ impl App {
             }
             None => (0, 0),
         };
+
+        // Status-bar snapshot: term mode, scroll position, selection count.
+        // All taken here under the immutable `&self` borrow.
+        let (sb_mode, sb_disp_off, sb_hist, sb_sel_len) = match self.pty.as_ref() {
+            Some(pty) => {
+                let t = pty.term.lock();
+                let mode = *t.mode();
+                let disp = t.grid().display_offset() as i32;
+                let hist = t.grid().history_size();
+                let sel = t.selection_to_string()
+                    .map(|s| s.chars().count())
+                    .unwrap_or(0);
+                (mode, disp, hist, sel)
+            }
+            None => (TermMode::empty(), 0, 0, 0),
+        };
+        let sb_focused = self.focused;
+        let sb_surface_h = self.renderer.as_ref().map(|r| r.surface_size().1).unwrap_or(0);
+
         // Tab-bar state snapshot (owned data) for the pixel-overlay painter, taken
         // under the immutable `&self` borrow.
         let tab_snapshot = self.tab_bar_snapshot();
@@ -3374,6 +3543,17 @@ impl App {
             pane_menu_open,
             pane_menu_sel,
             mouse_px_f,
+        );
+
+        // Status bar (§3.4): same as the single-pane path.
+        Self::paint_status_bar(
+            renderer,
+            sb_surface_h,
+            sb_mode,
+            sb_disp_off,
+            sb_hist,
+            sb_sel_len,
+            sb_focused,
         );
 
         if let Err(err) = renderer.render_multi() {
