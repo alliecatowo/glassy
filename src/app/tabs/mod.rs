@@ -130,12 +130,15 @@ impl App {
         size: PhysicalSize<u32>,
         cell_w: f32,
         cell_h: f32,
-        pad: f32,
+        pad_x: f32,
+        pad_y: f32,
         status_bar_enabled: bool,
         tab_strip_h: f32,
     ) -> (usize, usize) {
-        let usable_w = (size.width as f32 - 2.0 * pad).max(0.0);
-        let usable_h = (size.height as f32 - 2.0 * pad).max(0.0);
+        // `pad_x`/`pad_y` are the TOTAL horizontal/vertical insets (left+right,
+        // top+bottom) — not doubled here, since the sides can differ.
+        let usable_w = (size.width as f32 - pad_x).max(0.0);
+        let usable_h = (size.height as f32 - pad_y).max(0.0);
         let cols = ((usable_w / cell_w).floor() as usize).max(1);
         // Reserve the GUI tab bar at the top and the status bar at the bottom (both
         // in PIXELS). `tab_strip_h` is the strip's pixel height (0 when hidden); the
@@ -312,7 +315,7 @@ impl App {
             return;
         };
         let m = renderer.cell_metrics();
-        let pad = renderer.pad();
+        let (pad_x, pad_y) = (renderer.pad_x(), renderer.pad_y());
         let id = self.next_id;
         // Inherit the current tab's cwd (from OSC 7) so the new tab opens where the
         // user is, not in $HOME.
@@ -325,7 +328,15 @@ impl App {
         let (spawn_cols, spawn_rows) = match self.window.as_ref().map(|w| w.inner_size()) {
             Some(sz) if sz.width > 0 && sz.height > 0 => {
                 let strip_h = tab_bar_h(m.height).max(self.chrome_top_inset());
-                Self::grid_for(sz, m.width, m.height, pad, self.config.status_bar, strip_h)
+                Self::grid_for(
+                    sz,
+                    m.width,
+                    m.height,
+                    pad_x,
+                    pad_y,
+                    self.config.status_bar,
+                    strip_h,
+                )
             }
             _ => (self.cols, self.rows),
         };

@@ -287,9 +287,10 @@ fn collect_rasters(glyphs: &[crate::text::RasterizedGlyph]) -> Vec<Raster> {
 }
 
 /// The window padding (grid inset) for a given cell height, in physical pixels.
-/// Scales with the cell so a larger font keeps proportional breathing room.
+/// A small symmetric margin (≈2-3 logical px) so glyphs don't kiss the window
+/// edge — ghostty-style minimal, scaling gently with the cell. Applied on all sides.
 fn pad_for(cell_height: f32) -> f32 {
-    (cell_height * 0.5).round().max(6.0)
+    (cell_height * 0.15).round().max(4.0)
 }
 
 pub struct Renderer {

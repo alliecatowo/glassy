@@ -349,7 +349,8 @@ impl App {
             size,
             m.width,
             m.height,
-            renderer.pad(),
+            renderer.pad_x(),
+            renderer.pad_y(),
             self.config.status_bar,
             strip_h,
         );

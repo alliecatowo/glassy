@@ -93,8 +93,14 @@ impl ApplicationHandler<UserEvent> for App {
             "startup: renderer+GPU+font ready at {:.1} ms",
             ms(self.started)
         );
-        // Apply an explicit padding override (logical px scaled to physical).
-        if let Some(pad) = self.config.padding {
+        // Apply an explicit padding override (logical px scaled to physical). A
+        // value of 0 means "use the cell-derived default" (matching the settings
+        // form, where 0 is the default sentinel) — without this guard, a config
+        // with `padding = 0` (which the settings form writes) would force a
+        // zero-margin grid that kisses the window edge.
+        if let Some(pad) = self.config.padding
+            && pad > 0.0
+        {
             renderer.set_pad(pad * scale);
         }
         // Apply per-side padding overrides if configured.
@@ -138,7 +144,8 @@ impl ApplicationHandler<UserEvent> for App {
             size,
             m.width,
             m.height,
-            renderer.pad(),
+            renderer.pad_x(),
+            renderer.pad_y(),
             self.config.status_bar,
             strip_h,
         );

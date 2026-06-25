@@ -54,6 +54,20 @@ impl Renderer {
         self.pad
     }
 
+    /// Total horizontal padding (left + right) in physical px. Use this — not
+    /// `2 * pad()` — when computing how many columns fit: the sides can differ
+    /// (default left inset, or per-side config overrides), and assuming symmetry
+    /// over-counts columns and clips the right edge.
+    pub fn pad_x(&self) -> f32 {
+        self.pad_left() + self.pad_right()
+    }
+
+    /// Total vertical padding (top + bottom) in physical px. The grid origin adds
+    /// the tab-strip/status-bar bands separately; this is just the window inset.
+    pub fn pad_y(&self) -> f32 {
+        self.pad_top() + self.pad_bottom()
+    }
+
     /// Get the effective padding on each side (physical px). Per-side overrides
     /// take precedence; otherwise the uniform `pad` is used.
     #[allow(dead_code)]
