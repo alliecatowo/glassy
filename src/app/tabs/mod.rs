@@ -118,6 +118,8 @@ impl App {
             // (only when `config.quake` is set); `None` keeps normal mode untouched.
             quake: None,
             preedit: None,
+            cmd_history: std::collections::VecDeque::new(),
+            cwd_history: std::collections::VecDeque::new(),
         }
     }
 

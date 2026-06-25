@@ -29,6 +29,7 @@ use winit::event_loop::EventLoopProxy;
 use crate::image::ImageStore;
 use crate::input::ModifyOtherKeys;
 
+pub mod cmdzone;
 pub mod r#loop;
 mod scan;
 
@@ -264,6 +265,12 @@ pub enum UserEvent {
     /// window's slide animation. Carries no session id — it's a window-level
     /// command, not a per-PTY event. See [`crate::ipc`].
     Ipc(crate::ipc::IpcCommand),
+    /// A shell command was captured from the grid between an OSC 133 `B`
+    /// (command start) and `C` (command executed) mark. The string is the final
+    /// command line as it sat on the grid. The UI thread pushes it into the
+    /// per-app command-history ring so the command palette can offer it for
+    /// re-run. See [`cmdzone`].
+    CommandRun(usize, String),
 }
 
 /// Wraps the `ClipboardLoad` reply-builder closure so `UserEvent` can keep its

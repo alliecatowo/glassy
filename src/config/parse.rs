@@ -14,6 +14,9 @@ use super::platform::Platform;
 
 const DEFAULT_FONT_SIZE: f32 = 14.0;
 const DEFAULT_SCROLLBACK: usize = 10_000;
+/// Default number of recently-run commands retained for the command palette's
+/// history source (OSC 133 `B`..`C` capture). 0 disables it.
+const DEFAULT_COMMAND_HISTORY: usize = 200;
 
 /// Accumulated raw configuration before validation/finalization. Every field is
 /// optional so the file and CLI layers can each set a subset.
@@ -68,6 +71,7 @@ pub(super) struct RawConfig {
     pub quake: Option<bool>,
     pub quake_height: Option<f32>,
     pub quake_animation_ms: Option<u64>,
+    pub command_history: Option<usize>,
 }
 
 impl RawConfig {
@@ -195,6 +199,7 @@ impl RawConfig {
                 }
             },
             quake_animation_ms: self.quake_animation_ms.unwrap_or(180).min(5_000),
+            command_history: self.command_history.unwrap_or(DEFAULT_COMMAND_HISTORY),
         };
 
         Ok(super::Settings { config, theme })
@@ -464,6 +469,12 @@ pub(super) fn apply_kv(key: &str, value: &str, raw: &mut RawConfig) -> Result<()
                 .parse()
                 .with_context(|| format!("scrollback: invalid integer '{value}'"))?;
             raw.scrollback = Some(n.clamp(0, 1_000_000));
+        }
+        "command_history" => {
+            let n: usize = value
+                .parse()
+                .with_context(|| format!("command_history: invalid integer '{value}'"))?;
+            raw.command_history = Some(n.clamp(0, 10_000));
         }
         "bell_visual" => {
             raw.bell_visual = Some(parse_bool(value, "bell_visual")?);

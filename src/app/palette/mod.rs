@@ -8,6 +8,13 @@
 
 use super::*;
 
+use fuzzy::fuzzy_score;
+use history::{compact_home, shell_quote};
+
+mod fuzzy;
+mod history;
+mod paint;
+
 /// One palette command: a stable identifier the App maps to a concrete effect,
 /// plus the display metadata (category + label) the registry builds it with.
 ///
@@ -58,6 +65,14 @@ pub(crate) enum PaletteCmd {
     SetTheme(usize),
     /// Generate a theme from the configured `wallpaper_theme` image path and apply it live.
     GenerateThemeFromWallpaper,
+    // --- Dynamic history sources (payload carried by the PaletteEntry) ---
+    /// Re-run a command from history: paste its text into the focused pane and
+    /// submit it (append a newline). The command string lives in
+    /// [`PaletteEntry::payload`].
+    RunCommand,
+    /// Change into a recent working directory: paste `cd <dir>` and submit. The
+    /// directory string lives in [`PaletteEntry::payload`].
+    CdTo,
 }
 
 impl PaletteCmd {
@@ -75,6 +90,8 @@ impl PaletteCmd {
             | BellAudible | ScrollbackIncrease | ScrollbackDecrease => "Setting",
             ToggleFold => "View",
             NextTheme | PrevTheme | SetTheme(_) | GenerateThemeFromWallpaper => "Theme",
+            RunCommand => "History",
+            CdTo => "Cwd",
         }
     }
 
@@ -115,6 +132,8 @@ impl PaletteCmd {
             ToggleFold => "Fold/unfold command output".into(),
             SetTheme(_) => String::new(),
             GenerateThemeFromWallpaper => "Generate theme from wallpaper image".into(),
+            // History/cwd labels are filled in by the registry from the payload.
+            RunCommand | CdTo => String::new(),
         }
     }
 
@@ -167,6 +186,10 @@ pub(crate) struct PaletteEntry {
     /// Lower-cased haystack for case-insensitive matching (cached).
     pub haystack: String,
     pub hint: Option<&'static str>,
+    /// Owned action data for dynamic entries: the command text for
+    /// [`PaletteCmd::RunCommand`] or the directory for [`PaletteCmd::CdTo`].
+    /// `None` for the static action/setting/theme rows.
+    pub payload: Option<String>,
 }
 
 /// All state for an open palette. Owned by `App` as `Option<PaletteState>`.
@@ -234,7 +257,8 @@ impl App {
         for i in 0..color::THEME_NAMES.len() {
             cmds.push(SetTheme(i));
         }
-        cmds.into_iter()
+        let mut entries: Vec<PaletteEntry> = cmds
+            .into_iter()
             .map(|cmd| {
                 let label = match cmd {
                     SetTheme(i) => format!("Set theme: {}", color::THEME_NAMES[i]),
@@ -247,9 +271,37 @@ impl App {
                     display,
                     haystack,
                     hint: cmd.hint(),
+                    payload: None,
                 }
             })
-            .collect()
+            .collect();
+        // Append the dynamic history sources. Newest-first so a `nt` query that
+        // happens to also match a recent command surfaces the freshest one near
+        // the top once the (small) action set is ranked alongside.
+        for cmd in self.cmd_history.iter().rev() {
+            let display = format!("History  {cmd}");
+            let haystack = display.to_lowercase();
+            entries.push(PaletteEntry {
+                cmd: RunCommand,
+                display,
+                haystack,
+                hint: None,
+                payload: Some(cmd.clone()),
+            });
+        }
+        for dir in self.cwd_history.iter().rev() {
+            let shown = compact_home(dir);
+            let display = format!("Cwd  {shown}");
+            let haystack = display.to_lowercase();
+            entries.push(PaletteEntry {
+                cmd: CdTo,
+                display,
+                haystack,
+                hint: None,
+                payload: Some(dir.to_string_lossy().into_owned()),
+            });
+        }
+        entries
     }
 
     /// Open the command palette (or no-op if already open). Builds the registry,
@@ -380,39 +432,50 @@ impl App {
     /// Execute the currently-selected palette row's command, then close the
     /// palette. A no-op (just closes) when the filtered list is empty.
     pub(crate) fn palette_activate_sel(&mut self, event_loop: &ActiveEventLoop) {
-        let cmd = self.palette.as_ref().and_then(|p| {
-            p.filtered
-                .get(p.sel)
-                .and_then(|&i| p.all.get(i))
-                .map(|e| e.cmd)
-        });
-        // Close first so re-entrant overlays (Settings/Help/Search) open cleanly.
-        self.close_palette(event_loop);
-        if let Some(cmd) = cmd {
-            self.run_palette_cmd(cmd, event_loop);
+        let sel = self.palette.as_ref().map(|p| p.sel);
+        if let Some(sel) = sel {
+            self.palette_activate_index(sel, event_loop);
         }
     }
 
     /// Activate the palette row at filtered index `idx` (mouse click).
     pub(crate) fn palette_activate_index(&mut self, idx: usize, event_loop: &ActiveEventLoop) {
-        let cmd = self.palette.as_ref().and_then(|p| {
+        let picked = self.palette.as_ref().and_then(|p| {
             p.filtered
                 .get(idx)
                 .and_then(|&i| p.all.get(i))
-                .map(|e| e.cmd)
+                .map(|e| (e.cmd, e.payload.clone()))
         });
+        // Close first so re-entrant overlays (Settings/Help/Search) open cleanly.
         self.close_palette(event_loop);
-        if let Some(cmd) = cmd {
-            self.run_palette_cmd(cmd, event_loop);
+        if let Some((cmd, payload)) = picked {
+            self.run_palette_cmd_with(cmd, payload, event_loop);
         }
     }
 
-    /// Map a [`PaletteCmd`] onto the existing App effect. Every arm routes through
-    /// the SAME method the menu / settings / keybinding path uses, so behaviour is
-    /// identical no matter how an action is triggered.
-    pub(crate) fn run_palette_cmd(&mut self, cmd: PaletteCmd, event_loop: &ActiveEventLoop) {
+    /// Map a [`PaletteCmd`] (plus its optional owned `payload` for the dynamic
+    /// history/cwd rows) onto the existing App effect. Every static arm routes
+    /// through the SAME method the menu / settings / keybinding path uses, so
+    /// behaviour is identical no matter how an action is triggered.
+    pub(crate) fn run_palette_cmd_with(
+        &mut self,
+        cmd: PaletteCmd,
+        payload: Option<String>,
+        event_loop: &ActiveEventLoop,
+    ) {
         use PaletteCmd::*;
         match cmd {
+            RunCommand => {
+                if let Some(text) = payload {
+                    self.palette_submit_line(&text, event_loop);
+                }
+            }
+            CdTo => {
+                if let Some(dir) = payload {
+                    let line = format!("cd {}", shell_quote(&dir));
+                    self.palette_submit_line(&line, event_loop);
+                }
+            }
             NewTab => self.new_tab(event_loop),
             CloseTab => self.close_active_tab(event_loop),
             NextTab => self.cycle_tab(1, event_loop),
@@ -525,336 +588,31 @@ impl App {
             }
         }
     }
-}
 
-impl App {
-    /// Snapshot the palette paint inputs: the query, the filtered rows as owned
-    /// `(label, hint)` pairs, and the selected row. Returns `None` when closed.
-    pub(crate) fn palette_snapshot(&self) -> Option<PaletteSnapshot> {
-        let p = self.palette.as_ref()?;
-        let rows: Vec<(String, Option<&'static str>)> = p
-            .filtered
-            .iter()
-            .filter_map(|&i| p.all.get(i))
-            .map(|e| (e.display.clone(), e.hint))
-            .collect();
-        Some((p.query(), p.edit.caret(), p.edit.selection(), rows, p.sel))
-    }
-
-    /// Paint the command palette: a full-surface scrim, a centered glass panel
-    /// with a query field at the top and a fuzzy-filtered, scrollable list below.
-    /// The selected row is highlighted; the hovered row (under `mouse`) gets a
-    /// lighter tint. Returns the `(filtered_index, row_rect)` list for the App to
-    /// store for mouse hit-testing (the immediate-mode click is resolved in the
-    /// mouse handler, mirroring the menu pattern).
-    ///
-    /// Associated fn (no `&self`) so it composes with the caller's `&mut Renderer`
-    /// borrow; all `self`-derived data arrives via parameters.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn paint_palette(
-        renderer: &mut Renderer,
-        surface: (f32, f32),
-        query: &str,
-        caret: usize,
-        selection: Option<(usize, usize)>,
-        rows: &[(&str, Option<&str>)],
-        sel: usize,
-        mouse: (f32, f32),
-    ) -> Vec<(usize, gui::Rect)> {
-        let m = renderer.cell_metrics();
-        let cell_w = m.width;
-        let cell_h = m.height;
-        let pad = (cell_h * 0.5).round();
-        let gap = (cell_h * 0.35).round();
-        let radius = (cell_h * 0.28).round().clamp(4.0, 8.0);
-        let row_h = (cell_h * 1.55).round();
-
-        // Full-surface scrim.
-        renderer.push_overlay_px(0.0, 0.0, surface.0, surface.1, [0.0, 0.0, 0.0, 0.5]);
-
-        // Centered panel. Width ~ 60 cols, capped to the surface.
-        let pw = (cell_w * 60.0)
-            .min(surface.0 - 2.0 * pad)
-            .max(cell_w * 28.0);
-        let field_h = row_h;
-        // Show up to 12 list rows; the rest scroll into view around the selection.
-        let max_visible = 12usize;
-        let visible = rows.len().min(max_visible);
-        let list_h = visible as f32 * row_h;
-        let ph = (pad + field_h + gap + list_h + pad).round();
-        let px = ((surface.0 - pw) * 0.5).round();
-        // Anchor toward the upper third so the list grows downward like a palette.
-        let py = ((surface.1 - ph) * 0.35).round().max(pad);
-        let panel = gui::Rect::new(px, py, pw, ph);
-
-        // Panel body (E3 floating surface) + accent top rail.
-        renderer.push_overlay_rrect_px(
-            panel.x,
-            panel.y,
-            panel.w,
-            panel.h,
-            radius + 2.0,
-            gui::glass_float(),
-        );
-        renderer.push_overlay_rrect_px(panel.x, panel.y, panel.w, 2.0, radius + 2.0, gui::rail());
-
-        let inner_x = panel.x + pad;
-        let inner_w = panel.w - 2.0 * pad;
-
-        // --- Query field --------------------------------------------------------
-        let field = gui::Rect::new(inner_x, panel.y + pad, inner_w, field_h);
-        renderer.push_overlay_rrect_px(
-            field.x,
-            field.y,
-            field.w,
-            field.h,
-            radius,
-            [0.0, 0.0, 0.0, 0.35],
-        );
-        let ty = (field.y + (field.h - cell_h) * 0.5).round();
-        let mut cx = field.x + pad;
-        // Leading prompt chevron.
-        renderer.push_overlay_glyph_px(cx.round(), ty, '\u{203A}', color::accent());
-        cx += cell_w * 1.6;
-        // The query text starts after the chevron; used for caret + selection x.
-        let text_x0 = field.x + pad + cell_w * 1.6;
-        // Selection band behind the glyphs.
-        if let Some((lo, hi)) = selection
-            && hi > lo
-        {
-            let sx = text_x0 + lo as f32 * cell_w;
-            let sw = (hi - lo) as f32 * cell_w;
-            let mut band = color::selection_bg();
-            band[3] = 0.45;
-            renderer.push_overlay_px(sx.round(), ty, sw.round(), cell_h, band);
+    /// Send a line of text to the focused pane's shell and submit it (paste the
+    /// text honoring bracketed paste, then send a carriage return). Used by the
+    /// palette's history (`RunCommand`) and cwd (`CdTo`) rows. Scrolls the pane to
+    /// the bottom first so the result is visible. A no-op with no focused pane.
+    pub(crate) fn palette_submit_line(&mut self, line: &str, event_loop: &ActiveEventLoop) {
+        if line.is_empty() {
+            return;
         }
-        if query.is_empty() {
-            for ch in "Type a command…".chars() {
-                renderer.push_overlay_glyph_px(cx.round(), ty, ch, gui::fg_dim());
-                cx += cell_w;
-            }
-        } else {
-            for ch in query.chars() {
-                renderer.push_overlay_glyph_px(cx.round(), ty, ch, gui::fg());
-                cx += cell_w;
-            }
+        let bracketed = self.term_mode().contains(TermMode::BRACKETED_PASTE);
+        if let Some(pty) = self.pty.as_ref() {
+            pty.term
+                .lock()
+                .scroll_display(alacritty_terminal::grid::Scroll::Bottom);
+            // Paste sanitizes embedded control sequences; then a CR submits it.
+            pty.paste(line, bracketed);
+            pty.write(b"\r".to_vec());
         }
-        let caret_x = text_x0 + caret as f32 * cell_w;
-        renderer.push_overlay_px(caret_x.round(), ty, 2.0, cell_h, color::accent());
-
-        // --- List ---------------------------------------------------------------
-        let list_y = field.y + field.h + gap;
-        // Scroll so the selection stays visible (keep a simple window).
-        let first = if sel >= visible { sel + 1 - visible } else { 0 };
-        let mut out = Vec::with_capacity(visible);
-        for (slot, ri) in (first..rows.len()).take(visible).enumerate() {
-            let (label, hint) = rows[ri];
-            let ry = list_y + slot as f32 * row_h;
-            let rr = gui::Rect::new(inner_x, ry, inner_w, row_h);
-            let over = gui::hit(rr, mouse.0, mouse.1);
-            if ri == sel {
-                renderer.push_overlay_rrect_px(rr.x, rr.y, rr.w, rr.h, radius, gui::sel_bg());
-            } else if over {
-                let mut c = color::selection_bg();
-                c[3] = 0.40;
-                renderer.push_overlay_rrect_px(rr.x, rr.y, rr.w, rr.h, radius, c);
-            }
-            let lty = (rr.y + (rr.h - cell_h) * 0.5).round();
-            // Label (left).
-            let mut lx = rr.x + pad;
-            for ch in label.chars() {
-                renderer.push_overlay_glyph_px(lx.round(), lty, ch, gui::fg());
-                lx += cell_w;
-            }
-            // Hint (right, dim).
-            if let Some(h) = hint {
-                let hw = h.chars().count() as f32 * cell_w;
-                let mut hx = rr.x + rr.w - pad - hw;
-                for ch in h.chars() {
-                    renderer.push_overlay_glyph_px(hx.round(), lty, ch, gui::fg_dim());
-                    hx += cell_w;
-                }
-            }
-            out.push((ri, rr));
-        }
-        // "No matches" hint when the list is empty.
-        if rows.is_empty() {
-            let msg = "No matching commands";
-            let mx = inner_x + pad;
-            let mut cxn = mx;
-            for ch in msg.chars() {
-                renderer.push_overlay_glyph_px(
-                    cxn.round(),
-                    (list_y + (row_h - cell_h) * 0.5).round(),
-                    ch,
-                    gui::fg_dim(),
-                );
-                cxn += cell_w;
-            }
-        }
-        out
-    }
-}
-
-/// Subsequence fuzzy score: returns `Some(score)` if every char of `needle`
-/// appears in `haystack` in order (case-folded by the caller), `None` otherwise.
-/// Rewards contiguous runs and word-start matches so "nt" ranks "New tab" highly.
-/// Higher is better. Pure for unit testing.
-pub(crate) fn fuzzy_score(haystack: &str, needle: &str) -> Option<i32> {
-    if needle.is_empty() {
-        return Some(0);
-    }
-    let hay: Vec<char> = haystack.chars().collect();
-    let need: Vec<char> = needle.chars().collect();
-    let mut hi = 0usize;
-    let mut ni = 0usize;
-    let mut score = 0i32;
-    let mut prev_matched = false;
-    let mut prev_char = ' ';
-    while hi < hay.len() && ni < need.len() {
-        if hay[hi] == need[ni] {
-            score += 1;
-            if prev_matched {
-                score += 4; // contiguous run bonus
-            }
-            // Word-start bonus (match right after a space / separator).
-            if hi == 0 || prev_char == ' ' || prev_char == '-' || prev_char == '/' {
-                score += 6;
-            }
-            ni += 1;
-            prev_matched = true;
-        } else {
-            prev_matched = false;
-        }
-        prev_char = hay[hi];
-        hi += 1;
-    }
-    if ni == need.len() {
-        // Prefer shorter haystacks (tighter match) slightly.
-        Some(score - (hay.len() as i32) / 32)
-    } else {
-        None
+        self.mark_dirty(event_loop);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn fuzzy_requires_full_subsequence() {
-        assert!(fuzzy_score("new tab", "ntb").is_some());
-        assert!(fuzzy_score("new tab", "xyz").is_none());
-        assert!(fuzzy_score("new tab", "newtab").is_some());
-    }
-
-    #[test]
-    fn fuzzy_word_start_outranks_midword() {
-        // "st" should score "Setting  Toggle status bar" via the word-start 's'+'t'.
-        let a = fuzzy_score("setting toggle status bar", "st").unwrap();
-        // A buried, non-word-start subsequence scores lower.
-        let b = fuzzy_score("abcsxtq", "st").unwrap();
-        assert!(a > b, "word-start match {a} should beat buried {b}");
-    }
-
-    #[test]
-    fn fuzzy_empty_needle_matches_everything() {
-        assert_eq!(fuzzy_score("anything", ""), Some(0));
-    }
-
-    // ---- additional fuzzy_score coverage ------------------------------------
-
-    #[test]
-    fn fuzzy_no_match_returns_none() {
-        assert!(fuzzy_score("new tab", "xyz").is_none());
-        assert!(fuzzy_score("", "a").is_none());
-        assert!(fuzzy_score("abc", "abcd").is_none());
-    }
-
-    #[test]
-    fn fuzzy_empty_haystack_empty_needle_scores_zero() {
-        assert_eq!(fuzzy_score("", ""), Some(0));
-    }
-
-    #[test]
-    fn fuzzy_contiguous_bonus_makes_prefix_score_higher() {
-        // Matching the first N chars contiguously should outscore spread matches.
-        let contiguous = fuzzy_score("new tab", "new").unwrap();
-        let spread = fuzzy_score("new tab", "ntb").unwrap();
-        assert!(
-            contiguous > spread,
-            "contiguous prefix match ({contiguous}) should outscore spread ({spread})"
-        );
-    }
-
-    #[test]
-    fn fuzzy_word_start_slash_separator_bonus() {
-        // '/' counts as a word-start separator (file paths).
-        let with_slash = fuzzy_score("split vertical (left / right)", "r").unwrap();
-        // Match at position 0 (word start) vs a buried 'r'.
-        let at_word_start = fuzzy_score("right side", "r").unwrap();
-        // Both should match; the word-start bonus means starting with 'r' scores well.
-        assert!(at_word_start > 0);
-        assert!(with_slash > 0);
-    }
-
-    #[test]
-    fn fuzzy_shorter_haystack_preferred_over_longer_for_same_needle() {
-        // Both match "tab"; the shorter haystack should outscore the longer one
-        // (the -len/32 penalty slightly penalizes the longer haystack).
-        let short = fuzzy_score("new tab", "tab").unwrap();
-        let long_hay = fuzzy_score(
-            "this very long string has a tab word in it somewhere",
-            "tab",
-        )
-        .unwrap();
-        // The short haystack has a stronger tighter-match score.
-        assert!(
-            short >= long_hay,
-            "shorter haystack {short} should be >= longer {long_hay}"
-        );
-    }
-
-    #[test]
-    fn fuzzy_case_folded_caller_responsibility() {
-        // The function does NOT lowercase; callers must pre-fold.
-        // If needle is lowercase and haystack is uppercase they won't match.
-        assert!(fuzzy_score("NEW TAB", "new").is_none());
-        // But if both are lowercase they do.
-        assert!(fuzzy_score("new tab", "new").is_some());
-    }
-
-    #[test]
-    fn fuzzy_dash_separator_bonus() {
-        // '-' also triggers word-start bonus.
-        let score = fuzzy_score("tokyo-night", "n").unwrap();
-        assert!(
-            score > 1,
-            "dash-separated word start should get bonus score"
-        );
-    }
-
-    #[test]
-    fn fuzzy_ranking_order() {
-        // "nt" applied to the palette display strings:
-        // "Tab  New tab" hits word-start N in "New" and then t in "tab"
-        // vs some non-word-start match — the palette ranking should order the best match first.
-        let new_tab = fuzzy_score("tab  new tab", "nt").unwrap();
-        let buried = fuzzy_score("abcntxyz", "nt").unwrap();
-        assert!(
-            new_tab > buried,
-            "word-start match should rank higher than buried"
-        );
-    }
-
-    #[test]
-    fn fuzzy_single_char_needle() {
-        // Single-char needle at word start gets word-start bonus.
-        let word_start = fuzzy_score("new tab", "n").unwrap();
-        let buried = fuzzy_score("xnew", "n").unwrap();
-        assert!(word_start > buried);
-    }
-
     #[test]
     fn palette_cmd_category_label_consistency() {
         // Every non-SetTheme PaletteCmd should have a non-empty label.
@@ -907,5 +665,16 @@ mod tests {
     fn set_theme_label_is_empty() {
         // SetTheme defers label generation to the registry; the bare method returns "".
         assert_eq!(PaletteCmd::SetTheme(0).label(), "");
+    }
+
+    // ---- history/cwd source helpers ----------------------------------------
+
+    #[test]
+    fn run_command_and_cd_to_labels_deferred_to_registry() {
+        // Both dynamic variants carry their label via the payload, not the method.
+        assert_eq!(PaletteCmd::RunCommand.label(), "");
+        assert_eq!(PaletteCmd::CdTo.label(), "");
+        assert_eq!(PaletteCmd::RunCommand.category(), "History");
+        assert_eq!(PaletteCmd::CdTo.category(), "Cwd");
     }
 }

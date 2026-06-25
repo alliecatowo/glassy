@@ -96,6 +96,12 @@ pub(super) fn dispatch(
             return;
         }
         UserEvent::Cwd(id, path) => {
+            // Also feed the cwd-history ring for the command palette's recent-dirs
+            // source (only the focused pane's reports, to avoid noise from busy
+            // background panes).
+            if id == app.active_focused_id() {
+                app.record_cwd_history(path.clone());
+            }
             // OSC 7: record the reporting pane's cwd so new tabs/splits inherit
             // it. Only a tab's FOCUSED pane drives the inherited cwd (mirrors
             // the title handling); not a visual change, so no repaint.
@@ -217,6 +223,13 @@ pub(super) fn dispatch(
             if id == app.active_focused_id() {
                 app.modify_other_keys = level;
             }
+            return;
+        }
+        UserEvent::CommandRun(_id, cmd) => {
+            // OSC 133 command-zone capture: record the run command into the
+            // history ring for the command palette (any pane's commands are
+            // useful history). Not a visual change, so no repaint.
+            app.record_command_history(cmd);
             return;
         }
         UserEvent::Progress(id, state) => {

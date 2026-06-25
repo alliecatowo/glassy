@@ -17,6 +17,7 @@
 //! padding_right = 4
 //! shell       = /usr/bin/zsh -l        # program + args
 //! scrollback  = 10000                  # lines of history
+//! command_history = 200                # recent commands kept for the palette (OSC 133); 0 = off
 //! bell_visual = true                   # flash the window on bell
 //! bell_audible= false                  # soft beep on bell (needs bell-audio build)
 //! follow_system = false                # track the OS light/dark color scheme
@@ -408,6 +409,26 @@ opacity = 0.80
         parse_config_file("pane_headers = on\n", &mut raw_on).unwrap();
         let settings_on = raw_on.into_settings().unwrap();
         assert!(settings_on.config.pane_headers);
+    }
+
+    #[test]
+    fn command_history_parses_and_defaults() {
+        // Default is 200 when unset.
+        let settings = RawConfig::default().into_settings().unwrap();
+        assert_eq!(settings.config.command_history, 200);
+        // Explicit value is honored and clamped to the [0, 10000] range.
+        let mut raw = RawConfig::default();
+        parse_config_file("command_history = 50\n", &mut raw).unwrap();
+        assert_eq!(raw.command_history, Some(50));
+        assert_eq!(raw.into_settings().unwrap().config.command_history, 50);
+        // Over-large values clamp.
+        let mut raw_big = RawConfig::default();
+        parse_config_file("command_history = 99999\n", &mut raw_big).unwrap();
+        assert_eq!(raw_big.command_history, Some(10_000));
+        // 0 disables capture.
+        let mut raw_off = RawConfig::default();
+        parse_config_file("command_history = 0\n", &mut raw_off).unwrap();
+        assert_eq!(raw_off.command_history, Some(0));
     }
 
     #[test]

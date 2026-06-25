@@ -103,6 +103,14 @@ pub fn run_loop(
     let mut sync_pending_wakeup = false;
     // ---- End sync state ---------------------------------------------------------
 
+    // ---- OSC 133 command-zone capture -------------------------------------------
+    // The grid point recorded at the last `133;B` (command start). When the
+    // matching `133;C` (command executed) arrives we read the command the user
+    // typed from the grid between this point and the cursor. `None` between a `C`
+    // and the next `B` (no command being typed). See `super::cmdzone`.
+    let mut cmd_start: Option<super::cmdzone::CmdStart> = None;
+    // ---- End command-zone capture -----------------------------------------------
+
     'main: loop {
         // Compute the poll timeout: while inside a sync bracket, wake at the
         // deadline so we never stall the UI longer than SYNC_TIMEOUT even if
@@ -239,23 +247,62 @@ pub fn run_loop(
                                 proxy.send_user(crate::pty::UserEvent::Cwd(proxy.id, path));
                             }
                             crate::image::TapEvent::SemanticMark(mark, exit) => {
-                                // OSC 133: drive the per-session command-block tracker.
-                                // `A` opens a block (prompt start), `C` marks output
-                                // start + start time, `D` closes it with end time + exit
-                                // code. All rows are absolute grid offsets (display_offset
-                                // + cursor.line); `term` is already locked above, so read
-                                // through the guard directly.
+                                // OSC 133: drive the per-session command-block tracker
+                                // AND capture the typed command for the palette history.
+                                // `A` opens a block (prompt start; also records the row
+                                // for jump-to-prompt). `B` records the command-zone start
+                                // so the matching `C` can read the typed command text.
+                                // `C` marks output start + start time and forwards the
+                                // captured command. `D` closes the block with end time +
+                                // exit code. All rows are absolute grid offsets
+                                // (display_offset + cursor.line); `term` is already locked
+                                // above, so read through the guard directly.
                                 let row = {
                                     let c = term.renderable_content();
                                     c.cursor.point.line.0 + c.display_offset as i32
                                 };
-                                if let Ok(mut p) = prompts.lock() {
-                                    match mark {
-                                        'A' => p.begin_block(row),
-                                        'C' => p.command_started(row, Instant::now()),
-                                        'D' => p.command_finished(row, exit, Instant::now()),
-                                        _ => {}
+                                match mark {
+                                    'A' => {
+                                        if let Ok(mut p) = prompts.lock() {
+                                            p.begin_block(row);
+                                        }
                                     }
+                                    'B' => {
+                                        // Command start: record the cursor position so
+                                        // the matching `C` can read the typed command
+                                        // text from the grid starting here.
+                                        let cur = term.grid().cursor.point;
+                                        cmd_start = Some(super::cmdzone::CmdStart {
+                                            line: cur.line.0,
+                                            col: cur.column.0,
+                                        });
+                                    }
+                                    'C' => {
+                                        if let Ok(mut p) = prompts.lock() {
+                                            p.command_started(row, Instant::now());
+                                        }
+                                        // Command executed: read the command text from
+                                        // the grid between the `B` point and the cursor,
+                                        // then forward it to the UI history ring.
+                                        if let Some(start) = cmd_start.take() {
+                                            let end = term.grid().cursor.point;
+                                            if let Some(cmd) = super::cmdzone::read_command_zone(
+                                                term.grid(),
+                                                start,
+                                                end,
+                                            ) {
+                                                proxy.send_user(crate::pty::UserEvent::CommandRun(
+                                                    proxy.id, cmd,
+                                                ));
+                                            }
+                                        }
+                                    }
+                                    'D' => {
+                                        if let Ok(mut p) = prompts.lock() {
+                                            p.command_finished(row, exit, Instant::now());
+                                        }
+                                    }
+                                    _ => {}
                                 }
                                 proxy.send_user(crate::pty::UserEvent::SemanticMark(
                                     proxy.id, mark, exit,
