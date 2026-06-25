@@ -27,7 +27,7 @@ use winit::window::{Window, WindowId};
 use crate::bell::{self, AudioBell};
 use crate::color::{self, lighten};
 use crate::gui;
-use crate::input::{KittyFlags, ModifyOtherKeys, MouseReport, encode_key, encode_mouse};
+use crate::input::{KittyFlags, ModifyOtherKeys, MouseReport, encode_key_parts, encode_mouse};
 use crate::pane;
 use crate::pty::{Pty, UserEvent};
 use crate::renderer::{CursorOverlay, Decorations, LigatureCell, Renderer, UnderlineStyle};
@@ -42,6 +42,7 @@ mod multipane;
 mod palette;
 mod panes;
 mod render;
+mod script;
 mod search;
 mod selection;
 mod settings;
@@ -383,6 +384,12 @@ pub struct App {
     // (so the shell has produced output), write a PPM, and exit.
     capture: Option<std::path::PathBuf>,
     capture_deadline: Option<Instant>,
+
+    // Scripted-input test harness: when `GLASSY_SCRIPT` is set, a queue of parsed
+    // commands drives the REAL mouse/keyboard/render handlers headlessly (one step
+    // per `about_to_wait` wake), then exits. `None` on the normal interactive path,
+    // so the 0%-idle invariant is untouched. See `app/script.rs`.
+    script: Option<script::ScriptRunner>,
 
     // --- Per-frame damage tracking (drives the renderer's per-row updates). ---
     /// Force a full grid rebuild on the next frame regardless of terminal damage.

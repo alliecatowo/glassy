@@ -269,6 +269,13 @@ impl ApplicationHandler<UserEvent> for App {
             self.capture_deadline = Some(deadline);
             event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
         }
+
+        // Scripted-input harness: when GLASSY_SCRIPT is set, drive the real
+        // mouse/keyboard/render handlers from the parsed command list (one step per
+        // about_to_wait wake) and exit when done. Armed last so it can ride on top
+        // of any overlay opened above (GLASSY_SETTINGS/MENU/…). The normal path
+        // leaves `self.script` None, so the 0%-idle invariant is untouched.
+        self.maybe_start_script(event_loop);
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
@@ -593,6 +600,19 @@ impl ApplicationHandler<UserEvent> for App {
         if self.session_dirty {
             self.session_dirty = false;
             self.save_session();
+        }
+
+        // Scripted-input harness: advance one command per wake, driving the real
+        // handlers. While a script is in flight we stay on `Poll`; once it runs
+        // out of commands the loop exits. Checked before the capture path so a
+        // script can own the run entirely (it has its own `capture` command).
+        if self.script.is_some() {
+            if self.step_script(event_loop) {
+                event_loop.set_control_flow(ControlFlow::Poll);
+            } else {
+                event_loop.exit();
+            }
+            return;
         }
 
         // Headless capture path: at the deadline, render the latest content,

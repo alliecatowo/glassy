@@ -6,7 +6,6 @@
 
 use std::fmt::Write as _;
 
-use winit::event::KeyEvent;
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 
 /// Active kitty keyboard protocol flags (bitfield of TermMode bits 18-22).
@@ -67,16 +66,24 @@ pub enum ModifyOtherKeys {
 ///
 /// Returns `None` for keys that produce no input (pure modifiers, unhandled
 /// named keys, key releases when report_event_types is off).
-pub fn encode_key(
-    event: &KeyEvent,
+/// Encode a key event into the PTY byte sequence, taking the individual fields
+/// it reads from a winit `KeyEvent` (`logical_key`, `text`, press/repeat state)
+/// rather than the event itself. This decomposition lets the scripted-input test
+/// harness (`app/script.rs`) drive the exact same encoding path even though it
+/// cannot construct a winit `KeyEvent` (whose `platform_specific` field is
+/// crate-private), guaranteeing synthetic keys encode byte-for-byte like real
+/// ones.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_key_parts(
+    logical_key: &Key,
+    text: Option<&str>,
+    pressed: bool,
+    repeat: bool,
     mods: ModifiersState,
     kitty: KittyFlags,
     app_cursor: bool,
     modify_other_keys: ModifyOtherKeys,
 ) -> Option<Vec<u8>> {
-    let pressed = event.state.is_pressed();
-    let repeat = event.repeat;
-
     // Without REPORT_EVENT_TYPES, only forward key-press (including OS repeat).
     if !pressed && !kitty.report_event_types {
         return None;
@@ -143,7 +150,7 @@ pub fn encode_key(
     };
 
     // a) Named keys -> fixed control / CSI sequences.
-    if let Key::Named(named) = &event.logical_key {
+    if let Key::Named(named) = logical_key {
         let named = *named;
 
         // Under REPORT_ALL_KEYS_AS_ESC every named key (including unmodified Enter,
@@ -240,7 +247,7 @@ pub fn encode_key(
     }
 
     // b) Printable input. winit gives the locale-correct text directly.
-    if let Some(text) = &event.text {
+    if let Some(text) = text {
         if text.is_empty() {
             return None;
         }
@@ -249,14 +256,14 @@ pub fn encode_key(
         // Unicode codepoint so the application sees the release.
         if !pressed && kitty.report_event_types {
             let c = text.chars().next()?;
-            return Some(kitty_csi_u(c as u32, Some(text.as_str())));
+            return Some(kitty_csi_u(c as u32, Some(text)));
         }
 
         // REPORT_ALL_KEYS_AS_ESC: unmodified printable keys also go as CSI-u.
         if kitty.active() && kitty.report_all_keys_as_esc && !ctrl {
             let c = text.chars().next()?;
             let assoc = if kitty.report_associated_text {
-                Some(text.as_str())
+                Some(text)
             } else {
                 None
             };
@@ -269,7 +276,7 @@ pub fn encode_key(
             // CSI-u so the application can distinguish Ctrl-I from Tab etc.
             if kitty.active() {
                 let assoc = if kitty.report_associated_text {
-                    Some(text.as_str())
+                    Some(text)
                 } else {
                     None
                 };

@@ -79,6 +79,7 @@ impl App {
             spinner_at: Instant::now() + SPINNER_INTERVAL,
             capture: std::env::var_os("GLASSY_CAPTURE").map(std::path::PathBuf::from),
             capture_deadline: None,
+            script: None,
             force_full_redraw: true,
             tab_bar_key: None,
             prev_cursor: None,

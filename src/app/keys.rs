@@ -9,13 +9,13 @@ use crate::config::{Chord, KeyAction};
 
 /// Convert a winit key event + current modifiers into a [`Chord`] for keymap
 /// lookup. Returns `None` for modifier-only keypresses (the key IS a modifier).
-fn chord_from_event(event: &winit::event::KeyEvent, mods: ModifiersState) -> Option<Chord> {
+fn chord_from_event(logical_key: &Key, mods: ModifiersState) -> Option<Chord> {
     let ctrl = mods.control_key();
     let shift = mods.shift_key();
     let alt = mods.alt_key();
     let meta = mods.super_key();
 
-    let key = match &event.logical_key {
+    let key = match logical_key {
         Key::Character(s) => s.to_lowercase(),
         Key::Named(n) => named_key_to_str(n)?.to_string(),
         _ => return None,
@@ -90,12 +90,48 @@ impl App {
         event: winit::event::KeyEvent,
         event_loop: &ActiveEventLoop,
     ) {
+        self.handle_keyboard_parts(
+            event.logical_key,
+            event.text,
+            event.state,
+            event.repeat,
+            event_loop,
+        );
+    }
+
+    /// Decomposed form of [`handle_keyboard`] used by both the real winit
+    /// dispatch and the scripted-input test harness (`app/script.rs`), which
+    /// cannot construct a winit `KeyEvent` (its `platform_specific` field is
+    /// crate-private). Routing both paths through one body guarantees synthetic
+    /// keys exercise the exact same overlay / keymap / encode logic as real ones.
+    pub(super) fn handle_keyboard_parts(
+        &mut self,
+        logical_key: Key,
+        text: Option<winit::keyboard::SmolStr>,
+        state: ElementState,
+        repeat: bool,
+        event_loop: &ActiveEventLoop,
+    ) {
+        // Reconstruct the field-access shape the original body used so the logic
+        // below is untouched: `event.state` / `event.logical_key` / `event.text`.
+        struct Ev {
+            logical_key: Key,
+            text: Option<winit::keyboard::SmolStr>,
+            state: ElementState,
+            repeat: bool,
+        }
+        let event = Ev {
+            logical_key,
+            text,
+            state,
+            repeat,
+        };
         // Window-level shortcuts (fullscreen / maximize) are handled first,
         // before overlays, using the keymap so they can be rebound.
         // We consult the keymap for ToggleFullscreen and ToggleMaximize before
         // anything else so they work even when overlays are open.
         if event.state.is_pressed()
-            && let Some(chord) = chord_from_event(&event, self.mods)
+            && let Some(chord) = chord_from_event(&event.logical_key, self.mods)
         {
             match self.config.keymap.get(&chord) {
                 Some(KeyAction::ToggleFullscreen) => {
@@ -150,7 +186,7 @@ impl App {
         // override every built-in chord.
         // --------------------------------------------------------------------
         if event.state.is_pressed()
-            && let Some(chord) = chord_from_event(&event, self.mods)
+            && let Some(chord) = chord_from_event(&event.logical_key, self.mods)
             && let Some(&action) = self.config.keymap.get(&chord)
         {
             // Scroll actions are suppressed on the alt-screen (let the
@@ -297,9 +333,16 @@ impl App {
         // forbids the ambiguous SS3 form for cursor keys, so suppress app-cursor
         // mode when kitty is active — those keys then fall to unambiguous CSI.
         let app_cursor = mode.contains(TermMode::APP_CURSOR) && !kitty.active();
-        if let Some(bytes) =
-            encode_key(&event, self.mods, kitty, app_cursor, self.modify_other_keys)
-        {
+        if let Some(bytes) = encode_key_parts(
+            &event.logical_key,
+            event.text.as_deref(),
+            event.state.is_pressed(),
+            event.repeat,
+            self.mods,
+            kitty,
+            app_cursor,
+            self.modify_other_keys,
+        ) {
             // Typing resets the blink to solid-on so the cursor doesn't
             // wink out mid-keystroke, matching every mainstream terminal.
             self.reset_blink();
