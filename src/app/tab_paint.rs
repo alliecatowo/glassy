@@ -277,9 +277,12 @@ impl App {
             );
         }
 
-        // 5) Tab-count badge + scrollback %, tucked just left of the right controls.
+        // 5) Scrollback % (when scrolled back), tucked just left of the right
+        // controls. The tab-count badge ("N tabs") is intentionally omitted — the
+        // tab chips themselves already convey the count.
+        let _ = tab_count;
         let right_ctrl_x = bar_w - CTRL_BTN * 3.0 - TAB_GAP;
-        let mut tag_right = right_ctrl_x - m.width;
+        let tag_right = right_ctrl_x - m.width;
         let ty = ((bar_h - m.height) * 0.5).round();
         if display_offset > 0 {
             let pct = if history_size > 0 {
@@ -291,12 +294,6 @@ impl App {
             let s = format!("⇡{pct:>3}%");
             let w = renderer.text_width_px(&s);
             renderer.push_overlay_glyph_px_str((tag_right - w).round(), ty, &s, accent);
-            tag_right -= w + m.width;
-        }
-        if tab_count > 1 {
-            let s = format!("{tab_count} tabs");
-            let w = renderer.text_width_px(&s);
-            renderer.push_overlay_glyph_px_str((tag_right - w).round(), ty, &s, fg_dim);
         }
     }
 

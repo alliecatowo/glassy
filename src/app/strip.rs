@@ -214,17 +214,15 @@ pub(crate) fn strip_layout_ex(
 }
 
 /// Pixel width to reserve to the LEFT of the right control cluster for the
-/// "N tabs" readout (and a little slack for the scrollback-% badge that appears
-/// while scrolled). 0 for a single tab (no counter shown). Estimated from the
-/// digit count so the rightmost tab never kisses the counter. Pure.
+/// scrollback-% badge ("⇡100%") that appears while scrolled back. The "N tabs"
+/// readout was removed (the chips convey the count), so this only covers the
+/// ~6-char percent badge plus a cell of slack. Pure.
 pub(crate) fn tab_tag_reserve(tab_count: usize, cell_w: f32) -> f32 {
     if tab_count <= 1 {
         return 0.0;
     }
-    // "<n> tabs" = digits + " tabs" (5) + 1 cell of leading slack.
-    let digits = tab_count.to_string().len();
-    let chars = digits + 6;
-    (chars as f32 * cell_w).round()
+    // "⇡100%" = 5 chars + 1 cell of leading slack.
+    (6.0 * cell_w).round()
 }
 
 /// Pixel layout for just the three floating icon buttons (Help / Settings / Menu)
