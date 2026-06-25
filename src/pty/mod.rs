@@ -108,10 +108,9 @@ impl PaneInfo {
             .or(shell_comm)
     }
 
-    /// Refresh from `/proc` for the shell with `shell_pid`. Reads the pty's tty
-    /// foreground pgid from `/proc/<shell_pid>/stat` field 8, then reads that
-    /// process's `comm` and the shell's `cwd` symlink. All reads are best-effort
-    /// (`None` on any failure).
+    /// Refresh the shell's cwd and the tty's foreground-process name for
+    /// `shell_pid`. Linux reads `/proc`; macOS reads libproc. All reads are
+    /// best-effort (`None` on any failure). `git_branch` is pure filesystem.
     pub fn read(shell_pid: u32) -> Self {
         let cwd = read_proc_cwd(shell_pid);
         let foreground_comm = read_foreground_comm(shell_pid);
@@ -126,8 +125,65 @@ impl PaneInfo {
     }
 }
 
-/// Read `/proc/<pid>/cwd` (a symlink to the process's cwd).
+/// Read the shell's own `comm`/name (e.g. `zsh`, `bash`) — the process-name
+/// fallback shown at an idle prompt. Platform-dispatched like the other reads.
+pub(crate) fn read_shell_comm(shell_pid: u32) -> Option<String> {
+    #[cfg(target_os = "linux")]
+    {
+        std::fs::read_to_string(format!("/proc/{shell_pid}/comm"))
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    }
+    #[cfg(target_os = "macos")]
+    {
+        macos_procinfo::shell_comm(shell_pid)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = shell_pid;
+        None
+    }
+}
+
+/// Read the shell process's cwd. Dispatches to the platform implementation.
 fn read_proc_cwd(pid: u32) -> Option<PathBuf> {
+    #[cfg(target_os = "linux")]
+    {
+        read_proc_cwd_linux(pid)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        macos_procinfo::cwd(pid)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = pid;
+        None
+    }
+}
+
+/// Read the tty foreground process name for `shell_pid`. Dispatches to the
+/// platform implementation; `None` when the shell itself is foreground (idle).
+fn read_foreground_comm(shell_pid: u32) -> Option<String> {
+    #[cfg(target_os = "linux")]
+    {
+        read_foreground_comm_linux(shell_pid)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        macos_procinfo::foreground_comm(shell_pid)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = shell_pid;
+        None
+    }
+}
+
+/// Read `/proc/<pid>/cwd` (a symlink to the process's cwd).
+#[cfg(target_os = "linux")]
+fn read_proc_cwd_linux(pid: u32) -> Option<PathBuf> {
     let path = format!("/proc/{pid}/cwd");
     std::fs::read_link(&path).ok()
 }
@@ -142,7 +198,8 @@ fn read_proc_cwd(pid: u32) -> Option<PathBuf> {
 ///    a process whose `stat` `pgrp` field matches.
 /// 3. Return the `comm` string, or `None` if the shell itself is foreground
 ///    (tpgid == shell's pgid) or any read fails.
-fn read_foreground_comm(shell_pid: u32) -> Option<String> {
+#[cfg(target_os = "linux")]
+fn read_foreground_comm_linux(shell_pid: u32) -> Option<String> {
     // Parse /proc/<shell_pid>/stat to get tpgid (field index 7, 0-based after
     // stripping the comm field in parens). The stat line format is:
     //   pid (comm) state ppid pgrp session tty_nr tpgid ...
@@ -206,6 +263,223 @@ fn read_foreground_comm(shell_pid: u32) -> Option<String> {
 }
 
 // ---- /proc-based pane-info helpers (end) ------------------------------------
+
+/// macOS pane-info via libproc (no `/proc`). `proc_pidinfo(PROC_PIDTBSDINFO)`
+/// exposes `e_tpgid` — the tty foreground pgid, the exact analog of Linux stat's
+/// `tpgid` — and `pbi_pgid`, the shell's own pgid for the idle comparison. So the
+/// shell pid alone suffices; the pty master fd / `tcgetpgrp` are not needed.
+#[cfg(target_os = "macos")]
+mod macos_procinfo {
+    use std::ffi::{CStr, c_char, c_int, c_void};
+    use std::path::PathBuf;
+
+    const PROC_PIDTBSDINFO: c_int = 3;
+    const PROC_PIDVNODEPATHINFO: c_int = 9;
+    const MAXCOMLEN: usize = 16;
+    const MAXPATHLEN: usize = 1024;
+    const PROC_PIDPATHINFO_MAXSIZE: usize = 4 * MAXPATHLEN;
+    const NODEV: u32 = u32::MAX;
+
+    // libproc is part of libSystem — no #[link] needed. proc_pidinfo's buffersize
+    // is c_int; proc_name/proc_pidpath's is u32 (verified against libproc.h).
+    unsafe extern "C" {
+        fn proc_pidinfo(
+            pid: c_int,
+            flavor: c_int,
+            arg: u64,
+            buffer: *mut c_void,
+            buffersize: c_int,
+        ) -> c_int;
+        fn proc_name(pid: c_int, buffer: *mut c_void, buffersize: u32) -> c_int;
+        fn proc_pidpath(pid: c_int, buffer: *mut c_void, buffersize: u32) -> c_int;
+        fn proc_listchildpids(ppid: c_int, buffer: *mut c_void, buffersize: c_int) -> c_int;
+    }
+
+    #[repr(C)]
+    struct ProcBsdInfo {
+        pbi_flags: u32,
+        pbi_status: u32,
+        pbi_xstatus: u32,
+        pbi_pid: u32,
+        pbi_ppid: u32,
+        pbi_uid: u32,
+        pbi_gid: u32,
+        pbi_ruid: u32,
+        pbi_rgid: u32,
+        pbi_svuid: u32,
+        pbi_svgid: u32,
+        rfu_1: u32,
+        pbi_comm: [c_char; MAXCOMLEN],
+        pbi_name: [c_char; 2 * MAXCOMLEN],
+        pbi_nfiles: u32,
+        pbi_pgid: u32,
+        pbi_pjobc: u32,
+        e_tdev: u32,
+        e_tpgid: u32,
+        pbi_nice: i32,
+        pbi_start_tvsec: u64,
+        pbi_start_tvusec: u64,
+    }
+
+    // The cwd C-string sits at offset 152 inside vnode_info_path (the vnode_info
+    // prefix is 152 bytes). Model the prefix opaquely to avoid transcribing
+    // vinfo_stat; size asserts below catch any future ABI drift.
+    #[repr(C)]
+    struct VnodeInfoPath {
+        vip_vi: [u8; 152],
+        vip_path: [c_char; MAXPATHLEN],
+    }
+    #[repr(C)]
+    struct ProcVnodePathInfo {
+        pvi_cdir: VnodeInfoPath,
+        pvi_rdir: VnodeInfoPath,
+    }
+
+    // Compile-time ABI guards (verified against the macOS SDK).
+    const _: () = assert!(std::mem::size_of::<ProcBsdInfo>() == 136);
+    const _: () = assert!(std::mem::size_of::<ProcVnodePathInfo>() == 2352);
+
+    /// The pid to actually query for shell info. glassy's shell is often spawned
+    /// behind `/usr/bin/login` (root, setuid) on macOS, which a normal-user process
+    /// can't introspect via libproc. In that case the real shell is `login`'s
+    /// same-uid child on the same controlling tty, so its cwd and tty foreground
+    /// pgid are exactly what we want. If `pid` itself is queryable, use it directly.
+    fn queryable_pid(pid: u32) -> u32 {
+        if raw_bsd_info(pid).is_some() {
+            return pid;
+        }
+        first_child_pid(pid).unwrap_or(pid)
+    }
+
+    /// First child pid of `ppid` via `proc_listchildpids`, or `None`.
+    fn first_child_pid(ppid: u32) -> Option<u32> {
+        // SAFETY: proc_listchildpids fills a pid_t (i32) array and returns the
+        // *count* of pids written (not a byte count). We size the buffer generously
+        // and read only what it reports.
+        unsafe {
+            let mut pids = [0i32; 64];
+            let cap = (pids.len() * std::mem::size_of::<i32>()) as c_int;
+            let n = proc_listchildpids(ppid as c_int, pids.as_mut_ptr() as *mut c_void, cap);
+            if n <= 0 {
+                return None;
+            }
+            let count = (n as usize).min(pids.len());
+            pids[..count]
+                .iter()
+                .copied()
+                .find(|&p| p > 0)
+                .map(|p| p as u32)
+        }
+    }
+
+    /// `proc_pidinfo(PROC_PIDTBSDINFO)` on `pid` exactly (no login descent).
+    fn raw_bsd_info(pid: u32) -> Option<ProcBsdInfo> {
+        // SAFETY: zeroed POD; proc_pidinfo writes exactly size_of bytes on success.
+        unsafe {
+            let mut bi: ProcBsdInfo = std::mem::zeroed();
+            let size = std::mem::size_of::<ProcBsdInfo>() as c_int;
+            let n = proc_pidinfo(
+                pid as c_int,
+                PROC_PIDTBSDINFO,
+                0,
+                &mut bi as *mut _ as *mut c_void,
+                size,
+            );
+            (n == size).then_some(bi)
+        }
+    }
+
+    /// `proc_pidinfo(PROC_PIDTBSDINFO)` → the shell's BSD info, descending through
+    /// a `login` wrapper to the real shell when needed.
+    fn bsd_info(pid: u32) -> Option<ProcBsdInfo> {
+        raw_bsd_info(queryable_pid(pid))
+    }
+
+    fn cstr_field(buf: &[c_char]) -> Option<String> {
+        // SAFETY: buf is a NUL-terminated C string field from a libproc struct.
+        let s = unsafe { CStr::from_ptr(buf.as_ptr()) }.to_string_lossy();
+        let s = s.trim();
+        (!s.is_empty()).then(|| s.to_string())
+    }
+
+    /// The shell's own short name (e.g. `zsh`), from `pbi_comm`.
+    pub(super) fn shell_comm(pid: u32) -> Option<String> {
+        cstr_field(&bsd_info(pid)?.pbi_comm)
+    }
+
+    /// The tty foreground process name, or `None` when the shell is foreground
+    /// (idle prompt) — mirrors the Linux `tpgid == shell_pgid` check exactly.
+    pub(super) fn foreground_comm(shell_pid: u32) -> Option<String> {
+        let bi = bsd_info(shell_pid)?;
+        // No controlling tty, or shell is the foreground group (idle): nothing to show.
+        if bi.e_tdev == NODEV || bi.e_tpgid == 0 || bi.e_tpgid == bi.pbi_pgid {
+            return None;
+        }
+        // The foreground pgid leader's pid == pgid in the common case. Prefer
+        // proc_name (short, like Linux comm); fall back to proc_pidpath's basename.
+        proc_short_name(bi.e_tpgid).or_else(|| proc_path_basename(bi.e_tpgid))
+    }
+
+    /// The shell process's cwd, from `PROC_PIDVNODEPATHINFO`. Descends through a
+    /// `login` wrapper to the real shell (same as bsd_info) so the cwd is the
+    /// shell's, not login's.
+    pub(super) fn cwd(pid: u32) -> Option<PathBuf> {
+        let pid = queryable_pid(pid);
+        // SAFETY: zeroed POD; proc_pidinfo writes the struct and returns >0 on success.
+        unsafe {
+            let mut vpi: ProcVnodePathInfo = std::mem::zeroed();
+            let size = std::mem::size_of::<ProcVnodePathInfo>() as c_int;
+            let n = proc_pidinfo(
+                pid as c_int,
+                PROC_PIDVNODEPATHINFO,
+                0,
+                &mut vpi as *mut _ as *mut c_void,
+                size,
+            );
+            if n <= 0 {
+                return None;
+            }
+            cstr_field(&vpi.pvi_cdir.vip_path).map(PathBuf::from)
+        }
+    }
+
+    fn proc_short_name(pid: u32) -> Option<String> {
+        // SAFETY: proc_name writes up to buffersize bytes and returns the count.
+        unsafe {
+            let mut buf = [0u8; 2 * MAXCOMLEN];
+            let n = proc_name(
+                pid as c_int,
+                buf.as_mut_ptr() as *mut c_void,
+                buf.len() as u32,
+            );
+            if n <= 0 {
+                return None;
+            }
+            let s = String::from_utf8_lossy(&buf[..n as usize]);
+            let s = s.trim();
+            (!s.is_empty()).then(|| s.to_string())
+        }
+    }
+
+    fn proc_path_basename(pid: u32) -> Option<String> {
+        // SAFETY: proc_pidpath writes up to buffersize bytes and returns the count.
+        unsafe {
+            let mut buf = [0u8; PROC_PIDPATHINFO_MAXSIZE];
+            let n = proc_pidpath(
+                pid as c_int,
+                buf.as_mut_ptr() as *mut c_void,
+                buf.len() as u32,
+            );
+            if n <= 0 {
+                return None;
+            }
+            let path = String::from_utf8_lossy(&buf[..n as usize]);
+            std::path::Path::new(path.trim())
+                .file_name()
+                .map(|f| f.to_string_lossy().to_string())
+        }
+    }
+}
 
 /// Events delivered from the PTY thread (and timers) into the winit loop. Each
 /// carries the id of the session (tab) it came from so the UI can route it.
@@ -675,6 +949,18 @@ impl Pty {
         };
         // `..default()` covers the windows-only `escape_args` field; on unix every
         // field is set explicitly, so silence the resulting needless-update lint.
+        // When launched as a .app bundle (e.g. from Finder/DMG), the process CWD
+        // is "/" rather than the user's home. Default to $HOME so the shell opens
+        // in a useful directory instead of the filesystem root.
+        let working_directory = working_directory.or_else(|| {
+            let cwd = std::env::current_dir().ok()?;
+            if cwd == std::path::Path::new("/") {
+                std::env::var_os("HOME").map(std::path::PathBuf::from)
+            } else {
+                None
+            }
+        });
+
         #[allow(clippy::needless_update)]
         let pty_options = PtyOptions {
             shell,
@@ -720,10 +1006,7 @@ impl Pty {
         let pane_info = PaneInfo::read(shell_pid);
         // The shell's own comm (zsh/bash/…) is the process-name fallback at an
         // idle prompt; read it once here since the shell pid is stable.
-        let shell_comm = std::fs::read_to_string(format!("/proc/{shell_pid}/comm"))
-            .ok()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty());
+        let shell_comm = read_shell_comm(shell_pid);
         Ok(Pty {
             term,
             images,
