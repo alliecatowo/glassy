@@ -18,12 +18,14 @@ use super::*;
 use alacritty_terminal::term::Term;
 use alacritty_terminal::term::color::Colors;
 
-/// Strip width in physical pixels.
-const STRIP_W: f32 = 8.0;
+/// Strip width in physical pixels. Wide enough to read as an overview rail
+/// (an 8px sliver was effectively invisible).
+const STRIP_W: f32 = 28.0;
 /// Right-edge margin in physical pixels.
-const STRIP_MARGIN: f32 = 1.0;
-/// Alpha applied to the strip background (a faint dark rail behind the rows).
-const STRIP_BG_ALPHA: f32 = 0.22;
+const STRIP_MARGIN: f32 = 2.0;
+/// Alpha applied to the strip background (a dark rail behind the rows). Kept
+/// high enough that the rail is clearly distinguishable from the terminal bg.
+const STRIP_BG_ALPHA: f32 = 0.42;
 /// Alpha applied to the viewport indicator (the brighter band marking the
 /// currently-visible region within the whole buffer).
 const VIEWPORT_ALPHA: f32 = 0.30;
