@@ -114,6 +114,9 @@ impl App {
             fold_state: command_blocks::FoldState::default(),
             minimap_cache: Default::default(),
             minimap_dragging: false,
+            // Quake state is armed lazily in `resumed()` once the window exists
+            // (only when `config.quake` is set); `None` keeps normal mode untouched.
+            quake: None,
         }
     }
 

@@ -35,7 +35,16 @@
 //! title_show_cwd = true                # include the cwd in the OS window title
 //! title_show_count = false             # append " · N tabs" to the window title
 //! minimap     = false                  # scrollback minimap / overview strip (right edge)
+//! quake       = false                  # quake/dropdown mode: borderless slide-down window
+//! quake_height = 0.5                   # fraction of the monitor height (0.1..1.0)
+//! quake_animation_ms = 180             # slide duration in ms (0 = instant)
 //! ```
+//!
+//! Quake / dropdown mode (see `docs/quake-mode.md`): with `quake = true` glassy
+//! opens as a borderless window that slides down from the top edge. Wayland has no
+//! portable global hotkey, so bind `glassy toggle` (or `glassy --toggle`) to a key
+//! in your compositor; it signals the running instance over a single-instance Unix
+//! socket. The in-app `quake_toggle` action (default F12) hides it from inside.
 //!
 //! Custom keybindings live in a `[keybindings]` section mapping chords to actions:
 //!
@@ -63,7 +72,8 @@
 //! `toggle_status_bar`, `font_increase`, `font_decrease`, `font_reset`,
 //! `scroll_up`, `scroll_down`, `scroll_top`, `scroll_bottom`,
 //! `jump_prev_prompt`, `jump_next_prompt` (OSC 133 prompt navigation),
-//! `move_tab_left`, `move_tab_right`, and `go_to_tab_1` .. `go_to_tab_9`.
+//! `move_tab_left`, `move_tab_right`, `go_to_tab_1` .. `go_to_tab_9`,
+//! `broadcast_input`, `hints`, `toggle_fold`, `toggle_minimap`, `quake_toggle`.
 //!
 //! Default chords are platform-aware: macOS uses ⌘-based chords (⌘C/⌘V/⌘T/⌘W,
 //! ⌘1-9, ⌘, for settings, ⌘F for find); Linux/Windows use Ctrl / Ctrl+Shift.
@@ -320,6 +330,49 @@ opacity = 0.80
         let s = raw.into_settings().unwrap();
         assert!(!s.config.title_show_cwd);
         assert!(s.config.title_show_count);
+    }
+
+    #[test]
+    fn quake_defaults_off_and_parses() {
+        // Default is off with the documented geometry/animation defaults.
+        let settings = RawConfig::default().into_settings().unwrap();
+        assert!(!settings.config.quake);
+        assert_eq!(settings.config.quake_height, 0.5);
+        assert_eq!(settings.config.quake_animation_ms, 180);
+
+        let mut raw = RawConfig::default();
+        parse_config_file(
+            "quake = true\nquake_height = 0.4\nquake_animation_ms = 250\n",
+            &mut raw,
+        )
+        .unwrap();
+        assert_eq!(raw.quake, Some(true));
+        let s = raw.into_settings().unwrap();
+        assert!(s.config.quake);
+        assert!((s.config.quake_height - 0.4).abs() < 1e-6);
+        assert_eq!(s.config.quake_animation_ms, 250);
+    }
+
+    #[test]
+    fn quake_height_out_of_range_errors() {
+        let mut raw = RawConfig::default();
+        assert!(parse_config_file("quake_height = 2.0\n", &mut raw).is_err());
+        let mut raw2 = RawConfig::default();
+        assert!(parse_config_file("quake_height = 0.0\n", &mut raw2).is_err());
+    }
+
+    #[test]
+    fn quake_animation_ms_clamps() {
+        let mut raw = RawConfig::default();
+        parse_config_file("quake_animation_ms = 999999\n", &mut raw).unwrap();
+        assert_eq!(raw.quake_animation_ms, Some(5_000));
+    }
+
+    #[test]
+    fn quake_toggle_keybind_defaults_to_f12() {
+        let km = default_keymap(Platform::Linux);
+        let chord = parse_chord("f12").unwrap();
+        assert_eq!(km.get(&chord), Some(&KeyAction::QuakeToggle));
     }
 
     #[test]
@@ -723,6 +776,11 @@ f11 = none\n\
             "move_tab_right",
             "go_to_tab_1",
             "go_to_tab_9",
+            "broadcast_input",
+            "hints",
+            "toggle_fold",
+            "toggle_minimap",
+            "quake_toggle",
         ];
         for name in &known {
             let r = parse_action(name);

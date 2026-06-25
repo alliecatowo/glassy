@@ -229,6 +229,8 @@ pub enum KeyAction {
     ToggleFold,
     /// Toggle the scrollback minimap / overview strip on the right edge.
     ToggleMinimap,
+    /// Toggle the quake/dropdown window (slide it down/up).
+    QuakeToggle,
 }
 
 impl KeyAction {
@@ -267,6 +269,7 @@ impl KeyAction {
             Hints => "Hints (label & open links)",
             ToggleFold => "Fold/unfold command output",
             ToggleMinimap => "Toggle minimap",
+            QuakeToggle => "Toggle quake dropdown",
         }
     }
 
@@ -280,8 +283,8 @@ impl KeyAction {
             SplitVertical | SplitHorizontal | BroadcastInput => "Split panes",
             Copy | Paste => "Edit",
             ToggleFullscreen | ToggleMaximize | FontIncrease | FontDecrease | FontReset
-            | ToggleStatusBar | ToggleMinimap | ScrollUp | ScrollDown | ScrollTop
-            | ScrollBottom | JumpPrevPrompt | JumpNextPrompt | ToggleFold => "View",
+            | ToggleStatusBar | ToggleMinimap | ScrollUp | ScrollDown | ScrollTop | ScrollBottom
+            | JumpPrevPrompt | JumpNextPrompt | ToggleFold | QuakeToggle => "View",
             Settings | Help | Search | CommandPalette | Hints => "App",
         }
     }
@@ -324,6 +327,7 @@ pub(crate) fn parse_action(s: &str) -> Result<Option<KeyAction>> {
         "hints" => Hints,
         "toggle_fold" => ToggleFold,
         "toggle_minimap" => ToggleMinimap,
+        "quake_toggle" => QuakeToggle,
         // go_to_tab_1 .. go_to_tab_9 select a tab by 1-based position.
         s if s.starts_with("go_to_tab_") => match s["go_to_tab_".len()..].parse::<u8>() {
             Ok(n @ 1..=9) => GoToTab(n),
@@ -383,6 +387,10 @@ fn shared_default_binds() -> &'static [(&'static str, KeyAction)] {
         ("ctrl+shift+h", Hints),
         ("ctrl+shift+z", ToggleFold),
         ("ctrl+shift+m", ToggleMinimap),
+        // Quake/dropdown toggle. F12 is the de-facto dropdown-terminal key
+        // (guake/yakuake) and is otherwise unbound. Only meaningful when
+        // `quake = true`; in normal mode `quake_toggle` is a harmless no-op.
+        ("f12", QuakeToggle),
     ]
 }
 

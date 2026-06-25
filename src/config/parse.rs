@@ -65,6 +65,9 @@ pub(super) struct RawConfig {
     pub title_show_cwd: Option<bool>,
     pub title_show_count: Option<bool>,
     pub minimap: Option<bool>,
+    pub quake: Option<bool>,
+    pub quake_height: Option<f32>,
+    pub quake_animation_ms: Option<u64>,
 }
 
 impl RawConfig {
@@ -182,6 +185,16 @@ impl RawConfig {
                 .map(|s| s.chars().filter(|c| c.is_ascii_alphabetic()).collect()),
             command_badges: self.command_badges.unwrap_or(true),
             minimap: self.minimap.unwrap_or(false),
+            quake: self.quake.unwrap_or(false),
+            quake_height: {
+                let h = self.quake_height.unwrap_or(0.5);
+                if h.is_finite() && (0.1..=1.0).contains(&h) {
+                    h
+                } else {
+                    0.5
+                }
+            },
+            quake_animation_ms: self.quake_animation_ms.unwrap_or(180).min(5_000),
         };
 
         Ok(super::Settings { config, theme })
@@ -546,6 +559,24 @@ pub(super) fn apply_kv(key: &str, value: &str, raw: &mut RawConfig) -> Result<()
         }
         "minimap" => {
             raw.minimap = Some(parse_bool(value, "minimap")?);
+        }
+        "quake" => {
+            raw.quake = Some(parse_bool(value, "quake")?);
+        }
+        "quake_height" => {
+            let h: f32 = value
+                .parse()
+                .with_context(|| format!("quake_height: invalid number '{value}'"))?;
+            if !(h.is_finite() && (0.1..=1.0).contains(&h)) {
+                bail!("quake_height must be between 0.1 and 1.0, got {h}");
+            }
+            raw.quake_height = Some(h);
+        }
+        "quake_animation_ms" => {
+            let ms: u64 = value
+                .parse()
+                .with_context(|| format!("quake_animation_ms: invalid integer '{value}'"))?;
+            raw.quake_animation_ms = Some(ms.min(5_000));
         }
         "color.fg" => {
             parse_hex_color(value)?;
