@@ -312,15 +312,28 @@ impl App {
             return;
         };
         let m = renderer.cell_metrics();
+        let pad = renderer.pad();
         let id = self.next_id;
         // Inherit the current tab's cwd (from OSC 7) so the new tab opens where the
         // user is, not in $HOME.
         let cwd = self.active_cwd.clone();
+        // Spawn at the FULL single-pane grid, not self.cols/self.rows — those hold
+        // the focused pane's (possibly half-width) dims when the current tab is
+        // split, which would make the new single-pane tab's shell start half-width
+        // and paint over only half until the next resize. The new tab makes the
+        // strip visible (≥2 tabs / Always), so reserve the strip + macOS inset.
+        let (spawn_cols, spawn_rows) = match self.window.as_ref().map(|w| w.inner_size()) {
+            Some(sz) if sz.width > 0 && sz.height > 0 => {
+                let strip_h = tab_bar_h(m.height).max(self.chrome_top_inset());
+                Self::grid_for(sz, m.width, m.height, pad, self.config.status_bar, strip_h)
+            }
+            _ => (self.cols, self.rows),
+        };
         let pty = match Pty::spawn(
             self.proxy.clone(),
             id,
-            self.cols,
-            self.rows,
+            spawn_cols,
+            spawn_rows,
             m.width.round() as u16,
             m.height.round() as u16,
             self.config.shell.clone(),
@@ -465,8 +478,13 @@ impl App {
         // Restore the activated session's cwd so a new tab/split inherits it.
         self.active_cwd = target.last_cwd;
         // A split tab may have been parked at a different window size; re-tile it.
+        // A single-pane tab needs the full grid: self.cols/rows may still hold the
+        // previously-active tab's focused-pane (e.g. half) width, which would render
+        // the activated shell over only part of the window until the next resize.
         if self.panes.is_some() {
             self.resize_panes();
+        } else {
+            self.reflow_grid();
         }
         // Reset per-session keyboard state: the activated session manages its own
         // modifyOtherKeys level independently via XTMODKEYS negotiation.

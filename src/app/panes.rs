@@ -225,11 +225,13 @@ impl App {
         // Collapse back to single-pane if only one leaf remains.
         if g.layout.len() == 1 {
             self.panes = None;
-            // Reflow with the canonical single-pane sizing (the same path
-            // handle_resize and the renderer use). The old bespoke pane_grid resize
-            // disagreed with the render path, leaving the grid half-sized until the
-            // next window resize forced a reflow.
-            self.reflow_grid();
+            // Drive the full resize path (renderer.resize + grid_for + pty.resize +
+            // full-redraw + projection rebuild), exactly as a window resize does.
+            // reflow_grid alone left the renderer's row storage sized for the split,
+            // so the collapsed pane rendered half-width until the next real resize.
+            if let Some(size) = self.window.as_ref().map(|w| w.inner_size()) {
+                self.handle_resize(event_loop, size);
+            }
         } else {
             self.resize_panes();
         }
