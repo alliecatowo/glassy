@@ -221,6 +221,9 @@ pub enum KeyAction {
     /// Toggle broadcast input: typed keys/pastes go to every pane of the
     /// active tab at once.
     BroadcastInput,
+    /// Open kitty-style hints mode: label every URL/path/git-SHA/IP on screen and
+    /// act on the one whose label is typed.
+    Hints,
 }
 
 impl KeyAction {
@@ -256,6 +259,7 @@ impl KeyAction {
             MoveTabLeft => "Move tab left",
             MoveTabRight => "Move tab right",
             BroadcastInput => "Broadcast input to all panes",
+            Hints => "Hints (label & open links)",
         }
     }
 
@@ -271,7 +275,7 @@ impl KeyAction {
             ToggleFullscreen | ToggleMaximize | FontIncrease | FontDecrease | FontReset
             | ToggleStatusBar | ScrollUp | ScrollDown | ScrollTop | ScrollBottom
             | JumpPrevPrompt | JumpNextPrompt => "View",
-            Settings | Help | Search | CommandPalette => "App",
+            Settings | Help | Search | CommandPalette | Hints => "App",
         }
     }
 }
@@ -310,6 +314,7 @@ pub(crate) fn parse_action(s: &str) -> Result<Option<KeyAction>> {
         "move_tab_left" => MoveTabLeft,
         "move_tab_right" => MoveTabRight,
         "broadcast_input" => BroadcastInput,
+        "hints" => Hints,
         // go_to_tab_1 .. go_to_tab_9 select a tab by 1-based position.
         s if s.starts_with("go_to_tab_") => match s["go_to_tab_".len()..].parse::<u8>() {
             Ok(n @ 1..=9) => GoToTab(n),
@@ -366,6 +371,7 @@ fn shared_default_binds() -> &'static [(&'static str, KeyAction)] {
         ("shift+pagedown", ScrollDown),
         ("shift+home", ScrollTop),
         ("shift+end", ScrollBottom),
+        ("ctrl+shift+h", Hints),
     ]
 }
 

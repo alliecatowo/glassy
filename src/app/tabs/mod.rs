@@ -110,6 +110,7 @@ impl App {
             confirm_close: None,
             pending_confirm_execute: false,
             broadcast_input: false,
+            hints: None,
         }
     }
 

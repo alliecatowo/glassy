@@ -311,6 +311,14 @@ impl ApplicationHandler<UserEvent> for App {
             self.force_full_redraw = true;
         }
 
+        // Headless: open hints mode at startup so the labelled-overlay can be
+        // captured (GLASSY_HINTS=1). Scans the visible grid for URLs/paths/SHAs/IPs
+        // and labels each; a no-op (toast) when the screen has no targets yet.
+        if std::env::var_os("GLASSY_HINTS").is_some() {
+            self.open_hints(event_loop);
+            self.force_full_redraw = true;
+        }
+
         // Headless: split the active tab at startup to capture the multi-pane path.
         //   v = one vertical (left|right) split, h = one horizontal (top/bottom),
         //   grid = both (a 2x2 quad).

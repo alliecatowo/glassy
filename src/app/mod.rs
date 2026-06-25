@@ -35,6 +35,7 @@ use crate::renderer::{CursorOverlay, Decorations, LigatureCell, Renderer, Underl
 mod chrome;
 mod event_loop;
 mod helpers;
+mod hints;
 mod input;
 mod keys;
 mod mouse;
@@ -176,6 +177,10 @@ pub struct Config {
     /// Append a ` · N tabs` suffix to the OS window title when more than one tab
     /// is open. Default false. Config key `title_show_count`.
     pub title_show_count: bool,
+    /// Custom label alphabet for hints mode (Ctrl+Shift+H). When set, these ASCII
+    /// letters (home-row-first preferred) are used to label on-screen targets
+    /// instead of the built-in `asdfghjkl…` order. `None` uses the default.
+    pub hints_chars: Option<String>,
 }
 
 /// The three user-facing default cursor shapes.
@@ -606,6 +611,14 @@ pub struct App {
     /// single-pane tab (there is only one pane to write to). Off by default;
     /// purely additive so the 0%-idle path is untouched.
     broadcast_input: bool,
+
+    // --- Kitty-style hints mode (Ctrl+Shift+H) -------------------------------
+    /// When `Some`, the hints overlay is open: the visible grid has been scanned
+    /// for URLs/paths/git-SHAs/IPs and each labelled with a home-row mnemonic.
+    /// The overlay owns the keyboard while open; typing a label fires its action
+    /// (open URL / copy path). Idle-safe — only `Some` while the mode is active.
+    /// See [`hints`].
+    hints: Option<hints::HintsState>,
 }
 
 /// Pending close that is waiting for user confirmation.

@@ -223,6 +223,9 @@ impl App {
         // tab-bar paint entirely when the strip is hidden.
         let tab_strip_h = self.effective_tab_bar_h();
         let tab_strip_visible = self.tab_bar_visible();
+        // Hints-mode labels snapshotted before the borrow (owned, no `self` access
+        // inside the renderer borrow). `None` when hints mode is closed.
+        let hints_inputs = self.hints_snapshot();
 
         let (Some(renderer), Some(pty)) = (self.renderer.as_mut(), self.pty.as_ref()) else {
             return;
@@ -786,6 +789,13 @@ impl App {
                 *sel,
                 mouse,
             );
+        }
+
+        // Hints mode (Ctrl+Shift+H): labelled chips over every URL/path/SHA/IP on
+        // screen. Drawn above the grid; the mode never coexists with a modal, so
+        // no scrim interaction is needed. Idle-safe — only present while open.
+        if let Some(hints) = &hints_inputs {
+            Self::paint_hints(renderer, hints);
         }
 
         // Modal overlays (help / settings): centered panels over a dimmed backdrop.

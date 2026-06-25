@@ -43,6 +43,7 @@ pub(super) struct RawConfig {
     pub cwd: Option<String>,
     pub restore_session: Option<bool>,
     pub copy_on_select: Option<bool>,
+    pub hints_chars: Option<String>,
     pub color_fg: Option<String>,
     pub color_bg: Option<String>,
     pub color_cursor: Option<String>,
@@ -173,6 +174,10 @@ impl RawConfig {
             show_tab_bar: parse_tab_bar_mode(self.show_tab_bar.as_deref()),
             title_show_cwd: self.title_show_cwd.unwrap_or(true),
             title_show_count: self.title_show_count.unwrap_or(false),
+            hints_chars: self
+                .hints_chars
+                .filter(|s| s.chars().filter(|c| c.is_ascii_alphabetic()).count() >= 2)
+                .map(|s| s.chars().filter(|c| c.is_ascii_alphabetic()).collect()),
         };
 
         Ok(super::Settings { config, theme })
@@ -526,6 +531,11 @@ pub(super) fn apply_kv(key: &str, value: &str, raw: &mut RawConfig) -> Result<()
         }
         "title_show_count" => {
             raw.title_show_count = Some(parse_bool(value, "title_show_count")?);
+        }
+        "hints_chars" => {
+            // The label alphabet for hints mode (home-row-first letters). Only the
+            // ASCII letters are kept; an alphabet shorter than 2 chars is ignored.
+            raw.hints_chars = Some(value.to_string());
         }
         "color.fg" => {
             parse_hex_color(value)?;
