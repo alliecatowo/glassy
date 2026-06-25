@@ -466,6 +466,10 @@ pub(super) fn discover_font_producers(requested: Option<&str>) -> Vec<CandidateP
     // capture a clone; a cache hit in the closure avoids the subprocess entirely.
     #[cfg(target_os = "linux")]
     let fc_cache = fc_cache_load();
+    // macOS equivalent: family → file_path cache that survives across launches,
+    // avoiding directory scans on warm starts.
+    #[cfg(target_os = "macos")]
+    let macos_cache = macos_font_cache_load();
 
     // 1. Explicit override: an absolute path to a font file.
     producers.push(Box::new(|| {
@@ -517,8 +521,9 @@ pub(super) fn discover_font_producers(requested: Option<&str>) -> Vec<CandidateP
     if let Some(name) = requested {
         let name = name.trim().to_string();
         if !name.is_empty() {
+            let cache_clone = macos_cache.clone();
             producers.push(Box::new(move || {
-                let path = find_macos_font_file(&name)?;
+                let path = find_macos_font_file(&name, &cache_clone)?;
                 let bytes = read_font(&path)?;
                 Some(FontCandidate {
                     bytes,
@@ -555,8 +560,9 @@ pub(super) fn discover_font_producers(requested: Option<&str>) -> Vec<CandidateP
     // 2b. macOS: scan ~/Library/Fonts and /Library/Fonts for curated Nerd Font families.
     #[cfg(target_os = "macos")]
     for family in CURATED_FAMILIES_MACOS {
+        let cache_clone = macos_cache.clone();
         producers.push(Box::new(move || {
-            let path = find_macos_font_file(family)?;
+            let path = find_macos_font_file(family, &cache_clone)?;
             let bytes = read_font(&path)?;
             Some(FontCandidate {
                 bytes,
@@ -767,6 +773,68 @@ const CURATED_FAMILIES_MACOS: &[&str] = &[
     "UbuntuMonoNerdFont",
 ];
 
+/// Path to the macOS font-discovery cache (mirrors the Linux fc-cache).
+///
+/// Layout: one entry per line, tab-separated `family\tfile_path`. A cache hit
+/// skips the directory scan entirely on warm launches. Stale entries (missing
+/// file) are silently ignored and a live scan fills the gap.
+#[cfg(target_os = "macos")]
+fn macos_font_cache_path() -> Option<PathBuf> {
+    let base = std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Library/Caches"))
+        })?;
+    Some(base.join("glassy/macos-font-cache.tsv"))
+}
+
+/// Load the macOS font cache into a `HashMap<family, file_path>`.
+#[cfg(target_os = "macos")]
+pub(super) fn macos_font_cache_load() -> std::collections::HashMap<String, String> {
+    let mut map = std::collections::HashMap::new();
+    let path = match macos_font_cache_path() {
+        Some(p) => p,
+        None => return map,
+    };
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(_) => return map,
+    };
+    for line in text.lines() {
+        if let Some((k, v)) = line.split_once('\t')
+            && !k.is_empty()
+            && !v.is_empty()
+        {
+            map.insert(k.to_string(), v.to_string());
+        }
+    }
+    map
+}
+
+/// Persist a `family → file_path` mapping to the macOS font cache.
+#[cfg(target_os = "macos")]
+fn macos_font_cache_insert(family: &str, file_path: &str) {
+    let path = match macos_font_cache_path() {
+        Some(p) => p,
+        None => return,
+    };
+    if let Some(parent) = path.parent()
+        && let Err(e) = std::fs::create_dir_all(parent)
+    {
+        log::debug!("glassy: macos-font-cache dir create failed: {e}");
+        return;
+    }
+    use std::io::Write;
+    match std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        Ok(mut f) => {
+            if let Err(e) = writeln!(f, "{family}\t{file_path}") {
+                log::debug!("glassy: macos-font-cache write failed: {e}");
+            }
+        }
+        Err(e) => log::debug!("glassy: macos-font-cache open failed: {e}"),
+    }
+}
+
 /// Font directories to search on macOS, in priority order.
 #[cfg(target_os = "macos")]
 fn macos_font_dirs() -> Vec<PathBuf> {
@@ -779,18 +847,28 @@ fn macos_font_dirs() -> Vec<PathBuf> {
     dirs
 }
 
-/// Search macOS font directories for a font file matching `family`.
+/// Search macOS font directories for a font file matching `family`, checking
+/// `cache` first so warm launches skip the directory scan entirely.
 ///
 /// If `family` is an absolute path to an existing file it is returned as-is.
-/// Otherwise each font directory is scanned for TTF/OTF/TTC files whose stem
-/// (normalized: spaces removed, lowercased) starts with the normalized family
-/// name. Two passes are made: the first requires "regular" in the stem so we
-/// pick up a Regular-weight face; the second accepts any weight as a fallback.
+/// Otherwise a cache hit (valid path still on disk) returns immediately. On a
+/// miss, directories are scanned: first pass prefers Regular-weight stems,
+/// second accepts any weight. A successful scan result is written to the cache.
 #[cfg(target_os = "macos")]
-fn find_macos_font_file(family: &str) -> Option<PathBuf> {
+fn find_macos_font_file(
+    family: &str,
+    cache: &std::collections::HashMap<String, String>,
+) -> Option<PathBuf> {
     let as_path = Path::new(family);
     if as_path.is_file() {
         return Some(as_path.to_path_buf());
+    }
+    // Cache hit: skip the directory scan.
+    if let Some(cached) = cache.get(family)
+        && Path::new(cached).exists()
+    {
+        log::debug!("glassy: macos-font-cache hit for '{family}': {cached}");
+        return Some(PathBuf::from(cached));
     }
     let needle = family.replace(' ', "").to_lowercase();
     let dirs = macos_font_dirs();
@@ -827,12 +905,13 @@ fn find_macos_font_file(family: &str) -> Option<PathBuf> {
                         continue;
                     }
                 }
-                log::debug!(
-                    "glassy: macos found font for '{}': {}",
-                    family,
-                    entry.path().display()
-                );
-                return Some(entry.path());
+                let path = entry.path();
+                log::debug!("glassy: macos found font for '{family}': {}", path.display());
+                // Persist to cache for next launch.
+                if !cache.contains_key(family) {
+                    macos_font_cache_insert(family, &path.to_string_lossy());
+                }
+                return Some(path);
             }
         }
     }
