@@ -56,6 +56,8 @@ pub(super) struct RawConfig {
     /// startup (via `theme_gen`). When set, the generated theme overrides any
     /// `theme = …` setting and any `color.*` overrides.
     pub wallpaper_theme: Option<String>,
+    pub cursor_trail: Option<bool>,
+    pub crt_effect: Option<bool>,
 }
 
 impl RawConfig {
@@ -159,6 +161,8 @@ impl RawConfig {
                 .wallpaper_theme
                 .filter(|s| !s.is_empty())
                 .map(PathBuf::from),
+            cursor_trail: self.cursor_trail.unwrap_or(false),
+            crt_effect: self.crt_effect.unwrap_or(false),
         };
 
         Ok(super::Settings { config, theme })
@@ -489,6 +493,12 @@ pub(super) fn apply_kv(key: &str, value: &str, raw: &mut RawConfig) -> Result<()
         }
         "copy_on_select" => {
             raw.copy_on_select = Some(parse_bool(value, "copy_on_select")?);
+        }
+        "cursor_trail" => {
+            raw.cursor_trail = Some(parse_bool(value, "cursor_trail")?);
+        }
+        "crt_effect" => {
+            raw.crt_effect = Some(parse_bool(value, "crt_effect")?);
         }
         "color.fg" => {
             parse_hex_color(value)?;

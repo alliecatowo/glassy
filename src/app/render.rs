@@ -589,6 +589,15 @@ impl App {
         //   - unfocused (any non-hidden shape): an outline box, so an idle window
         //     still shows where the cursor is.
         if let Some((cc, cr)) = cur_cursor_cell {
+            // gpu-fx cursor trail (config `cursor_trail`, off by default): aim the
+            // trail at the live cursor cell so it eases toward it. The smear quads
+            // (a faded block trailing behind) are pushed onto the cursor's row
+            // below; when the feature is off this is a no-op and the cursor jumps
+            // instantly as before. Aimed for every shape (incl. Block) so the
+            // smear reads regardless of cursor style.
+            if renderer.cursor_trail_enabled() {
+                renderer.aim_cursor_trail(cc, cr);
+            }
             let overlay = if !self.focused {
                 Some(CursorOverlay::Hollow)
             } else {
@@ -600,24 +609,33 @@ impl App {
                     CursorShape::Block | CursorShape::Hidden => None,
                 }
             };
-            if let Some(overlay) = overlay {
-                // The cursor row is usually (re)built above, in which case we
-                // re-target it WITHOUT clearing so the overlay appends on top of
-                // that row's cell backgrounds. On a partial-dirty frame (e.g. a
-                // resize) the cursor's row can have no in-bounds cells and so was
-                // never begun this frame — begin it now so the overlay still
-                // paints instead of being dropped for a frame.
-                let scr = cr;
-                if cr < rows {
-                    if row_started[scr] {
-                        renderer.set_cur_row(scr);
-                    } else {
-                        renderer.begin_row(scr);
-                        row_started[scr] = true;
-                    }
+            // The cursor row is usually (re)built above, in which case we
+            // re-target it WITHOUT clearing so the overlay appends on top of
+            // that row's cell backgrounds. On a partial-dirty frame (e.g. a
+            // resize) the cursor's row can have no in-bounds cells and so was
+            // never begun this frame — begin it now so the overlay still
+            // paints instead of being dropped for a frame.
+            let scr = cr;
+            if cr < rows {
+                if row_started[scr] {
+                    renderer.set_cur_row(scr);
+                } else {
+                    renderer.begin_row(scr);
+                    row_started[scr] = true;
+                }
+                // gpu-fx cursor trail: the smear tail + a soft gliding head block
+                // (both translucent overlay quads). No-ops when the trail is off or
+                // settled, so the resting frame is byte-identical to before.
+                renderer.push_cursor_smear(cursor_color);
+                renderer.push_cursor_head(cursor_color, 0.5);
+                if let Some(overlay) = overlay {
                     renderer.push_cursor(cc, scr, overlay, cursor_color);
                 }
             }
+        } else if renderer.cursor_trail_enabled() {
+            // Cursor hidden / off-screen: forget the animated position so a later
+            // re-show snaps to the new cell rather than flying across the screen.
+            renderer.reset_cursor_trail();
         }
 
         drop(term); // release before GPU submit / present

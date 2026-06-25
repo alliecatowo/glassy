@@ -336,6 +336,15 @@ impl super::App {
         // handful of cycles, matching a human pausing between actions.
         crate::gui::step_anims(&mut self.gui_anims, 1.0 / 60.0, 12.0);
         self.gui_anims.retain(|_, a| !a.is_settled());
+        // Advance the cursor-trail glide one step per settle cycle so a scripted
+        // `wait` animates the smear deterministically (the live path steps it in
+        // about_to_wait, which the script loop bypasses). No-op when off/settled.
+        if let Some(r) = self.renderer.as_mut()
+            && r.cursor_trail_animating()
+        {
+            r.step_cursor_trail();
+            self.force_full_redraw = true;
+        }
         self.render();
     }
 

@@ -154,6 +154,15 @@ pub struct Config {
     /// (from the `wallpaper_theme` config key). Stored so the palette
     /// "Generate theme from wallpaper" action can re-run the generator live.
     pub wallpaper_theme: Option<std::path::PathBuf>,
+    /// gpu-fx: smoothly animate (ease + brief smear) the cursor between cells
+    /// instead of jumping instantly. Default false. Strictly idle-safe — only
+    /// schedules frames while the cursor is mid-glide.
+    pub cursor_trail: bool,
+    /// gpu-fx: enable the CRT / glow / scanline fullscreen post-process. Default
+    /// false. Adds real GPU cost (an offscreen pass), so it MUST stay off by
+    /// default to preserve the 0%-idle + perf numbers; when off it is a complete
+    /// no-op (no offscreen pass, no allocation).
+    pub crt_effect: bool,
 }
 
 /// The three user-facing default cursor shapes.

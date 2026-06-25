@@ -92,6 +92,15 @@ impl ApplicationHandler<UserEvent> for App {
         // Enable ligature run-shaping if the config requests it.
         renderer.set_ligatures(self.config.ligatures);
 
+        // gpu-fx (both OFF by default): cursor trail/smear + CRT post-process.
+        // Headless hooks GLASSY_CURSOR_TRAIL=1 / GLASSY_CRT=1 force them on for
+        // capture verification regardless of the config.
+        let cursor_trail =
+            self.config.cursor_trail || std::env::var_os("GLASSY_CURSOR_TRAIL").is_some();
+        let crt_effect = self.config.crt_effect || std::env::var_os("GLASSY_CRT").is_some();
+        renderer.set_cursor_trail(cursor_trail);
+        renderer.set_crt(crt_effect);
+
         let size = window.inner_size();
         renderer.resize(size.width, size.height);
         let m = renderer.cell_metrics();
@@ -524,6 +533,26 @@ impl ApplicationHandler<UserEvent> for App {
             self.blink_on = true;
         }
 
+        // gpu-fx cursor trail (config `cursor_trail`, off by default): while the
+        // cursor is mid-glide, advance the eased position one step and keep the
+        // frame dirty so the smear repaints. A full redraw is forced so the smear
+        // (which spans pixels across several grid rows on a multi-row jump) clears
+        // cleanly each frame. When the trail settles `step_cursor_trail` returns
+        // false and we stop scheduling — back to `Wait`, 0% idle. Entirely dormant
+        // when the feature is off (the renderer reports not-animating).
+        let trail_active = if let Some(r) = self.renderer.as_mut() {
+            if r.cursor_trail_animating() {
+                r.step_cursor_trail();
+                self.dirty = true;
+                self.force_full_redraw = true;
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
         // Text blink (SGR 5/6): runs while the active session has blinking cells.
         // Drives a periodic phase flip at the same cadence as the cursor blink so
         // the UI redraws and the render path can suppress blinking cells. When the
@@ -637,8 +666,9 @@ impl ApplicationHandler<UserEvent> for App {
             self.next_frame = now + self.refresh;
             // RedrawRequested will clear `dirty`. Keep a wakeup scheduled for the
             // next blink flip, flash boundary, or spinner frame; else wait for an
-            // event. A live GUI animation keeps us on `Poll` until it settles.
-            if gui_active {
+            // event. A live GUI animation OR an in-flight cursor trail keeps us on
+            // `Poll` until it settles (both hard-stop to `Wait` once done).
+            if gui_active || trail_active {
                 event_loop.set_control_flow(ControlFlow::Poll);
             } else {
                 match self.next_wake(blink_active, flash_active, spin_active) {

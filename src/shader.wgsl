@@ -204,3 +204,112 @@ fn coverage_blend(color: vec3<f32>, cov: f32) -> vec4<f32> {
     let cov = in.color.a * textureSample(mask_tex, atlas_samp, in.uv).r;
     return coverage_blend(in.color.rgb, cov);
 }
+
+// --- CRT / glow / scanline post-process pass. -------------------------------
+// OPT-IN (config `crt_effect`, default off). When the effect is disabled the
+// host never adds this pass at all (the offscreen target + composite are not
+// even allocated), so the default build pays zero cost and keeps the 0%-idle /
+// memory benchmarks intact. When enabled, the grid is first rendered to an
+// offscreen RGBA texture, then this pass samples that texture full-screen and
+// composites it to the surface with barrel curvature, scanlines, an aperture-
+// grille tint, a cheap separable-ish glow (a few taps), and vignette.
+//
+// group(0): the shared screen-size uniform `u` (reused for resolution).
+// group(2): the offscreen scene texture + sampler + the CRT parameter uniform.
+@group(2) @binding(0) var crt_tex: texture_2d<f32>;
+@group(2) @binding(1) var crt_samp: sampler;
+struct CrtU {
+    // x = curvature strength (0 = flat), y = scanline strength (0..1),
+    // z = glow strength (0..1), w = vignette strength (0..1).
+    params: vec4<f32>,
+};
+@group(2) @binding(2) var<uniform> crt: CrtU;
+
+struct CrtOut {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+
+// Fullscreen triangle: 3 vertices covering clip space, UV in 0..1 (y-down to
+// match the texture's top-left origin). Driven with draw(0..3), no vertex buffer.
+@vertex fn vs_crt(@builtin(vertex_index) vid: u32) -> CrtOut {
+    var o: CrtOut;
+    // (-1,-1),(3,-1),(-1,3): the classic oversized triangle.
+    let x = f32((vid << 1u) & 2u) * 2.0 - 1.0;
+    let y = f32(vid & 2u) * 2.0 - 1.0;
+    o.clip = vec4<f32>(x, y, 0.0, 1.0);
+    // Map clip xy to 0..1 uv; flip y so uv.y=0 is the top of the image.
+    o.uv = vec2<f32>(x * 0.5 + 0.5, 1.0 - (y * 0.5 + 0.5));
+    return o;
+}
+
+// Apply a gentle barrel distortion to a centered (-1..1) coordinate. `amt` is
+// the curvature strength; 0 returns the input unchanged.
+fn crt_curve(p: vec2<f32>, amt: f32) -> vec2<f32> {
+    // Push corners outward proportional to the squared distance along the other
+    // axis — the canonical cheap CRT bulge.
+    let off = p.yx * p.yx * amt;
+    return p + p * off;
+}
+
+@fragment fn fs_crt(in: CrtOut) -> @location(0) vec4<f32> {
+    let curvature = crt.params.x;
+    let scan_amt = crt.params.y;
+    let glow_amt = crt.params.z;
+    let vig_amt = crt.params.w;
+
+    // Barrel curvature: warp the sample coordinate around the screen center.
+    var uv = in.uv;
+    if (curvature > 0.0) {
+        let centered = uv * 2.0 - 1.0;
+        let warped = crt_curve(centered, curvature);
+        uv = warped * 0.5 + 0.5;
+        // Outside the curved screen is the bezel (black).
+        if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
+            return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+        }
+    }
+
+    let texel = 1.0 / u.screen.xy;
+    var col = textureSample(crt_tex, crt_samp, uv).rgb;
+
+    // Cheap glow: a few offset taps summed and weighted, added back as bloom so
+    // bright glyphs bleed light into neighbouring pixels (the phosphor halo).
+    if (glow_amt > 0.0) {
+        var bloom = vec3<f32>(0.0);
+        let r = texel * 1.5;
+        bloom += textureSample(crt_tex, crt_samp, uv + vec2<f32>( r.x, 0.0)).rgb;
+        bloom += textureSample(crt_tex, crt_samp, uv + vec2<f32>(-r.x, 0.0)).rgb;
+        bloom += textureSample(crt_tex, crt_samp, uv + vec2<f32>(0.0,  r.y)).rgb;
+        bloom += textureSample(crt_tex, crt_samp, uv + vec2<f32>(0.0, -r.y)).rgb;
+        bloom *= 0.25;
+        col += bloom * glow_amt;
+    }
+
+    // Scanlines: darken every other physical row in a smooth sine so the effect
+    // reads as a real raster line rather than a hard 1px comb. Tied to the
+    // physical pixel row (uv.y * height) so the line density is DPI-correct.
+    if (scan_amt > 0.0) {
+        let line = sin(uv.y * u.screen.y * 3.14159265);
+        let scan = 1.0 - scan_amt * (0.5 - 0.5 * line);
+        col *= scan;
+        // Aperture-grille tint: a soft per-column RGB cycle so vertical triads
+        // shimmer like a Trinitron, scaled down so it stays subtle.
+        let triad = uv.x * u.screen.x;
+        let grille = vec3<f32>(
+            0.5 + 0.5 * cos(triad * 2.094395 + 0.0),
+            0.5 + 0.5 * cos(triad * 2.094395 + 2.094395),
+            0.5 + 0.5 * cos(triad * 2.094395 + 4.18879),
+        );
+        col *= mix(vec3<f32>(1.0), grille, scan_amt * 0.15);
+    }
+
+    // Vignette: gently darken toward the corners for the tube-glass falloff.
+    if (vig_amt > 0.0) {
+        let c = in.uv * 2.0 - 1.0;
+        let v = 1.0 - vig_amt * dot(c, c) * 0.35;
+        col *= clamp(v, 0.0, 1.0);
+    }
+
+    return vec4<f32>(col, 1.0);
+}
