@@ -153,6 +153,9 @@ pub enum KeyAction {
     ScrollDown,
     ScrollTop,
     ScrollBottom,
+    /// Open kitty-style hints mode: label every URL/path/git-SHA/IP on screen and
+    /// act on the one whose label is typed.
+    Hints,
 }
 
 impl KeyAction {
@@ -182,6 +185,7 @@ impl KeyAction {
             ScrollDown => "Scroll history down",
             ScrollTop => "Scroll to top",
             ScrollBottom => "Scroll to bottom",
+            Hints => "Hints (label & open links)",
         }
     }
 
@@ -194,7 +198,7 @@ impl KeyAction {
             Copy | Paste => "Edit",
             ToggleFullscreen | ToggleMaximize | FontIncrease | FontDecrease | FontReset
             | ToggleStatusBar | ScrollUp | ScrollDown | ScrollTop | ScrollBottom => "View",
-            Settings | Help | Search | CommandPalette => "App",
+            Settings | Help | Search | CommandPalette | Hints => "App",
         }
     }
 }
@@ -228,6 +232,7 @@ pub(crate) fn parse_action(s: &str) -> Result<Option<KeyAction>> {
         "scroll_down" => ScrollDown,
         "scroll_top" => ScrollTop,
         "scroll_bottom" => ScrollBottom,
+        "hints" => Hints,
         other => bail!("unrecognized keybinding action '{other}'"),
     }))
 }
@@ -264,6 +269,7 @@ pub fn default_keymap() -> KeyMap {
         ("shift+pagedown", ScrollDown),
         ("shift+home", ScrollTop),
         ("shift+end", ScrollBottom),
+        ("ctrl+shift+h", Hints),
     ];
     let mut map = KeyMap::new();
     for (chord_str, action) in defaults {

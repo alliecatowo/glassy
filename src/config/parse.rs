@@ -42,6 +42,7 @@ pub(super) struct RawConfig {
     pub cwd: Option<String>,
     pub restore_session: Option<bool>,
     pub copy_on_select: Option<bool>,
+    pub hints_chars: Option<String>,
     pub color_fg: Option<String>,
     pub color_bg: Option<String>,
     pub color_cursor: Option<String>,
@@ -133,6 +134,10 @@ impl RawConfig {
             restore_session: self.restore_session.unwrap_or(false),
             copy_on_select: self.copy_on_select.unwrap_or(false),
             keymap: build_keymap(default_keymap(), &self.keybinding_overrides),
+            hints_chars: self
+                .hints_chars
+                .filter(|s| s.chars().filter(|c| c.is_ascii_alphabetic()).count() >= 2)
+                .map(|s| s.chars().filter(|c| c.is_ascii_alphabetic()).collect()),
         };
 
         Ok(super::Settings { config, theme })
@@ -463,6 +468,11 @@ pub(super) fn apply_kv(key: &str, value: &str, raw: &mut RawConfig) -> Result<()
         }
         "copy_on_select" => {
             raw.copy_on_select = Some(parse_bool(value, "copy_on_select")?);
+        }
+        "hints_chars" => {
+            // The label alphabet for hints mode (home-row-first letters). Only the
+            // ASCII letters are kept; an alphabet shorter than 2 chars is ignored.
+            raw.hints_chars = Some(value.to_string());
         }
         "color.fg" => {
             parse_hex_color(value)?;

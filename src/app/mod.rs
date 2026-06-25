@@ -35,6 +35,7 @@ use crate::renderer::{CursorOverlay, Decorations, LigatureCell, Renderer, Underl
 mod chrome;
 mod event_loop;
 mod helpers;
+mod hints;
 mod input;
 mod keys;
 mod mouse;
@@ -143,6 +144,10 @@ pub struct Config {
     /// defaults). Built once at config resolution time by [`crate::config`] and
     /// consulted by the keyboard handler before the hard-coded fallback paths.
     pub keymap: crate::config::KeyMap,
+    /// Custom label alphabet for hints mode (Ctrl+Shift+H). When set, these ASCII
+    /// letters (home-row-first preferred) are used to label on-screen targets
+    /// instead of the built-in `asdfghjkl…` order. `None` uses the default.
+    pub hints_chars: Option<String>,
 }
 
 /// A tab's split layout: the tiling tree (whose leaf ids are pty/pane ids) plus
@@ -523,6 +528,14 @@ pub struct App {
     /// clicked. The actual close call is deferred to `about_to_wait` (where an
     /// `ActiveEventLoop` reference is available). Cleared after execution.
     pending_confirm_execute: bool,
+
+    // --- Kitty-style hints mode (Ctrl+Shift+H) -------------------------------
+    /// When `Some`, the hints overlay is open: the visible grid has been scanned
+    /// for URLs/paths/git-SHAs/IPs and each labelled with a home-row mnemonic.
+    /// The overlay owns the keyboard while open; typing a label fires its action
+    /// (open URL / copy path). Idle-safe — only `Some` while the mode is active.
+    /// See [`hints`].
+    hints: Option<hints::HintsState>,
 }
 
 /// Pending close that is waiting for user confirmation.

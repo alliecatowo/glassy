@@ -173,6 +173,14 @@ impl App {
             }
             return; // consume everything while the find bar is up
         }
+        // Hints mode owns the keyboard while open: every key narrows/fires a label
+        // or cancels. Checked before the keymap dispatch so a bare label letter is
+        // never stolen by a chord. (The open action itself is a keymap chord that
+        // can only fire when the mode is closed.)
+        if event.state.is_pressed() && self.hints_open() {
+            self.handle_hints_key(&event.logical_key, event_loop);
+            return; // consume everything while hints are up
+        }
         // The inline tab-rename editor owns the keyboard while open: text
         // edits the title, Enter commits, Esc cancels. Consume everything.
         if event.state.is_pressed() && self.is_renaming_tab() {
@@ -461,6 +469,7 @@ impl App {
                 }
                 self.mark_dirty(event_loop);
             }
+            Hints => self.open_hints(event_loop),
         }
     }
 }
