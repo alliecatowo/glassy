@@ -52,8 +52,11 @@ impl App {
             return;
         };
         // Collect rects first to drop the immutable `self` borrow before mutating.
+        // Zoom-aware: a zoomed pane sizes its PTY to the full content area; the
+        // hidden panes keep their last tiled size (they're not in this list, so
+        // they aren't resized — they snap back on unzoom via the next resize).
         let rects: Vec<(usize, pane::Rect)> = match self.panes.as_ref() {
-            Some(g) => g.layout.rects(area, Self::PANE_GAP),
+            Some(g) => g.rects(area, Self::PANE_GAP),
             None => return,
         };
         let Some(r) = self.renderer.as_ref() else {
@@ -129,11 +132,15 @@ impl App {
                 layout: pane::Layout::new(self.active_id),
                 others: HashMap::new(),
                 others_titles: HashMap::new(),
+                zoom: pane::Zoom::new(),
             });
         }
         // The pane currently in `self.pty` is the focused leaf; park it as an
         // "other" and make the freshly-spawned pane the new focused `self.pty`.
         let g = self.panes.as_mut().unwrap();
+        // Splitting introduces a new tile, so any active zoom is stale — clear it
+        // so the fresh split renders tiled rather than maximized into one pane.
+        g.zoom = g.zoom.cleared();
         let prev_focus = g.layout.focused();
         if !g.layout.split(dir, new_id) {
             // Couldn't split (shouldn't happen for a fresh id); drop the new pty.
@@ -167,12 +174,18 @@ impl App {
         };
         let Some(g) = self.panes.as_mut() else { return };
         let prev = g.layout.focused();
+        // Focus movement is computed against the TILED geometry, not the zoomed
+        // (single-pane) view — otherwise there'd be no neighbour to move to. Use
+        // the layout directly here; clearing zoom below restores the tiling.
         let Some(next) = g.layout.focus_move(m, area, Self::PANE_GAP) else {
             return;
         };
         if next == prev {
             return;
         }
+        // Moving focus to a different pane reveals the tiling: clear zoom so the
+        // newly-focused pane isn't immediately hidden behind a stale maximize.
+        g.zoom = g.zoom.cleared();
         // Swap the previously-focused PTY out and the newly-focused one in.
         if let Some(old) = self.pty.take() {
             g.others.insert(prev, old);
@@ -197,6 +210,9 @@ impl App {
             return;
         }
         let g = self.panes.as_mut().unwrap();
+        // Closing the (focused) pane collapses the tree; drop any zoom so the
+        // promoted sibling renders at its real tiled size, not a stale maximize.
+        g.zoom = g.zoom.cleared();
         let closing = g.layout.focused();
         if !g.layout.close(closing) {
             return;
@@ -259,8 +275,8 @@ impl App {
         let area = self.content_area()?;
         let g = self.panes.as_ref()?;
         let (xi, yi) = (x.round() as i32, y.round() as i32);
-        g.layout
-            .rects(area, Self::PANE_GAP)
+        // Zoom-aware: only the (full-area) focused pane is hit-testable while zoomed.
+        g.rects(area, Self::PANE_GAP)
             .into_iter()
             .find(|(_, r)| xi >= r.x && xi < r.x + r.w && yi >= r.y && yi < r.y + r.h)
     }
@@ -270,14 +286,40 @@ impl App {
         self.panes.as_ref().is_some_and(|g| g.layout.len() > 1)
     }
 
+    /// Toggle pane zoom: maximize the focused pane to fill the content area
+    /// (hiding the others), or restore the tiling if already zoomed. A no-op when
+    /// the active tab is a single pane (nothing to maximize over). All geometry
+    /// (render, PTY sizing, hit-testing) routes through [`PaneGroup::rects`], so
+    /// flipping this one flag re-tiles everything; we then resize PTYs so the
+    /// (un)maximized panes get correct grid dimensions and force a full redraw.
+    pub(crate) fn toggle_zoom(&mut self, event_loop: &ActiveEventLoop) {
+        let Some(g) = self.panes.as_mut() else {
+            return; // single-pane tab: no PaneGroup, nothing to zoom.
+        };
+        let next = g.zoom.toggle(g.layout.len());
+        if next == g.zoom {
+            return; // unchanged (e.g. tried to zoom a sole leaf): skip the repaint.
+        }
+        g.zoom = next;
+        // Re-size every (visible) pane's PTY to its new rect: the focused pane
+        // grows to the full area on zoom and the panes snap back to their tiles on
+        // unzoom. `resize_panes` reads the zoom-aware rects, so this is correct in
+        // both directions (the hidden panes simply aren't in the zoomed list and
+        // keep their last size until the unzoom resize restores them).
+        self.resize_panes();
+        self.reset_pointer_state();
+        self.force_full_redraw = true;
+        self.mark_dirty(event_loop);
+    }
+
     /// The pixel rect of the FOCUSED pane in the active split. `None` when not
     /// split. Used to translate pointer positions into focused-pane-local cells.
     pub(crate) fn focused_pane_rect(&self) -> Option<pane::Rect> {
         let area = self.content_area()?;
         let g = self.panes.as_ref()?;
         let f = g.layout.focused();
-        g.layout
-            .rects(area, Self::PANE_GAP)
+        // Zoom-aware: the focused pane spans the whole `area` while zoomed.
+        g.rects(area, Self::PANE_GAP)
             .into_iter()
             .find(|(id, _)| *id == f)
             .map(|(_, r)| r)
@@ -331,6 +373,10 @@ impl App {
         }
         let area = self.content_area()?;
         let g = self.panes.as_ref()?;
+        // No visible dividers while zoomed (one pane fills the area), so no gutters.
+        if g.zoom.is_on() {
+            return None;
+        }
         g.layout.split_at(
             area,
             Self::PANE_GAP,
@@ -350,7 +396,8 @@ impl App {
         }
         let area = self.content_area()?;
         let g = self.panes.as_ref()?;
-        let rects = g.layout.rects(area, Self::PANE_GAP);
+        // Zoom-aware: only the focused pane's header exists while zoomed.
+        let rects = g.rects(area, Self::PANE_GAP);
         let (xi, yi) = (x as f32, y as f32);
         let hdr_h = Self::PANE_HEADER_H as f32;
         for (id, r) in rects {
@@ -404,7 +451,7 @@ impl App {
         let open_pane = self.pane_menu_open?;
         let area = self.content_area()?;
         let g = self.panes.as_ref()?;
-        let rects = g.layout.rects(area, Self::PANE_GAP);
+        let rects = g.rects(area, Self::PANE_GAP);
         let (id, r) = rects.into_iter().find(|(id, _)| *id == open_pane)?;
         let _ = id;
         let m = self.renderer.as_ref()?.cell_metrics();
@@ -436,6 +483,7 @@ impl App {
         match idx {
             0 => self.split_pane(pane::Dir::Vertical, event_loop),
             1 => self.split_pane(pane::Dir::Horizontal, event_loop),
+            2 => self.toggle_zoom(event_loop),
             _ => self.close_pane(event_loop),
         }
         self.mark_dirty(event_loop);

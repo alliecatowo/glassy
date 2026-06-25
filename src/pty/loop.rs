@@ -332,6 +332,12 @@ pub fn run_loop(
                                 // bar / tab chip.
                                 proxy.send_user(crate::pty::UserEvent::Progress(proxy.id, state));
                             }
+                            crate::image::TapEvent::Peek(path) => {
+                                // OSC 1337 Peek: forward the requested file path to the
+                                // UI thread, which reads a small head of it and shows an
+                                // inline preview card near the cursor.
+                                proxy.send_user(crate::pty::UserEvent::Peek(proxy.id, path));
+                            }
                         }
                     }
                     drop(term);

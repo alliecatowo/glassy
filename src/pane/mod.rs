@@ -9,9 +9,11 @@
 
 mod layout;
 mod tree;
+mod zoom;
 
 pub use layout::Layout;
 pub use tree::{LayoutDesc, NodeDesc};
+pub use zoom::Zoom;
 
 /// Direction a split divides space. `Vertical` is a left|right divider (the two
 /// children sit side by side); `Horizontal` is a top/bottom divider (children

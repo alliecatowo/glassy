@@ -26,6 +26,11 @@ impl App {
         let pressed = state == ElementState::Pressed;
         // Track the held button for drag reports regardless of mode.
         self.held_button = if pressed { Some(base) } else { None };
+        // A left press dismisses any inline peek card (but does not consume the
+        // click — it still focuses the pane / positions the cursor as usual).
+        if pressed && button == MouseButton::Left {
+            self.dismiss_peek(event_loop);
+        }
         // Real-GUI chrome: capture the left press→release as a click edge for
         // the next chrome paint, and release the press latch on button-up.
         if button == MouseButton::Left {

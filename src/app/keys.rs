@@ -156,6 +156,17 @@ impl App {
             }
         }
 
+        // An inline peek card is dismissed by the next keypress. Esc only
+        // dismisses (it's consumed so it doesn't also reach the child); any other
+        // key clears the card and falls through to its normal handling below.
+        if event.state.is_pressed() && self.peek.is_some() {
+            let is_esc = matches!(event.logical_key, Key::Named(NamedKey::Escape));
+            self.dismiss_peek(event_loop);
+            if is_esc {
+                return;
+            }
+        }
+
         // The command palette and the find bar own the keyboard while
         // open: every key is routed to them (query edit, list nav, jump,
         // Esc) and never reaches the child or the chrome shortcuts below.
@@ -496,6 +507,7 @@ impl App {
                 // mode `quake` is None so this is a no-op.
                 self.quake_apply(crate::ipc::IpcCommand::Toggle, event_loop);
             }
+            ToggleZoom => self.toggle_zoom(event_loop),
         }
     }
 

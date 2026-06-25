@@ -231,6 +231,9 @@ pub enum KeyAction {
     ToggleMinimap,
     /// Toggle the quake/dropdown window (slide it down/up).
     QuakeToggle,
+    /// Temporarily maximize the focused split pane (hide the others); toggle
+    /// again to restore the tiling. A no-op when the active tab is not split.
+    ToggleZoom,
 }
 
 impl KeyAction {
@@ -270,6 +273,7 @@ impl KeyAction {
             ToggleFold => "Fold/unfold command output",
             ToggleMinimap => "Toggle minimap",
             QuakeToggle => "Toggle quake dropdown",
+            ToggleZoom => "Zoom focused pane",
         }
     }
 
@@ -280,7 +284,7 @@ impl KeyAction {
             NewTab | ClosePane | NextTab | PrevTab | GoToTab(_) | MoveTabLeft | MoveTabRight => {
                 "Tabs"
             }
-            SplitVertical | SplitHorizontal | BroadcastInput => "Split panes",
+            SplitVertical | SplitHorizontal | BroadcastInput | ToggleZoom => "Split panes",
             Copy | Paste => "Edit",
             ToggleFullscreen | ToggleMaximize | FontIncrease | FontDecrease | FontReset
             | ToggleStatusBar | ToggleMinimap | ScrollUp | ScrollDown | ScrollTop
@@ -328,6 +332,7 @@ pub(crate) fn parse_action(s: &str) -> Result<Option<KeyAction>> {
         "toggle_fold" => ToggleFold,
         "toggle_minimap" => ToggleMinimap,
         "quake_toggle" => QuakeToggle,
+        "toggle_zoom" | "zoom" => ToggleZoom,
         // go_to_tab_1 .. go_to_tab_9 select a tab by 1-based position.
         s if s.starts_with("go_to_tab_") => match s["go_to_tab_".len()..].parse::<u8>() {
             Ok(n @ 1..=9) => GoToTab(n),
@@ -405,6 +410,7 @@ fn pc_default_binds() -> &'static [(&'static str, KeyAction)] {
         ("ctrl+shift+e", SplitVertical),
         ("ctrl+shift+o", SplitHorizontal),
         ("ctrl+shift+i", BroadcastInput),
+        ("ctrl+shift+enter", ToggleZoom),
         ("ctrl+,", Settings),
         ("ctrl+shift+f", Search),
         ("ctrl+shift+p", CommandPalette),
@@ -443,6 +449,7 @@ fn mac_default_binds() -> &'static [(&'static str, KeyAction)] {
         ("ctrl+shift+tab", PrevTab),
         ("cmd+d", SplitVertical),
         ("cmd+shift+d", SplitHorizontal),
+        ("cmd+shift+enter", ToggleZoom),
         ("cmd+,", Settings),
         ("cmd+f", Search),
         ("cmd+shift+p", CommandPalette),
@@ -520,6 +527,34 @@ mod tests {
         let map = default_keymap(Platform::Linux);
         let chord = parse_chord("ctrl+shift+i").unwrap();
         assert_eq!(map.get(&chord), Some(&KeyAction::BroadcastInput));
+    }
+
+    #[test]
+    fn toggle_zoom_action_round_trips() {
+        // The zoom action parses from both its canonical and short config names
+        // and reports a description + section like every other action.
+        assert_eq!(
+            parse_action("toggle_zoom").unwrap(),
+            Some(KeyAction::ToggleZoom)
+        );
+        assert_eq!(parse_action("zoom").unwrap(), Some(KeyAction::ToggleZoom));
+        assert!(!KeyAction::ToggleZoom.description().is_empty());
+        assert_eq!(KeyAction::ToggleZoom.section(), "Split panes");
+    }
+
+    #[test]
+    fn toggle_zoom_has_platform_default_binding() {
+        // Ctrl+Shift+Enter (pc) and Cmd+Shift+Enter (mac) toggle zoom out of the box.
+        let pc = default_keymap(Platform::Linux);
+        assert_eq!(
+            pc.get(&parse_chord("ctrl+shift+enter").unwrap()),
+            Some(&KeyAction::ToggleZoom)
+        );
+        let mac = default_keymap(Platform::Mac);
+        assert_eq!(
+            mac.get(&parse_chord("cmd+shift+enter").unwrap()),
+            Some(&KeyAction::ToggleZoom)
+        );
     }
 
     #[test]

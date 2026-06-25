@@ -23,12 +23,12 @@ impl App {
         };
         // Precompute every leaf's rect + grid size (whole-`self` method calls)
         // BEFORE taking disjoint field borrows for the render loop below.
-        let rects = self
-            .panes
-            .as_ref()
-            .unwrap()
-            .layout
-            .rects(area, Self::PANE_GAP);
+        // Zoom-aware: when a pane is zoomed this yields just the focused leaf
+        // filling `area`, so the render loop below naturally hides the others.
+        let rects = self.panes.as_ref().unwrap().rects(area, Self::PANE_GAP);
+        // Whether the focused pane is zoomed (drives the small "ZOOM" indicator
+        // badge below; the maximize itself already fell out of the zoom-aware rects).
+        let zoomed = self.panes.as_ref().unwrap().zoom.is_on();
         // Per-pane header chrome is runtime-configurable. When off, panes get their
         // full height and no header is painted (hdr_h == 0 collapses the body inset).
         let pane_headers = self.config.pane_headers;
@@ -488,6 +488,25 @@ impl App {
             );
         }
 
+        // Zoom indicator: a small accent badge in the top-right of the focused
+        // pane's body, so it's visible whether or not pane headers are on. Cheap
+        // (a rounded quad + a glyph run) and only drawn while zoomed.
+        if zoomed
+            && let Some((_, _full, body, _, _)) =
+                pane_specs.iter().find(|(id, ..)| *id == focused_pane)
+        {
+            Self::paint_zoom_badge(renderer, *body);
+        }
+
+        // Inline file peek card (OSC 1337 Peek): drawn over the focused pane's
+        // body rect, mirroring the single-pane path. Present only until dismissed.
+        if let Some(peek) = self.peek.as_ref()
+            && let Some((_, _full, body, _, _)) =
+                pane_specs.iter().find(|(id, ..)| *id == focused_pane)
+        {
+            Self::paint_peek(renderer, peek, *body);
+        }
+
         // Status bar (§3.4): same as the single-pane path.
         // Only painted when enabled in the config.
         if self.config.status_bar {
@@ -676,8 +695,36 @@ impl App {
 
     /// Pane-menu entries (for the ⋮ button in each pane header). Kept as a
     /// static slice so the menu shape is stable and hit-testing is index-based.
-    pub(crate) const PANE_MENU_ITEMS: &'static [&'static str] =
-        &["Split vertical", "Split horizontal", "Close pane"];
+    pub(crate) const PANE_MENU_ITEMS: &'static [&'static str] = &[
+        "Split vertical",
+        "Split horizontal",
+        "Zoom pane",
+        "Close pane",
+    ];
+
+    /// Draw a small "⛶ ZOOM" badge in the top-right corner of the focused pane's
+    /// `body` rect. A compact accent-tinted glass pill that reads at a glance and
+    /// doesn't depend on the (optional) pane headers, so the zoom state is always
+    /// legible. Drawn only while zoomed (see the call site in `render_split`).
+    pub(crate) fn paint_zoom_badge(renderer: &mut Renderer, body: pane::Rect) {
+        let m = renderer.cell_metrics();
+        let label = "⛶ ZOOM";
+        let nchars = label.chars().count() as f32;
+        let pad_x = 8.0;
+        let pad_y = 4.0;
+        let pill_w = nchars * m.width + pad_x * 2.0;
+        let pill_h = m.height + pad_y * 2.0;
+        // Inset from the pane's top-right corner.
+        let margin = 8.0;
+        let px = (body.x as f32 + body.w as f32 - pill_w - margin).max(body.x as f32);
+        let py = body.y as f32 + margin;
+        let accent = color::accent();
+        let bg = [accent[0], accent[1], accent[2], 0.22];
+        renderer.push_overlay_rrect_px(px, py, pill_w, pill_h, pill_h * 0.5, bg);
+        let tx = px + pad_x;
+        let ty = (py + (pill_h - m.height) * 0.5).round();
+        renderer.push_overlay_glyph_px_str(tx.round(), ty, label, accent);
+    }
 
     /// Paint per-pane title bars for all leaves in split mode. Each header is
     /// `PANE_HEADER_H` px tall at the top of the leaf rect and contains (L→R):

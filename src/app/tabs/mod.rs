@@ -107,6 +107,7 @@ impl App {
             text_blink_at: Instant::now() + BLINK_INTERVAL,
             text_blink_active: false,
             toasts: Vec::new(),
+            peek: None,
             confirm_close: None,
             pending_confirm_execute: false,
             broadcast_input: false,

@@ -401,6 +401,16 @@ impl ApplicationHandler<UserEvent> for App {
                 _ => {}
             }
         }
+        // Headless: split the active tab and zoom the focused pane at startup so
+        // the pane-zoom path (focused pane maximized, others hidden, ZOOM badge)
+        // can be captured. Splits first if needed so there is something to zoom.
+        if std::env::var_os("GLASSY_ZOOM").is_some() {
+            if !self.is_split() {
+                self.split_pane(pane::Dir::Vertical, event_loop);
+            }
+            self.toggle_zoom(event_loop);
+            self.force_full_redraw = true;
+        }
         // Headless: enable broadcast input at startup (splits the tab first so
         // there are multiple panes to broadcast to, and turns the status bar on
         // so the BCAST indicator is visible) so the indicator + the multi-pane
@@ -411,6 +421,19 @@ impl ApplicationHandler<UserEvent> for App {
             }
             self.broadcast_input = true;
             self.config.status_bar = true;
+            self.force_full_redraw = true;
+        }
+
+        // Headless: show an inline file-peek card at startup so the preview overlay
+        // can be captured. GLASSY_PEEK=<path> peeks that file; GLASSY_PEEK=1 (or an
+        // empty value) falls back to this source file so there's always something.
+        if let Ok(spec) = std::env::var("GLASSY_PEEK") {
+            let path = if spec.trim().is_empty() || spec == "1" {
+                "src/app/peek.rs".to_string()
+            } else {
+                spec
+            };
+            self.show_peek(std::path::Path::new(&path));
             self.force_full_redraw = true;
         }
 

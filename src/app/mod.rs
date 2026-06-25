@@ -45,6 +45,7 @@ mod mouse;
 mod multipane;
 mod palette;
 mod panes;
+pub(crate) mod peek;
 mod quake;
 mod render;
 mod script;
@@ -266,6 +267,28 @@ struct PaneGroup {
     /// the focused one (whose OSC title is also in `App::active_title`). New
     /// panes start with an empty string (displayed as "shell" in the header).
     others_titles: HashMap<usize, String>,
+    /// Pane-zoom state: when on, the focused leaf is rendered/sized to fill the
+    /// whole content area and the other tiles are hidden. A *presentation* mode
+    /// over the (unchanged) tiling, so unzooming restores the exact partition.
+    /// Cleared on any structural change (split/close/focus-move) — see [`pane::Zoom`].
+    zoom: pane::Zoom,
+}
+
+impl PaneGroup {
+    /// The effective per-leaf rectangles for `area`, honoring the zoom mode. When
+    /// zoomed, the focused leaf fills the whole `area` and every other pane is
+    /// omitted (hidden); otherwise this is the plain tiled partition. This is the
+    /// single source of truth for *visual + interactive* geometry — rendering,
+    /// PTY sizing, and pointer hit-testing all route through it so zoom is applied
+    /// everywhere consistently. Gutter/divider hit-testing is suppressed separately
+    /// (there are no visible dividers while zoomed).
+    fn rects(&self, area: pane::Rect, gap: i32) -> Vec<(usize, pane::Rect)> {
+        if self.zoom.is_on() {
+            vec![(self.layout.focused(), area)]
+        } else {
+            self.layout.rects(area, gap)
+        }
+    }
 }
 
 /// One terminal tab. The *active* tab's PTY lives directly in `App::pty` (so all
@@ -622,6 +645,14 @@ pub struct App {
     /// Active toast stack (most-recent at back). Each toast fades in, stays
     /// ~4 s, then fades out. Painted by `toast.rs`.
     toasts: Vec<crate::app::toast::Toast>,
+
+    // --- Inline file peek ----------------------------------------------------
+    /// Active inline-preview card, if any. Set when the shell emits an
+    /// OSC 1337 `Peek=<path>` request (e.g. via a `glassy-peek <file>` helper);
+    /// holds the file's title + a small head of its lines. Painted as a glass
+    /// card near the bottom of the focused pane and dismissed by the next
+    /// keystroke / Esc / click. See [`peek`](crate::app::peek).
+    peek: Option<crate::app::peek::Peek>,
 
     // --- Confirm-close modal -------------------------------------------------
     /// When a tab/pane close is intercepted because a process is running, this
