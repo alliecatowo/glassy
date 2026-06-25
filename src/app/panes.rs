@@ -112,6 +112,8 @@ impl App {
             cwd,
             self.config.scrollback,
             &self.config.word_separator,
+            self.config.cursor_style.to_cursor_shape(),
+            self.config.cursor_blink,
         ) {
             Ok(p) => p,
             Err(e) => {

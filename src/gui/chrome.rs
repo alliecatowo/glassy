@@ -51,8 +51,8 @@ impl<'r> Ui<'r> {
             .max(m.cell_w * 28.0);
         // font, opacity, bell, theme, font, scrollback, padding, status_bar,
         // pane_headers, follow_system, ligatures, restore_session, word_sep,
-        // font_features, config path.
-        const ROWS: usize = 15;
+        // font_features, config path, cursor_style, cursor_blink.
+        const ROWS: usize = 17;
         let header_h = m.row_h;
         let footer_h = m.row_h + m.gap;
         // Adaptive row step: the natural step is `row_h + gap`, but if the form
@@ -287,6 +287,32 @@ impl<'r> Ui<'r> {
             fields.blink_on,
             fields.double_click,
         );
+        y += step;
+
+        // -- Cursor shape (segmented) ----------------------------------------
+        row_label(self, y, "Cursor shape");
+        let cs = self.segmented(
+            id("settings/cursor_style"),
+            ctrl_rect(y, ctrl_w),
+            &["Block", "Beam", "Underline"],
+            v.cursor_style_idx.min(2),
+        );
+        if cs != v.cursor_style_idx {
+            ev.cursor_style = Some(cs);
+        }
+        y += step;
+
+        // -- Cursor blink (toggle) -------------------------------------------
+        row_label(self, y, "Cursor blink");
+        let blink_rect = Rect::new(
+            ctrl_x,
+            (y + (ctrl_h - toggle_h) * 0.5).round(),
+            toggle_w,
+            toggle_h,
+        );
+        if self.toggle(id("settings/cursor_blink"), blink_rect, v.cursor_blink) != v.cursor_blink {
+            ev.cursor_blink_toggle = true;
+        }
         y += step;
 
         // -- Config path (readonly + copy/open) ------------------------------

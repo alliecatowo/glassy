@@ -34,7 +34,7 @@ impl App {
     /// for Tab / Shift+Tab / Up / Down focus movement (the form itself collects
     /// the live order each paint, but key handling runs between paints so it walks
     /// this fixed list — identical ordering keeps focus stable).
-    pub(crate) fn settings_focus_order() -> [gui::WidgetId; 16] {
+    pub(crate) fn settings_focus_order() -> [gui::WidgetId; 18] {
         [
             gui::id("settings/font_size"),
             gui::id("settings/opacity"),
@@ -50,6 +50,8 @@ impl App {
             gui::id("settings/restore_session"),
             gui::id("settings/word_separator"),
             gui::id("settings/font_features"),
+            gui::id("settings/cursor_style"),
+            gui::id("settings/cursor_blink"),
             gui::id("settings/config"),
             gui::id("settings/save"),
         ]
@@ -150,6 +152,9 @@ impl App {
             self.adjust_scrollback(dir);
         } else if f == Some(gui::id("settings/padding")) {
             self.adjust_padding(dir);
+        } else if f == Some(gui::id("settings/cursor_style")) {
+            let cur = self.cursor_style_index() as i32;
+            self.set_cursor_style_index(((cur + dir).rem_euclid(3)) as usize);
         }
     }
 
@@ -196,6 +201,12 @@ impl App {
         } else if f == Some(gui::id("settings/restore_session")) {
             self.config.restore_session = !self.config.restore_session;
             self.session_dirty = true;
+            self.settings_saved = false;
+        } else if f == Some(gui::id("settings/cursor_style")) {
+            let cur = self.cursor_style_index() as i32;
+            self.set_cursor_style_index(((cur + 1).rem_euclid(3)) as usize);
+        } else if f == Some(gui::id("settings/cursor_blink")) {
+            self.config.cursor_blink = !self.config.cursor_blink;
             self.settings_saved = false;
         } else {
             self.save_settings();
@@ -407,6 +418,25 @@ impl App {
         Self::open_url(&uri);
     }
 
+    /// Current cursor style as a segmented-control index: 0=Block, 1=Beam, 2=Underline.
+    pub(crate) fn cursor_style_index(&self) -> usize {
+        match self.config.cursor_style {
+            CursorStyleConfig::Block => 0,
+            CursorStyleConfig::Beam => 1,
+            CursorStyleConfig::Underline => 2,
+        }
+    }
+
+    /// Set the cursor style from a segmented-control index, marking config unsaved.
+    pub(crate) fn set_cursor_style_index(&mut self, idx: usize) {
+        self.config.cursor_style = match idx {
+            1 => CursorStyleConfig::Beam,
+            2 => CursorStyleConfig::Underline,
+            _ => CursorStyleConfig::Block,
+        };
+        self.settings_saved = false;
+    }
+
     /// Cycle the active theme by `dir` through `color::THEME_NAMES`, applying it
     /// live (swap the global theme + full redraw).
     pub(crate) fn cycle_theme(&mut self, dir: i32) {
@@ -505,6 +535,11 @@ impl App {
                 "padding",
                 format!("{:.0}", self.config.padding.unwrap_or(0.0)),
             ),
+            (
+                "cursor_style",
+                self.config.cursor_style.as_str().to_string(),
+            ),
+            ("cursor_blink", self.config.cursor_blink.to_string()),
         ];
         match crate::config::save(&updates) {
             Ok(()) => {

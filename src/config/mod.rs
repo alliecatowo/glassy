@@ -28,6 +28,8 @@
 //! font_features = ss01, calt=0         # OpenType feature tags to force on/off (comma or space separated)
 //! cwd         = /home/me/projects      # working directory for the first tab's shell
 //! restore_session = false              # restore previous tabs/splits/cwds on launch
+//! cursor_style = block                 # default cursor shape: block | beam | underline
+//! cursor_blink = false                 # blink the cursor by default (false = steady)
 //! ```
 //!
 //! Custom keybindings live in a `[keybindings]` section mapping chords to actions:
@@ -326,6 +328,54 @@ opacity = 0.80
             settings.config.font_features.is_empty(),
             "font_features must default to empty"
         );
+    }
+
+    #[test]
+    fn cursor_style_parses_and_defaults_block() {
+        // Default (unset) → Block.
+        let settings = RawConfig::default().into_settings().unwrap();
+        assert_eq!(
+            settings.config.cursor_style,
+            crate::app::CursorStyleConfig::Block
+        );
+        // Explicit beam.
+        let mut raw = RawConfig::default();
+        parse_config_file("cursor_style = beam\n", &mut raw).unwrap();
+        let s = raw.into_settings().unwrap();
+        assert_eq!(s.config.cursor_style, crate::app::CursorStyleConfig::Beam);
+        // Explicit underline.
+        let mut raw2 = RawConfig::default();
+        parse_config_file("cursor_style = underline\n", &mut raw2).unwrap();
+        let s2 = raw2.into_settings().unwrap();
+        assert_eq!(
+            s2.config.cursor_style,
+            crate::app::CursorStyleConfig::Underline
+        );
+        // Invalid value is a hard parse error.
+        let mut raw3 = RawConfig::default();
+        assert!(parse_config_file("cursor_style = arrow\n", &mut raw3).is_err());
+    }
+
+    #[test]
+    fn cursor_blink_parses_and_defaults_false() {
+        let settings = RawConfig::default().into_settings().unwrap();
+        assert!(
+            !settings.config.cursor_blink,
+            "cursor_blink default must be false"
+        );
+        let mut raw = RawConfig::default();
+        parse_config_file("cursor_blink = true\n", &mut raw).unwrap();
+        assert_eq!(raw.cursor_blink, Some(true));
+        let s = raw.into_settings().unwrap();
+        assert!(s.config.cursor_blink);
+    }
+
+    #[test]
+    fn cursor_style_case_insensitive() {
+        let mut raw = RawConfig::default();
+        parse_config_file("cursor_style = BEAM\n", &mut raw).unwrap();
+        let s = raw.into_settings().unwrap();
+        assert_eq!(s.config.cursor_style, crate::app::CursorStyleConfig::Beam);
     }
 
     #[test]

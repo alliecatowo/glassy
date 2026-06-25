@@ -121,6 +121,8 @@ impl ApplicationHandler<UserEvent> for App {
             initial_cwd,
             self.config.scrollback,
             &self.config.word_separator,
+            self.config.cursor_style.to_cursor_shape(),
+            self.config.cursor_blink,
         ) {
             Ok(p) => p,
             Err(e) => {
@@ -180,6 +182,19 @@ impl ApplicationHandler<UserEvent> for App {
         }
         if std::env::var_os("GLASSY_SETTINGS").is_some() {
             self.settings_open = true;
+            self.force_full_redraw = true;
+        }
+        // Headless: open settings with the cursor-cfg fields visible so the
+        // feature can be captured. GLASSY_CURSOR_CFG=beam|underline|block
+        // also pre-sets the cursor_style config so it shows in the form.
+        if let Ok(style) = std::env::var("GLASSY_CURSOR_CFG") {
+            use crate::app::CursorStyleConfig;
+            self.config.cursor_style = match style.to_ascii_lowercase().as_str() {
+                "beam" => CursorStyleConfig::Beam,
+                "underline" => CursorStyleConfig::Underline,
+                _ => CursorStyleConfig::Block,
+            };
+            self.open_settings();
             self.force_full_redraw = true;
         }
         if std::env::var_os("GLASSY_MENU").is_some() {
