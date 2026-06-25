@@ -202,7 +202,20 @@ impl ApplicationHandler<UserEvent> for App {
         }
         // Headless: open the command palette at startup; GLASSY_PALETTE's value (if
         // non-empty) pre-fills the query so the fuzzy filter can be captured.
+        // GLASSY_PALETTE_HIST / GLASSY_PALETTE_CWD seed the history + cwd sources
+        // (newline-separated entries) so the dynamic palette rows can be captured
+        // without a live OSC 133 / OSC 7 producing shell.
         if let Some(q) = std::env::var_os("GLASSY_PALETTE") {
+            if let Some(h) = std::env::var_os("GLASSY_PALETTE_HIST") {
+                for line in h.to_string_lossy().split('\n').filter(|l| !l.is_empty()) {
+                    self.record_command_history(line.to_string());
+                }
+            }
+            if let Some(c) = std::env::var_os("GLASSY_PALETTE_CWD") {
+                for line in c.to_string_lossy().split('\n').filter(|l| !l.is_empty()) {
+                    self.record_cwd_history(std::path::PathBuf::from(line));
+                }
+            }
             self.open_palette(event_loop);
             let q = q.to_string_lossy().to_string();
             if !q.is_empty()

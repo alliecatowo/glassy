@@ -8,6 +8,60 @@
 
 use super::*;
 
+/// Maximum number of recent working directories retained for the palette's cwd
+/// source. Independent of the command-history capacity (which is user-configurable
+/// via `command_history`); cwds are cheap and few in practice.
+pub(crate) const CWD_HISTORY_CAP: usize = 64;
+
+impl App {
+    /// Record a shell command captured from an OSC 133 `B`..`C` zone into the
+    /// command-history ring. Deduplicates against the most-recent entry (so
+    /// hitting Enter on the same command twice does not stack it) and bounds the
+    /// ring to `config.command_history`. A no-op when capture is disabled
+    /// (capacity 0) or the command is blank. Not a visual change, so no redraw.
+    pub(crate) fn record_command_history(&mut self, cmd: String) {
+        let cap = self.config.command_history;
+        if cap == 0 {
+            return;
+        }
+        let cmd = cmd.trim();
+        if cmd.is_empty() {
+            return;
+        }
+        // Skip if identical to the last recorded command.
+        if self.cmd_history.back().map(String::as_str) == Some(cmd) {
+            return;
+        }
+        self.cmd_history.push_back(cmd.to_string());
+        while self.cmd_history.len() > cap {
+            self.cmd_history.pop_front();
+        }
+    }
+
+    /// Drop oldest command-history entries down to the current capacity. Called
+    /// after `config.command_history` shrinks on a live config reload.
+    pub(crate) fn trim_command_history(&mut self) {
+        let cap = self.config.command_history;
+        while self.cmd_history.len() > cap {
+            self.cmd_history.pop_front();
+        }
+    }
+
+    /// Record a working directory reported via OSC 7 into the cwd-history ring.
+    /// A directory already present is moved to the back (most-recent wins) rather
+    /// than duplicated; the ring is bounded to [`CWD_HISTORY_CAP`]. Not visual.
+    pub(crate) fn record_cwd_history(&mut self, dir: std::path::PathBuf) {
+        // Drop an existing occurrence so the path floats to most-recent.
+        if let Some(pos) = self.cwd_history.iter().position(|p| p == &dir) {
+            self.cwd_history.remove(pos);
+        }
+        self.cwd_history.push_back(dir);
+        while self.cwd_history.len() > CWD_HISTORY_CAP {
+            self.cwd_history.pop_front();
+        }
+    }
+}
+
 /// One palette command: a stable identifier the App maps to a concrete effect,
 /// plus the display metadata (category + label) the registry builds it with.
 ///
@@ -50,6 +104,14 @@ pub(crate) enum PaletteCmd {
     PrevTheme,
     /// Set the theme at this index into [`color::THEME_NAMES`].
     SetTheme(usize),
+    // --- Dynamic history sources (payload carried by the PaletteEntry) ---
+    /// Re-run a command from history: paste its text into the focused pane and
+    /// submit it (append a newline). The command string lives in
+    /// [`PaletteEntry::payload`].
+    RunCommand,
+    /// Change into a recent working directory: paste `cd <dir>` and submit. The
+    /// directory string lives in [`PaletteEntry::payload`].
+    CdTo,
 }
 
 impl PaletteCmd {
@@ -66,6 +128,8 @@ impl PaletteCmd {
             ToggleStatusBar | TogglePaneHeaders | BellOff | BellVisual | BellAudible
             | ScrollbackIncrease | ScrollbackDecrease => "Setting",
             NextTheme | PrevTheme | SetTheme(_) => "Theme",
+            RunCommand => "History",
+            CdTo => "Cwd",
         }
     }
 
@@ -101,6 +165,8 @@ impl PaletteCmd {
             NextTheme => "Next theme".into(),
             PrevTheme => "Previous theme".into(),
             SetTheme(_) => String::new(),
+            // History/cwd labels are filled in by the registry from the payload.
+            RunCommand | CdTo => String::new(),
         }
     }
 
@@ -149,6 +215,10 @@ pub(crate) struct PaletteEntry {
     /// Lower-cased haystack for case-insensitive matching (cached).
     pub haystack: String,
     pub hint: Option<&'static str>,
+    /// Owned action data for dynamic entries: the command text for
+    /// [`PaletteCmd::RunCommand`] or the directory for [`PaletteCmd::CdTo`].
+    /// `None` for the static action/setting/theme rows.
+    pub payload: Option<String>,
 }
 
 /// All state for an open palette. Owned by `App` as `Option<PaletteState>`.
@@ -208,7 +278,8 @@ impl App {
         for i in 0..color::THEME_NAMES.len() {
             cmds.push(SetTheme(i));
         }
-        cmds.into_iter()
+        let mut entries: Vec<PaletteEntry> = cmds
+            .into_iter()
             .map(|cmd| {
                 let label = match cmd {
                     SetTheme(i) => format!("Set theme: {}", color::THEME_NAMES[i]),
@@ -221,9 +292,37 @@ impl App {
                     display,
                     haystack,
                     hint: cmd.hint(),
+                    payload: None,
                 }
             })
-            .collect()
+            .collect();
+        // Append the dynamic history sources. Newest-first so a `nt` query that
+        // happens to also match a recent command surfaces the freshest one near
+        // the top once the (small) action set is ranked alongside.
+        for cmd in self.cmd_history.iter().rev() {
+            let display = format!("History  {cmd}");
+            let haystack = display.to_lowercase();
+            entries.push(PaletteEntry {
+                cmd: RunCommand,
+                display,
+                haystack,
+                hint: None,
+                payload: Some(cmd.clone()),
+            });
+        }
+        for dir in self.cwd_history.iter().rev() {
+            let shown = compact_home(dir);
+            let display = format!("Cwd  {shown}");
+            let haystack = display.to_lowercase();
+            entries.push(PaletteEntry {
+                cmd: CdTo,
+                display,
+                haystack,
+                hint: None,
+                payload: Some(dir.to_string_lossy().into_owned()),
+            });
+        }
+        entries
     }
 
     /// Open the command palette (or no-op if already open). Builds the registry,
@@ -354,39 +453,50 @@ impl App {
     /// Execute the currently-selected palette row's command, then close the
     /// palette. A no-op (just closes) when the filtered list is empty.
     pub(crate) fn palette_activate_sel(&mut self, event_loop: &ActiveEventLoop) {
-        let cmd = self.palette.as_ref().and_then(|p| {
-            p.filtered
-                .get(p.sel)
-                .and_then(|&i| p.all.get(i))
-                .map(|e| e.cmd)
-        });
-        // Close first so re-entrant overlays (Settings/Help/Search) open cleanly.
-        self.close_palette(event_loop);
-        if let Some(cmd) = cmd {
-            self.run_palette_cmd(cmd, event_loop);
+        let sel = self.palette.as_ref().map(|p| p.sel);
+        if let Some(sel) = sel {
+            self.palette_activate_index(sel, event_loop);
         }
     }
 
     /// Activate the palette row at filtered index `idx` (mouse click).
     pub(crate) fn palette_activate_index(&mut self, idx: usize, event_loop: &ActiveEventLoop) {
-        let cmd = self.palette.as_ref().and_then(|p| {
+        let picked = self.palette.as_ref().and_then(|p| {
             p.filtered
                 .get(idx)
                 .and_then(|&i| p.all.get(i))
-                .map(|e| e.cmd)
+                .map(|e| (e.cmd, e.payload.clone()))
         });
+        // Close first so re-entrant overlays (Settings/Help/Search) open cleanly.
         self.close_palette(event_loop);
-        if let Some(cmd) = cmd {
-            self.run_palette_cmd(cmd, event_loop);
+        if let Some((cmd, payload)) = picked {
+            self.run_palette_cmd_with(cmd, payload, event_loop);
         }
     }
 
-    /// Map a [`PaletteCmd`] onto the existing App effect. Every arm routes through
-    /// the SAME method the menu / settings / keybinding path uses, so behaviour is
-    /// identical no matter how an action is triggered.
-    pub(crate) fn run_palette_cmd(&mut self, cmd: PaletteCmd, event_loop: &ActiveEventLoop) {
+    /// Map a [`PaletteCmd`] (plus its optional owned `payload` for the dynamic
+    /// history/cwd rows) onto the existing App effect. Every static arm routes
+    /// through the SAME method the menu / settings / keybinding path uses, so
+    /// behaviour is identical no matter how an action is triggered.
+    pub(crate) fn run_palette_cmd_with(
+        &mut self,
+        cmd: PaletteCmd,
+        payload: Option<String>,
+        event_loop: &ActiveEventLoop,
+    ) {
         use PaletteCmd::*;
         match cmd {
+            RunCommand => {
+                if let Some(text) = payload {
+                    self.palette_submit_line(&text, event_loop);
+                }
+            }
+            CdTo => {
+                if let Some(dir) = payload {
+                    let line = format!("cd {}", shell_quote(&dir));
+                    self.palette_submit_line(&line, event_loop);
+                }
+            }
             NewTab => self.new_tab(event_loop),
             CloseTab => self.close_active_tab(event_loop),
             NextTab => self.cycle_tab(1, event_loop),
@@ -487,6 +597,67 @@ impl App {
             }
         }
     }
+
+    /// Send a line of text to the focused pane's shell and submit it (paste the
+    /// text honoring bracketed paste, then send a carriage return). Used by the
+    /// palette's history (`RunCommand`) and cwd (`CdTo`) rows. Scrolls the pane to
+    /// the bottom first so the result is visible. A no-op with no focused pane.
+    pub(crate) fn palette_submit_line(&mut self, line: &str, event_loop: &ActiveEventLoop) {
+        if line.is_empty() {
+            return;
+        }
+        let bracketed = self.term_mode().contains(TermMode::BRACKETED_PASTE);
+        if let Some(pty) = self.pty.as_ref() {
+            pty.term
+                .lock()
+                .scroll_display(alacritty_terminal::grid::Scroll::Bottom);
+            // Paste sanitizes embedded control sequences; then a CR submits it.
+            pty.paste(line, bracketed);
+            pty.write(b"\r".to_vec());
+        }
+        self.mark_dirty(event_loop);
+    }
+}
+
+/// Quote a directory path for safe use after `cd ` in a POSIX shell: wrap in
+/// single quotes and escape any embedded single quotes (`'` → `'\''`). Paths
+/// without shell-special characters are returned unquoted to keep the common
+/// case tidy. Pure for unit testing.
+pub(crate) fn shell_quote(dir: &str) -> String {
+    let needs_quote = dir
+        .chars()
+        .any(|c| !(c.is_alphanumeric() || matches!(c, '/' | '.' | '_' | '-' | '~' | '+' | ':')));
+    if !needs_quote {
+        return dir.to_string();
+    }
+    let mut out = String::with_capacity(dir.len() + 2);
+    out.push('\'');
+    for c in dir.chars() {
+        if c == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(c);
+        }
+    }
+    out.push('\'');
+    out
+}
+
+/// Render a path with the user's home directory collapsed to `~` for display in
+/// the palette (`/home/me/src` → `~/src`). Falls back to the full path when the
+/// path is not under `$HOME`. Pure-ish (reads `$HOME`); kept here for the cwd
+/// source's display labels.
+pub(crate) fn compact_home(dir: &std::path::Path) -> String {
+    if let Some(home) = std::env::var_os("HOME") {
+        let home = std::path::PathBuf::from(home);
+        if let Ok(rest) = dir.strip_prefix(&home) {
+            if rest.as_os_str().is_empty() {
+                return "~".to_string();
+            }
+            return format!("~/{}", rest.display());
+        }
+    }
+    dir.to_string_lossy().into_owned()
 }
 
 impl App {
@@ -864,5 +1035,51 @@ mod tests {
     fn set_theme_label_is_empty() {
         // SetTheme defers label generation to the registry; the bare method returns "".
         assert_eq!(PaletteCmd::SetTheme(0).label(), "");
+    }
+
+    // ---- history/cwd source helpers ----------------------------------------
+
+    #[test]
+    fn run_command_and_cd_to_labels_deferred_to_registry() {
+        // Both dynamic variants carry their label via the payload, not the method.
+        assert_eq!(PaletteCmd::RunCommand.label(), "");
+        assert_eq!(PaletteCmd::CdTo.label(), "");
+        assert_eq!(PaletteCmd::RunCommand.category(), "History");
+        assert_eq!(PaletteCmd::CdTo.category(), "Cwd");
+    }
+
+    #[test]
+    fn shell_quote_leaves_plain_paths_unquoted() {
+        assert_eq!(shell_quote("/home/me/src"), "/home/me/src");
+        assert_eq!(shell_quote("~/projects/glassy"), "~/projects/glassy");
+        assert_eq!(shell_quote("/a-b_c.d/e+f"), "/a-b_c.d/e+f");
+    }
+
+    #[test]
+    fn shell_quote_wraps_and_escapes_special_chars() {
+        // A space forces quoting.
+        assert_eq!(shell_quote("/my dir"), "'/my dir'");
+        // An embedded single-quote is escaped as '\''.
+        assert_eq!(shell_quote("/a'b"), "'/a'\\''b'");
+    }
+
+    #[test]
+    fn compact_home_collapses_home_prefix() {
+        // Use a synthetic HOME so the test is deterministic.
+        // SAFETY: single-threaded test; we restore nothing because cargo runs each
+        // test process fresh, but scope the var to avoid surprising siblings.
+        unsafe {
+            std::env::set_var("HOME", "/home/tester");
+        }
+        assert_eq!(
+            compact_home(std::path::Path::new("/home/tester/src/glassy")),
+            "~/src/glassy"
+        );
+        assert_eq!(compact_home(std::path::Path::new("/home/tester")), "~");
+        // Not under HOME → unchanged.
+        assert_eq!(
+            compact_home(std::path::Path::new("/etc/hosts")),
+            "/etc/hosts"
+        );
     }
 }

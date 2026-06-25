@@ -29,6 +29,7 @@ use winit::event_loop::EventLoopProxy;
 use crate::image::ImageStore;
 use crate::input::ModifyOtherKeys;
 
+pub mod cmdzone;
 pub mod r#loop;
 mod scan;
 
@@ -246,6 +247,12 @@ pub enum UserEvent {
     /// `CSI > 4 ; N m`. The UI thread updates `App::modify_other_keys` so
     /// subsequent key events are encoded with the correct form.
     ModifyOtherKeys(usize, ModifyOtherKeys),
+    /// A shell command was captured from the grid between an OSC 133 `B`
+    /// (command start) and `C` (command executed) mark. The string is the final
+    /// command line as it sat on the grid. The UI thread pushes it into the
+    /// per-app command-history ring so the command palette can offer it for
+    /// re-run. See [`cmdzone`].
+    CommandRun(usize, String),
 }
 
 /// Wraps the `ClipboardLoad` reply-builder closure so `UserEvent` can keep its

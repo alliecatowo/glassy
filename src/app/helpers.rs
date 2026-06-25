@@ -597,6 +597,13 @@ impl App {
             self.force_full_redraw = true;
         }
 
+        // Command-history capacity: update the cap and trim the existing ring if
+        // it shrank. Not a visual change (the palette rebuilds on next open).
+        if new_config.command_history != self.config.command_history {
+            self.config.command_history = new_config.command_history;
+            self.trim_command_history();
+        }
+
         // Word separator for selection: update the config and push the merged
         // semantic_escape_chars to all live PTYs so double-click word selection
         // honours the new setting immediately without restarting.

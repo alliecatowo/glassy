@@ -143,6 +143,10 @@ pub struct Config {
     /// defaults). Built once at config resolution time by [`crate::config`] and
     /// consulted by the keyboard handler before the hard-coded fallback paths.
     pub keymap: crate::config::KeyMap,
+    /// Number of recently-run shell commands to retain for the command palette's
+    /// history source (captured from OSC 133 `B`..`C` zones). 0 disables capture.
+    /// Default 200.
+    pub command_history: usize,
 }
 
 /// A tab's split layout: the tiling tree (whose leaf ids are pty/pane ids) plus
@@ -523,6 +527,18 @@ pub struct App {
     /// clicked. The actual close call is deferred to `about_to_wait` (where an
     /// `ActiveEventLoop` reference is available). Cleared after execution.
     pending_confirm_execute: bool,
+
+    // --- Command / cwd history (command-palette sources) ---------------------
+    /// Recently-run shell commands captured from OSC 133 `B`..`C` zones, newest
+    /// last. Bounded by `config.command_history`; deduped against the immediately
+    /// previous entry. The command palette offers these for re-run. Empty when
+    /// capture is disabled (capacity 0) or no shell integration is present.
+    cmd_history: std::collections::VecDeque<String>,
+    /// Recently-visited working directories from OSC 7 reports, newest last. A
+    /// directory already present is moved to the back rather than duplicated, so
+    /// the most-recent unique paths win. Bounded by [`CWD_HISTORY_CAP`]. The
+    /// command palette offers these to `cd` into.
+    cwd_history: std::collections::VecDeque<std::path::PathBuf>,
 }
 
 /// Pending close that is waiting for user confirmation.

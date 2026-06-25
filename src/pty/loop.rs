@@ -103,6 +103,14 @@ pub fn run_loop(
     let mut sync_pending_wakeup = false;
     // ---- End sync state ---------------------------------------------------------
 
+    // ---- OSC 133 command-zone capture -------------------------------------------
+    // The grid point recorded at the last `133;B` (command start). When the
+    // matching `133;C` (command executed) arrives we read the command the user
+    // typed from the grid between this point and the cursor. `None` between a `C`
+    // and the next `B` (no command being typed). See `super::cmdzone`.
+    let mut cmd_start: Option<super::cmdzone::CmdStart> = None;
+    // ---- End command-zone capture -----------------------------------------------
+
     'main: loop {
         // Compute the poll timeout: while inside a sync bracket, wake at the
         // deadline so we never stall the UI longer than SYNC_TIMEOUT even if
@@ -241,20 +249,51 @@ pub fn run_loop(
                             crate::image::TapEvent::SemanticMark(mark) => {
                                 // OSC 133: record prompt-start rows (mark 'A') in the
                                 // shared PromptTracker so the UI can jump to them via
-                                // Shift+Up/Down. Other marks (B/C/D) are forwarded to
-                                // the UI for potential future use (e.g. command timing).
-                                if mark == 'A' {
-                                    // Capture the current cursor row as an absolute
-                                    // grid offset (display_offset + cursor.line). `term`
-                                    // is already locked (the MutexGuard from above), so
-                                    // read through the guard directly.
-                                    let row = {
-                                        let c = term.renderable_content();
-                                        c.cursor.point.line.0 + c.display_offset as i32
-                                    };
-                                    if let Ok(mut p) = prompts.lock() {
-                                        p.push(row);
+                                // Shift+Up/Down. `B`/`C` bracket the typed command,
+                                // which we capture from the grid for the command-history
+                                // palette source. `D` (done) is forwarded for future use.
+                                match mark {
+                                    'A' => {
+                                        // Capture the current cursor row as an absolute
+                                        // grid offset (display_offset + cursor.line).
+                                        // `term` is already locked (the MutexGuard from
+                                        // above), so read through the guard directly.
+                                        let row = {
+                                            let c = term.renderable_content();
+                                            c.cursor.point.line.0 + c.display_offset as i32
+                                        };
+                                        if let Ok(mut p) = prompts.lock() {
+                                            p.push(row);
+                                        }
                                     }
+                                    'B' => {
+                                        // Command start: record the cursor position so
+                                        // the matching `C` can read the typed command
+                                        // text from the grid starting here.
+                                        let cur = term.grid().cursor.point;
+                                        cmd_start = Some(super::cmdzone::CmdStart {
+                                            line: cur.line.0,
+                                            col: cur.column.0,
+                                        });
+                                    }
+                                    'C' => {
+                                        // Command executed: read the command text from
+                                        // the grid between the `B` point and the cursor,
+                                        // then forward it to the UI history ring.
+                                        if let Some(start) = cmd_start.take() {
+                                            let end = term.grid().cursor.point;
+                                            if let Some(cmd) = super::cmdzone::read_command_zone(
+                                                term.grid(),
+                                                start,
+                                                end,
+                                            ) {
+                                                proxy.send_user(crate::pty::UserEvent::CommandRun(
+                                                    proxy.id, cmd,
+                                                ));
+                                            }
+                                        }
+                                    }
+                                    _ => {}
                                 }
                                 proxy
                                     .send_user(crate::pty::UserEvent::SemanticMark(proxy.id, mark));

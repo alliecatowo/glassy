@@ -109,6 +109,8 @@ impl App {
             toasts: Vec::new(),
             confirm_close: None,
             pending_confirm_execute: false,
+            cmd_history: std::collections::VecDeque::new(),
+            cwd_history: std::collections::VecDeque::new(),
         }
     }
 
