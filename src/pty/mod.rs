@@ -525,8 +525,10 @@ impl PromptTracker {
         }
     }
 
-    /// The most-recently-finished command block, if any. Used by the UI for the
-    /// status-bar "last command" badge.
+    /// The most-recently-finished command block, if any. Kept for the planned
+    /// status-bar "last command" badge (exercised by the command-block tests);
+    /// not yet read by the live render path.
+    #[allow(dead_code)]
     pub fn last_finished(&self) -> Option<&CommandBlock> {
         self.blocks.iter().rev().find(|b| b.is_finished())
     }

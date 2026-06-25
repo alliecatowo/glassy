@@ -283,8 +283,8 @@ impl KeyAction {
             SplitVertical | SplitHorizontal | BroadcastInput => "Split panes",
             Copy | Paste => "Edit",
             ToggleFullscreen | ToggleMaximize | FontIncrease | FontDecrease | FontReset
-            | ToggleStatusBar | ToggleMinimap | ScrollUp | ScrollDown | ScrollTop | ScrollBottom
-            | JumpPrevPrompt | JumpNextPrompt | ToggleFold | QuakeToggle => "View",
+            | ToggleStatusBar | ToggleMinimap | ScrollUp | ScrollDown | ScrollTop
+            | ScrollBottom | JumpPrevPrompt | JumpNextPrompt | ToggleFold | QuakeToggle => "View",
             Settings | Help | Search | CommandPalette | Hints => "App",
         }
     }
