@@ -132,6 +132,82 @@ Dx12/OpenGL don't support `PIPELINE_CACHE`).
 | First launch (cold cache) | baseline | same |
 | Subsequent launches (warm cache, Vulkan) | baseline | -20-80 ms startup |
 
+## glassy vs ghostty (2026-06-25)
+
+Head-to-head comparison on the same machine, both spawned fresh under the same
+Wayland session (wayland-0), sampled in a single sitting.
+
+### Machine
+
+- CPU: AMD Ryzen 7 6800U (Zen 3+, 8-core)
+- GPU: AMD Radeon 680M (integrated, RDNA 2)
+- Driver: RADV (Mesa Vulkan, open-source)
+- OS: Fedora Linux 7.0.11-100.fc43 (Wayland, GNOME)
+- glassy version: develop @ 2eacb59 (release build, stripped, fat LTO)
+- ghostty version: 1.3.1-2.fc43 (distro package, `/usr/bin/ghostty`, 123 MB)
+- kitty / alacritty: not installed on this machine
+
+### Results
+
+| Metric | glassy | ghostty | glassy advantage |
+| --- | --- | --- | --- |
+| **Binary size (stripped)** | **11.0 MB** | 123.2 MB | **11× smaller** |
+| **Idle RSS** (VmRSS, /proc, 2 runs avg) | **~133 MB** | ~214 MB | **~38% less RAM** |
+| **Idle CPU** (ticks/s after 10 s settle) | **0 ticks (~0%)** | 1 tick (~≤1%) | effectively tied |
+| **TTFF** (glassy: `log::info` first-frame; ghostty: `time -e true` wall) | **~450 ms** | ~710 ms | **~260 ms faster** |
+| **Threads at idle** | **9** | 45–47 | **5× fewer threads** |
+
+### Method notes
+
+**Binary size** — `stat --format="%s"` on each stripped executable.
+glassy: `target/release/glassy` (cargo release profile: fat LTO, 1 codegen
+unit, `panic = "abort"`, strip). ghostty: `/usr/bin/ghostty` (distro RPM).
+
+**Idle RSS** — Each terminal spawned with `$WAYLAND_DISPLAY=wayland-0` into
+a fresh idle shell (`-e /bin/bash`). RSS read from
+`/proc/<spawned-pid>/status` (VmRSS) after 4–5 s. Two runs each; both
+were consistent to within 2 MB. glassy runs: 132.6 MB, 132.5 MB.
+ghostty runs: 212.7 MB, 215.0 MB. Only that spawned PID was measured;
+the existing ghostty session (the one Claude runs in) was never touched.
+
+**Idle CPU** — Both terminals left idle (no typing, no shell output) for
+10 s. CPU ticks read from `/proc/<pid>/stat` fields 14+15 (utime+stime)
+across a 1-second window. glassy: 0 ticks. ghostty: 1 tick. At HZ=100
+this is ≤1% each; both are effectively zero at rest. The `ps -o pcpu=`
+cumulative averages reported earlier were still decaying (startup work
+amortised) — the per-second tick count is the accurate idle figure.
+
+**TTFF (time to first frame)** — glassy logs
+`"glassy time-to-first-frame: N ms"` via `log::info!` on the first
+`queue.submit` + `surface.present` call (measured from `Instant::now()`
+set in `App::new`). Two warm-cache runs: 448.3 ms and 455.0 ms (~451 ms
+avg). ghostty has no equivalent intrinsic log; proxy: `time ghostty
+--gtk-single-instance=false -e true`, which measures exec→process-exit
+(window open + one shell invocation + exit): two runs 725 ms and 702 ms
+(~714 ms avg). The ghostty figure includes shell startup and process
+teardown, so it overstates pure TTFF slightly; the glassy figure is the
+first-render timestamp only. Both figures come from the same warm-cache
+Vulkan state.
+
+**Threads** — read from VmRSS `Threads:` field in
+`/proc/<spawned-pid>/status` while at idle. glassy: 9 (main + wgpu
+device + 3 pipeline compile workers + pty reader + pty writer + 2
+others). ghostty: 45–47 (GTK runtime, tokio thread pool, font threads,
+etc.).
+
+### Caveats
+
+- Single machine, single session, single run per metric (no
+  `hyperfine`-style averaging). Numbers rounded.
+- ghostty TTFF is a wall-time proxy (`time -e true`), not an intrinsic
+  first-present timestamp; it systematically overstates pure TTFF.
+- RSS includes shared library pages (GPU driver, libc, Wayland client
+  libs). glassy's 133 MB figure includes roughly 80–90 MB of GPU-driver
+  shared pages that would be present regardless. The marginal per-process
+  footprint is lower.
+- kitty and alacritty were not installed on this machine and could not be
+  measured.
+
 ## Caveats
 
 - Single machine, single run order; no warmup/averaging discipline beyond
