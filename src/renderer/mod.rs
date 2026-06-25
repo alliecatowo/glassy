@@ -99,10 +99,11 @@ fn load_pipeline_cache_data(adapter_info: &wgpu::AdapterInfo) -> Option<Vec<u8>>
 /// 4x versus the old RGBA8 atlas (1 MB instead of 4 MB) since a coverage mask
 /// only needs one byte per pixel.
 const ATLAS_SIZE: u32 = 1024;
-/// Color-atlas dimensions (square, RGBA8). Only color glyphs (emoji) live here,
-/// so it can be much smaller than the mask atlas; on overflow the shared
-/// full-atlas path clears both caches and repacks.
-const COLOR_ATLAS_SIZE: u32 = 256;
+/// Color-atlas dimensions (square, RGBA8). Color emoji are rasterized at a font
+/// strike ≥ the cell height (≈64px on Retina) for crisp downscaling, so each one
+/// is larger than a text glyph; 512² (1 MB) holds ~50 emoji at 64px — ample for a
+/// session — while staying lean. On overflow the shared path clears + repacks.
+const COLOR_ATLAS_SIZE: u32 = 512;
 /// Image-atlas dimensions (square, RGBA8). Inline images (kitty graphics) are
 /// packed here, kept separate from the glyph atlases so a large image can't evict
 /// the font cache. On overflow the image cache is cleared and repacked.

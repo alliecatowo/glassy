@@ -90,6 +90,23 @@ pub struct Text {
     /// ZWJ path, to render at the right size without threading it through callers.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     font_px: f32,
+    /// Pixel size to rasterize color emoji at — the smallest font strike ≥ the
+    /// cell height. Color emoji are bitmaps; rasterizing at ≥ cell size means the
+    /// renderer only ever downscales them (crisp) instead of upscaling (blurry).
+    emoji_px: f32,
+}
+
+/// Pick the color-emoji raster size for a given cell height. Snaps up to the
+/// nearest Apple Color Emoji `sbix` strike (20/32/40/48/64/96/160) ≥ `cell_h`
+/// so swash uses a native strike with no internal scaling, and the renderer
+/// downscales it to the cell. Falls back to the largest strike for huge fonts.
+fn emoji_raster_px(cell_h: f32) -> f32 {
+    const STRIKES: [f32; 7] = [20.0, 32.0, 40.0, 48.0, 64.0, 96.0, 160.0];
+    STRIKES
+        .iter()
+        .copied()
+        .find(|&s| s >= cell_h)
+        .unwrap_or(160.0)
 }
 
 /// Build shaping attributes for the given style against the resolved family,
@@ -244,6 +261,7 @@ impl Text {
             font_features: parse_font_features(font_features),
             emoji_family,
             font_px,
+            emoji_px: emoji_raster_px(line_height),
         };
 
         let cell = text.measure_cell(font_px, line_height);
@@ -389,9 +407,11 @@ impl Text {
         // components — cosmic-text returns real (non-.notdef) glyphs, so the
         // `.notdef` fallback in build_glyphs won't catch it. Route ZWJ explicitly
         // through the CoreText system cascade, which resolves the ligature.
+        // ZWJ clusters are always color emoji — render at emoji_px (≥ cell height)
+        // so the renderer downscales for crispness rather than upscaling.
         #[cfg(target_os = "macos")]
         if cluster.contains('\u{200D}')
-            && let Some(g) = render_coretext(cluster, self.font_px)
+            && let Some(g) = render_coretext(cluster, self.emoji_px)
         {
             return vec![g];
         }
@@ -445,6 +465,15 @@ impl Text {
                 .layout_runs()
                 .any(|run| run.glyphs.iter().any(|g| g.glyph_id == 0));
             if has_notdef && let Some(g) = render_coretext(text, self.font_px) {
+                // A monochrome symbol (e.g. ⏵) is correct at em size — it's tinted
+                // as a mask and placed by bearings. A color emoji needs the larger
+                // emoji_px raster so the renderer downscales it; re-render at that size.
+                if g.is_color
+                    && self.emoji_px > self.font_px
+                    && let Some(hi) = render_coretext(text, self.emoji_px)
+                {
+                    return vec![hi];
+                }
                 return vec![g];
             }
         }
@@ -465,6 +494,7 @@ impl Text {
                     continue;
                 }
                 let advance = glyph.w;
+                // Rasterize at the buffer em size first.
                 let pg = glyph.physical((0.0, 0.0), 1.0);
                 // Clone the Option so the FontSystem borrow ends before we read
                 // the image and build the glyph below.
@@ -472,7 +502,23 @@ impl Text {
                     .swash_cache
                     .get_image(&mut self.font_system, pg.cache_key)
                     .clone();
-                let Some(img) = img_opt else { continue };
+                let Some(mut img) = img_opt else { continue };
+
+                // Color emoji are bitmaps. The em-size raster (~28px) is smaller than
+                // the cell (~36px), so the renderer would upscale and blur it. Re-fetch
+                // at `emoji_px` (a font strike ≥ cell height) so the renderer instead
+                // downscales — crisp. Text/mask glyphs keep the em-size raster.
+                if matches!(img.content, SwashContent::Color) {
+                    let scale = self.emoji_px / self.font_px;
+                    let pg_hi = glyph.physical((0.0, 0.0), scale);
+                    if let Some(hi) = self
+                        .swash_cache
+                        .get_image(&mut self.font_system, pg_hi.cache_key)
+                        .clone()
+                    {
+                        img = hi;
+                    }
+                }
 
                 let (w, h) = (img.placement.width, img.placement.height);
                 if w == 0 || h == 0 {
@@ -579,7 +625,7 @@ impl Text {
                     .swash_cache
                     .get_image(&mut self.font_system, pg.cache_key)
                     .clone();
-                let Some(img) = img_opt else {
+                let Some(mut img) = img_opt else {
                     // Advance-only glyph (space, control char): mark the slot
                     // so the caller knows this cell was shaped but blank.
                     if char_idx < slots.len() {
@@ -587,6 +633,20 @@ impl Text {
                     }
                     continue;
                 };
+
+                // Re-rasterize color emoji at emoji_px (≥ cell height) so the
+                // renderer downscales rather than upscales — see collect_glyphs.
+                if matches!(img.content, SwashContent::Color) {
+                    let scale = self.emoji_px / self.font_px;
+                    let pg_hi = glyph.physical((0.0, 0.0), scale);
+                    if let Some(hi) = self
+                        .swash_cache
+                        .get_image(&mut self.font_system, pg_hi.cache_key)
+                        .clone()
+                    {
+                        img = hi;
+                    }
+                }
 
                 let (w, h) = (img.placement.width, img.placement.height);
                 if w == 0 || h == 0 {
@@ -677,7 +737,7 @@ impl Text {
 /// with any chroma is returned as straight **RGBA** (`is_color = true`) for color
 /// emoji. Returns `None` if CoreText also produced nothing.
 #[cfg(target_os = "macos")]
-fn render_coretext(cluster: &str, font_px: f32) -> Option<RasterizedGlyph> {
+fn render_coretext(cluster: &str, render_px: f32) -> Option<RasterizedGlyph> {
     use core_foundation::attributed_string::CFMutableAttributedString;
     use core_foundation::base::{CFRange, TCFType};
     use core_foundation::string::CFString;
@@ -689,7 +749,7 @@ fn render_coretext(cluster: &str, font_px: f32) -> Option<RasterizedGlyph> {
 
     // Menlo is the macOS terminal default monospace; CoreText cascades from it to
     // whatever system font covers each code point (Apple Color Emoji, STIX, …).
-    let font = core_text::font::new_from_name("Menlo", font_px as f64).ok()?;
+    let font = core_text::font::new_from_name("Menlo", render_px as f64).ok()?;
 
     let cf_str = CFString::new(cluster);
     let mut attr = CFMutableAttributedString::new();
