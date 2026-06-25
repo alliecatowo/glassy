@@ -552,22 +552,23 @@ impl ApplicationHandler<UserEvent> for App {
         // Periodically refresh /proc-based pane info (cwd + foreground process).
         // Only done for panes of the active tab; background tabs refresh on focus.
         // This is cheap (a few symlink reads) and keeps the header/status bar live.
-        // Track the active pane's process name across the refresh so a change
-        // (e.g. launching vim, returning to the prompt) re-derives the window title
-        // + tab label and schedules a repaint — without that, a process-aware title
-        // would only update on OSC/tab events.
-        let proc_before = self
-            .pty
-            .as_ref()
-            .and_then(|p| p.pane_info.foreground_comm.clone());
+        // Track the active pane's process name AND cwd across the refresh so a
+        // change (launching vim, returning to the prompt, or `cd`-ing) re-derives
+        // the window title + tab label and schedules a repaint — without this a
+        // process-aware/cwd title would only update on OSC/tab events. The cwd
+        // check matters for shells that don't emit OSC 7: the 2 s poll picks up the
+        // new cwd and this refreshes the title.
+        let snapshot = |app: &Self| {
+            app.pty
+                .as_ref()
+                .map(|p| (p.pane_info.foreground_comm.clone(), p.pane_info.cwd.clone()))
+        };
+        let before = snapshot(self);
         if let Some(pty) = self.pty.as_mut() {
             Self::maybe_refresh_proc_info(pty);
         }
-        let proc_after = self
-            .pty
-            .as_ref()
-            .and_then(|p| p.pane_info.foreground_comm.clone());
-        if proc_before != proc_after {
+        let after = snapshot(self);
+        if before != after {
             // Only the derived title needs updating when no OSC/custom title is set;
             // update unconditionally (cheap) and repaint so the tab chip re-shapes.
             self.update_window_title();
