@@ -46,6 +46,7 @@ mod script;
 mod search;
 mod selection;
 mod settings;
+mod settings_fields;
 mod tab_paint;
 mod tabs;
 pub(crate) mod toast;
@@ -221,10 +222,12 @@ pub struct App {
     /// is `active_cwd`). Keyed by pane id; persisted so each split pane restores in
     /// its own directory.
     active_pane_cwds: std::collections::HashMap<usize, std::path::PathBuf>,
-    /// Inline tab-rename editor: `Some((pos, buffer))` while a tab chip at stable
-    /// position `pos` is being renamed; the buffer is the in-progress text. Enter
-    /// commits, Esc cancels. `None` when not renaming.
-    tab_rename: Option<(usize, String)>,
+    /// Inline tab-rename editor: `Some((pos, edit))` while a tab chip at stable
+    /// position `pos` is being renamed; `edit` is the in-progress editable text
+    /// model (caret / selection / word-jump / clipboard, shared with every other
+    /// glassy field via [`gui::TextEdit`]). Enter commits, Esc cancels. `None`
+    /// when not renaming.
+    tab_rename: Option<(usize, gui::TextEdit)>,
     /// Last tab-chip click `(pos, time)`, for double-click rename detection. A
     /// second click on the same chip within the multi-click window opens the
     /// inline rename editor.
@@ -293,6 +296,15 @@ pub struct App {
     settings_panel: gui::Rect,
     /// True briefly after a successful settings save, for the overlay's status line.
     settings_saved: bool,
+    /// Editable model + drag state for the settings "Word seps" field (finishing
+    /// the w9-deferred read-only labels). Seeded from `config.word_separator` when
+    /// the form opens; committed back to config + persisted on Save.
+    settings_word_sep: gui::TextEdit,
+    settings_word_sep_ms: gui::TextInputMouse,
+    /// Editable model + drag state for the settings "Font features" field. Seeded
+    /// from `config.font_features` (space-joined) on open; parsed back on commit.
+    settings_font_feat: gui::TextEdit,
+    settings_font_feat_ms: gui::TextInputMouse,
     /// Whether the # hamburger dropdown menu is currently shown.
     menu_open: bool,
     /// Currently-highlighted row in the dropdown menu (keyboard nav).
@@ -436,6 +448,12 @@ pub struct App {
     /// Press→release click edge captured by the MouseInput handler and consumed by
     /// the next chrome paint. Set on left-release, cleared after the GUI frame.
     gui_click_edge: bool,
+    /// Double-click edge for chrome text fields: set on a left PRESS that lands
+    /// close (in px + time) to the previous one, consumed by the next chrome paint
+    /// (drives word-select in an editable [`gui::Ui::text_input`]).
+    gui_double_click: bool,
+    /// Position + time of the last left press, for chrome double-click detection.
+    gui_last_press: Option<(f32, f32, Instant)>,
     /// Mouse position (physical px) at the instant `gui_click_edge` was set (i.e.
     /// at the moment of the button release). Overlay hit tests use this position
     /// instead of the current `mouse_px` so that pointer motion between the release
@@ -518,4 +536,3 @@ pub(crate) enum ConfirmClose {
 
 #[cfg(test)]
 mod tests;
-

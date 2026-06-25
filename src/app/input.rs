@@ -367,6 +367,46 @@ impl App {
         crate::app::toast::push(&mut self.toasts, message);
     }
 
+    /// Note a left mouse PRESS for chrome double-click detection (drives
+    /// word-select in editable text fields). A press close in px + time to the
+    /// previous one sets `gui_double_click` for the next chrome paint to consume;
+    /// the chain collapses after a double so a third quick press starts fresh.
+    pub(crate) fn note_gui_left_press(&mut self) {
+        const GUI_DBL_MS: Duration = Duration::from_millis(400);
+        const GUI_DBL_PX: f32 = 6.0;
+        let (px, py) = (self.mouse_px.0 as f32, self.mouse_px.1 as f32);
+        let now = Instant::now();
+        self.gui_double_click = matches!(
+            self.gui_last_press,
+            Some((lx, ly, lt))
+                if now.duration_since(lt) < GUI_DBL_MS
+                    && (lx - px).abs() <= GUI_DBL_PX
+                    && (ly - py).abs() <= GUI_DBL_PX
+        );
+        self.gui_last_press = if self.gui_double_click {
+            None
+        } else {
+            Some((px, py, now))
+        };
+    }
+
+    /// Read the OS clipboard as text (best-effort), for editable text-field paste
+    /// (search / palette / rename / settings fields).
+    pub(crate) fn clipboard_text(&mut self) -> Option<String> {
+        self.clipboard().and_then(|cb| cb.get_text().ok())
+    }
+
+    /// Copy `text` to the OS clipboard (best-effort), for editable text-field
+    /// copy/cut (search / palette / rename / settings fields).
+    pub(crate) fn copy_text_to_clipboard(&mut self, text: &str) {
+        let owned = text.to_string();
+        if let Some(cb) = self.clipboard()
+            && let Err(e) = cb.set_text(owned)
+        {
+            log::debug!("clipboard copy (text field) failed: {e}");
+        }
+    }
+
     /// Lazily open the OS clipboard. Returns `None` if it is unavailable.
     pub(crate) fn clipboard(&mut self) -> Option<&mut arboard::Clipboard> {
         if self.clipboard.is_none() {

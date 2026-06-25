@@ -52,6 +52,17 @@ impl<'r> Ui<'r> {
         &self.tab_order
     }
 
+    /// Current pointer position in physical px (read by [`Ui::text_input`] for
+    /// caret hit-testing).
+    pub(crate) fn mouse_pos(&self) -> (f32, f32) {
+        self.mouse
+    }
+
+    /// Whether `wid` currently holds keyboard focus.
+    pub(crate) fn is_focused(&self, wid: WidgetId) -> bool {
+        *self.focused == Some(wid)
+    }
+
     pub(crate) fn anim(&mut self, wid: WidgetId, target: f32) -> f32 {
         let a = self.anims.entry(wid).or_insert_with(|| Anim::new(target));
         a.target = target;

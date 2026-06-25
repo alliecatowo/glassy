@@ -129,9 +129,16 @@ impl PaletteCmd {
     }
 }
 
-/// The owned snapshot the palette paint reads: `(query, rows, selected)`, where
-/// each row is `(display_label, optional_shortcut_hint)`.
-pub(crate) type PaletteSnapshot = (String, Vec<(String, Option<&'static str>)>, usize);
+/// The owned snapshot the palette paint reads: `(query, caret, selection, rows,
+/// selected)`, where each row is `(display_label, optional_shortcut_hint)` and
+/// `caret`/`selection` are char offsets into `query` for the editable field.
+pub(crate) type PaletteSnapshot = (
+    String,
+    usize,
+    Option<(usize, usize)>,
+    Vec<(String, Option<&'static str>)>,
+    usize,
+);
 
 /// One built registry row: a command + its resolved display label (category and
 /// label pre-joined for matching) + hint.
@@ -146,14 +153,22 @@ pub(crate) struct PaletteEntry {
 
 /// All state for an open palette. Owned by `App` as `Option<PaletteState>`.
 pub(crate) struct PaletteState {
-    /// The live query text.
-    pub query: String,
+    /// The live query, as an editable model (caret, selection, word-jump,
+    /// clipboard) shared with every other glassy text field via [`gui::TextEdit`].
+    pub edit: gui::TextEdit,
     /// The full registry, built once on open (cheap; ~30 rows).
     pub all: Vec<PaletteEntry>,
     /// Indices into `all` that pass the current filter, best-first.
     pub filtered: Vec<usize>,
     /// Selected row within `filtered` (keyboard highlight).
     pub sel: usize,
+}
+
+impl PaletteState {
+    /// The current query text (what the fuzzy filter + painter consume).
+    pub fn query(&self) -> String {
+        self.edit.text()
+    }
 }
 
 impl App {
@@ -218,7 +233,7 @@ impl App {
             let all = self.palette_registry();
             let filtered: Vec<usize> = (0..all.len()).collect();
             self.palette = Some(PaletteState {
-                query: String::new(),
+                edit: gui::TextEdit::default(),
                 all,
                 filtered,
                 sel: 0,
@@ -243,7 +258,7 @@ impl App {
         let Some(p) = self.palette.as_mut() else {
             return;
         };
-        let q = p.query.to_lowercase();
+        let q = p.query().to_lowercase();
         if q.is_empty() {
             p.filtered = (0..p.all.len()).collect();
         } else {
@@ -267,11 +282,10 @@ impl App {
         if self.palette.is_none() {
             return false;
         }
+        // Up/Down move the result selection (not the caret); Enter activates the
+        // selected row. These belong to the list, so intercept before the shared
+        // text-field path consumes arrows as caret moves.
         match key {
-            Key::Named(NamedKey::Escape) => {
-                self.close_palette(event_loop);
-                true
-            }
             Key::Named(NamedKey::ArrowDown) => {
                 if let Some(p) = self.palette.as_mut()
                     && !p.filtered.is_empty()
@@ -279,7 +293,7 @@ impl App {
                     p.sel = (p.sel + 1) % p.filtered.len();
                 }
                 self.mark_dirty(event_loop);
-                true
+                return true;
             }
             Key::Named(NamedKey::ArrowUp) => {
                 if let Some(p) = self.palette.as_mut()
@@ -289,44 +303,52 @@ impl App {
                     p.sel = (p.sel + n - 1) % n;
                 }
                 self.mark_dirty(event_loop);
-                true
+                return true;
             }
-            Key::Named(NamedKey::Enter) => {
-                self.palette_activate_sel(event_loop);
-                true
-            }
-            Key::Named(NamedKey::Backspace) => {
-                if let Some(p) = self.palette.as_mut() {
-                    p.query.pop();
-                    p.sel = 0;
-                }
-                self.refilter_palette();
-                self.force_full_redraw = true;
-                self.mark_dirty(event_loop);
-                true
-            }
-            Key::Named(NamedKey::Space) => {
-                if let Some(p) = self.palette.as_mut() {
-                    p.query.push(' ');
-                    p.sel = 0;
-                }
-                self.refilter_palette();
-                self.force_full_redraw = true;
-                self.mark_dirty(event_loop);
-                true
-            }
-            Key::Character(s) => {
-                if let Some(p) = self.palette.as_mut() {
-                    p.query.push_str(s.as_str());
-                    p.sel = 0;
-                }
-                self.refilter_palette();
-                self.force_full_redraw = true;
-                self.mark_dirty(event_loop);
-                true
-            }
-            _ => false,
+            _ => {}
         }
+        let ctrl = self.mods.control_key();
+        let shift = self.mods.shift_key();
+        let (named, text) = super::settings::key_to_text_parts(key);
+        let action = gui::map_text_key(named.as_deref(), text.as_deref(), ctrl, shift);
+        match action {
+            // Esc closes; Enter activates the selected command.
+            gui::TextInputAction::Cancel => {
+                self.close_palette(event_loop);
+                return true;
+            }
+            gui::TextInputAction::Submit => {
+                self.palette_activate_sel(event_loop);
+                return true;
+            }
+            gui::TextInputAction::None => return false,
+            _ => {}
+        }
+        let paste_text = if matches!(action, gui::TextInputAction::Paste) {
+            self.clipboard_text()
+        } else {
+            None
+        };
+        let Some(p) = self.palette.as_mut() else {
+            return false;
+        };
+        let res = gui::apply_text_action(&mut p.edit, action, paste_text.as_deref());
+        if res.changed {
+            p.sel = 0;
+        }
+        match &res.clip {
+            gui::ClipReq::Copy(s) | gui::ClipReq::Cut(s) => {
+                let owned = s.clone();
+                self.copy_text_to_clipboard(&owned);
+            }
+            gui::ClipReq::None | gui::ClipReq::Paste => {}
+        }
+        if res.changed {
+            self.refilter_palette();
+        }
+        self.force_full_redraw = true;
+        self.mark_dirty(event_loop);
+        true
     }
 
     /// Execute the currently-selected palette row's command, then close the
@@ -478,7 +500,7 @@ impl App {
             .filter_map(|&i| p.all.get(i))
             .map(|e| (e.display.clone(), e.hint))
             .collect();
-        Some((p.query.clone(), rows, p.sel))
+        Some((p.query(), p.edit.caret(), p.edit.selection(), rows, p.sel))
     }
 
     /// Paint the command palette: a full-surface scrim, a centered glass panel
@@ -495,6 +517,8 @@ impl App {
         renderer: &mut Renderer,
         surface: (f32, f32),
         query: &str,
+        caret: usize,
+        selection: Option<(usize, usize)>,
         rows: &[(&str, Option<&str>)],
         sel: usize,
         mouse: (f32, f32),
@@ -554,6 +578,18 @@ impl App {
         // Leading prompt chevron.
         renderer.push_overlay_glyph_px(cx.round(), ty, '\u{203A}', color::accent());
         cx += cell_w * 1.6;
+        // The query text starts after the chevron; used for caret + selection x.
+        let text_x0 = field.x + pad + cell_w * 1.6;
+        // Selection band behind the glyphs.
+        if let Some((lo, hi)) = selection
+            && hi > lo
+        {
+            let sx = text_x0 + lo as f32 * cell_w;
+            let sw = (hi - lo) as f32 * cell_w;
+            let mut band = color::selection_bg();
+            band[3] = 0.45;
+            renderer.push_overlay_px(sx.round(), ty, sw.round(), cell_h, band);
+        }
         if query.is_empty() {
             for ch in "Type a command…".chars() {
                 renderer.push_overlay_glyph_px(cx.round(), ty, ch, gui::fg_dim());
@@ -565,7 +601,7 @@ impl App {
                 cx += cell_w;
             }
         }
-        let caret_x = field.x + pad + cell_w * 1.6 + query.chars().count() as f32 * cell_w;
+        let caret_x = text_x0 + caret as f32 * cell_w;
         renderer.push_overlay_px(caret_x.round(), ty, 2.0, cell_h, color::accent());
 
         // --- List ---------------------------------------------------------------

@@ -103,8 +103,10 @@ fn settings_focus_order_matches_gui_ids_and_is_distinct() {
     assert_eq!(order[9], gui::id("settings/follow_system"));
     assert_eq!(order[10], gui::id("settings/ligatures"));
     assert_eq!(order[11], gui::id("settings/restore_session"));
-    assert_eq!(order[12], gui::id("settings/config"));
-    assert_eq!(order[13], gui::id("settings/save"));
+    assert_eq!(order[12], gui::id("settings/word_separator"));
+    assert_eq!(order[13], gui::id("settings/font_features"));
+    assert_eq!(order[14], gui::id("settings/config"));
+    assert_eq!(order[15], gui::id("settings/save"));
     for (i, a) in order.iter().enumerate() {
         for b in order.iter().skip(i + 1) {
             assert_ne!(a, b);

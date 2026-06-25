@@ -28,10 +28,14 @@ use crate::renderer::Renderer;
 
 mod chrome;
 mod help;
+mod textedit;
+mod textinput;
 mod widgets;
 
 pub use chrome::*;
 pub use help::*;
+pub use textedit::*;
+pub use textinput::*;
 pub use widgets::*;
 
 /// Combine a base widget id with a sub-index (segments / stepper buttons).

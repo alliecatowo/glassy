@@ -2,6 +2,22 @@
 
 use super::*;
 
+/// Mutable editing models for the settings form's editable text fields, threaded
+/// into [`Ui::build_settings`] alongside the read-only [`SettingsView`]. Owned by
+/// the App across frames so caret / selection / scroll survive between paints.
+pub struct SettingsFields<'a> {
+    /// "Word seps" field model + its mouse drag state.
+    pub word_sep: &'a mut TextEdit,
+    pub word_sep_ms: &'a mut TextInputMouse,
+    /// "Font features" field model + its mouse drag state.
+    pub font_feat: &'a mut TextEdit,
+    pub font_feat_ms: &'a mut TextInputMouse,
+    /// Current cursor-blink phase (reuse the app blink timer).
+    pub blink_on: bool,
+    /// True on the frame a double-click landed (for word-select in a field).
+    pub double_click: bool,
+}
+
 impl<'r> Ui<'r> {
     /// Build the whole Ctrl+, settings form (§3.5): a full-screen scrim, one
     /// centered glass panel with a header (`glassy — settings` + ✕), labelled
@@ -13,7 +29,12 @@ impl<'r> Ui<'r> {
     ///
     /// `surface` is the framebuffer size in px (for centering + the scrim). The
     /// returned [`SettingsEvents`] carry every change back to the App.
-    pub fn build_settings(&mut self, surface: (f32, f32), v: &SettingsView) -> SettingsEvents {
+    pub fn build_settings(
+        &mut self,
+        surface: (f32, f32),
+        v: &SettingsView,
+        fields: &mut SettingsFields,
+    ) -> SettingsEvents {
         let mut ev = SettingsEvents::default();
         let m = self.m;
 
@@ -242,35 +263,29 @@ impl<'r> Ui<'r> {
         }
         y += step;
 
-        // -- Word separators (readonly display) ------------------------------
+        // -- Word separators (editable) --------------------------------------
         row_label(self, y, "Word seps");
-        let ws = if v.word_separator.is_empty() {
-            "(default)"
-        } else {
-            v.word_separator
-        };
-        self.text_field_readonly(
+        self.text_input(
             id("settings/word_separator"),
             ctrl_rect(y, ctrl_w),
-            ws,
-            false,
-            false,
+            fields.word_sep,
+            fields.word_sep_ms,
+            "(default)",
+            fields.blink_on,
+            fields.double_click,
         );
         y += step;
 
-        // -- Font features (readonly display) --------------------------------
+        // -- Font features (editable) ----------------------------------------
         row_label(self, y, "Font features");
-        let ff = if v.font_features.is_empty() {
-            "(none)"
-        } else {
-            v.font_features
-        };
-        self.text_field_readonly(
+        self.text_input(
             id("settings/font_features"),
             ctrl_rect(y, ctrl_w),
-            ff,
-            false,
-            false,
+            fields.font_feat,
+            fields.font_feat_ms,
+            "ss01 calt=0 …",
+            fields.blink_on,
+            fields.double_click,
         );
         y += step;
 

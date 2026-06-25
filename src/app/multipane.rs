@@ -98,11 +98,11 @@ impl App {
         // Tab-bar state snapshot (owned data) for the pixel-overlay painter, taken
         // under the immutable `&self` borrow.
         let tab_snapshot = self.tab_bar_snapshot();
-        let rename_inputs = self.tab_rename_state().and_then(|(pos, buf)| {
+        let rename_inputs = self.tab_rename_state().and_then(|(pos, buf, caret, sel)| {
             self.tab_layout()
                 .into_iter()
                 .find(|s| s.item == StripItem::Tab(pos))
-                .map(|s| (s.rect, buf))
+                .map(|s| (s.rect, buf, caret, sel))
         });
         let tab_focused = self.focused;
         let tab_hovered = self.hovered_strip_item;
@@ -449,8 +449,8 @@ impl App {
         }
 
         // Inline tab-rename editor, drawn over its chip on top of the tab bar.
-        if let Some((rect, buf)) = &rename_inputs {
-            Self::paint_tab_rename(renderer, *rect, buf);
+        if let Some((rect, buf, caret, sel)) = &rename_inputs {
+            Self::paint_tab_rename(renderer, *rect, buf, *caret, *sel);
         }
 
         // Pane title bars: one per leaf, drawn as overlay quads+glyphs so they
@@ -505,6 +505,14 @@ impl App {
         )) = settings_inputs
         {
             let font_px = renderer.font_px();
+            let mut fields = gui::SettingsFields {
+                word_sep: &mut self.settings_word_sep,
+                word_sep_ms: &mut self.settings_word_sep_ms,
+                font_feat: &mut self.settings_font_feat,
+                font_feat_ms: &mut self.settings_font_feat_ms,
+                blink_on: self.blink_on,
+                double_click: self.gui_double_click,
+            };
             settings_events = Some(Self::paint_settings(
                 renderer,
                 &self.config,
@@ -521,6 +529,7 @@ impl App {
                 &mut self.gui_pressed,
                 &mut self.gui_focused,
                 &mut self.gui_anims,
+                &mut fields,
             ));
         } else if self.help_open {
             // Real GUI help panel (§3.7) in split mode.
@@ -568,13 +577,17 @@ impl App {
 
         // Find bar + match highlights (Ctrl+Shift+F) in split mode. Highlights are
         // anchored to the focused pane's body rect (search targets the focused pane).
-        if let Some(((query, count, current, bad_regex), highlights)) = &search_inputs {
+        if let Some(((query, caret, selection, count, current, bad_regex), highlights)) =
+            &search_inputs
+        {
             let (sw, sh) = renderer.surface_size();
             Self::paint_search(
                 renderer,
                 (sw as f32, sh as f32),
                 search_origin,
                 query,
+                *caret,
+                *selection,
                 *count,
                 *current,
                 *bad_regex,
@@ -583,7 +596,7 @@ impl App {
         }
 
         // Command palette (Ctrl+Shift+P) in split mode: topmost modal.
-        if let Some((query, rows, sel)) = &palette_inputs {
+        if let Some((query, caret, selection, rows, sel)) = &palette_inputs {
             let (sw, sh) = renderer.surface_size();
             let row_refs: Vec<(&str, Option<&str>)> =
                 rows.iter().map(|(l, h)| (l.as_str(), *h)).collect();
@@ -591,6 +604,8 @@ impl App {
                 renderer,
                 (sw as f32, sh as f32),
                 query,
+                *caret,
+                *selection,
                 &row_refs,
                 *sel,
                 mouse_px_f,
@@ -619,6 +634,8 @@ impl App {
             self.overlay_opened_by_press = false;
         }
         self.gui_click_edge = false;
+        // Consume the chrome double-click edge (one frame of word-select).
+        self.gui_double_click = false;
 
         // Cache the focused pane's blink state (single lock here, on an actual
         // repaint) so about_to_wait never takes the term lock per event.

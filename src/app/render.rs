@@ -68,11 +68,11 @@ impl App {
         // Inline tab-rename editor (drawn over its chip after the tab bar). The
         // blinking caret is omitted (static) so it never forces extra repaints.
         // Resolve the chip rect here (under `&self`) so the painter just draws.
-        let rename_inputs = self.tab_rename_state().and_then(|(pos, buf)| {
+        let rename_inputs = self.tab_rename_state().and_then(|(pos, buf, caret, sel)| {
             self.tab_layout()
                 .into_iter()
                 .find(|s| s.item == StripItem::Tab(pos))
-                .map(|s| (s.rect, buf))
+                .map(|s| (s.rect, buf, caret, sel))
         });
         let tab_focused = self.focused;
         let tab_hovered = self.hovered_strip_item;
@@ -685,8 +685,8 @@ impl App {
 
         // Inline tab-rename editor: an opaque text field drawn over the chip being
         // renamed, on top of the (cached) tab bar so the caret/edits are live.
-        if let Some((rect, buf)) = &rename_inputs {
-            Self::paint_tab_rename(renderer, *rect, buf);
+        if let Some((rect, buf, caret, sel)) = &rename_inputs {
+            Self::paint_tab_rename(renderer, *rect, buf, *caret, *sel);
         }
 
         // Status bar (§3.4): E1 bar at the very bottom, always above the terminal
@@ -711,7 +711,9 @@ impl App {
         // grid/status bar but below the palette/settings/help modals (a modal scrim
         // dims it like everything else). Highlights are anchored to the grid by the
         // same pixel origin as the cells (grid_origin_y).
-        if let Some(((query, count, current, bad_regex), highlights)) = &search_inputs {
+        if let Some(((query, caret, selection, count, current, bad_regex), highlights)) =
+            &search_inputs
+        {
             let (sw, sh) = renderer.surface_size();
             let pad = renderer.pad();
             let goy = renderer.grid_origin_y();
@@ -720,6 +722,8 @@ impl App {
                 (sw as f32, sh as f32),
                 (pad, pad + goy),
                 query,
+                *caret,
+                *selection,
                 *count,
                 *current,
                 *bad_regex,
@@ -730,7 +734,7 @@ impl App {
         // Command palette (Ctrl+Shift+P): centered fuzzy action list over a scrim.
         // Topmost modal. The row rects it returns are stored for mouse hit-testing
         // (mouse_px is read up-front so no `self` borrow collides with `renderer`).
-        if let Some((query, rows, sel)) = &palette_inputs {
+        if let Some((query, caret, selection, rows, sel)) = &palette_inputs {
             let (sw, sh) = renderer.surface_size();
             let mouse = (self.mouse_px.0 as f32, self.mouse_px.1 as f32);
             let row_refs: Vec<(&str, Option<&str>)> =
@@ -739,6 +743,8 @@ impl App {
                 renderer,
                 (sw as f32, sh as f32),
                 query,
+                *caret,
+                *selection,
                 &row_refs,
                 *sel,
                 mouse,
@@ -763,6 +769,14 @@ impl App {
         )) = settings_inputs
         {
             let font_px = renderer.font_px();
+            let mut fields = gui::SettingsFields {
+                word_sep: &mut self.settings_word_sep,
+                word_sep_ms: &mut self.settings_word_sep_ms,
+                font_feat: &mut self.settings_font_feat,
+                font_feat_ms: &mut self.settings_font_feat_ms,
+                blink_on: self.blink_on,
+                double_click: self.gui_double_click,
+            };
             settings_events = Some(Self::paint_settings(
                 renderer,
                 &self.config,
@@ -779,6 +793,7 @@ impl App {
                 &mut self.gui_pressed,
                 &mut self.gui_focused,
                 &mut self.gui_anims,
+                &mut fields,
             ));
         } else if self.help_open {
             // Real GUI help panel (§3.7): scrollable two-column keybindings over
@@ -900,6 +915,9 @@ impl App {
             self.overlay_opened_by_press = false;
         }
         self.gui_click_edge = false;
+        // The double-click edge for chrome text fields is consumed by this same
+        // paint (it drives one frame of word-select); drop it now.
+        self.gui_double_click = false;
 
         // The renderer self-heals lost/outdated surfaces internally. If a frame is
         // dropped (e.g. transient surface loss), the damage we consumed + the rows

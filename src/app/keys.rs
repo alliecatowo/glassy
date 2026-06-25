@@ -315,6 +315,11 @@ impl App {
                 return;
             }
             if self.settings_open {
+                // An editable text field (Word seps / Font features) gets first
+                // crack at the key; only nav/commit keys fall through to the form.
+                if self.handle_settings_field_key(key, event_loop) {
+                    return;
+                }
                 self.handle_settings_key(key.clone(), event_loop);
             }
             return; // consume all other keys while an overlay is up
