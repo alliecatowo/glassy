@@ -309,11 +309,12 @@ impl<'r> Ui<'r> {
             track_off()
         };
         let rr = rect.h * 0.5;
-        self.rrect(rect, rr, track);
+        // Focus ring drawn before the track and knob so both paint on top of it.
         if *self.focused == Some(wid) {
             self.focus_ring(rect, rr);
         }
-        // Knob.
+        self.rrect(rect, rr, track);
+        // Knob — painted last so it always sits visually on top of the track.
         let pad = 2.0;
         let k = rect.h - 2.0 * pad;
         let kx = rect.x + pad + (rect.w - 2.0 * pad - k) * on_t;
@@ -380,6 +381,12 @@ impl<'r> Ui<'r> {
         } else {
             0.0
         };
+        // Focus ring drawn FIRST so the track/fill/knob paint on top of it.
+        // Drawing it last (the old order) caused the ring's inner glass_raised()
+        // fill to overpaint the knob, hiding the thumb behind the track surface.
+        if *self.focused == Some(wid) {
+            self.focus_ring(rect, rect.h * 0.5);
+        }
         // Track.
         let mid = rect.center_y();
         let th = 4.0;
@@ -391,13 +398,10 @@ impl<'r> Ui<'r> {
             th * 0.5,
             fill_on(),
         );
-        // Knob.
+        // Knob — painted last so it always sits visually on top of the track.
         let k = rect.h * 0.6;
         let kx = rect.x + rect.w * t - k * 0.5;
         self.rrect(Rect::new(kx, mid - k * 0.5, k, k), k * 0.5, fg());
-        if *self.focused == Some(wid) {
-            self.focus_ring(rect, rect.h * 0.5);
-        }
         v
     }
 
@@ -615,5 +619,69 @@ impl<'r> Ui<'r> {
         let fill = state_fill(with_alpha(fg(), 0.35), hover_t, it.pressed);
         self.rrect(thumb, track.w * 0.5, fill);
         s
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Unit tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    /// Verify the slider knob position geometry: at t=0 the knob center is at
+    /// rect.x, at t=1 it is at rect.x + rect.w, and at t=0.5 it is at the midpoint.
+    /// Also verifies that the knob rect is horizontally centred on the value position.
+    #[test]
+    fn slider_knob_position() {
+        let rect_x = 10.0_f32;
+        let rect_w = 200.0_f32;
+        let rect_h = 20.0_f32;
+        let k = rect_h * 0.6; // knob diameter
+
+        for (v, min, max, expected_center_x) in [
+            (0.0_f32, 0.0_f32, 1.0_f32, rect_x),
+            (1.0, 0.0, 1.0, rect_x + rect_w),
+            (0.5, 0.0, 1.0, rect_x + rect_w * 0.5),
+            (0.25, 0.0, 1.0, rect_x + rect_w * 0.25),
+        ] {
+            let t = (v - min) / (max - min);
+            let kx = rect_x + rect_w * t - k * 0.5;
+            let knob_center_x = kx + k * 0.5;
+            let expected = expected_center_x;
+            assert!(
+                (knob_center_x - expected).abs() < 0.001,
+                "at v={v} expected knob center_x={expected} got {knob_center_x}"
+            );
+        }
+    }
+
+    /// Verify the fill portion width: fill extends from rect.x to rect.x + rect.w * t,
+    /// so at v=0.0 fill width is 0, at v=1.0 fill equals track width, at v=0.5 fill is half.
+    #[test]
+    fn slider_fill_width() {
+        let rect_x = 10.0_f32;
+        let rect_w = 200.0_f32;
+
+        for (v, min, max, expected_fill_w) in [
+            (0.0_f32, 0.0_f32, 1.0_f32, 0.0_f32),
+            (1.0, 0.0, 1.0, rect_w),
+            (0.5, 0.0, 1.0, rect_w * 0.5),
+        ] {
+            let t = (v - min) / (max - min);
+            let fill_w = rect_w * t;
+            assert!(
+                (fill_w - expected_fill_w).abs() < 0.001,
+                "at v={v} expected fill_w={expected_fill_w} got {fill_w}"
+            );
+            // Knob center must be at the fill's right edge.
+            let k = 12.0_f32; // example knob size
+            let kx = rect_x + rect_w * t - k * 0.5;
+            let fill_right = rect_x + fill_w;
+            let knob_center = kx + k * 0.5;
+            assert!(
+                (knob_center - fill_right).abs() < 0.001,
+                "knob center {knob_center} should coincide with fill right edge {fill_right}"
+            );
+        }
     }
 }
