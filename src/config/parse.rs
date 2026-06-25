@@ -49,6 +49,9 @@ pub(super) struct RawConfig {
     pub color_ansi: Option<[Option<String>; 16]>,
     pub profiles: HashMap<String, Vec<(String, String)>>,
     pub keybinding_overrides: Vec<(String, String)>,
+    // Cursor defaults (new in cursor-cfg stream)
+    pub cursor_style: Option<String>,
+    pub cursor_blink: Option<bool>,
 }
 
 impl RawConfig {
@@ -133,6 +136,8 @@ impl RawConfig {
             restore_session: self.restore_session.unwrap_or(false),
             copy_on_select: self.copy_on_select.unwrap_or(false),
             keymap: build_keymap(default_keymap(), &self.keybinding_overrides),
+            cursor_style: parse_cursor_style_config(self.cursor_style.as_deref()),
+            cursor_blink: self.cursor_blink.unwrap_or(false),
         };
 
         Ok(super::Settings { config, theme })
@@ -497,11 +502,34 @@ pub(super) fn apply_kv(key: &str, value: &str, raw: &mut RawConfig) -> Result<()
                 log::warn!("glassy: ignoring invalid color key '{k}'");
             }
         }
+        "cursor_style" => {
+            let lower = value.to_ascii_lowercase();
+            match lower.as_str() {
+                "block" | "beam" | "underline" => {
+                    raw.cursor_style = Some(lower);
+                }
+                _ => {
+                    bail!("cursor_style must be block, beam, or underline; got '{value}'");
+                }
+            }
+        }
+        "cursor_blink" => {
+            raw.cursor_blink = Some(parse_bool(value, "cursor_blink")?);
+        }
         other => {
             log::warn!("glassy: ignoring unknown config key '{other}'");
         }
     }
     Ok(())
+}
+
+/// Parse a cursor style string into the app config enum (block is the default).
+pub(crate) fn parse_cursor_style_config(s: Option<&str>) -> crate::app::CursorStyleConfig {
+    match s {
+        Some("beam") => crate::app::CursorStyleConfig::Beam,
+        Some("underline") => crate::app::CursorStyleConfig::Underline,
+        _ => crate::app::CursorStyleConfig::Block,
+    }
 }
 
 /// Parse a boolean for a named field, accepting the usual spellings.

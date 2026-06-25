@@ -421,6 +421,10 @@ pub struct SettingsView<'a> {
     pub word_separator: &'a str,
     /// OpenType font-feature tags as a single display string (e.g. "ss01 calt=0").
     pub font_features: &'a str,
+    /// Default cursor shape index: 0=Block, 1=Beam, 2=Underline.
+    pub cursor_style_idx: usize,
+    /// Default cursor blink enabled.
+    pub cursor_blink: bool,
 }
 
 /// Everything the settings form reported this frame. The App applies each
@@ -466,6 +470,10 @@ pub struct SettingsEvents {
     pub restore_session_toggle: bool,
     /// Padding stepper delta in clicks (-1 / 0 / +1).
     pub padding_delta: i32,
+    /// New cursor-shape index if the segmented control changed.
+    pub cursor_style: Option<usize>,
+    /// Cursor-blink toggle was clicked.
+    pub cursor_blink_toggle: bool,
 }
 
 // ---------------------------------------------------------------------------

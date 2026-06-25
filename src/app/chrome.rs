@@ -334,6 +334,11 @@ impl App {
             gui_focused,
             gui_anims,
         );
+        let cursor_style_idx = match config.cursor_style {
+            crate::app::CursorStyleConfig::Block => 0,
+            crate::app::CursorStyleConfig::Beam => 1,
+            crate::app::CursorStyleConfig::Underline => 2,
+        };
         let view = gui::SettingsView {
             font_px,
             opacity: config.opacity,
@@ -356,6 +361,8 @@ impl App {
             padding: padding_px,
             word_separator: &config.word_separator,
             font_features: &font_features_str,
+            cursor_style_idx,
+            cursor_blink: config.cursor_blink,
         };
         ui.build_settings((sw as f32, sh as f32), &view, fields)
     }
@@ -445,6 +452,15 @@ impl App {
         }
         if ev.padding_delta != 0 {
             self.adjust_padding(ev.padding_delta);
+            changed = true;
+        }
+        if let Some(cs_idx) = ev.cursor_style {
+            self.set_cursor_style_index(cs_idx);
+            changed = true;
+        }
+        if ev.cursor_blink_toggle {
+            self.config.cursor_blink = !self.config.cursor_blink;
+            self.settings_saved = false;
             changed = true;
         }
         if ev.copy_path {

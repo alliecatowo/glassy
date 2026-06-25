@@ -159,6 +159,8 @@ impl App {
                     cwd.clone(),
                     self.config.scrollback,
                     &self.config.word_separator,
+                    self.config.cursor_style.to_cursor_shape(),
+                    self.config.cursor_blink,
                 ) {
                     Ok(p) => p,
                     Err(e) => {
@@ -303,6 +305,8 @@ impl App {
             None,
             self.config.scrollback,
             &self.config.word_separator,
+            self.config.cursor_style.to_cursor_shape(),
+            self.config.cursor_blink,
         ) {
             self.active_id = self.next_id;
             self.tab_order.push(self.next_id);

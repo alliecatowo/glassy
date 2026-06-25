@@ -464,6 +464,8 @@ impl Pty {
         working_directory: Option<PathBuf>,
         scrollback: usize,
         word_separator: &str,
+        default_cursor_shape: alacritty_terminal::vte::ansi::CursorShape,
+        default_cursor_blink: bool,
     ) -> anyhow::Result<Pty> {
         tty::setup_env();
 
@@ -504,6 +506,10 @@ impl Pty {
         let config = Config {
             scrolling_history: scrollback,
             semantic_escape_chars,
+            default_cursor_style: alacritty_terminal::vte::ansi::CursorStyle {
+                shape: default_cursor_shape,
+                blinking: default_cursor_blink,
+            },
             ..Config::default()
         };
         let term = Arc::new(FairMutex::new(Term::new(

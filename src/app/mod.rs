@@ -143,6 +143,41 @@ pub struct Config {
     /// defaults). Built once at config resolution time by [`crate::config`] and
     /// consulted by the keyboard handler before the hard-coded fallback paths.
     pub keymap: crate::config::KeyMap,
+    /// Default cursor shape shown when the child has not issued DECSCUSR.
+    /// `block` (default) | `beam` | `underline`. DECSCUSR from the app still
+    /// overrides at runtime (the terminal layer wins over the config default).
+    pub cursor_style: CursorStyleConfig,
+    /// Whether the cursor blinks by default (when the child has not set a
+    /// blinking/steady style via DECSCUSR). Default false (steady).
+    pub cursor_blink: bool,
+}
+
+/// The three user-facing default cursor shapes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum CursorStyleConfig {
+    #[default]
+    Block,
+    Beam,
+    Underline,
+}
+
+impl CursorStyleConfig {
+    /// Convert to the alacritty-terminal VTE `CursorShape`.
+    pub fn to_cursor_shape(self) -> alacritty_terminal::vte::ansi::CursorShape {
+        match self {
+            Self::Block => alacritty_terminal::vte::ansi::CursorShape::Block,
+            Self::Beam => alacritty_terminal::vte::ansi::CursorShape::Beam,
+            Self::Underline => alacritty_terminal::vte::ansi::CursorShape::Underline,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Block => "block",
+            Self::Beam => "beam",
+            Self::Underline => "underline",
+        }
+    }
 }
 
 /// A tab's split layout: the tiling tree (whose leaf ids are pty/pane ids) plus
