@@ -266,14 +266,14 @@ impl App {
             return false;
         }
         let (x, y) = self.mouse_px;
-        // The tab bar occupies the pixel band [0, tab_bar_h); 0 when hidden, so the
-        // band is empty and every click falls through to the terminal/panes.
-        if y >= self.effective_tab_bar_h() as f64 {
+        // Hit-test against the pixel layout (the same helper the painter uses, so
+        // click targets match what's drawn). When the full bar is hidden, `tab_layout`
+        // returns only the floating icon segments, so clicks anywhere else return None
+        // and fall through to the terminal — no separate y-range guard needed.
+        let item = self.strip_item_at_px(x as f32, y as f32);
+        if item.is_none() {
             return false;
         }
-        // Hit-test against the pixel tab-bar layout (the same helper the painter
-        // uses, so click targets match what's drawn).
-        let item = self.strip_item_at_px(x as f32, y as f32);
         // Record the pressed item so the strip draws it inset (released in the
         // MouseInput handler), giving the click visible tactility.
         self.held_strip_item = item;
