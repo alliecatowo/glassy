@@ -109,6 +109,7 @@ impl App {
             toasts: Vec::new(),
             confirm_close: None,
             pending_confirm_execute: false,
+            fold_state: command_blocks::FoldState::default(),
         }
     }
 

@@ -264,6 +264,14 @@ impl ApplicationHandler<UserEvent> for App {
             }
         }
 
+        // Headless: inject synthetic OSC-133 command blocks so the Warp-style
+        // exit-status/duration badges (and a folded block) can be captured without
+        // a real shell-integration script. GLASSY_CMDBLOCK=1 seeds a few blocks.
+        if std::env::var_os("GLASSY_CMDBLOCK").is_some() {
+            self.inject_demo_command_blocks();
+            self.force_full_redraw = true;
+        }
+
         // Draw the first frame, then reveal the window (avoids a white flash).
         self.next_frame = Instant::now();
         self.render();

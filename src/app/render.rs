@@ -142,6 +142,36 @@ impl App {
             .and_then(|p| p.pane_info.git_branch.clone());
         let sb_progress = self.active_progress;
 
+        // Command-block badges + fold ranges (OSC 133 shell integration). Built
+        // here under the `&self` borrow so the renderer gets plain owned data.
+        // Empty (and cheap) when no blocks exist or the feature is disabled.
+        let (cmd_badges, cmd_fold_ranges) = if self.config.command_badges {
+            self.pty
+                .as_ref()
+                .and_then(|p| {
+                    let disp = p.term.lock().grid().display_offset() as i32;
+                    p.prompts.lock().ok().map(|g| {
+                        (
+                            command_blocks::build_badges(
+                                &g.blocks,
+                                &self.fold_state,
+                                disp,
+                                self.rows,
+                            ),
+                            command_blocks::build_fold_ranges(
+                                &g.blocks,
+                                &self.fold_state,
+                                disp,
+                                self.rows,
+                            ),
+                        )
+                    })
+                })
+                .unwrap_or_default()
+        } else {
+            (Vec::new(), Vec::new())
+        };
+
         // Settings-form inputs (whole-`self` method calls) snapshotted BEFORE the
         // disjoint `renderer`/`pty` borrows below.
         let settings_inputs = if self.settings_open {
@@ -657,6 +687,20 @@ impl App {
                     renderer.draw_image(p.id, &img.rgba, img.width, img.height, x, y, dst_w, dst_h);
                 }
             }
+        }
+
+        // Command-block affordances (OSC 133): the dim+summary overlay for folded
+        // output and the exit-status/duration badges, anchored to the grid by the
+        // same pixel origin as the cells. Suppressed under a modal so they don't
+        // punch through. Painted after images so badges read on top.
+        if !self.help_open && !self.settings_open && !self.menu_open && self.palette.is_none() {
+            Self::paint_command_blocks(
+                renderer,
+                self.cols,
+                self.rows,
+                &cmd_badges,
+                &cmd_fold_ranges,
+            );
         }
 
         // Real GUI tab bar (§3.1): painted over the pixel band [0, tab_bar_h) as

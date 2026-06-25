@@ -163,11 +163,16 @@ pub(super) fn dispatch(
             }
             return;
         }
-        UserEvent::SemanticMark(_id, _mark) => {
-            // OSC 133 semantic mark: the PromptTracker on the Pty already
-            // recorded the row offset for 'A' marks. No redraw needed; this
-            // event is a notification hook for future UI use (e.g. prompt-count
-            // in the status bar or Shift+Up/Down keybind wiring in app/input.rs).
+        UserEvent::SemanticMark(id, mark, _exit) => {
+            // OSC 133 semantic mark: the PromptTracker on the Pty already recorded
+            // the row offset, timing, and exit status (command-block tracking).
+            // A `D` mark finishes a command, which changes the exit-status badge +
+            // duration the active pane draws — repaint it. A/B/C don't change what
+            // is currently visible, so skip the redraw for those to preserve the
+            // 0%-idle invariant during heavy prompt churn.
+            if mark == 'D' && id == app.active_focused_id() {
+                app.mark_dirty(event_loop);
+            }
             return;
         }
         UserEvent::Notification(_id, text) => {

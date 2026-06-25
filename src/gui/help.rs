@@ -401,6 +401,7 @@ const HELP_ACTION_ORDER: &[KeyAction] = &[
     KeyAction::ScrollDown,
     KeyAction::ScrollTop,
     KeyAction::ScrollBottom,
+    KeyAction::ToggleFold,
     // App
     KeyAction::Settings,
     KeyAction::CommandPalette,

@@ -204,9 +204,12 @@ pub enum TapEvent {
     Cwd(std::path::PathBuf),
     /// OSC 133 shell-integration semantic mark. The mark character is one of:
     /// `A` (prompt start), `B` (command start), `C` (command executed), `D`
-    /// (command finished). The original OSC bytes are still passed through to the
-    /// VT parser. Used to record prompt-line offsets for Shift+Up/Down navigation.
-    SemanticMark(char),
+    /// (command finished). For a `D` mark the optional `i32` is the command's
+    /// exit code (`133;D;<exit>`); it is `None` for A/B/C and for a bare `D`
+    /// without an exit code. The original OSC bytes are still passed through to
+    /// the VT parser. Used to record per-command zones (prompt rows, exit status,
+    /// duration) for command-block grouping + jump-to-prompt navigation.
+    SemanticMark(char, Option<i32>),
     /// OSC 9 (iTerm2 / ConEmu style) or OSC 777 (terminal-notifier style) desktop
     /// notification request from the running shell. The payload is the notification
     /// body text. The original OSC bytes are still passed through to the VT parser.
@@ -478,7 +481,8 @@ impl StreamTap {
             return Some(ev);
         }
         // OSC 133 — shell-integration semantic marks: `133;A`, `133;B`, etc.
-        parse_osc133_mark(&osc).map(TapEvent::SemanticMark)
+        // (and `133;D;<exit>` carrying the command's exit code).
+        parse_osc133_mark(&osc).map(|(mark, exit)| TapEvent::SemanticMark(mark, exit))
     }
 }
 
@@ -566,21 +570,36 @@ pub(crate) fn parse_osc777_notification(body: &[u8]) -> Option<TapEvent> {
     Some(TapEvent::Notification(text))
 }
 
-/// Parse an OSC 133 body (`133;<mark>`) into a shell-integration semantic mark.
+/// Parse an OSC 133 body (`133;<mark>`) into a shell-integration semantic mark
+/// plus an optional exit code.
+///
 /// Valid marks are `A` (prompt start), `B` (command start), `C` (command
-/// executed), `D` (command finished). Extra params after the mark (e.g.
-/// `D;0` for exit code) are ignored — we only care about the mark type here.
-/// Returns the mark character, or `None` if not a valid OSC 133 sequence.
-pub(crate) fn parse_osc133_mark(body: &[u8]) -> Option<char> {
+/// executed), `D` (command finished). For a `D` mark, an exit code may follow
+/// as `133;D;<exit>` (e.g. `133;D;0` success, `133;D;1` failure, `133;D;130`
+/// SIGINT); the exit field is parsed into the returned `Option<i32>`. iTerm2's
+/// `aid=` / key=value params (e.g. `133;D;1;aid=123`) are tolerated — only the
+/// first field after `D` is read as the exit code, and it is ignored if it is
+/// not a bare integer.
+///
+/// Returns `(mark, exit_code)`, or `None` if not a valid OSC 133 sequence. The
+/// exit code is `None` for A/B/C and for a bare `D` with no numeric exit field.
+pub(crate) fn parse_osc133_mark(body: &[u8]) -> Option<(char, Option<i32>)> {
     let body = std::str::from_utf8(body).ok()?;
     let rest = body.strip_prefix("133;")?;
     // The mark is the first character; optional params follow after ';'.
     let mark = rest.chars().next()?;
-    if matches!(mark, 'A' | 'B' | 'C' | 'D') {
-        Some(mark)
+    if !matches!(mark, 'A' | 'B' | 'C' | 'D') {
+        return None;
+    }
+    // For D, read the first field after the mark as the exit code (if numeric).
+    let exit = if mark == 'D' {
+        rest.strip_prefix("D;")
+            .map(|p| p.split(';').next().unwrap_or(""))
+            .and_then(|f| f.trim().parse::<i32>().ok())
     } else {
         None
-    }
+    };
+    Some((mark, exit))
 }
 
 /// Whether an OSC 7 `file://` authority refers to the local machine: empty,

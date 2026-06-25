@@ -360,7 +360,7 @@ mod tests {
                 TapEvent::Display(_) => "display",
                 TapEvent::Delete(_) => "delete",
                 TapEvent::Cwd(_) => "cwd",
-                TapEvent::SemanticMark(_) => "mark",
+                TapEvent::SemanticMark(_, _) => "mark",
                 TapEvent::Notification(_) => "notification",
                 TapEvent::Progress(_) => "progress",
             })
@@ -670,10 +670,18 @@ mod tests {
         events
             .iter()
             .filter_map(|e| match e {
-                TapEvent::SemanticMark(c) => Some(*c),
+                TapEvent::SemanticMark(c, _) => Some(*c),
                 _ => None,
             })
             .collect()
+    }
+
+    /// Helper: extract the exit code carried by the first `D` SemanticMark.
+    fn first_exit_code(events: &[TapEvent]) -> Option<i32> {
+        events.iter().find_map(|e| match e {
+            TapEvent::SemanticMark('D', exit) => Some(*exit),
+            _ => None,
+        })?
     }
 
     #[test]
@@ -713,14 +721,31 @@ mod tests {
     #[test]
     fn osc133_mark_parsed() {
         use super::store::parse_osc133_mark;
-        assert_eq!(parse_osc133_mark(b"133;A"), Some('A'));
-        assert_eq!(parse_osc133_mark(b"133;B"), Some('B'));
-        assert_eq!(parse_osc133_mark(b"133;C"), Some('C'));
-        // D with optional params (exit code).
-        assert_eq!(parse_osc133_mark(b"133;D;0"), Some('D'));
+        assert_eq!(parse_osc133_mark(b"133;A"), Some(('A', None)));
+        assert_eq!(parse_osc133_mark(b"133;B"), Some(('B', None)));
+        assert_eq!(parse_osc133_mark(b"133;C"), Some(('C', None)));
+        // D carries the exit code.
+        assert_eq!(parse_osc133_mark(b"133;D;0"), Some(('D', Some(0))));
+        assert_eq!(parse_osc133_mark(b"133;D;1"), Some(('D', Some(1))));
+        assert_eq!(parse_osc133_mark(b"133;D;130"), Some(('D', Some(130))));
+        // Bare D with no exit field → mark with no code.
+        assert_eq!(parse_osc133_mark(b"133;D"), Some(('D', None)));
+        // iTerm2 key=value params after the exit code are tolerated.
+        assert_eq!(parse_osc133_mark(b"133;D;2;aid=7"), Some(('D', Some(2))));
+        // Non-numeric exit field is ignored (mark still recognized).
+        assert_eq!(parse_osc133_mark(b"133;D;err"), Some(('D', None)));
         // Wrong OSC code or unknown mark.
         assert_eq!(parse_osc133_mark(b"133;X"), None);
         assert_eq!(parse_osc133_mark(b"7;A"), None);
+    }
+
+    #[test]
+    fn tap_osc133_d_mark_carries_exit_code() {
+        // The tap must surface the D mark's exit code in the SemanticMark event.
+        let store = FairMutex::new(ImageStore::new());
+        let mut tap = StreamTap::new();
+        let events = tap.process(b"\x1b]133;D;42\x07", &store);
+        assert_eq!(first_exit_code(&events), Some(42));
     }
 
     #[test]

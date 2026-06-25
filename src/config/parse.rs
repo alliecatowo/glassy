@@ -42,6 +42,7 @@ pub(super) struct RawConfig {
     pub cwd: Option<String>,
     pub restore_session: Option<bool>,
     pub copy_on_select: Option<bool>,
+    pub command_badges: Option<bool>,
     pub color_fg: Option<String>,
     pub color_bg: Option<String>,
     pub color_cursor: Option<String>,
@@ -132,6 +133,7 @@ impl RawConfig {
             initial_cwd: self.cwd.filter(|s| !s.is_empty()).map(PathBuf::from),
             restore_session: self.restore_session.unwrap_or(false),
             copy_on_select: self.copy_on_select.unwrap_or(false),
+            command_badges: self.command_badges.unwrap_or(true),
             keymap: build_keymap(default_keymap(), &self.keybinding_overrides),
         };
 
@@ -463,6 +465,9 @@ pub(super) fn apply_kv(key: &str, value: &str, raw: &mut RawConfig) -> Result<()
         }
         "copy_on_select" => {
             raw.copy_on_select = Some(parse_bool(value, "copy_on_select")?);
+        }
+        "command_badges" => {
+            raw.command_badges = Some(parse_bool(value, "command_badges")?);
         }
         "color.fg" => {
             parse_hex_color(value)?;

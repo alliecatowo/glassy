@@ -461,6 +461,7 @@ impl App {
                 }
                 self.mark_dirty(event_loop);
             }
+            ToggleFold => self.toggle_command_fold(event_loop),
         }
     }
 }

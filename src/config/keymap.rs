@@ -153,6 +153,9 @@ pub enum KeyAction {
     ScrollDown,
     ScrollTop,
     ScrollBottom,
+    /// Toggle folding (collapse/expand output) of the command block currently in
+    /// view — a Warp-style command-block affordance driven by OSC 133 marks.
+    ToggleFold,
 }
 
 impl KeyAction {
@@ -182,6 +185,7 @@ impl KeyAction {
             ScrollDown => "Scroll history down",
             ScrollTop => "Scroll to top",
             ScrollBottom => "Scroll to bottom",
+            ToggleFold => "Fold/unfold command output",
         }
     }
 
@@ -193,7 +197,9 @@ impl KeyAction {
             SplitVertical | SplitHorizontal => "Split panes",
             Copy | Paste => "Edit",
             ToggleFullscreen | ToggleMaximize | FontIncrease | FontDecrease | FontReset
-            | ToggleStatusBar | ScrollUp | ScrollDown | ScrollTop | ScrollBottom => "View",
+            | ToggleStatusBar | ScrollUp | ScrollDown | ScrollTop | ScrollBottom | ToggleFold => {
+                "View"
+            }
             Settings | Help | Search | CommandPalette => "App",
         }
     }
@@ -228,6 +234,7 @@ pub(crate) fn parse_action(s: &str) -> Result<Option<KeyAction>> {
         "scroll_down" => ScrollDown,
         "scroll_top" => ScrollTop,
         "scroll_bottom" => ScrollBottom,
+        "toggle_fold" => ToggleFold,
         other => bail!("unrecognized keybinding action '{other}'"),
     }))
 }
@@ -264,6 +271,7 @@ pub fn default_keymap() -> KeyMap {
         ("shift+pagedown", ScrollDown),
         ("shift+home", ScrollTop),
         ("shift+end", ScrollBottom),
+        ("ctrl+shift+z", ToggleFold),
     ];
     let mut map = KeyMap::new();
     for (chord_str, action) in defaults {
