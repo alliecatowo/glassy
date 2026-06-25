@@ -439,6 +439,14 @@ pub fn danger() -> [f32; 4] {
     to_f32(active().ansi16[1])
 }
 
+/// The UI success color of the active theme, derived from ANSI green — used for
+/// affirmative affordances (the command-block exit-0 badge ✓) so "success"
+/// reads as green in whatever green the theme actually uses.
+#[allow(dead_code)]
+pub fn success() -> [f32; 4] {
+    to_f32(active().ansi16[2])
+}
+
 /// Resolve a terminal `Color` (named / indexed / direct) to RGBA in [0, 1].
 pub fn resolve(color: Color, colors: &Colors) -> [f32; 4] {
     let rgb = match color {

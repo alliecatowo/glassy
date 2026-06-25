@@ -481,6 +481,7 @@ impl App {
             MoveTabRight => self.move_active_tab(1, event_loop),
             BroadcastInput => self.toggle_broadcast_input(event_loop),
             Hints => self.open_hints(event_loop),
+            ToggleFold => self.toggle_command_fold(event_loop),
         }
     }
 

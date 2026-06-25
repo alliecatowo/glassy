@@ -111,6 +111,7 @@ impl App {
             pending_confirm_execute: false,
             broadcast_input: false,
             hints: None,
+            fold_state: command_blocks::FoldState::default(),
         }
     }
 

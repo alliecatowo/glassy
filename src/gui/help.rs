@@ -391,6 +391,7 @@ const HELP_ACTION_ORDER: &[KeyAction] = &[
     // Split panes
     KeyAction::SplitVertical,
     KeyAction::SplitHorizontal,
+    KeyAction::BroadcastInput,
     // Edit
     KeyAction::Copy,
     KeyAction::Paste,
@@ -407,10 +408,12 @@ const HELP_ACTION_ORDER: &[KeyAction] = &[
     KeyAction::ScrollBottom,
     KeyAction::JumpPrevPrompt,
     KeyAction::JumpNextPrompt,
+    KeyAction::ToggleFold,
     // App
     KeyAction::Settings,
     KeyAction::CommandPalette,
     KeyAction::Search,
+    KeyAction::Hints,
     KeyAction::Help,
 ];
 

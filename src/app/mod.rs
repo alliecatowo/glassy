@@ -33,6 +33,7 @@ use crate::pty::{Pty, UserEvent};
 use crate::renderer::{CursorOverlay, Decorations, LigatureCell, Renderer, UnderlineStyle};
 
 mod chrome;
+mod command_blocks;
 mod event_loop;
 mod helpers;
 mod hints;
@@ -181,6 +182,12 @@ pub struct Config {
     /// letters (home-row-first preferred) are used to label on-screen targets
     /// instead of the built-in `asdfghjkl…` order. `None` uses the default.
     pub hints_chars: Option<String>,
+    /// Show Warp-style command-block affordances in the gutter when the shell
+    /// emits OSC 133 marks: an exit-status badge (✓ / ✗ code) + duration next to
+    /// each prompt, and a fold caret for collapsing a command's output. Default
+    /// true (a no-op until a shell-integration script is sourced). Disable with
+    /// `command_badges = false`.
+    pub command_badges: bool,
 }
 
 /// The three user-facing default cursor shapes.
@@ -619,6 +626,13 @@ pub struct App {
     /// (open URL / copy path). Idle-safe — only `Some` while the mode is active.
     /// See [`hints`].
     hints: Option<hints::HintsState>,
+
+    // --- Command-block folding (OSC 133 shell integration) -------------------
+    /// Which command blocks of the ACTIVE pane are folded (collapsed output),
+    /// keyed by absolute prompt row. Toggled by the `ToggleFold` key action /
+    /// command palette. Per-pane fold state for split tabs is a follow-up; for
+    /// now this tracks the focused pane's blocks.
+    fold_state: command_blocks::FoldState,
 }
 
 /// Pending close that is waiting for user confirmation.

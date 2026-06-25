@@ -238,26 +238,28 @@ pub fn run_loop(
                                 // new tabs/splits of this session can inherit it.
                                 proxy.send_user(crate::pty::UserEvent::Cwd(proxy.id, path));
                             }
-                            crate::image::TapEvent::SemanticMark(mark) => {
-                                // OSC 133: record prompt-start rows (mark 'A') in the
-                                // shared PromptTracker so the UI can jump to them via
-                                // Shift+Up/Down. Other marks (B/C/D) are forwarded to
-                                // the UI for potential future use (e.g. command timing).
-                                if mark == 'A' {
-                                    // Capture the current cursor row as an absolute
-                                    // grid offset (display_offset + cursor.line). `term`
-                                    // is already locked (the MutexGuard from above), so
-                                    // read through the guard directly.
-                                    let row = {
-                                        let c = term.renderable_content();
-                                        c.cursor.point.line.0 + c.display_offset as i32
-                                    };
-                                    if let Ok(mut p) = prompts.lock() {
-                                        p.push(row);
+                            crate::image::TapEvent::SemanticMark(mark, exit) => {
+                                // OSC 133: drive the per-session command-block tracker.
+                                // `A` opens a block (prompt start), `C` marks output
+                                // start + start time, `D` closes it with end time + exit
+                                // code. All rows are absolute grid offsets (display_offset
+                                // + cursor.line); `term` is already locked above, so read
+                                // through the guard directly.
+                                let row = {
+                                    let c = term.renderable_content();
+                                    c.cursor.point.line.0 + c.display_offset as i32
+                                };
+                                if let Ok(mut p) = prompts.lock() {
+                                    match mark {
+                                        'A' => p.begin_block(row),
+                                        'C' => p.command_started(row, Instant::now()),
+                                        'D' => p.command_finished(row, exit, Instant::now()),
+                                        _ => {}
                                     }
                                 }
-                                proxy
-                                    .send_user(crate::pty::UserEvent::SemanticMark(proxy.id, mark));
+                                proxy.send_user(crate::pty::UserEvent::SemanticMark(
+                                    proxy.id, mark, exit,
+                                ));
                             }
                             crate::image::TapEvent::Notification(text) => {
                                 // OSC 9 / OSC 777: forward to the UI thread so it can

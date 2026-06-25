@@ -49,6 +49,8 @@ pub(crate) enum PaletteCmd {
     ScrollbackDecrease,
     NextTheme,
     PrevTheme,
+    /// Fold/unfold the output of the command block in view (OSC 133).
+    ToggleFold,
     /// Set the theme at this index into [`color::THEME_NAMES`].
     SetTheme(usize),
     /// Generate a theme from the configured `wallpaper_theme` image path and apply it live.
@@ -68,6 +70,7 @@ impl PaletteCmd {
             FontIncrease | FontDecrease | FontReset => "Font",
             ToggleStatusBar | TogglePaneHeaders | BellOff | BellVisual | BellAudible
             | ScrollbackIncrease | ScrollbackDecrease => "Setting",
+            ToggleFold => "View",
             NextTheme | PrevTheme | SetTheme(_) | GenerateThemeFromWallpaper => "Theme",
         }
     }
@@ -104,6 +107,7 @@ impl PaletteCmd {
             ScrollbackDecrease => "Scrollback −1000 lines".into(),
             NextTheme => "Next theme".into(),
             PrevTheme => "Previous theme".into(),
+            ToggleFold => "Fold/unfold command output".into(),
             SetTheme(_) => String::new(),
             GenerateThemeFromWallpaper => "Generate theme from wallpaper image".into(),
         }
@@ -130,6 +134,7 @@ impl PaletteCmd {
             FontDecrease => Some("Ctrl+-"),
             FontReset => Some("Ctrl+0"),
             ToggleStatusBar => Some("Ctrl+Shift+B"),
+            ToggleFold => Some("Ctrl+Shift+Z"),
             _ => None,
         }
     }
@@ -209,6 +214,7 @@ impl App {
             BellAudible,
             ScrollbackIncrease,
             ScrollbackDecrease,
+            ToggleFold,
             NextTheme,
             PrevTheme,
             GenerateThemeFromWallpaper,
@@ -490,6 +496,7 @@ impl App {
                 self.cycle_theme(-1);
                 self.mark_dirty(event_loop);
             }
+            ToggleFold => self.toggle_command_fold(event_loop),
             SetTheme(i) => {
                 self.set_theme_by_idx(i);
                 self.mark_dirty(event_loop);
@@ -858,6 +865,7 @@ mod tests {
             BellAudible,
             ScrollbackIncrease,
             ScrollbackDecrease,
+            ToggleFold,
             NextTheme,
             PrevTheme,
             GenerateThemeFromWallpaper,

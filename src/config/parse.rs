@@ -44,6 +44,7 @@ pub(super) struct RawConfig {
     pub restore_session: Option<bool>,
     pub copy_on_select: Option<bool>,
     pub hints_chars: Option<String>,
+    pub command_badges: Option<bool>,
     pub color_fg: Option<String>,
     pub color_bg: Option<String>,
     pub color_cursor: Option<String>,
@@ -178,6 +179,7 @@ impl RawConfig {
                 .hints_chars
                 .filter(|s| s.chars().filter(|c| c.is_ascii_alphabetic()).count() >= 2)
                 .map(|s| s.chars().filter(|c| c.is_ascii_alphabetic()).collect()),
+            command_badges: self.command_badges.unwrap_or(true),
         };
 
         Ok(super::Settings { config, theme })
@@ -536,6 +538,9 @@ pub(super) fn apply_kv(key: &str, value: &str, raw: &mut RawConfig) -> Result<()
             // The label alphabet for hints mode (home-row-first letters). Only the
             // ASCII letters are kept; an alphabet shorter than 2 chars is ignored.
             raw.hints_chars = Some(value.to_string());
+        }
+        "command_badges" => {
+            raw.command_badges = Some(parse_bool(value, "command_badges")?);
         }
         "color.fg" => {
             parse_hex_color(value)?;

@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::grid::Dimensions;
@@ -237,10 +237,11 @@ pub enum UserEvent {
     /// sequence), and writes the result back over the `PtyWrite` path.
     ClipboardLoad(usize, ClipboardType, ClipboardFormatter),
     /// OSC 133 shell-integration semantic mark (`A`/`B`/`C`/`D`) received from
-    /// the shell. The PTY loop records the cursor row in the per-session
-    /// [`PromptTracker`] and forwards this event so the UI can update any
-    /// jump-to-prompt state (Shift+Up/Down).
-    SemanticMark(usize, char),
+    /// the shell, with the optional exit code carried by a `D` mark. The PTY loop
+    /// records the cursor row + timing + exit status in the per-session
+    /// [`PromptTracker`] and forwards this event so the UI can repaint the
+    /// command-block badges and update jump-to-prompt state.
+    SemanticMark(usize, char, Option<i32>),
     /// OSC 9 or OSC 777 desktop notification from the shell. Forwarded to the UI
     /// thread so it can fire a native notification when the window is unfocused.
     Notification(usize, String),
@@ -338,6 +339,61 @@ impl EventListener for EventProxy {
 /// still providing a deep enough history for realistic interactive use.
 const MAX_PROMPT_OFFSETS: usize = 1024;
 
+/// Maximum number of [`CommandBlock`] records retained per session. Bounds the
+/// memory used by Warp-style command-block tracking; the oldest block is evicted
+/// when a new prompt pushes past this cap.
+const MAX_COMMAND_BLOCKS: usize = 1024;
+
+/// One Warp-style command block: the semantic zone for a single command, derived
+/// from the OSC 133 `A`/`B`/`C`/`D` marks the shell emits.
+///
+/// Rows are *absolute* grid rows (including scrollback): `cursor.line.0 +
+/// display_offset` at the moment the mark arrived. The renderer translates them
+/// to viewport rows by subtracting the live `display_offset`.
+///
+/// A block starts on an `A` mark (prompt start). `C` records where the command's
+/// output begins (and the wall-clock start time). `D` closes it, recording the
+/// end time (so `duration()` is known) and the exit code.
+#[derive(Clone, Debug)]
+pub struct CommandBlock {
+    /// Absolute grid row of the `A` (prompt start) mark.
+    pub prompt_row: i32,
+    /// Absolute grid row of the `C` (command executed / output start) mark, once
+    /// seen. `None` between `A` and `C` (the user is still typing the command).
+    pub output_row: Option<i32>,
+    /// Absolute grid row of the `D` (command finished) mark, once seen. While
+    /// `None` the command is still running.
+    pub end_row: Option<i32>,
+    /// Exit code from `133;D;<exit>`. `None` while running, or for a `D` with no
+    /// numeric exit field.
+    pub exit_code: Option<i32>,
+    /// Wall-clock instant the command started running (`C` mark). `None` until C.
+    pub started_at: Option<Instant>,
+    /// Wall-clock instant the command finished (`D` mark). `None` while running.
+    pub ended_at: Option<Instant>,
+}
+
+impl CommandBlock {
+    /// How long the command ran, if both `C` (start) and `D` (end) were seen.
+    pub fn duration(&self) -> Option<Duration> {
+        match (self.started_at, self.ended_at) {
+            (Some(s), Some(e)) => Some(e.saturating_duration_since(s)),
+            _ => None,
+        }
+    }
+
+    /// Whether the command has finished (a `D` mark was recorded).
+    pub fn is_finished(&self) -> bool {
+        self.end_row.is_some()
+    }
+
+    /// Whether the command succeeded (finished with exit code 0). `false` for a
+    /// non-zero exit, and `false` while still running / exit unknown.
+    pub fn succeeded(&self) -> bool {
+        self.exit_code == Some(0)
+    }
+}
+
 /// Tracks the terminal row of every `OSC 133 ; A` (prompt start) mark received
 /// from the shell for one PTY session. The rows are *absolute* grid rows
 /// (including scrollback): `cursor.line.0 + display_offset`. Jump-to-prompt
@@ -355,6 +411,11 @@ pub struct PromptTracker {
     /// `VecDeque` so the bounded-capacity eviction pops the front in O(1) rather
     /// than memmoving the whole backing buffer.
     pub rows: std::collections::VecDeque<i32>,
+    /// Warp-style command blocks, one per prompt zone, in stream (ascending-row)
+    /// order. Appended on each `A` mark; the open block's `output_row` /
+    /// `end_row` / `exit_code` / timing are filled in as `C` / `D` arrive. Bounded
+    /// at [`MAX_COMMAND_BLOCKS`]; the oldest is evicted past the cap.
+    pub blocks: std::collections::VecDeque<CommandBlock>,
 }
 
 impl PromptTracker {
@@ -398,6 +459,64 @@ impl PromptTracker {
     /// `pty.prompts.lock().next_prompt(display_offset)` and scroll there.
     pub fn next_prompt(&self, current_row: i32) -> Option<i32> {
         self.rows.iter().find(|&&r| r > current_row).copied()
+    }
+
+    /// Record an `A` (prompt-start) mark at absolute grid row `row`: also opens a
+    /// new [`CommandBlock`] zone. Called from the PTY loop alongside [`push`].
+    pub fn begin_block(&mut self, row: i32) {
+        self.push(row);
+        // Avoid a duplicate block if the same prompt re-draws at the same row
+        // without an intervening command (e.g. a redraw on resize).
+        if self
+            .blocks
+            .back()
+            .is_some_and(|b| b.prompt_row == row && !b.is_finished())
+        {
+            return;
+        }
+        if self.blocks.len() >= MAX_COMMAND_BLOCKS {
+            self.blocks.pop_front();
+        }
+        self.blocks.push_back(CommandBlock {
+            prompt_row: row,
+            output_row: None,
+            end_row: None,
+            exit_code: None,
+            started_at: None,
+            ended_at: None,
+        });
+    }
+
+    /// Record a `C` (command-executed / output-start) mark at `row`: marks the
+    /// open block's output start and start time. A `C` with no open block (e.g.
+    /// integration sourced mid-session) is ignored.
+    pub fn command_started(&mut self, row: i32, at: Instant) {
+        if let Some(b) = self.blocks.back_mut()
+            && b.output_row.is_none()
+            && !b.is_finished()
+        {
+            b.output_row = Some(row);
+            b.started_at = Some(at);
+        }
+    }
+
+    /// Record a `D` (command-finished) mark at `row` with optional `exit` code:
+    /// closes the open block, recording the end row, end time, and exit status.
+    /// A `D` with no open running block is ignored.
+    pub fn command_finished(&mut self, row: i32, exit: Option<i32>, at: Instant) {
+        if let Some(b) = self.blocks.back_mut()
+            && !b.is_finished()
+        {
+            b.end_row = Some(row);
+            b.ended_at = Some(at);
+            b.exit_code = exit;
+        }
+    }
+
+    /// The most-recently-finished command block, if any. Used by the UI for the
+    /// status-bar "last command" badge.
+    pub fn last_finished(&self) -> Option<&CommandBlock> {
+        self.blocks.iter().rev().find(|b| b.is_finished())
     }
 }
 
@@ -698,6 +817,7 @@ pub fn merge_word_separators(defaults: &str, extras: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{PaneInfo, PromptTracker, merge_word_separators};
+    use std::time::{Duration, Instant};
 
     // ---- PromptTracker (OSC 133 jump-to-prompt) tests ------------------------
 
@@ -766,6 +886,72 @@ mod tests {
     fn process_name_none_when_nothing_known() {
         let info = PaneInfo::default();
         assert_eq!(info.process_name(None), None);
+    }
+
+    // ---- PromptTracker command-block tests -----------------------------------
+
+    #[test]
+    fn command_block_lifecycle_records_zone_timing_exit() {
+        let mut t = PromptTracker::new();
+        let start = Instant::now();
+        t.begin_block(10); // A: prompt start at row 10
+        t.command_started(11, start); // C: output starts at row 11
+        t.command_finished(20, Some(0), start + Duration::from_millis(500)); // D
+
+        assert_eq!(t.blocks.len(), 1);
+        let b = &t.blocks[0];
+        assert_eq!(b.prompt_row, 10);
+        assert_eq!(b.output_row, Some(11));
+        assert_eq!(b.end_row, Some(20));
+        assert_eq!(b.exit_code, Some(0));
+        assert!(b.is_finished());
+        assert!(b.succeeded());
+        assert_eq!(b.duration(), Some(Duration::from_millis(500)));
+        // A also feeds the row list used by jump-to-prompt.
+        assert!(t.rows.contains(&10));
+    }
+
+    #[test]
+    fn command_block_failure_is_not_success() {
+        let mut t = PromptTracker::new();
+        t.begin_block(0);
+        t.command_started(1, Instant::now());
+        t.command_finished(5, Some(130), Instant::now());
+        assert!(!t.blocks[0].succeeded());
+        assert_eq!(t.blocks[0].exit_code, Some(130));
+        assert!(t.last_finished().is_some());
+    }
+
+    #[test]
+    fn stray_c_and_d_without_a_are_ignored() {
+        let mut t = PromptTracker::new();
+        // No begin_block first → no open block to mutate.
+        t.command_started(1, Instant::now());
+        t.command_finished(5, Some(0), Instant::now());
+        assert!(t.blocks.is_empty());
+        assert!(t.last_finished().is_none());
+    }
+
+    #[test]
+    fn repeated_a_at_same_row_does_not_duplicate_open_block() {
+        let mut t = PromptTracker::new();
+        t.begin_block(7);
+        t.begin_block(7); // prompt redraw at the same row (e.g. resize)
+        assert_eq!(
+            t.blocks.len(),
+            1,
+            "same-row redraw must not open a new block"
+        );
+    }
+
+    #[test]
+    fn new_prompt_after_finish_opens_a_fresh_block() {
+        let mut t = PromptTracker::new();
+        t.begin_block(0);
+        t.command_finished(3, Some(0), Instant::now());
+        t.begin_block(4); // next prompt
+        assert_eq!(t.blocks.len(), 2);
+        assert!(!t.blocks[1].is_finished());
     }
 
     // ---- merge_word_separators tests -----------------------------------------
