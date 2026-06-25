@@ -47,11 +47,6 @@ fn main() -> anyhow::Result<()> {
     // Install the active color theme before any rendering reads it.
     color::set_theme(settings.theme);
 
-    // Set the macOS dock + Cmd-Tab icon from the embedded .icns before the event
-    // loop starts so the icon is visible from the very first frame.
-    #[cfg(target_os = "macos")]
-    set_macos_app_icon();
-
     // Typed event loop so the PTY thread can wake us via EventLoopProxy<UserEvent>.
     let event_loop = EventLoop::<pty::UserEvent>::with_user_event().build()?;
     event_loop.set_control_flow(ControlFlow::Wait);
@@ -68,6 +63,11 @@ fn main() -> anyhow::Result<()> {
     }
 
     let mut app = app::App::new(proxy, settings.config);
+
+    // Set dock + Cmd-Tab icon after EventLoop::build() so winit has already
+    // initialised NSApplication — our call then updates the existing singleton.
+    #[cfg(target_os = "macos")]
+    set_macos_app_icon();
 
     event_loop.run_app(&mut app)?;
     ipc::cleanup();

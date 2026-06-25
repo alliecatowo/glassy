@@ -177,11 +177,9 @@ pub(super) fn build_font_system(
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     let _ = primary_path;
 
-    // After loading fallback fonts, find the emoji font's family name so the
-    // shaping layer can force ZWJ clusters into a single font run. Shaping a
-    // ZWJ sequence like 🏳️‍⚧️ across two fonts (e.g. JetBrainsMono for ⚧
-    // and Apple Color Emoji for 🏳) silently drops the ZWJ ligature — the
-    // entire cluster must be shaped by the font that holds the combined glyph.
+    // With the fallback chain loaded, record the emoji face's family name (the
+    // first face whose family contains "emoji") so the shaper can force ZWJ
+    // clusters into a single run. See `LoadedFont::emoji_family`.
     let emoji_family = db
         .faces()
         .find(|f| {
@@ -811,7 +809,7 @@ fn macos_font_cache_path() -> Option<PathBuf> {
 
 /// Load the macOS font cache into a `HashMap<family, file_path>`.
 #[cfg(target_os = "macos")]
-pub(super) fn macos_font_cache_load() -> std::collections::HashMap<String, String> {
+fn macos_font_cache_load() -> std::collections::HashMap<String, String> {
     let mut map = std::collections::HashMap::new();
     let path = match macos_font_cache_path() {
         Some(p) => p,
@@ -948,9 +946,9 @@ fn find_macos_font_file(
 
 /// Load fallback fonts into `db` on macOS: Apple Color Emoji and Apple Symbols.
 /// Simple emoji (single codepoint + variation selectors) render correctly via
-/// Apple Color Emoji's SBIX bitmaps. ZWJ compound sequences (🏳️‍⚧️ etc.) require
-/// CoreText shaping to resolve Apple's GSUB lookup chain — that path is pending
-/// a `core-text` integration and tracked separately.
+/// Apple Color Emoji's SBIX bitmaps. ZWJ compound sequences (🏳️‍⚧️ etc.) can't be
+/// shaped from this database (rustybuzz drops Apple's GSUB ZWJ chain); the shaping
+/// layer renders those directly via CoreText (see `shape::rasterize_cluster`).
 #[cfg(target_os = "macos")]
 fn load_fallback_fonts_macos(db: &mut fontdb::Database, primary_path: Option<&Path>) {
     let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();

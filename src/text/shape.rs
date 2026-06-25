@@ -80,13 +80,15 @@ pub struct Text {
     /// when the user did not request any features. Built once at load time from
     /// the config's `font_features` list; re-applied on every `build_attrs` call.
     font_features: FontFeatures,
-    /// Family name of the emoji font in the database, used on Linux/non-macOS to
-    /// force ZWJ clusters into a single font run. On macOS the CoreText path handles
-    /// ZWJ, so this field is unused there (but kept for cross-platform parity).
+    /// Family name of the emoji font in the database. On non-macOS hosts, ZWJ
+    /// clusters are forced into this single font run so the GSUB ZWJ ligature
+    /// resolves — shaping 🏳️‍⚧️ across two fonts (JetBrains for ⚧, Color Emoji
+    /// for 🏳) silently drops the join. macOS shapes ZWJ via CoreText instead.
     #[cfg_attr(target_os = "macos", allow(dead_code))]
     emoji_family: Option<String>,
-    /// Physical pixel size of the loaded font. Used by the CoreText ZWJ path on
-    /// macOS to render at the correct size without threading font_px through callers.
+    /// Physical pixel size of the loaded font. Read only by the macOS CoreText
+    /// ZWJ path, to render at the right size without threading it through callers.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     font_px: f32,
 }
 
@@ -382,29 +384,26 @@ impl Text {
         bold: bool,
         italic: bool,
     ) -> Vec<RasterizedGlyph> {
-        // Variation-selector-only clusters (e.g. ▶ + U+FE0F): for characters that
-        // are NOT inherently emoji (< U+1F000), VS-16 requests emoji presentation but
-        // terminal TUI apps (Claude Code, etc.) expect text rendering in the current
-        // fg color. Strip the VS so ▶️ renders as ▶ via the terminal font, not as a
-        // colored Apple Color Emoji square. Characters ≥ U+1F000 are inherently emoji
-        // and keep their VS for correct Apple Color Emoji rendering.
-        if !cluster.contains('\u{200D}') {
-            let base_cp = cluster.chars().next().map(|c| c as u32).unwrap_or(0);
-            let is_inherent_emoji = base_cp >= 0x1F000;
-            if !is_inherent_emoji {
-                let stripped: String = cluster
-                    .chars()
-                    .filter(|&c| c != '\u{FE0F}' && c != '\u{FE0E}')
-                    .collect();
-                if !stripped.is_empty() && stripped != cluster {
-                    return self.build_glyphs(&stripped, bold, italic);
-                }
+        // A base char below U+1F000 followed only by VS-16 (e.g. ▶ + U+FE0F)
+        // requests emoji presentation, but TUIs expect the glyph drawn as text in
+        // the current fg color. Drop the variation selector so it shapes via the
+        // terminal font instead of becoming a colored emoji. Inherently-emoji base
+        // chars (>= U+1F000) keep their selector for correct color rendering.
+        if !cluster.contains('\u{200D}')
+            && cluster.chars().next().map(|c| c as u32).unwrap_or(0) < 0x1F000
+        {
+            let stripped: String = cluster
+                .chars()
+                .filter(|&c| c != '\u{FE0F}' && c != '\u{FE0E}')
+                .collect();
+            if !stripped.is_empty() && stripped != cluster {
+                return self.build_glyphs(&stripped, bold, italic);
             }
         }
 
         // ZWJ compound emoji (🏳️‍⚧️, 👨‍👩‍👧 etc.): rustybuzz doesn't resolve Apple
-        // Color Emoji's GSUB ZWJ lookup chain. On macOS, use CoreText — the same
-        // native shaper ghostty uses — which resolves ZWJ correctly.
+        // Color Emoji's GSUB ZWJ lookup chain. macOS shapes these with CoreText
+        // (the native shaper ghostty uses), which resolves ZWJ correctly.
         #[cfg(target_os = "macos")]
         if cluster.contains('\u{200D}')
             && let Some(g) = render_zwj_coretext(cluster, self.font_px)
@@ -412,11 +411,10 @@ impl Text {
             return vec![g];
         }
 
-        // On Linux/non-macOS: force the emoji font family so component glyphs in the
-        // primary Nerd Font (e.g. ⚧ U+26A7) don't split the ZWJ shaping run.
-        // On macOS this is handled by the CoreText path above; forcing the font here
-        // would change the glyph placement vs the working coverage-fallback path and
-        // cause simple emoji to appear raised.
+        // Non-macOS: force the emoji family so a component glyph the primary Nerd
+        // Font happens to cover (e.g. ⚧ U+26A7) can't split the ZWJ shaping run.
+        // (macOS uses the CoreText path above; forcing the family there would shift
+        // glyph placement vs the coverage-fallback path and raise simple emoji.)
         #[cfg(not(target_os = "macos"))]
         {
             let needs_emoji = cluster.contains('\u{200D}')
@@ -424,6 +422,7 @@ impl Text {
                     let cp = c as u32;
                     (0x1F300..=0x1FAFF).contains(&cp) || (0x2600..=0x27BF).contains(&cp)
                 });
+            // Clone the family name so the `&mut self` shaping call below can borrow.
             if needs_emoji && let Some(ref ef) = self.emoji_family.clone() {
                 return self.build_glyphs_with_family(cluster, ef, bold, italic);
             }
@@ -431,8 +430,8 @@ impl Text {
         self.build_glyphs(cluster, bold, italic)
     }
 
-    /// Shape using an explicit family name rather than the primary font. Used on
-    /// Linux/non-macOS to keep ZWJ clusters in a single font run.
+    /// Shape using an explicit family name rather than the primary font. Used for
+    /// ZWJ emoji clusters that must stay in a single font run.
     #[cfg_attr(target_os = "macos", allow(dead_code))]
     fn build_glyphs_with_family(
         &mut self,
@@ -666,14 +665,14 @@ fn render_zwj_coretext(cluster: &str, font_px: f32) -> Option<RasterizedGlyph> {
 
     let font = core_text::font::new_from_name("Apple Color Emoji", font_px as f64).ok()?;
 
+    // Build a CFAttributedString of the cluster tagged with Apple Color Emoji.
     let cf_str = CFString::new(cluster);
     let mut attr = CFMutableAttributedString::new();
-    // replace_str inserts text into the empty mutable attributed string.
     attr.replace_str(&cf_str, CFRange::init(0, 0));
-    // Range in UTF-16 units (CFString char_len() returns UTF-16 length, correct for emoji).
+    // char_len() is the UTF-16 length, which is what CFRange expects.
     let full = CFRange::init(0, cf_str.char_len());
     // SAFETY: kCTFontAttributeName is an extern "C" static from CoreText — the
-    // documented way to name the font attribute in CFAttributedString.
+    // documented way to name the font attribute on a CFAttributedString.
     unsafe {
         attr.set_attribute(full, kCTFontAttributeName, &font);
     }

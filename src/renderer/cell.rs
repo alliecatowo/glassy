@@ -403,6 +403,7 @@ impl Renderer {
                     cell_w,
                     box_w,
                     cell_h,
+                    self.metrics.ascent,
                 );
             }
             return;
@@ -468,6 +469,7 @@ impl Renderer {
                 cell_w,
                 box_w,
                 cell_h,
+                self.metrics.ascent,
             );
         }
     }
@@ -539,6 +541,7 @@ impl Renderer {
                     cell_w,
                     box_w,
                     cell_h,
+                    self.metrics.ascent,
                 );
             }
             // Continuation cells (empty glyph slot): background + decorations
@@ -579,13 +582,16 @@ impl Renderer {
         cell_w: f32,
         box_w: f32,
         cell_h: f32,
+        ascent: f32,
     ) {
         // Horizontal recentering for a wide box (0 for a single-width cell).
         let center_dx = (box_w - cell_w) * 0.5;
+        // Top of the cell in the same Y-down coordinate space as baseline.
+        let origin_y = baseline - ascent;
         for g in glyphs {
             let (pos, size) = if g.is_color {
                 // Color emoji: scale to fit the box height-first (preserving
-                // aspect), capped to the box width, then center in the box.
+                // aspect), capped to the box width, then center in the cell.
                 let scale = if g.px_h > 0.0 {
                     let s = cell_h / g.px_h;
                     if g.px_w * s > box_w && g.px_w > 0.0 {
@@ -599,7 +605,10 @@ impl Renderer {
                 let w = g.px_w * scale;
                 let h = g.px_h * scale;
                 let x = origin_x + (box_w - w) * 0.5;
-                let y = baseline - cell_h + (cell_h - h) * 0.5;
+                // Center vertically within the cell (origin_y is cell top).
+                // The old formula `baseline - cell_h + …` went above origin_y
+                // when ascent < cell_h (e.g. 28/36), raising emoji above midline.
+                let y = origin_y + (cell_h - h) * 0.5;
                 ([x, y], [w, h])
             } else {
                 // Mask glyph: keep its size and bearings; shift right to recenter

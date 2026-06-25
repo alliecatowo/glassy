@@ -72,6 +72,7 @@ impl Renderer {
                 cell_w,
                 box_w,
                 cell_h,
+                self.metrics.ascent,
             );
         }
     }
@@ -199,6 +200,7 @@ impl Renderer {
                 cell_w,
                 cell_w,
                 cell_h,
+                self.metrics.ascent,
             );
         }
     }
