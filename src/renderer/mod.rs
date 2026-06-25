@@ -18,6 +18,8 @@ use winit::window::Window;
 use crate::text::{CellMetrics, Text};
 
 mod cell;
+mod crt;
+mod cursor_trail;
 mod frame;
 mod geometry;
 mod image_draw;
@@ -484,6 +486,24 @@ pub struct Renderer {
     /// [`Renderer::render_multi`]. Splitting is rare, so this path fully rebuilds
     /// each frame (no per-row damage tracking) for simplicity.
     mp: MultiPane,
+
+    // --- gpu-fx stream additions (cursor trail + CRT post-process). ---
+    /// The shader module compiled from `shader.wgsl`, retained so the CRT post
+    /// pipeline can be built lazily (only when the effect is enabled) from the
+    /// same module rather than recompiling. The grid pipelines already captured
+    /// their entry points at startup.
+    crt_shader: wgpu::ShaderModule,
+    /// The group(0) screen-size uniform bind group layout, retained so the CRT
+    /// post pipeline (built lazily) can reuse it for the resolution uniform.
+    uniform_bind_group_layout: wgpu::BindGroupLayout,
+    /// CRT / glow / scanline post-process state (config `crt_effect`, default
+    /// off). Entirely dormant — no GPU allocation, zero per-frame cost — until
+    /// enabled. See [`crt::CrtPass`].
+    crt: crt::CrtPass,
+    /// Cursor trail / smear animation state (config `cursor_trail`, default off).
+    /// Idle-safe: only animates while the cursor is mid-glide. See
+    /// [`cursor_trail::CursorTrail`].
+    cursor_trail: cursor_trail::CursorTrail,
 }
 
 /// State for the multi-pane (split) render path. A flat instance list whose

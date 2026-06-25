@@ -643,6 +643,14 @@ impl Renderer {
             opacity: opacity.clamp(0.0, 1.0),
             transparent,
             mp: MultiPane::default(),
+            // gpu-fx: retain the shader module + uniform layout so the CRT post
+            // pipeline can be built lazily (only when enabled). Both are clones
+            // of Arc-backed handles, so this is cheap and the grid pipelines
+            // already hold their own references.
+            crt_shader: shader,
+            uniform_bind_group_layout,
+            crt: crt::CrtPass::default(),
+            cursor_trail: cursor_trail::CursorTrail::default(),
         };
 
         // Probe the loaded font for OpenType GSUB liga support. This shapes the

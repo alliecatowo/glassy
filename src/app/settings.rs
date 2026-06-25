@@ -617,6 +617,12 @@ impl App {
         // Reproject + repaint the whole grid against the new surface; the per-row
         // storage is resized to match in the next frame's full rebuild.
         self.force_full_redraw = true;
+        // The cursor-trail eased position is in physical pixels; after a resize /
+        // font change the cell metrics shifted, so snap it to the new cell next
+        // frame rather than gliding across stale coordinates. (No-op when off.)
+        if let Some(r) = self.renderer.as_mut() {
+            r.reset_cursor_trail();
+        }
         self.mark_dirty(event_loop);
     }
 }

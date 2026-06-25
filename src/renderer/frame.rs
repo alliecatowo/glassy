@@ -742,7 +742,20 @@ impl Renderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("frame-encoder"),
             });
-        self.record_passes(&view, &mut encoder, bg_count, fg_count);
+        // CRT post-process (opt-in): when active, render the grid into the
+        // offscreen scene target, then run the fullscreen composite into the
+        // surface. When off this branch is never taken and the grid draws
+        // straight to the surface exactly as before (zero added cost).
+        if self.crt_active() {
+            if let Some(scene_view) = self.crt_scene_view() {
+                self.record_passes(&scene_view, &mut encoder, bg_count, fg_count);
+                self.record_crt_pass(&view, &mut encoder);
+            } else {
+                self.record_passes(&view, &mut encoder, bg_count, fg_count);
+            }
+        } else {
+            self.record_passes(&view, &mut encoder, bg_count, fg_count);
+        }
 
         self.queue.submit(std::iter::once(encoder.finish()));
         frame.present();

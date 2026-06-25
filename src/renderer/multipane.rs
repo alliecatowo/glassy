@@ -233,7 +233,18 @@ impl Renderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("frame-encoder-mp"),
             });
-        self.record_multi_passes(&view, &mut encoder);
+        // CRT post-process (opt-in): render the split grid into the offscreen
+        // scene target and composite it to the surface. Off => direct as before.
+        if self.crt_active() {
+            if let Some(scene_view) = self.crt_scene_view() {
+                self.record_multi_passes(&scene_view, &mut encoder);
+                self.record_crt_pass(&view, &mut encoder);
+            } else {
+                self.record_multi_passes(&view, &mut encoder);
+            }
+        } else {
+            self.record_multi_passes(&view, &mut encoder);
+        }
         self.queue.submit(std::iter::once(encoder.finish()));
         frame.present();
         Ok(())

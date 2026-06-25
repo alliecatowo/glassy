@@ -40,6 +40,8 @@ impl Renderer {
                 screen: [width as f32, height as f32, 0.0, 0.0],
             }),
         );
+        // Keep the CRT offscreen target sized to the surface (no-op when off).
+        self.crt_on_resize();
     }
 
     pub fn cell_metrics(&self) -> CellMetrics {

@@ -49,6 +49,8 @@ pub(super) struct RawConfig {
     pub color_ansi: Option<[Option<String>; 16]>,
     pub profiles: HashMap<String, Vec<(String, String)>>,
     pub keybinding_overrides: Vec<(String, String)>,
+    pub cursor_trail: Option<bool>,
+    pub crt_effect: Option<bool>,
 }
 
 impl RawConfig {
@@ -133,6 +135,8 @@ impl RawConfig {
             restore_session: self.restore_session.unwrap_or(false),
             copy_on_select: self.copy_on_select.unwrap_or(false),
             keymap: build_keymap(default_keymap(), &self.keybinding_overrides),
+            cursor_trail: self.cursor_trail.unwrap_or(false),
+            crt_effect: self.crt_effect.unwrap_or(false),
         };
 
         Ok(super::Settings { config, theme })
@@ -463,6 +467,12 @@ pub(super) fn apply_kv(key: &str, value: &str, raw: &mut RawConfig) -> Result<()
         }
         "copy_on_select" => {
             raw.copy_on_select = Some(parse_bool(value, "copy_on_select")?);
+        }
+        "cursor_trail" => {
+            raw.cursor_trail = Some(parse_bool(value, "cursor_trail")?);
+        }
+        "crt_effect" => {
+            raw.crt_effect = Some(parse_bool(value, "crt_effect")?);
         }
         "color.fg" => {
             parse_hex_color(value)?;

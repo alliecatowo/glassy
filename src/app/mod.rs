@@ -143,6 +143,15 @@ pub struct Config {
     /// defaults). Built once at config resolution time by [`crate::config`] and
     /// consulted by the keyboard handler before the hard-coded fallback paths.
     pub keymap: crate::config::KeyMap,
+    /// gpu-fx: smoothly animate (ease + brief smear) the cursor between cells
+    /// instead of jumping instantly. Default false. Strictly idle-safe — only
+    /// schedules frames while the cursor is mid-glide.
+    pub cursor_trail: bool,
+    /// gpu-fx: enable the CRT / glow / scanline fullscreen post-process. Default
+    /// false. Adds real GPU cost (an offscreen pass), so it MUST stay off by
+    /// default to preserve the 0%-idle + perf numbers; when off it is a complete
+    /// no-op (no offscreen pass, no allocation).
+    pub crt_effect: bool,
 }
 
 /// A tab's split layout: the tiling tree (whose leaf ids are pty/pane ids) plus

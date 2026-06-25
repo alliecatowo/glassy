@@ -4,13 +4,21 @@ use super::*;
 
 impl Renderer {
     /// Render the current frame to an offscreen texture and write it to `path`
-    /// as a binary PPM (P6). Used for headless screenshot verification.
+    /// as a binary PPM (P6). Used for headless screenshot verification. When the
+    /// CRT post-process is active the grid is rendered to the CRT scene texture
+    /// and the composite pass writes the post-processed image to the capture
+    /// target, so captures reflect the effect (GLASSY_CRT=1 verification).
     pub fn capture(&mut self, path: &std::path::Path) -> Result<()> {
         self.end_frame();
         let bg_count = self.bg_count;
         let fg_count = self.fg_count;
-        self.capture_with(path, |s, view, enc| {
-            s.record_passes(view, enc, bg_count, fg_count)
+        let crt_scene = self.crt_active().then(|| self.crt_scene_view()).flatten();
+        self.capture_with(path, |s, view, enc| match &crt_scene {
+            Some(scene) => {
+                s.record_passes(scene, enc, bg_count, fg_count);
+                s.record_crt_pass(view, enc);
+            }
+            None => s.record_passes(view, enc, bg_count, fg_count),
         })
     }
 
@@ -36,7 +44,14 @@ impl Renderer {
             "mp-fg-instances",
         );
         self.upload_overlay_buffers();
-        self.capture_with(path, |s, view, enc| s.record_multi_passes(view, enc))
+        let crt_scene = self.crt_active().then(|| self.crt_scene_view()).flatten();
+        self.capture_with(path, |s, view, enc| match &crt_scene {
+            Some(scene) => {
+                s.record_multi_passes(scene, enc);
+                s.record_crt_pass(view, enc);
+            }
+            None => s.record_multi_passes(view, enc),
+        })
     }
 
     /// Shared offscreen-capture machinery: allocate a render target, let `record`
