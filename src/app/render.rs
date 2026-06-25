@@ -723,6 +723,33 @@ impl App {
             renderer.reset_cursor_trail();
         }
 
+        // IME preedit (composition) overlay: an underlined string drawn over the
+        // cells starting at the terminal cursor, displacing nothing in the grid.
+        // Painted after the cursor overlay so it composites on top, and only when
+        // a composition is in flight (idle-safe: `preedit` is `None` otherwise).
+        // We anchor at `cur_cursor_cell` (the cursor is visible during composition)
+        // or fall back to the raw cursor cell so a hidden-cursor IME still shows.
+        if let Some(preedit) = self.preedit.as_ref().filter(|p| !p.is_empty()) {
+            let anchor = cur_cursor_cell.or_else(|| {
+                let r = cursor_row;
+                let c = cursor_col;
+                if r >= 0 && r < rows as i32 && c >= 0 && c < self.cols as i32 {
+                    Some((c as usize, r as usize))
+                } else {
+                    None
+                }
+            });
+            if let Some((pc, pr)) = anchor.filter(|&(_, r)| r < rows) {
+                if row_started[pr] {
+                    renderer.set_cur_row(pr);
+                } else {
+                    renderer.begin_row(pr);
+                    row_started[pr] = true;
+                }
+                ime::paint_preedit(renderer, preedit, pc, pr, self.cols);
+            }
+        }
+
         drop(term); // release before GPU submit / present
 
         // Cache whether the cursor should blink (style requested + not hidden) so

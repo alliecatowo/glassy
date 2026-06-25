@@ -37,6 +37,7 @@ mod command_blocks;
 mod event_loop;
 mod helpers;
 mod hints;
+mod ime;
 mod input;
 mod keys;
 mod minimap;
@@ -669,6 +670,13 @@ pub struct App {
     /// drop/retract while staying idle-safe (no wakeups once settled). `None` in
     /// normal windowed mode, so every standard path is untouched. See `quake.rs`.
     quake: Option<QuakeState>,
+
+    // --- IME preedit (composition) -------------------------------------------
+    /// In-progress IME composition (CJK / dead-key input). `Some` exactly while
+    /// the IME is composing: the string is drawn as an underlined overlay at the
+    /// terminal cursor and displaces nothing in the grid until `Ime::Commit`
+    /// writes the finished text to the PTY. `None` when idle. See [`ime`].
+    preedit: Option<ime::Preedit>,
 }
 
 /// Direction + progress of the quake window's slide animation.

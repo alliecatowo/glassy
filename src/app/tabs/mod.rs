@@ -117,6 +117,7 @@ impl App {
             // Quake state is armed lazily in `resumed()` once the window exists
             // (only when `config.quake` is set); `None` keeps normal mode untouched.
             quake: None,
+            preedit: None,
         }
     }
 
