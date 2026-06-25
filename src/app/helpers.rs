@@ -342,21 +342,18 @@ pub(crate) enum MenuAction {
     SplitDown,
     NewTab,
     Settings,
-    PaneHeaders,
     Help,
     CloseTab,
 }
 
 impl MenuAction {
-    /// The fixed set shown by the # hamburger dropdown. The right-click context
+    /// The fixed set shown by the ≡ hamburger dropdown. Settings (⚙) and Help (?)
+    /// are NOT listed here — they have dedicated quick-access strip icons, so
+    /// duplicating them in the hamburger would give two independent UI paths to the
+    /// same overlay. `PaneHeaders` is likewise omitted: it is a Settings-form (and
+    /// command-palette) toggle, not a top-level menu action. The right-click context
     /// menu uses a separately-built `Vec<MenuAction>` (see `context_menu_items`).
-    pub(crate) const ALL: &'static [MenuAction] = &[
-        MenuAction::NewTab,
-        MenuAction::Settings,
-        MenuAction::PaneHeaders,
-        MenuAction::Help,
-        MenuAction::CloseTab,
-    ];
+    pub(crate) const ALL: &'static [MenuAction] = &[MenuAction::NewTab, MenuAction::CloseTab];
 
     pub(crate) fn label(self) -> &'static str {
         match self {
@@ -369,7 +366,6 @@ impl MenuAction {
             MenuAction::SplitDown => "Split down",
             MenuAction::NewTab => "New tab",
             MenuAction::Settings => "Settings",
-            MenuAction::PaneHeaders => "Pane headers",
             MenuAction::Help => "Help / keys",
             MenuAction::CloseTab => "Close tab",
         }
@@ -387,7 +383,6 @@ impl MenuAction {
             MenuAction::SplitDown => '-',
             MenuAction::NewTab => '+',
             MenuAction::Settings => '*',
-            MenuAction::PaneHeaders => '▭',
             MenuAction::Help => '?',
             MenuAction::CloseTab => '✕',
         }
@@ -406,7 +401,6 @@ impl MenuAction {
             MenuAction::SplitDown => Some("Ctrl+Shift+O"),
             MenuAction::NewTab => Some("Ctrl+Shift+T"),
             MenuAction::Settings => Some("Ctrl+,"),
-            MenuAction::PaneHeaders => None,
             MenuAction::Help => Some("F1"),
             MenuAction::CloseTab => Some("Ctrl+Shift+W"),
         }
@@ -420,16 +414,17 @@ impl MenuAction {
             MenuAction::Copy | MenuAction::Paste | MenuAction::SelectAll => 0,
             MenuAction::ClearScrollback | MenuAction::Search => 1,
             MenuAction::SplitRight | MenuAction::SplitDown | MenuAction::NewTab => 2,
-            MenuAction::Settings | MenuAction::PaneHeaders | MenuAction::Help => 3,
+            MenuAction::Settings | MenuAction::Help => 3,
             MenuAction::CloseTab => 4,
         }
     }
 }
 
 /// Build a `Vec<MenuEntry>` for the real GUI menu from a flat list of
-/// `MenuAction`s. Context menus with Copy+Paste get a separator between the
-/// clipboard group and the navigation group; the hamburger menu has its own
-/// separator after Settings (before CloseTab). Pure for testing.
+/// `MenuAction`s. A separator is inserted wherever two consecutive actions fall in
+/// different visual groups (see [`MenuAction::group`]) — e.g. between the clipboard
+/// and navigation groups in the context menu, or between NewTab (layout) and
+/// CloseTab (destructive) in the hamburger. Pure for testing.
 pub(crate) fn actions_to_entries(
     actions: &[MenuAction],
     has_selection: bool,

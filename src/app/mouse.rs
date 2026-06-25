@@ -196,10 +196,13 @@ impl App {
                 // overlay hit tests always use the click's actual position, even
                 // if the pointer moves between this event and the next render.
                 self.gui_click_pos = (self.mouse_px.0 as f32, self.mouse_px.1 as f32);
-                // If an overlay was opened by the PRESS of this same button, the
-                // release belongs to that opening gesture — do not treat it as a
-                // click-outside-the-panel dismiss.
-                self.overlay_opened_by_press = false;
+                // NOTE: `overlay_opened_by_press` is intentionally NOT cleared here.
+                // It must be consumed only where the click edge is consulted (the
+                // settings-dismiss guard below, or the help paint via the render
+                // reset), so an overlay opened on this same gesture's press ignores
+                // this release for click-outside dismissal. Clearing it up-front
+                // (as the old code did) made the guard dead — the cog-opened
+                // Settings then dismissed on its own opening release/motion.
             }
             self.mark_dirty(event_loop);
         }
@@ -271,6 +274,13 @@ impl App {
         // gutter-drag beneath the panel. Do NOT clear `held_button` — the
         // scrollbar drag reads it as `mouse_down` during paint (same rule as
         // the settings block above).
+        //
+        // We deliberately do NOT clear `overlay_opened_by_press` here. When the
+        // help panel was opened by the PRESS of this same gesture (the cog
+        // icon), this release set a stale outside click edge; `build_help`
+        // skips its scrim-close while `overlay_opened_by_press` is set, and the
+        // render reset clears the flag once it consumes that edge — so a later
+        // motion-driven repaint can no longer flush a stale dismiss.
         if self.help_open {
             return;
         }

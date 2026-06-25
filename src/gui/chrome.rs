@@ -64,7 +64,15 @@ impl<'r> Ui<'r> {
         // is wide enough for the longest label ("Restore session").
         let label_w = (m.cell_w * 17.0).round();
         let ctrl_x = inner.x + label_w;
-        let ctrl_w = (inner.w - label_w).min(m.ctrl_w * 1.6).max(m.ctrl_w);
+        // Control column width: prefer up to 1.6× the natural control width, but
+        // never exceed the space left after the label column. The lower floor is
+        // `ctrl_w * 0.5` (not `ctrl_w`): a `ctrl_w` floor could push
+        // `ctrl_x + ctrl_w` PAST the panel's inner right edge on a narrow window
+        // (`inner.w - label_w < ctrl_w`), making every full-width control — and the
+        // opacity value label anchored at the column's right edge — overflow the
+        // glass. `label_w (17 cells) + ctrl_w*0.5 (7 cells) = 24 cells` stays within
+        // the minimum panel width.
+        let ctrl_w = (inner.w - label_w).min(m.ctrl_w * 1.6).max(m.ctrl_w * 0.5);
         let mut y = inner.y + header_h + m.gap;
         // The drawn height of a single row's control band: the smaller of the
         // natural control height and the (possibly compressed) step, so adjacent
@@ -87,7 +95,10 @@ impl<'r> Ui<'r> {
 
         // -- Opacity (slider) ------------------------------------------------
         row_label(self, y, "Opacity");
-        let sl = ctrl_rect(y, ctrl_w - m.cell_w * 6.0);
+        // Reserve ~6 cells at the right of the control column for the value label
+        // ("1.00"); floor the track width so the slider stays usable even when
+        // `ctrl_w` is squeezed to its `ctrl_w*0.5` floor on a narrow window.
+        let sl = ctrl_rect(y, (ctrl_w - m.cell_w * 6.0).max(m.cell_w * 4.0));
         let nv = self.slider(id("settings/opacity"), sl, v.opacity, 0.0, 1.0, 0.05);
         if (nv - v.opacity).abs() > f32::EPSILON {
             ev.opacity = Some(nv);
@@ -147,7 +158,12 @@ impl<'r> Ui<'r> {
 
         // -- Scrollback (stepper) --------------------------------------------
         row_label(self, y, "Scrollback");
-        let sb_txt = format!("{} lines", v.scrollback);
+        // Just the number — the "Scrollback" row label already says what it is.
+        // The old "{} lines" suffix made "10000 lines" (11 chars) overflow the
+        // stepper's middle cell (≈ ctrl_w - 2*button ≈ 11.6 cells), so the centered
+        // label started left of its cell and overpainted the − and + buttons
+        // ("−10000 lines+"). Max scrollback (1_000_000 → "1000000", 7 chars) fits.
+        let sb_txt = format!("{}", v.scrollback);
         ev.scrollback_delta =
             self.stepper(id("settings/scrollback"), ctrl_rect(y, m.ctrl_w), &sb_txt);
         y += step;

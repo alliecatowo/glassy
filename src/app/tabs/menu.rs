@@ -38,10 +38,6 @@ impl App {
                 self.open_settings();
                 self.mark_dirty(event_loop);
             }
-            MenuAction::PaneHeaders => {
-                self.toggle_pane_headers();
-                self.mark_dirty(event_loop);
-            }
             MenuAction::Help => {
                 self.help_open = true;
                 self.mark_dirty(event_loop);
@@ -121,6 +117,7 @@ impl App {
         self.menu_open = true;
         self.help_open = false;
         self.settings_open = false;
+        self.overlay_opened_by_press = false;
         self.force_full_redraw = true;
         self.mark_dirty(event_loop);
     }
@@ -390,9 +387,11 @@ impl App {
                 }
                 self.help_open = false;
                 self.settings_open = false;
-                if opening {
-                    self.overlay_opened_by_press = true;
-                }
+                // The hamburger dropdown does NOT use `overlay_opened_by_press`
+                // for its dismiss (it closes on a press outside the panel via
+                // `menu_hit_test`, never on the opening gesture's release), so we
+                // must NOT set the flag here — leaving it set would leak into the
+                // next overlay and swallow that overlay's first dismiss click.
                 self.force_full_redraw = true;
                 self.mark_dirty(event_loop);
             }

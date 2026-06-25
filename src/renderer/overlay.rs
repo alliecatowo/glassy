@@ -246,7 +246,15 @@ impl Renderer {
         if w <= 0.0 || h <= 0.0 {
             return;
         }
-        self.rows[self.cur_row].bg.push(BgInstance {
+        // Defense-in-depth: `cur_row` is kept in range by `begin_row`/`set_cur_row`
+        // (which clamp/self-heal), so this index is normally valid. Guard it anyway
+        // so a future path that leaves `cur_row` stale (e.g. a row count change
+        // between `resize_grid` and the next `begin_row`) degrades to a dropped quad
+        // rather than an out-of-bounds panic — cheap insurance against a latent crash.
+        let Some(row) = self.rows.get_mut(self.cur_row) else {
+            return;
+        };
+        row.bg.push(BgInstance {
             pos: [x, y],
             size: [w, h],
             color,

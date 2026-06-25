@@ -25,12 +25,19 @@ impl App {
         // `plain_link_at` tells us which kind it is).
         let (hovered_cell_col, hovered_cell_row) = self.mouse_cell;
         let plain_link_spans: Vec<super::selection::PlainLink> = if hovered_link.is_some()
+            && hovered_cell_row < self.rows
             && self.pty.as_ref().is_some_and(|p| {
                 // Quick check: OSC 8 link → no plain spans needed.
-                hovered_cell_row < self.rows
-                    && p.term.lock().grid()[self.grid_point(hovered_cell_col, hovered_cell_row)]
-                        .hyperlink()
-                        .is_none()
+                //
+                // IMPORTANT: compute the grid Point BEFORE taking the term lock.
+                // `grid_point` itself locks `pty.term` (input.rs); evaluating it
+                // inside `grid()[ … ]` would build the `grid()` MutexGuard temporary
+                // first and then re-lock the SAME non-reentrant `FairMutex` on this
+                // UI thread while the guard is still alive → permanent deadlock
+                // ("not responding"). Hoisting `grid_point` drops its guard before
+                // the indexing lock is taken (mirrors `cell_hyperlink`).
+                let point = self.grid_point(hovered_cell_col, hovered_cell_row);
+                p.term.lock().grid()[point].hyperlink().is_none()
             }) {
             self.scan_row_for_links(hovered_cell_row)
         } else {
@@ -788,6 +795,7 @@ impl App {
                 self.gui_click_pos,
                 self.held_button == Some(0),
                 self.gui_click_edge,
+                self.overlay_opened_by_press,
                 &mut self.gui_pressed,
                 &mut self.gui_focused,
                 &mut self.gui_anims,
@@ -796,6 +804,7 @@ impl App {
             );
             if help_result.close {
                 self.help_open = false;
+                self.overlay_opened_by_press = false;
                 self.force_full_redraw = true;
             }
         }
@@ -847,8 +856,13 @@ impl App {
         self.tab_bar_key = Some(new_tab_key);
         // The chrome paint consumed this frame's click edge; if it was a release
         // edge, also drop the press latch now that the click has been resolved.
+        // Clear `overlay_opened_by_press` at the SAME moment the edge is consumed:
+        // the opening gesture's release is now fully accounted for (the help paint
+        // skipped its scrim-close, the settings guard absorbed it), so the next
+        // genuinely-outside click is free to dismiss.
         if self.gui_click_edge {
             self.gui_pressed = None;
+            self.overlay_opened_by_press = false;
         }
         self.gui_click_edge = false;
 

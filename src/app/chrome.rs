@@ -522,14 +522,33 @@ impl App {
                 [TAB_RADIUS, TAB_RADIUS, 0.0, 0.0],
                 active_surface,
             );
-            // Connector: extends 4px below the bar bottom seam, matching the
-            // active-tab color, so the chip visually "opens into" the content surface.
-            renderer.push_overlay_px(r.x, bar_h - 2.0, r.w, 4.0, active_surface);
-            // Soft accent crown (2px, low alpha) — the active tab still reads as
-            // raised + crowned, but WITHOUT the old harsh bright 3px line + side
-            // strips that painted white/light edge artifacts on light themes.
+            // Connector: a thin patch over the seam, capped at the bar bottom edge
+            // (y = bar_h - 2 .. bar_h) so the active chip is FLUSH with the bar and
+            // never drops below it. (The old `bar_h - 2, h = 4` ran 2px into the
+            // content area, making the active tab look 2px taller than the bar.)
+            // The chip body's bottom is square (no corner feather), so a flush
+            // patch leaves no background hairline at the seam.
+            renderer.push_overlay_px(r.x, bar_h - 2.0, r.w, 2.0, active_surface);
+            // Soft accent crown (2px, low alpha). Inset horizontally by the corner
+            // radius so the bar spans only the FLAT top edge between the two rounded
+            // corners and never enters the corner zones — there is therefore no way
+            // for the accent to bleed outside the chip's rounded top corners onto the
+            // bar background. (The old full-width sharp quad filled those corner
+            // zones and, showing through the body's transparent rounded corners, read
+            // as a white/light rectangular fill behind the corners.) Drawn into
+            // `overlay_text` like the body so the pass order is consistent.
             let crown = [accent[0], accent[1], accent[2], accent[3] * 0.5];
-            renderer.push_overlay_px(r.x, r.y, r.w, 2.0, crown);
+            let crown_w = (r.w - 2.0 * TAB_RADIUS).max(0.0);
+            if crown_w > 0.0 {
+                renderer.push_overlay_rrect4_px(
+                    r.x + TAB_RADIUS,
+                    r.y,
+                    crown_w,
+                    2.0,
+                    [0.0, 0.0, 0.0, 0.0],
+                    crown,
+                );
+            }
         } else {
             // Inactive: strongly recessed chip — clearly subordinate to the active tab.
             // Inset by 2px top and shrink 4px total height so it visually "recedes".
@@ -824,6 +843,7 @@ impl App {
         if ev.close {
             self.settings_open = false;
             self.settings_drop = gui::SettingsDrop::None;
+            self.overlay_opened_by_press = false;
             changed = true;
         }
         if changed {

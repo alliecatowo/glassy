@@ -536,6 +536,7 @@ impl App {
                 self.gui_click_pos,
                 self.held_button == Some(0),
                 self.gui_click_edge,
+                self.overlay_opened_by_press,
                 &mut self.gui_pressed,
                 &mut self.gui_focused,
                 &mut self.gui_anims,
@@ -544,6 +545,7 @@ impl App {
             );
             if help_result.close {
                 self.help_open = false;
+                self.overlay_opened_by_press = false;
                 self.force_full_redraw = true;
             }
         }
@@ -609,9 +611,12 @@ impl App {
         }
 
         // The chrome paint consumed this frame's click edge (the single-pane path
-        // resets it too); on a release edge also drop the press latch.
+        // resets it too); on a release edge also drop the press latch. Clear
+        // `overlay_opened_by_press` alongside it (see the single-pane reset for the
+        // rationale): the opening gesture's release is now fully consumed.
         if self.gui_click_edge {
             self.gui_pressed = None;
+            self.overlay_opened_by_press = false;
         }
         self.gui_click_edge = false;
 

@@ -905,3 +905,180 @@ fn scissor_pane_of_zero_size_gives_zero_extent() {
     let s2 = clamp_scissor(100, 100, 200, 0, 800, 600);
     assert_eq!(s2.h, 0, "zero-height pane must have h=0 scissor");
 }
+
+// ---- Transparency: glyph/overlay write_mask alpha invariant ------------
+// Proves the opacity fix (init.rs): the foreground pipeline uses
+// `ColorWrites::COLOR` so a fully-covered glyph CANNOT raise the surface
+// alpha from `opacity` toward 1.0 under premultiplied blending — which was
+// the cause of "window barely transparent at opacity=0.50". The overlay
+// pipeline deliberately keeps `ColorWrites::ALL` (chrome reads near-opaque),
+// so the same draw under ALL raises alpha to 1.0; this test asserts BOTH so a
+// future change that flips either mask is caught.
+
+fn run_writemask_alpha_probe(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    write_mask: wgpu::ColorWrites,
+) -> f32 {
+    // A 1x1 Rgba8Unorm target cleared to a premultiplied (0.5,0.5,0.5,0.5),
+    // then a full-screen opaque white quad (premultiplied rgb=1, a=1) drawn
+    // over it with PREMULTIPLIED_ALPHA_BLENDING and the given write_mask.
+    let fmt = wgpu::TextureFormat::Rgba8Unorm;
+    let src = r#"
+        @vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
+            // Full-screen triangle.
+            var p = array<vec2<f32>, 3>(
+                vec2<f32>(-1.0, -1.0), vec2<f32>(3.0, -1.0), vec2<f32>(-1.0, 3.0));
+            return vec4<f32>(p[i], 0.0, 1.0);
+        }
+        @fragment fn fs() -> @location(0) vec4<f32> {
+            // Premultiplied opaque white: rgb=1, a=1.
+            return vec4<f32>(1.0, 1.0, 1.0, 1.0);
+        }
+    "#;
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("wm-probe"),
+        source: wgpu::ShaderSource::Wgsl(src.into()),
+    });
+    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("wm-probe-layout"),
+        bind_group_layouts: &[],
+        immediate_size: 0,
+    });
+    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("wm-probe-pipeline"),
+        layout: Some(&layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs"),
+            buffers: &[],
+            compilation_options: Default::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs"),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: fmt,
+                blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                write_mask,
+            })],
+            compilation_options: Default::default(),
+        }),
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: Default::default(),
+        multiview_mask: None,
+        cache: None,
+    });
+
+    let target = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("wm-probe-target"),
+        size: wgpu::Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: fmt,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = target.create_view(&wgpu::TextureViewDescriptor::default());
+
+    let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+    let padded = 4u32.div_ceil(align) * align;
+    let readback = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("wm-probe-readback"),
+        size: padded as u64,
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("wm-probe-enc"),
+    });
+    {
+        let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("wm-probe-pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &view,
+                resolve_target: None,
+                depth_slice: None,
+                ops: wgpu::Operations {
+                    // Clear to surface alpha 0.5 (premultiplied gray).
+                    load: wgpu::LoadOp::Clear(wgpu::Color {
+                        r: 0.5,
+                        g: 0.5,
+                        b: 0.5,
+                        a: 0.5,
+                    }),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&pipeline);
+        pass.draw(0..3, 0..1);
+    }
+    enc.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo {
+            texture: &target,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &readback,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(padded),
+                rows_per_image: Some(1),
+            },
+        },
+        wgpu::Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+    );
+    queue.submit(std::iter::once(enc.finish()));
+
+    let slice = readback.slice(..);
+    let (tx, rx) = std::sync::mpsc::channel();
+    slice.map_async(wgpu::MapMode::Read, move |r| {
+        let _ = tx.send(r);
+    });
+    device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+    rx.recv().unwrap().unwrap();
+    let data = slice.get_mapped_range();
+    let alpha = data[3] as f32 / 255.0;
+    drop(data);
+    readback.unmap();
+    alpha
+}
+
+#[test]
+fn fg_color_writemask_preserves_surface_alpha() {
+    let Some((device, queue)) = headless_device() else {
+        return;
+    };
+    // The fg pipeline's mask (COLOR): a full-coverage opaque glyph must NOT
+    // raise the surface alpha above the configured opacity (0.5 here).
+    let a_color = run_writemask_alpha_probe(&device, &queue, wgpu::ColorWrites::COLOR);
+    assert!(
+        (a_color - 0.5).abs() < 0.02,
+        "COLOR mask must leave surface alpha at opacity (0.5), got {a_color}"
+    );
+    // Sanity / contrast: with ALL (the OLD fg behavior, and the deliberate
+    // overlay/chrome behavior) the same draw raises alpha to ~1.0.
+    let a_all = run_writemask_alpha_probe(&device, &queue, wgpu::ColorWrites::ALL);
+    assert!(
+        a_all > 0.98,
+        "ALL mask raises surface alpha to ~1.0, got {a_all}"
+    );
+}

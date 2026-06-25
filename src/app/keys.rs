@@ -305,6 +305,11 @@ impl App {
                 self.help_open = false;
                 self.settings_open = false;
                 self.settings_drop = gui::SettingsDrop::None;
+                // Clear the opening-gesture guard on a keyboard close so a stale
+                // `true` (e.g. opened by cog, then closed by Esc before any click
+                // edge consumed it) cannot leak into the next overlay and swallow
+                // that overlay's first outside-click dismiss.
+                self.overlay_opened_by_press = false;
                 self.force_full_redraw = true;
                 self.mark_dirty(event_loop);
                 return;

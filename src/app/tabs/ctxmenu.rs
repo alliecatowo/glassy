@@ -134,6 +134,7 @@ impl App {
         self.pane_menu_open = None;
         self.help_open = false;
         self.settings_open = false;
+        self.overlay_opened_by_press = false;
         self.force_full_redraw = true;
         self.mark_dirty(event_loop);
     }

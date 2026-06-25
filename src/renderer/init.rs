@@ -472,10 +472,19 @@ impl Renderer {
                     // Premultiplied blending so glyphs composite correctly over a
                     // translucent backdrop (and identically over an opaque one):
                     // the shader emits premultiplied color, so dst is weighted by
-                    // (1 - src.a). With glyph alpha 1.0 the text stays fully opaque
-                    // and crisp regardless of the window opacity.
+                    // (1 - src.a). The RGB blend is correct as-is.
+                    //
+                    // write_mask = COLOR (RGB, NOT alpha): a fully-covered glyph
+                    // returns src alpha 1.0, and the premultiplied alpha equation
+                    // (a = src_a + dst_a*(1-src_a)) would raise the SURFACE alpha
+                    // from `opacity` to 1.0 for every text pixel — making a window
+                    // full of text effectively opaque to the compositor regardless
+                    // of the configured opacity. Masking out the alpha write keeps
+                    // the surface alpha at `opacity` (set by the bg clear/quads), so
+                    // the whole window — text included — composites at the chosen
+                    // transparency, matching ghostty et al.
                     blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
+                    write_mask: wgpu::ColorWrites::COLOR,
                 })],
                 compilation_options: Default::default(),
             }),
@@ -526,6 +535,14 @@ impl Renderer {
                 targets: &[Some(wgpu::ColorTargetState {
                     format,
                     blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                    // write_mask = ALL (RGB + alpha) — DELIBERATELY different from the
+                    // fg pipeline. The chrome strip, tabs and modals are designed to
+                    // RAISE the surface alpha so they read as near-opaque "glass"
+                    // floating above the more-transparent terminal body (bar/surface
+                    // alphas ≈ 0.92–0.97, the active tab is fully opaque). Masking the
+                    // alpha here (as the fg pipeline does) would drop the whole chrome
+                    // to the body opacity and make the toolbar/tabs/modals see-through
+                    // to the desktop — so the alpha write is kept on purpose.
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
                 compilation_options: Default::default(),

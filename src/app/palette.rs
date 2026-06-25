@@ -374,11 +374,19 @@ impl App {
             ClosePane => self.close_pane(event_loop),
             OpenSettings => {
                 self.open_settings();
+                // Palette rows are activated on a left RELEASE whose click edge /
+                // gui_click_pos is the palette row — OUTSIDE the centered overlay
+                // panel. Guard that opening release so it is not treated as a
+                // click-outside dismiss of the overlay it just opened.
+                self.overlay_opened_by_press = true;
                 self.mark_dirty(event_loop);
             }
             OpenHelp => {
                 self.help_open = true;
                 self.force_full_redraw = true;
+                // See OpenSettings: the activating release lands outside the help
+                // panel; guard it so the overlay survives its own opening gesture.
+                self.overlay_opened_by_press = true;
                 self.mark_dirty(event_loop);
             }
             OpenSearch => self.open_search(event_loop),

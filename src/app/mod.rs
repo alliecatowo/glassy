@@ -435,9 +435,17 @@ pub struct App {
     /// common cause of "overlay closes immediately after opening" and
     /// "motion dismisses help" bugs.
     gui_click_pos: (f32, f32),
-    /// Set when an overlay (settings / help / menu) was opened by a tab-strip button
-    /// PRESS. Cleared after the next left-button release so that same release is not
-    /// immediately treated as a click-outside-the-panel dismiss.
+    /// Set when an overlay (settings / help) was opened by a gesture whose RELEASE
+    /// lands OUTSIDE the overlay panel — the cog/`?` strip icons (opened on the
+    /// press, released outside) and the command-palette rows (activated on a
+    /// release outside the centered panel). It marks that opening release so it is
+    /// NOT treated as a click-outside-the-panel dismiss: the settings-dismiss guard
+    /// (`handle_mouse_input`) consumes it, and `build_help` skips its scrim-close
+    /// while it is set. It is cleared exactly where the click edge is consumed (the
+    /// render reset) and on every overlay close (Esc, ✕, opening another overlay),
+    /// so it can never linger past the gesture that set it and swallow a later
+    /// genuine dismiss. NOT set for keyboard opens (F1/Ctrl+,) or hamburger-menu
+    /// rows, whose opening release never flows through a dismiss/paint that reads it.
     overlay_opened_by_press: bool,
     /// Last instant the GUI animations were stepped, for dt computation.
     gui_anim_last: Instant,
@@ -518,10 +526,11 @@ mod tests {
     }
 
     #[test]
-    fn hamburger_menu_groups_layout_app_and_destructive() {
-        // The hamburger (NewTab, Settings, PaneHeaders, Help, CloseTab) spans the
-        // layout (NewTab), app (Settings/PaneHeaders/Help), and destructive
-        // (CloseTab) groups → a separator at each of the two boundaries.
+    fn hamburger_menu_groups_layout_and_destructive() {
+        // The hamburger is now (NewTab, CloseTab): Settings/Help have dedicated
+        // strip icons and PaneHeaders lives in the Settings form, so neither is
+        // duplicated here. NewTab is in the layout group, CloseTab in the
+        // destructive group → exactly one separator at that single boundary.
         let entries = actions_to_entries(MenuAction::ALL, false);
         let item_count = entries
             .iter()
@@ -532,12 +541,23 @@ mod tests {
             .filter(|e| matches!(e, MenuEntry::Separator))
             .count();
         assert_eq!(item_count, MenuAction::ALL.len());
-        assert_eq!(sep_count, 2);
+        assert_eq!(sep_count, 1);
         // The last entry is always the destructive Close-tab item.
         match entries.last() {
             Some(MenuEntry::Item { label, .. }) => assert_eq!(*label, "Close tab"),
             _ => panic!("hamburger must end with Close tab"),
         }
+        // Settings and Help are NOT in the hamburger anymore (strip icons own them).
+        let labels: Vec<&str> = entries
+            .iter()
+            .filter_map(|e| match e {
+                MenuEntry::Item { label, .. } => Some(*label),
+                _ => None,
+            })
+            .collect();
+        assert!(!labels.contains(&"Settings"));
+        assert!(!labels.contains(&"Help / keys"));
+        assert!(!labels.contains(&"Pane headers"));
     }
 
     #[test]

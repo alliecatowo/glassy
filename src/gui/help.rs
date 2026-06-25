@@ -46,10 +46,14 @@ pub struct HelpResult {
 /// are the current frame's pointer state. `click_pos` is the pointer position
 /// captured at the moment the click edge was set (button release); this is used
 /// for the click-outside-panel dismiss test so that pointer motion between the
-/// release event and the render frame does not shift the hit-test result. `state`
-/// is the caller-owned scroll position (mutable borrow; updated in place).
-/// `keymap` is the effective live keymap; the displayed rows are derived from it
-/// so custom bindings are shown.
+/// release event and the render frame does not shift the hit-test result.
+/// `opened_by_press` is the App's `overlay_opened_by_press` flag: when set, the
+/// scrim/click-outside dismiss is suppressed for this paint so the gesture that
+/// OPENED the panel (whose release lands outside the centered panel) cannot
+/// immediately close it — the caller clears the flag once it consumes the click
+/// edge. `state` is the caller-owned scroll position (mutable borrow; updated in
+/// place). `keymap` is the effective live keymap; the displayed rows are derived
+/// from it so custom bindings are shown.
 #[allow(clippy::too_many_arguments)]
 pub fn build_help(
     renderer: &mut Renderer,
@@ -60,6 +64,7 @@ pub fn build_help(
     click_pos: (f32, f32),
     mouse_down: bool,
     clicked: bool,
+    opened_by_press: bool,
     pressed: &mut Option<WidgetId>,
     focused: &mut Option<WidgetId>,
     anims: &mut HashMap<WidgetId, Anim>,
@@ -108,7 +113,15 @@ pub fn build_help(
     // Close if the click landed outside the panel (scrim click).
     // Use click_pos (pointer position at release time) — not live mouse — so
     // that motion after the release does not relocate the hit-test anchor.
-    if clicked && !hit(panel, click_pos.0, click_pos.1) {
+    //
+    // `opened_by_press` suppresses the scrim-close for exactly one paint: when
+    // the help panel was opened by the press/release of a gesture (cog icon,
+    // palette row) whose release lands OUTSIDE this centered panel, that stale
+    // click edge would otherwise dismiss the panel as soon as the next repaint
+    // flushes it (most often a motion-driven repaint → "motion dismisses help").
+    // The caller clears the flag in the same render reset that consumes the
+    // click edge, so the very next genuine outside click still dismisses.
+    if clicked && !opened_by_press && !hit(panel, click_pos.0, click_pos.1) {
         result.close = true;
     }
 
