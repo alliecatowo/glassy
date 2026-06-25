@@ -28,6 +28,7 @@
 //! font_features = ss01, calt=0         # OpenType feature tags to force on/off (comma or space separated)
 //! cwd         = /home/me/projects      # working directory for the first tab's shell
 //! restore_session = false              # restore previous tabs/splits/cwds on launch
+//! wallpaper_theme = /path/to/wall.png  # generate theme from image on startup
 //! ```
 //!
 //! Custom keybindings live in a `[keybindings]` section mapping chords to actions:
@@ -80,6 +81,7 @@
 mod cli;
 pub mod keymap;
 pub mod parse;
+pub mod theme_gen;
 pub mod theme_import;
 
 use anyhow::{Context, Result};

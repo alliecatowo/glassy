@@ -50,6 +50,8 @@ pub(crate) enum PaletteCmd {
     PrevTheme,
     /// Set the theme at this index into [`color::THEME_NAMES`].
     SetTheme(usize),
+    /// Generate a theme from the configured `wallpaper_theme` image path and apply it live.
+    GenerateThemeFromWallpaper,
 }
 
 impl PaletteCmd {
@@ -65,7 +67,7 @@ impl PaletteCmd {
             FontIncrease | FontDecrease | FontReset => "Font",
             ToggleStatusBar | TogglePaneHeaders | BellOff | BellVisual | BellAudible
             | ScrollbackIncrease | ScrollbackDecrease => "Setting",
-            NextTheme | PrevTheme | SetTheme(_) => "Theme",
+            NextTheme | PrevTheme | SetTheme(_) | GenerateThemeFromWallpaper => "Theme",
         }
     }
 
@@ -101,6 +103,7 @@ impl PaletteCmd {
             NextTheme => "Next theme".into(),
             PrevTheme => "Previous theme".into(),
             SetTheme(_) => String::new(),
+            GenerateThemeFromWallpaper => "Generate theme from wallpaper image".into(),
         }
     }
 
@@ -204,6 +207,7 @@ impl App {
             ScrollbackDecrease,
             NextTheme,
             PrevTheme,
+            GenerateThemeFromWallpaper,
         ];
         for i in 0..color::THEME_NAMES.len() {
             cmds.push(SetTheme(i));
@@ -484,6 +488,9 @@ impl App {
             SetTheme(i) => {
                 self.set_theme_by_idx(i);
                 self.mark_dirty(event_loop);
+            }
+            GenerateThemeFromWallpaper => {
+                self.generate_theme_from_wallpaper(event_loop);
             }
         }
     }
@@ -847,6 +854,7 @@ mod tests {
             ScrollbackDecrease,
             NextTheme,
             PrevTheme,
+            GenerateThemeFromWallpaper,
         ];
         for cmd in cmds {
             assert!(

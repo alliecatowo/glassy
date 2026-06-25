@@ -49,6 +49,10 @@ pub(super) struct RawConfig {
     pub color_ansi: Option<[Option<String>; 16]>,
     pub profiles: HashMap<String, Vec<(String, String)>>,
     pub keybinding_overrides: Vec<(String, String)>,
+    /// Path to an image file from which the theme should be auto-generated on
+    /// startup (via `theme_gen`). When set, the generated theme overrides any
+    /// `theme = …` setting and any `color.*` overrides.
+    pub wallpaper_theme: Option<String>,
 }
 
 impl RawConfig {
@@ -84,6 +88,19 @@ impl RawConfig {
                     if let Some(color) = color_str {
                         theme.ansi16[i] = parse_hex_color(color)?;
                     }
+                }
+            }
+        }
+
+        // Apply wallpaper-generated theme if a path is configured.
+        // This overrides all named-theme and color.* settings.
+        if let Some(ref path) = self.wallpaper_theme {
+            match super::theme_gen::from_image_path(path) {
+                Ok(generated) => {
+                    theme = generated;
+                }
+                Err(e) => {
+                    log::warn!("glassy: wallpaper_theme '{path}' failed, using fallback: {e}");
                 }
             }
         }
@@ -133,6 +150,10 @@ impl RawConfig {
             restore_session: self.restore_session.unwrap_or(false),
             copy_on_select: self.copy_on_select.unwrap_or(false),
             keymap: build_keymap(default_keymap(), &self.keybinding_overrides),
+            wallpaper_theme: self
+                .wallpaper_theme
+                .filter(|s| !s.is_empty())
+                .map(PathBuf::from),
         };
 
         Ok(super::Settings { config, theme })
@@ -495,6 +516,11 @@ pub(super) fn apply_kv(key: &str, value: &str, raw: &mut RawConfig) -> Result<()
                 }
             } else {
                 log::warn!("glassy: ignoring invalid color key '{k}'");
+            }
+        }
+        "wallpaper_theme" => {
+            if !value.is_empty() {
+                raw.wallpaper_theme = Some(value.to_string());
             }
         }
         other => {

@@ -143,6 +143,10 @@ pub struct Config {
     /// defaults). Built once at config resolution time by [`crate::config`] and
     /// consulted by the keyboard handler before the hard-coded fallback paths.
     pub keymap: crate::config::KeyMap,
+    /// Optional image path from which the theme was auto-generated at startup
+    /// (from the `wallpaper_theme` config key). Stored so the palette
+    /// "Generate theme from wallpaper" action can re-run the generator live.
+    pub wallpaper_theme: Option<std::path::PathBuf>,
 }
 
 /// A tab's split layout: the tiling tree (whose leaf ids are pty/pane ids) plus
