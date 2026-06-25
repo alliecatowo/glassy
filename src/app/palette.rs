@@ -40,6 +40,7 @@ pub(crate) enum PaletteCmd {
     FontReset,
     // --- Settings: toggles / cycles ---
     ToggleStatusBar,
+    ToggleMinimap,
     TogglePaneHeaders,
     BellOff,
     BellVisual,
@@ -63,8 +64,8 @@ impl PaletteCmd {
             Copy | Paste => "Edit",
             ToggleFullscreen => "Window",
             FontIncrease | FontDecrease | FontReset => "Font",
-            ToggleStatusBar | TogglePaneHeaders | BellOff | BellVisual | BellAudible
-            | ScrollbackIncrease | ScrollbackDecrease => "Setting",
+            ToggleStatusBar | ToggleMinimap | TogglePaneHeaders | BellOff | BellVisual
+            | BellAudible | ScrollbackIncrease | ScrollbackDecrease => "Setting",
             NextTheme | PrevTheme | SetTheme(_) => "Theme",
         }
     }
@@ -92,6 +93,7 @@ impl PaletteCmd {
             FontDecrease => "Decrease font size".into(),
             FontReset => "Reset font size".into(),
             ToggleStatusBar => "Toggle status bar".into(),
+            ToggleMinimap => "Toggle minimap".into(),
             TogglePaneHeaders => "Toggle pane headers".into(),
             BellOff => "Bell: off".into(),
             BellVisual => "Bell: visual".into(),
@@ -124,6 +126,7 @@ impl PaletteCmd {
             FontDecrease => Some("Ctrl+-"),
             FontReset => Some("Ctrl+0"),
             ToggleStatusBar => Some("Ctrl+Shift+B"),
+            ToggleMinimap => Some("Ctrl+Shift+M"),
             _ => None,
         }
     }
@@ -196,6 +199,7 @@ impl App {
             FontDecrease,
             FontReset,
             ToggleStatusBar,
+            ToggleMinimap,
             TogglePaneHeaders,
             BellOff,
             BellVisual,
@@ -444,6 +448,10 @@ impl App {
             }
             ToggleStatusBar => {
                 self.toggle_status_bar();
+                self.mark_dirty(event_loop);
+            }
+            ToggleMinimap => {
+                self.toggle_minimap();
                 self.mark_dirty(event_loop);
             }
             TogglePaneHeaders => {
@@ -839,6 +847,7 @@ mod tests {
             FontDecrease,
             FontReset,
             ToggleStatusBar,
+            ToggleMinimap,
             TogglePaneHeaders,
             BellOff,
             BellVisual,

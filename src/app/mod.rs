@@ -37,6 +37,7 @@ mod event_loop;
 mod helpers;
 mod input;
 mod keys;
+mod minimap;
 mod mouse;
 mod multipane;
 mod palette;
@@ -143,6 +144,10 @@ pub struct Config {
     /// defaults). Built once at config resolution time by [`crate::config`] and
     /// consulted by the keyboard handler before the hard-coded fallback paths.
     pub keymap: crate::config::KeyMap,
+    /// Show the scrollback minimap / overview strip at the right edge: a thin
+    /// downsampled colour-per-row preview of the whole buffer with click/drag to
+    /// jump. Default false (opt-in). See [`crate::app::minimap`].
+    pub minimap: bool,
 }
 
 /// A tab's split layout: the tiling tree (whose leaf ids are pty/pane ids) plus
@@ -523,6 +528,17 @@ pub struct App {
     /// clicked. The actual close call is deferred to `about_to_wait` (where an
     /// `ActiveEventLoop` reference is available). Cleared after execution.
     pending_confirm_execute: bool,
+
+    // --- Scrollback minimap / overview strip (P2) ----------------------------
+    /// Incrementally-cached downsample of the scrollback (one colour per buffer
+    /// line), rebuilt only on dirty rows so the strip never re-reads the whole
+    /// grid each frame (preserves the 0%-idle invariant). Empty when the minimap
+    /// is disabled or no buffer exists. See [`minimap`].
+    minimap_cache: minimap::MinimapCache,
+    /// True while a left-drag is scrubbing the minimap strip, so subsequent
+    /// `CursorMoved` events keep jumping the viewport until the button is
+    /// released. Set on a left-press over the strip, cleared on release.
+    minimap_dragging: bool,
 }
 
 /// Pending close that is waiting for user confirmation.

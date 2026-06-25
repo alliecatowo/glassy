@@ -425,6 +425,10 @@ impl App {
                 self.toggle_status_bar();
                 self.mark_dirty(event_loop);
             }
+            ToggleMinimap => {
+                self.toggle_minimap();
+                self.mark_dirty(event_loop);
+            }
             FontIncrease => {
                 self.resize_font(FontStep::Inc);
                 self.mark_dirty(event_loop);

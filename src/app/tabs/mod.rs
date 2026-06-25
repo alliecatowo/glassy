@@ -109,6 +109,8 @@ impl App {
             toasts: Vec::new(),
             confirm_close: None,
             pending_confirm_execute: false,
+            minimap_cache: Default::default(),
+            minimap_dragging: false,
         }
     }
 

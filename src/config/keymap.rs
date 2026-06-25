@@ -153,6 +153,7 @@ pub enum KeyAction {
     ScrollDown,
     ScrollTop,
     ScrollBottom,
+    ToggleMinimap,
 }
 
 impl KeyAction {
@@ -182,6 +183,7 @@ impl KeyAction {
             ScrollDown => "Scroll history down",
             ScrollTop => "Scroll to top",
             ScrollBottom => "Scroll to bottom",
+            ToggleMinimap => "Toggle minimap",
         }
     }
 
@@ -193,7 +195,8 @@ impl KeyAction {
             SplitVertical | SplitHorizontal => "Split panes",
             Copy | Paste => "Edit",
             ToggleFullscreen | ToggleMaximize | FontIncrease | FontDecrease | FontReset
-            | ToggleStatusBar | ScrollUp | ScrollDown | ScrollTop | ScrollBottom => "View",
+            | ToggleStatusBar | ToggleMinimap | ScrollUp | ScrollDown | ScrollTop
+            | ScrollBottom => "View",
             Settings | Help | Search | CommandPalette => "App",
         }
     }
@@ -228,6 +231,7 @@ pub(crate) fn parse_action(s: &str) -> Result<Option<KeyAction>> {
         "scroll_down" => ScrollDown,
         "scroll_top" => ScrollTop,
         "scroll_bottom" => ScrollBottom,
+        "toggle_minimap" => ToggleMinimap,
         other => bail!("unrecognized keybinding action '{other}'"),
     }))
 }
@@ -256,6 +260,7 @@ pub fn default_keymap() -> KeyMap {
         ("ctrl+shift+c", Copy),
         ("ctrl+shift+v", Paste),
         ("ctrl+shift+b", ToggleStatusBar),
+        ("ctrl+shift+m", ToggleMinimap),
         ("ctrl++", FontIncrease),
         ("ctrl+=", FontIncrease),
         ("ctrl+-", FontDecrease),

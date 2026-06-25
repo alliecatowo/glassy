@@ -28,6 +28,7 @@
 //! font_features = ss01, calt=0         # OpenType feature tags to force on/off (comma or space separated)
 //! cwd         = /home/me/projects      # working directory for the first tab's shell
 //! restore_session = false              # restore previous tabs/splits/cwds on launch
+//! minimap     = false                  # scrollback minimap / overview strip (right edge)
 //! ```
 //!
 //! Custom keybindings live in a `[keybindings]` section mapping chords to actions:

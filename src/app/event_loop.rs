@@ -247,6 +247,24 @@ impl ApplicationHandler<UserEvent> for App {
             self.force_full_redraw = true;
         }
 
+        // Headless: enable the scrollback minimap strip and seed enough scrollback
+        // that the downsampled overview has content to draw. GLASSY_MINIMAP=1
+        // turns it on; the seq fills the buffer with coloured lines so the strip
+        // shows structure in a capture.
+        if std::env::var_os("GLASSY_MINIMAP").is_some() {
+            self.config.minimap = true;
+            self.minimap_cache = Default::default();
+            if let Some(pty) = &self.pty {
+                // A burst of coloured output so the buffer has history to map.
+                pty.write(
+                    b"for i in $(seq 1 300); do printf '\\033[3%dm line %d \\033[0m\\n' \
+                      $((i%7+1)) $i; done\n"
+                        .to_vec(),
+                );
+            }
+            self.force_full_redraw = true;
+        }
+
         // Headless: split the active tab at startup to capture the multi-pane path.
         //   v = one vertical (left|right) split, h = one horizontal (top/bottom),
         //   grid = both (a 2x2 quad).

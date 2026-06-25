@@ -49,6 +49,7 @@ pub(super) struct RawConfig {
     pub color_ansi: Option<[Option<String>; 16]>,
     pub profiles: HashMap<String, Vec<(String, String)>>,
     pub keybinding_overrides: Vec<(String, String)>,
+    pub minimap: Option<bool>,
 }
 
 impl RawConfig {
@@ -133,6 +134,7 @@ impl RawConfig {
             restore_session: self.restore_session.unwrap_or(false),
             copy_on_select: self.copy_on_select.unwrap_or(false),
             keymap: build_keymap(default_keymap(), &self.keybinding_overrides),
+            minimap: self.minimap.unwrap_or(false),
         };
 
         Ok(super::Settings { config, theme })
@@ -463,6 +465,9 @@ pub(super) fn apply_kv(key: &str, value: &str, raw: &mut RawConfig) -> Result<()
         }
         "copy_on_select" => {
             raw.copy_on_select = Some(parse_bool(value, "copy_on_select")?);
+        }
+        "minimap" => {
+            raw.minimap = Some(parse_bool(value, "minimap")?);
         }
         "color.fg" => {
             parse_hex_color(value)?;
