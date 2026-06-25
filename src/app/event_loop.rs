@@ -22,6 +22,19 @@ impl ApplicationHandler<UserEvent> for App {
             // this is a harmless no-op and the window stays opaque.
             .with_transparent(true)
             .with_visible(false); // shown after the first frame to avoid a flash
+
+        // macOS: drop the separate OS title bar and let glassy's own content fill
+        // the whole window (ghostty-style). The traffic-light buttons float over
+        // the top-left; glassy's top chrome band insets past them (see
+        // TRAFFIC_LIGHT_INSET). title_hidden removes the centered title text.
+        #[cfg(target_os = "macos")]
+        let attrs = {
+            use winit::platform::macos::WindowAttributesExtMacOS;
+            attrs
+                .with_titlebar_transparent(true)
+                .with_fullsize_content_view(true)
+                .with_title_hidden(true)
+        };
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),
             Err(e) => {
@@ -105,12 +118,14 @@ impl ApplicationHandler<UserEvent> for App {
         renderer.resize(size.width, size.height);
         let m = renderer.cell_metrics();
         // At resume the first (single) tab does not yet exist, so the strip is
-        // hidden in Auto mode — reserve 0; it is reflowed once a 2nd tab opens.
+        // hidden in Auto mode — reserve 0 (plus the macOS traffic-light inset so
+        // content clears the floating window buttons); reflowed when a 2nd tab opens.
         let strip_h = if self.tab_bar_visible() {
             tab_bar_h(m.height)
         } else {
             0.0
-        };
+        }
+        .max(self.chrome_top_inset());
         let (cols, rows) = Self::grid_for(
             size,
             m.width,

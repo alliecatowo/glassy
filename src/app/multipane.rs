@@ -286,6 +286,7 @@ impl App {
         // `self.tab_bar_key` after the renderer borrow ends.
         let tab_pane_counts = self.tab_pane_counts();
         let tab_active_pos = self.active_pos();
+        let tab_left_inset = self.chrome_left_inset();
         let tab_strip_visible = self.tab_bar_visible();
         let new_tab_key = Self::tab_bar_key(
             &tab_snapshot,
@@ -453,6 +454,7 @@ impl App {
                 strip_hist,
                 &tab_pane_counts,
                 tab_active_pos,
+                tab_left_inset,
             );
             renderer.commit_tab_overlay();
         } else {

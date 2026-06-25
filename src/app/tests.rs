@@ -15,7 +15,7 @@ fn strip_layout(
     bar_h: f32,
     cell_w: f32,
 ) -> Vec<super::StripSeg> {
-    strip_layout_ex(tabs, bar_w, bar_h, cell_w, 0.0, 0)
+    strip_layout_ex(tabs, bar_w, bar_h, cell_w, 0.0, 0, 0.0)
 }
 
 #[test]
@@ -253,7 +253,7 @@ fn many_tabs_stop_shrinking_at_min_width_and_scroll() {
             }
         })
         .collect();
-    let segs = strip_layout_ex(&tabs, 900.0, BH, CW, 0.0, 0);
+    let segs = strip_layout_ex(&tabs, 900.0, BH, CW, 0.0, 0, 0.0);
     let widths: Vec<f32> = segs
         .iter()
         .filter_map(|s| matches!(s.item, StripItem::Tab(_)).then_some(s.rect.w))
@@ -275,7 +275,7 @@ fn scroll_keeps_active_tab_visible() {
     // The active tab is far to the right; the layout must scroll so it appears.
     let mut tabs: Vec<(&str, bool, bool)> = (0..30).map(|_| ("x", false, false)).collect();
     tabs[27] = ("active", true, false);
-    let segs = strip_layout_ex(&tabs, 900.0, BH, CW, 0.0, 27);
+    let segs = strip_layout_ex(&tabs, 900.0, BH, CW, 0.0, 27, 0.0);
     assert!(
         segs.iter().any(|s| s.item == StripItem::Tab(27)),
         "active tab (27) must be laid out (scrolled into view)"
@@ -290,7 +290,7 @@ fn tag_reserve_keeps_tabs_left_of_counter() {
     assert!(reserve > 0.0);
     let tabs: Vec<(&str, bool, bool)> = (0..9).map(|_| ("t", false, false)).collect();
     let bar_w = 1000.0;
-    let segs = strip_layout_ex(&tabs, bar_w, BH, CW, reserve, 0);
+    let segs = strip_layout_ex(&tabs, bar_w, BH, CW, reserve, 0, 0.0);
     // The right controls start at bar_w - 3*CTRL - gap; the counter sits to their
     // left within `reserve`. Tabs + the `+` must end before that counter band.
     let counter_left = bar_w - super::CTRL_BTN * 3.0 - super::TAB_GAP - reserve;

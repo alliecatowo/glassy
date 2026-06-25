@@ -103,6 +103,7 @@ pub(crate) fn strip_layout_ex(
     cell_w: f32,
     tag_reserve: f32,
     active_pos: usize,
+    left_inset: f32,
 ) -> Vec<StripSeg> {
     let mut segs = Vec::new();
     if bar_w <= 0.0 || bar_h <= 0.0 {
@@ -120,9 +121,10 @@ pub(crate) fn strip_layout_ex(
     // Reserve the control cluster AND the tag readout so tabs/`+` never overlap it.
     let right_start = (bar_w - right_w - TAB_GAP - tag_reserve.max(0.0)).max(0.0);
 
-    // Decorative mark on the far left (the " ◆ " brand), then the tabs.
+    // Decorative mark on the far left (the " ◆ " brand), then the tabs. `left_inset`
+    // clears the macOS traffic-light buttons (0 elsewhere).
     let mark_w = (cell_w * 3.0).round();
-    let tabs_left = mark_w + TAB_GAP;
+    let tabs_left = left_inset + mark_w + TAB_GAP;
     // The `+` button sits AFTER the last tab, so reserve its width on the right of
     // the tab band.
     let plus_w = CTRL_BTN + TAB_GAP * 2.0;
@@ -270,19 +272,60 @@ impl App {
         }
     }
 
-    /// The current pixel height the tab strip occupies: the full [`tab_bar_h`] when
-    /// visible, else 0.0 (the grid/content reclaims the band). Read by the render
-    /// origin, grid sizing, mouse hit-tests, menus, and toasts so the strip can be
-    /// hidden coherently without sprinkling visibility checks everywhere.
+    /// macOS reserves a top band even when the tab bar is hidden: with the OS
+    /// title bar removed (fullsize content view), the traffic-light buttons float
+    /// over the top-left, so content must start below them. ≈28 logical pt covers
+    /// the button zone. 0 on other platforms (normal title bar above the content).
+    pub(crate) fn chrome_top_inset(&self) -> f32 {
+        #[cfg(target_os = "macos")]
+        {
+            let scale = self
+                .window
+                .as_ref()
+                .map(|w| w.scale_factor() as f32)
+                .unwrap_or(1.0);
+            (28.0 * scale).round()
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            0.0
+        }
+    }
+
+    /// Left inset for the top chrome band's left-aligned content (brand mark, tab
+    /// chips) on macOS, clearing the floating traffic-light buttons (≈78 logical pt
+    /// wide). 0 elsewhere. Right-aligned content (the icon cluster) needs no inset.
+    pub(crate) fn chrome_left_inset(&self) -> f32 {
+        #[cfg(target_os = "macos")]
+        {
+            let scale = self
+                .window
+                .as_ref()
+                .map(|w| w.scale_factor() as f32)
+                .unwrap_or(1.0);
+            (78.0 * scale).round()
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            0.0
+        }
+    }
+
+    /// The current pixel height the top chrome band occupies. The tab strip's full
+    /// [`tab_bar_h`] when visible, else 0 — except on macOS, where the traffic-light
+    /// inset is always reserved (see [`chrome_top_inset`]) so the integrated
+    /// titlebar look never lets content slide under the window buttons. Read by the
+    /// render origin, grid sizing, mouse hit-tests, menus, and toasts.
     pub(crate) fn effective_tab_bar_h(&self) -> f32 {
-        if self.tab_bar_visible() {
+        let bar = if self.tab_bar_visible() {
             self.renderer
                 .as_ref()
                 .map(|r| tab_bar_h(r.cell_metrics().height))
                 .unwrap_or(0.0)
         } else {
             0.0
-        }
+        };
+        bar.max(self.chrome_top_inset())
     }
 
     /// Recompute the grid for the current strip visibility and resize every PTY.
@@ -291,7 +334,9 @@ impl App {
     /// the grid must reflow or the new/promoted tab is sized for the wrong height.
     /// A no-op-safe early return if the renderer/window are absent.
     pub(crate) fn reflow_grid(&mut self) {
-        let strip_visible = self.tab_bar_visible();
+        // Top band height incl. the macOS traffic-light inset; matches the render
+        // origin so grid sizing and painting agree.
+        let strip_h = self.effective_tab_bar_h();
         let (Some(window), Some(renderer)) = (self.window.as_ref(), self.renderer.as_ref()) else {
             return;
         };
@@ -300,11 +345,6 @@ impl App {
             return;
         }
         let m = renderer.cell_metrics();
-        let strip_h = if strip_visible {
-            tab_bar_h(m.height)
-        } else {
-            0.0
-        };
         let (cols, rows) = Self::grid_for(
             size,
             m.width,

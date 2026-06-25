@@ -108,6 +108,7 @@ impl App {
         let tab_count = self.tab_count();
         let tab_pane_counts = self.tab_pane_counts();
         let tab_active_pos = self.active_pos();
+        let tab_left_inset = self.chrome_left_inset();
         // Tab-bar incremental decision (single-pane path): rebuild only when the
         // painter's inputs changed or a full redraw is forced (e.g. theme), else
         // replay the cached overlay instead of re-shaping every tab title glyph.
@@ -829,6 +830,7 @@ impl App {
                 strip_hist,
                 &tab_pane_counts,
                 tab_active_pos,
+                tab_left_inset,
             );
             renderer.commit_tab_overlay();
         } else {

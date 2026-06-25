@@ -100,6 +100,7 @@ impl App {
         history_size: usize,
         pane_counts: &[usize],
         active_pos: usize,
+        left_inset: f32,
     ) {
         let m = renderer.cell_metrics();
         let (sw, _sh) = renderer.surface_size();
@@ -131,9 +132,9 @@ impl App {
         // 1) Bar backdrop (E1).
         renderer.push_overlay_px(0.0, 0.0, bar_w, bar_h, bar_bg);
 
-        // 2) Brand mark on the far left.
+        // 2) Brand mark on the far left, past any left inset (macOS traffic lights).
         let mark_y = (bar_h - m.height) * 0.5;
-        renderer.push_overlay_glyph_px((m.width).round(), mark_y.round(), '◆', accent);
+        renderer.push_overlay_glyph_px((left_inset + m.width).round(), mark_y.round(), '◆', accent);
 
         // 3) Lay out the bar (pixel rects) and paint each item.
         let descs: Vec<(&str, bool, bool)> = snapshot
@@ -141,7 +142,15 @@ impl App {
             .map(|(t, a, b, _)| (t.as_str(), *a, *b))
             .collect();
         let tag_reserve = tab_tag_reserve(tab_count, m.width);
-        let segs = strip_layout_ex(&descs, bar_w, bar_h, m.width, tag_reserve, active_pos);
+        let segs = strip_layout_ex(
+            &descs,
+            bar_w,
+            bar_h,
+            m.width,
+            tag_reserve,
+            active_pos,
+            left_inset,
+        );
         let multi = descs.len() > 1;
         let spin = SPINNER_FRAMES[spinner_frame % SPINNER_FRAMES.len()];
 

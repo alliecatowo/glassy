@@ -257,6 +257,7 @@ impl App {
             m.width,
             tag_reserve,
             self.active_pos(),
+            self.chrome_left_inset(),
         )
     }
 
