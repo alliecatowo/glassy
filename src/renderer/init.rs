@@ -182,21 +182,26 @@ impl Renderer {
         // the RGB channels ourselves. Either mode produces a translucent window;
         // only the premultiplication convention differs. If neither is available
         // the compositor can't do translucency and we stay fully opaque.
-        let (transparent, premultiplied_surface, alpha_mode) =
-            if caps.alpha_modes.contains(&wgpu::CompositeAlphaMode::PreMultiplied) {
-                (true, true, wgpu::CompositeAlphaMode::PreMultiplied)
-            } else if caps.alpha_modes.contains(&wgpu::CompositeAlphaMode::PostMultiplied) {
-                (true, false, wgpu::CompositeAlphaMode::PostMultiplied)
-            } else {
-                (
-                    false,
-                    false,
-                    caps.alpha_modes
-                        .first()
-                        .copied()
-                        .unwrap_or(wgpu::CompositeAlphaMode::Auto),
-                )
-            };
+        let (transparent, premultiplied_surface, alpha_mode) = if caps
+            .alpha_modes
+            .contains(&wgpu::CompositeAlphaMode::PreMultiplied)
+        {
+            (true, true, wgpu::CompositeAlphaMode::PreMultiplied)
+        } else if caps
+            .alpha_modes
+            .contains(&wgpu::CompositeAlphaMode::PostMultiplied)
+        {
+            (true, false, wgpu::CompositeAlphaMode::PostMultiplied)
+        } else {
+            (
+                false,
+                false,
+                caps.alpha_modes
+                    .first()
+                    .copied()
+                    .unwrap_or(wgpu::CompositeAlphaMode::Auto),
+            )
+        };
 
         // Surface stays unconfigured until `resize()`; start at 1x1 as a placeholder.
         let config = wgpu::SurfaceConfiguration {

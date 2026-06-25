@@ -34,7 +34,10 @@ impl App {
             let pw = last.rect.x + last.rect.w - first.rect.x + pill_pad * 2.0;
             let ph = CTRL_BTN + pill_pad;
             renderer.push_overlay_rrect_px(
-                px, py, pw, ph,
+                px,
+                py,
+                pw,
+                ph,
                 radius,
                 [surface[0], surface[1], surface[2], surface[3] * 0.55],
             );
@@ -54,7 +57,14 @@ impl App {
             if is_held {
                 renderer.push_overlay_rrect_px(r.x, r.y, r.w, r.h, radius, press_fill(surface));
             } else if is_hover {
-                renderer.push_overlay_rrect_px(r.x, r.y, r.w, r.h, radius, gui::state_fill(surface, 0.7, false));
+                renderer.push_overlay_rrect_px(
+                    r.x,
+                    r.y,
+                    r.w,
+                    r.h,
+                    radius,
+                    gui::state_fill(surface, 0.7, false),
+                );
             }
             let cfg = if is_hover || is_held { fg } else { fg_dim };
             let gx = r.x + (r.w - m.width) * 0.5;
