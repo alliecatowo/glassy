@@ -153,6 +153,9 @@ pub enum KeyAction {
     ScrollDown,
     ScrollTop,
     ScrollBottom,
+    /// Toggle broadcast input: typed keys/pastes go to every pane of the
+    /// active tab at once.
+    BroadcastInput,
 }
 
 impl KeyAction {
@@ -182,6 +185,7 @@ impl KeyAction {
             ScrollDown => "Scroll history down",
             ScrollTop => "Scroll to top",
             ScrollBottom => "Scroll to bottom",
+            BroadcastInput => "Broadcast input to all panes",
         }
     }
 
@@ -190,7 +194,7 @@ impl KeyAction {
         use KeyAction::*;
         match self {
             NewTab | ClosePane | NextTab | PrevTab => "Tabs",
-            SplitVertical | SplitHorizontal => "Split panes",
+            SplitVertical | SplitHorizontal | BroadcastInput => "Split panes",
             Copy | Paste => "Edit",
             ToggleFullscreen | ToggleMaximize | FontIncrease | FontDecrease | FontReset
             | ToggleStatusBar | ScrollUp | ScrollDown | ScrollTop | ScrollBottom => "View",
@@ -228,6 +232,7 @@ pub(crate) fn parse_action(s: &str) -> Result<Option<KeyAction>> {
         "scroll_down" => ScrollDown,
         "scroll_top" => ScrollTop,
         "scroll_bottom" => ScrollBottom,
+        "broadcast_input" => BroadcastInput,
         other => bail!("unrecognized keybinding action '{other}'"),
     }))
 }
@@ -247,6 +252,7 @@ pub fn default_keymap() -> KeyMap {
         ("ctrl+shift+tab", PrevTab),
         ("ctrl+shift+e", SplitVertical),
         ("ctrl+shift+o", SplitHorizontal),
+        ("ctrl+shift+i", BroadcastInput),
         ("f11", ToggleFullscreen),
         ("f10", ToggleMaximize),
         ("ctrl+,", Settings),
@@ -304,4 +310,36 @@ pub(crate) fn build_keymap(mut base: KeyMap, overrides: &[(String, String)]) -> 
         }
     }
     base
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn broadcast_input_action_round_trips() {
+        // The new action parses from its config name and reports a description
+        // + section like every other action.
+        assert_eq!(
+            parse_action("broadcast_input").unwrap(),
+            Some(KeyAction::BroadcastInput)
+        );
+        assert!(!KeyAction::BroadcastInput.description().is_empty());
+        assert_eq!(KeyAction::BroadcastInput.section(), "Split panes");
+    }
+
+    #[test]
+    fn broadcast_input_has_default_binding() {
+        // Ctrl+Shift+I is bound to BroadcastInput out of the box.
+        let map = default_keymap();
+        let chord = parse_chord("ctrl+shift+i").unwrap();
+        assert_eq!(map.get(&chord), Some(&KeyAction::BroadcastInput));
+    }
+
+    #[test]
+    fn broadcast_input_binding_can_be_disabled() {
+        // A user "none" override removes the default bind.
+        let map = build_keymap(default_keymap(), &[("ctrl+shift+i".into(), "none".into())]);
+        assert!(!map.values().any(|&a| a == KeyAction::BroadcastInput));
+    }
 }

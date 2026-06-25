@@ -33,6 +33,7 @@ impl App {
     /// Associated fn (no `&self`) so it composes with the caller's `&mut Renderer`
     /// borrow; all data arrives as plain parameters.
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn paint_status_bar(
         renderer: &mut Renderer,
         surface_h: u32,
@@ -44,6 +45,7 @@ impl App {
         cwd: Option<&std::path::Path>,
         git_branch: Option<&str>,
         progress: Option<crate::image::ProgressState>,
+        broadcast: bool,
     ) {
         let m = renderer.cell_metrics();
         let (sw, _sh) = renderer.surface_size();
@@ -124,6 +126,19 @@ impl App {
                 renderer.push_overlay_glyph_px_str((rx - w).round(), ty, tag, fg);
             }
             rx -= (8.0 * m.width).round(); // fixed 8-char slot (even when hidden)
+        }
+
+        // Broadcast-input indicator — shown only while broadcast input is on, so
+        // the user always sees that keystrokes fan out to every pane. Drawn in
+        // the danger accent (it changes where input lands, so make it loud) in a
+        // fixed 6-char slot left of the mode flags.
+        {
+            if broadcast {
+                let tag = "BCAST";
+                let w = renderer.text_width_px(tag);
+                renderer.push_overlay_glyph_px_str((rx - w).round(), ty, tag, mul(color::danger()));
+            }
+            rx -= (6.0 * m.width).round(); // fixed 6-char slot (even when hidden)
         }
         let _ = rx; // git/cwd slots reserved here for future waves
 

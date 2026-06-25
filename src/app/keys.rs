@@ -363,7 +363,9 @@ impl App {
                 // A typed key snaps the view back to the prompt, matching
                 // every mainstream terminal.
                 pty.term.lock().scroll_display(Scroll::Bottom);
-                pty.write(bytes);
+                // `write_input` fans the bytes out to every pane when broadcast
+                // input is active (else just the focused pane).
+                self.write_input(bytes);
             }
             // The snap-to-bottom (and the cursor/selection reset above) are
             // visual changes even when the child emits nothing back — e.g.
@@ -461,6 +463,7 @@ impl App {
                 }
                 self.mark_dirty(event_loop);
             }
+            BroadcastInput => self.toggle_broadcast_input(event_loop),
         }
     }
 }

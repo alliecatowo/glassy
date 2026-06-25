@@ -141,6 +141,7 @@ impl App {
             .as_ref()
             .and_then(|p| p.pane_info.git_branch.clone());
         let sb_progress = self.active_progress;
+        let sb_broadcast = self.broadcast_input;
 
         // Settings-form inputs (whole-`self` method calls) snapshotted BEFORE the
         // disjoint `renderer`/`pty` borrows below.
@@ -704,6 +705,7 @@ impl App {
                 sb_cwd.as_deref(),
                 sb_git_branch.as_deref(),
                 sb_progress,
+                sb_broadcast,
             );
         }
 

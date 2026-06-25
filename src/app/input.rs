@@ -298,7 +298,18 @@ impl App {
         });
         if let (Some(text), Some(pty)) = (text, self.pty.as_ref()) {
             pty.term.lock().scroll_display(Scroll::Bottom);
-            pty.paste(&text, bracketed);
+            // Honor broadcast input: a paste while broadcasting reaches every
+            // pane of a split tab, matching the typed-input fan-out.
+            if self.broadcast_input
+                && let Some(g) = self.panes.as_ref()
+            {
+                pty.paste(&text, bracketed);
+                for other in g.others.values() {
+                    other.paste(&text, bracketed);
+                }
+            } else {
+                pty.paste(&text, bracketed);
+            }
         }
     }
 
@@ -365,6 +376,46 @@ impl App {
     /// render path via `toast::paint_toasts`.
     pub(crate) fn push_toast(&mut self, message: impl Into<String>) {
         crate::app::toast::push(&mut self.toasts, message);
+    }
+
+    /// Toggle "broadcast input": when on, typed keys and pastes are mirrored to
+    /// every pane of the active tab at once. A toast confirms the new state and
+    /// a `BCAST` tag shows in the status bar while it is on. Repaints so the
+    /// indicator updates immediately.
+    pub(crate) fn toggle_broadcast_input(&mut self, event_loop: &ActiveEventLoop) {
+        self.broadcast_input = !self.broadcast_input;
+        let msg = if self.broadcast_input {
+            "Broadcast input: ON — typing goes to all panes"
+        } else {
+            "Broadcast input: OFF"
+        };
+        self.push_toast(msg);
+        // The status-bar indicator + toast are overlays not covered by terminal
+        // damage; force a full rebuild so they appear/clear this frame.
+        self.force_full_redraw = true;
+        self.mark_dirty(event_loop);
+    }
+
+    /// Write raw bytes to the child(ren), honoring broadcast input. When
+    /// broadcast is off (or the tab is single-pane) this writes only to the
+    /// focused pane, identical to a bare `pty.write`. When on AND the tab is
+    /// split, the same bytes go to every pane of the active tab so all shells
+    /// receive the keystrokes in lockstep.
+    pub(crate) fn write_input(&self, bytes: Vec<u8>) {
+        let Some(focused) = self.pty.as_ref() else {
+            return;
+        };
+        match self.panes.as_ref() {
+            Some(g) if self.broadcast_input => {
+                // Fan out: focused pane + every parked pane. Clone per-pane so
+                // each PTY owns its copy of the byte buffer.
+                focused.write(bytes.clone());
+                for pty in g.others.values() {
+                    pty.write(bytes.clone());
+                }
+            }
+            _ => focused.write(bytes),
+        }
     }
 
     /// Note a left mouse PRESS for chrome double-click detection (drives

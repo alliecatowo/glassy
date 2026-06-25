@@ -3,7 +3,9 @@
 //! Owns overlay routing (settings / help / palette / search / menus), the
 //! gutter-drag and pane-header / tab-strip click paths, Ctrl+click link
 //! opening, the right-click context menu, and — when no application owns the
-//! mouse — the glassy text-selection / paste path.
+//! mouse — the glassy text-selection / paste path. Holding Alt at press time
+//! starts a rectangular ([`SelectionType::Block`]) selection whose copy
+//! yields per-row blocks.
 
 use super::*;
 
@@ -334,6 +336,8 @@ impl App {
             // Left press: start (or extend the granularity of) a glassy
             // text selection. Double/triple clicks within the same cell
             // and a short window escalate to Semantic (word) then Lines.
+            // Holding Alt/Option at press time starts a rectangular (Block)
+            // selection instead; copying it yields one block per row.
             (MouseButton::Left, true) => {
                 const MULTI_CLICK: Duration = Duration::from_millis(300);
                 let now = Instant::now();
@@ -346,10 +350,17 @@ impl App {
                     _ => 1,
                 };
                 self.last_click = Some((self.mouse_cell, count, now));
-                let ty = match count {
-                    2 => SelectionType::Semantic,
-                    3 => SelectionType::Lines,
-                    _ => SelectionType::Simple,
+                let ty = if self.mods.alt_key() {
+                    // Alt-drag: rectangular block. Takes priority over the
+                    // multi-click word/line escalation so an Alt-drag is
+                    // always a clean column block regardless of click count.
+                    SelectionType::Block
+                } else {
+                    match count {
+                        2 => SelectionType::Semantic,
+                        3 => SelectionType::Lines,
+                        _ => SelectionType::Simple,
+                    }
                 };
                 self.start_selection(ty);
                 self.mark_dirty(event_loop);
