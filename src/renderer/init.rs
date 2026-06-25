@@ -626,7 +626,10 @@ impl Renderer {
             pad: pad_for(metrics.height),
             pad_top: None,
             pad_bottom: None,
-            pad_left: None,
+            // Left margin is 1.5× the uniform pad so the content has clear
+            // breathing room from the window edge. All other sides stay at the
+            // uniform value; set_pad_left() can override this at any time.
+            pad_left: Some((pad_for(metrics.height) * 1.5).round()),
             pad_right: None,
             grid_origin_y: 0.0,
             pad_override: None,

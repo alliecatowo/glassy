@@ -116,6 +116,11 @@ pub(super) struct LoadedFont {
     pub(super) font_system: cosmic_text::FontSystem,
     pub(super) family: FamilyOwned,
     pub(super) is_monospaced: bool,
+    /// Family name of the emoji fallback font in the database, if one was loaded.
+    /// Used to force ZWJ clusters (compound emoji like 🏳️‍⚧️) into a single font
+    /// run so the GSUB ZWJ ligature can be resolved — shaping across font boundaries
+    /// silently drops the ZWJ join.
+    pub(super) emoji_family: Option<String>,
 }
 
 /// Build a `FontSystem` from a single primary font's raw bytes, then enrich the
@@ -172,11 +177,29 @@ pub(super) fn build_font_system(
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     let _ = primary_path;
 
+    // After loading fallback fonts, find the emoji font's family name so the
+    // shaping layer can force ZWJ clusters into a single font run. Shaping a
+    // ZWJ sequence like 🏳️‍⚧️ across two fonts (e.g. JetBrainsMono for ⚧
+    // and Apple Color Emoji for 🏳) silently drops the ZWJ ligature — the
+    // entire cluster must be shaped by the font that holds the combined glyph.
+    let emoji_family = db
+        .faces()
+        .find(|f| {
+            f.families
+                .iter()
+                .any(|(name, _)| name.to_lowercase().contains("emoji"))
+        })
+        .and_then(|f| f.families.first().map(|(n, _)| n.clone()));
+    if let Some(ref ef) = emoji_family {
+        log::debug!("glassy: emoji family for ZWJ shaping: '{ef}'");
+    }
+
     let font_system = cosmic_text::FontSystem::new_with_locale_and_db("en-US".to_string(), db);
     Some(LoadedFont {
         font_system,
         family: FamilyOwned::Named(family_name),
         is_monospaced,
+        emoji_family,
     })
 }
 
@@ -782,9 +805,7 @@ const CURATED_FAMILIES_MACOS: &[&str] = &[
 fn macos_font_cache_path() -> Option<PathBuf> {
     let base = std::env::var_os("XDG_CACHE_HOME")
         .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Library/Caches"))
-        })?;
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Library/Caches")))?;
     Some(base.join("glassy/macos-font-cache.tsv"))
 }
 
@@ -825,7 +846,11 @@ fn macos_font_cache_insert(family: &str, file_path: &str) {
         return;
     }
     use std::io::Write;
-    match std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+    match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
         Ok(mut f) => {
             if let Err(e) = writeln!(f, "{family}\t{file_path}") {
                 log::debug!("glassy: macos-font-cache write failed: {e}");
@@ -906,7 +931,10 @@ fn find_macos_font_file(
                     }
                 }
                 let path = entry.path();
-                log::debug!("glassy: macos found font for '{family}': {}", path.display());
+                log::debug!(
+                    "glassy: macos found font for '{family}': {}",
+                    path.display()
+                );
                 // Persist to cache for next launch.
                 if !cache.contains_key(family) {
                     macos_font_cache_insert(family, &path.to_string_lossy());

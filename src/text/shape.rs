@@ -80,6 +80,11 @@ pub struct Text {
     /// when the user did not request any features. Built once at load time from
     /// the config's `font_features` list; re-applied on every `build_attrs` call.
     font_features: FontFeatures,
+    /// Family name of the emoji font in the database, used to force ZWJ clusters
+    /// into a single font run. Shaping 🏳️‍⚧️ across two fonts (JetBrains for ⚧,
+    /// Color Emoji for 🏳) drops the ZWJ ligature; using the emoji font for the
+    /// whole cluster lets the GSUB lookup resolve it.
+    emoji_family: Option<String>,
 }
 
 /// Build shaping attributes for the given style against the resolved family,
@@ -208,8 +213,8 @@ impl Text {
         // system and is O(hundreds of files) on a typical Linux install, so
         // it adds hundreds of milliseconds to startup. Warn so the user (or
         // packager) knows the curated discovery chain failed entirely.
-        let (font_system, family) = match loaded {
-            Some(found) => (found.font_system, found.family),
+        let (font_system, family, emoji_family) = match loaded {
+            Some(found) => (found.font_system, found.family, found.emoji_family),
             None => {
                 log::warn!(
                     "glassy: no usable monospace font found via fc-match or probe paths; \
@@ -217,7 +222,7 @@ impl Text {
                      Install a monospace font (e.g. JetBrains Mono, DejaVu Sans Mono) \
                      or set GLASSY_FONT=<path> to suppress this."
                 );
-                (FontSystem::new(), FamilyOwned::Monospace)
+                (FontSystem::new(), FamilyOwned::Monospace, None)
             }
         };
 
@@ -232,6 +237,7 @@ impl Text {
             buffer: Buffer::new_empty(metrics),
             family,
             font_features: parse_font_features(font_features),
+            emoji_family,
         };
 
         let cell = text.measure_cell(font_px, line_height);
@@ -372,7 +378,36 @@ impl Text {
         bold: bool,
         italic: bool,
     ) -> Vec<RasterizedGlyph> {
+        // ZWJ clusters (compound emoji like 🏳️‍⚧️) must be shaped entirely by the
+        // emoji font. If we shape with the primary monospace font, component glyphs
+        // that happen to exist in it (e.g. ⚧ in Nerd Font) cause the shaper to
+        // split the run, silently dropping the ZWJ ligature. Force the emoji family
+        // for any cluster that contains a ZWJ or an emoji code point.
+        let needs_emoji = cluster.contains('\u{200D}')
+            || cluster.chars().any(|c| {
+                let cp = c as u32;
+                (0x1F300..=0x1FAFF).contains(&cp)   // misc + supplemental emoji
+                    || (0x2600..=0x27BF).contains(&cp) // misc symbols / dingbats
+            });
+        if needs_emoji && let Some(ref ef) = self.emoji_family.clone() {
+            return self.build_glyphs_with_family(cluster, ef, bold, italic);
+        }
         self.build_glyphs(cluster, bold, italic)
+    }
+
+    /// Shape using an explicit family name rather than the primary font. Used for
+    /// ZWJ emoji clusters that must stay in a single font run.
+    fn build_glyphs_with_family(
+        &mut self,
+        text: &str,
+        family: &str,
+        bold: bool,
+        italic: bool,
+    ) -> Vec<RasterizedGlyph> {
+        let attrs = build_attrs(Family::Name(family), bold, italic, &self.font_features);
+        self.buffer.set_text(text, &attrs, Shaping::Advanced, None);
+        self.buffer.shape_until_scroll(&mut self.font_system, false);
+        self.collect_glyphs()
     }
 
     /// Shape and rasterize a single character into owned RGBA bitmaps.
@@ -382,7 +417,11 @@ impl Text {
         let attrs = build_attrs(self.family.as_family(), bold, italic, &self.font_features);
         self.buffer.set_text(text, &attrs, Shaping::Advanced, None);
         self.buffer.shape_until_scroll(&mut self.font_system, false);
+        self.collect_glyphs()
+    }
 
+    /// Collect rasterized glyphs from the shaped buffer. Shared by all shaping paths.
+    fn collect_glyphs(&mut self) -> Vec<RasterizedGlyph> {
         let mut out = Vec::new();
         for run in self.buffer.layout_runs() {
             for glyph in run.glyphs.iter() {
@@ -403,10 +442,7 @@ impl Text {
                 let pixels = (w * h) as usize;
 
                 let (data, is_color) = match img.content {
-                    // 1 byte/px coverage: keep it as-is for the R8 mask atlas.
                     SwashContent::Mask => (img.data.clone(), false),
-                    // 3 bytes/px subpixel coverage; collapse to a single coverage
-                    // byte for the R8 mask atlas.
                     SwashContent::SubpixelMask => {
                         let mut d = Vec::with_capacity(pixels);
                         for px in img.data.chunks_exact(3) {
@@ -414,7 +450,6 @@ impl Text {
                         }
                         (d, false)
                     }
-                    // Already RGBA (color emoji): keep as-is for the color atlas.
                     SwashContent::Color => (img.data.clone(), true),
                 };
 

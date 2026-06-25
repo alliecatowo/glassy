@@ -389,14 +389,13 @@ impl App {
                             + pad_x * 2.0)
                             .max(cell_w * 8.0)
                             .ceil();
-                        // Anchor just below the strip (or the window top when the
-                        // strip is hidden).
-                        let bar_h = if self.tab_bar_visible() {
-                            tab_bar_h(m.height)
-                        } else {
-                            0.0
-                        };
-                        self.menu_anchor_px = Some(((sw as f32 - est_w).max(0.0), bar_h + 2.0));
+                        // Always anchor below the icon-band height, even when
+                        // the full tab bar is hidden. Without this, the menu
+                        // opens at y=2 (directly under the hamburger button) and
+                        // the mouse release fires on the first menu item.
+                        let icon_band_h = tab_bar_h(m.height);
+                        self.menu_anchor_px =
+                            Some(((sw as f32 - est_w).max(0.0), icon_band_h + 2.0));
                     }
                 } else {
                     self.menu_items = None;
