@@ -947,8 +947,10 @@ fn find_macos_font_file(
 }
 
 /// Load fallback fonts into `db` on macOS: Apple Color Emoji and Apple Symbols.
-/// These cover emoji and miscellaneous symbol code points that the primary
-/// monospace font likely lacks.
+/// Simple emoji (single codepoint + variation selectors) render correctly via
+/// Apple Color Emoji's SBIX bitmaps. ZWJ compound sequences (🏳️‍⚧️ etc.) require
+/// CoreText shaping to resolve Apple's GSUB lookup chain — that path is pending
+/// a `core-text` integration and tracked separately.
 #[cfg(target_os = "macos")]
 fn load_fallback_fonts_macos(db: &mut fontdb::Database, primary_path: Option<&Path>) {
     let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
