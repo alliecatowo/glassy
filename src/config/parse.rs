@@ -52,6 +52,10 @@ pub(super) struct RawConfig {
     // Cursor defaults (new in cursor-cfg stream)
     pub cursor_style: Option<String>,
     pub cursor_blink: Option<bool>,
+    /// Path to an image file from which the theme should be auto-generated on
+    /// startup (via `theme_gen`). When set, the generated theme overrides any
+    /// `theme = …` setting and any `color.*` overrides.
+    pub wallpaper_theme: Option<String>,
 }
 
 impl RawConfig {
@@ -87,6 +91,19 @@ impl RawConfig {
                     if let Some(color) = color_str {
                         theme.ansi16[i] = parse_hex_color(color)?;
                     }
+                }
+            }
+        }
+
+        // Apply wallpaper-generated theme if a path is configured.
+        // This overrides all named-theme and color.* settings.
+        if let Some(ref path) = self.wallpaper_theme {
+            match super::theme_gen::from_image_path(path) {
+                Ok(generated) => {
+                    theme = generated;
+                }
+                Err(e) => {
+                    log::warn!("glassy: wallpaper_theme '{path}' failed, using fallback: {e}");
                 }
             }
         }
@@ -138,6 +155,10 @@ impl RawConfig {
             keymap: build_keymap(default_keymap(), &self.keybinding_overrides),
             cursor_style: parse_cursor_style_config(self.cursor_style.as_deref()),
             cursor_blink: self.cursor_blink.unwrap_or(false),
+            wallpaper_theme: self
+                .wallpaper_theme
+                .filter(|s| !s.is_empty())
+                .map(PathBuf::from),
         };
 
         Ok(super::Settings { config, theme })
@@ -515,6 +536,11 @@ pub(super) fn apply_kv(key: &str, value: &str, raw: &mut RawConfig) -> Result<()
         }
         "cursor_blink" => {
             raw.cursor_blink = Some(parse_bool(value, "cursor_blink")?);
+        }
+        "wallpaper_theme" => {
+            if !value.is_empty() {
+                raw.wallpaper_theme = Some(value.to_string());
+            }
         }
         other => {
             log::warn!("glassy: ignoring unknown config key '{other}'");

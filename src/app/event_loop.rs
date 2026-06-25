@@ -279,6 +279,15 @@ impl ApplicationHandler<UserEvent> for App {
             }
         }
 
+        // Headless: generate and apply a theme from an image path at startup so the
+        // resulting colour palette can be captured.
+        //   GLASSY_THEME_GEN_IMAGE=/path/to/wall.png   — apply a generated theme
+        if let Ok(path) = std::env::var("GLASSY_THEME_GEN_IMAGE")
+            && !path.is_empty()
+        {
+            self.apply_theme_from_image_path(&path, event_loop);
+        }
+
         // Draw the first frame, then reveal the window (avoids a white flash).
         self.next_frame = Instant::now();
         self.render();

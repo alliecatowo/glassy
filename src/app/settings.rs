@@ -499,6 +499,59 @@ impl App {
         }
     }
 
+    /// Generate a [`crate::color::Theme`] from the configured `wallpaper_theme`
+    /// image path (or the one supplied as an override) and apply it live.
+    ///
+    /// Shows a toast with the result. If no wallpaper path is configured, shows
+    /// a hint toast instead.
+    pub(crate) fn generate_theme_from_wallpaper(&mut self, event_loop: &ActiveEventLoop) {
+        let path = match &self.config.wallpaper_theme {
+            Some(p) => p.clone(),
+            None => {
+                self.push_toast(
+                    "No wallpaper_theme configured. Add `wallpaper_theme = /path/to/image.png` to glassy.conf",
+                );
+                self.mark_dirty(event_loop);
+                return;
+            }
+        };
+        let path_str = path.to_string_lossy().into_owned();
+        match crate::config::theme_gen::from_image_path(&path_str) {
+            Ok(generated) => {
+                color::set_theme(generated);
+                self.config.theme = "wallpaper".to_string();
+                self.force_full_redraw = true;
+                let short = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path_str.clone());
+                self.push_toast(format!("Theme generated from {short}"));
+                self.mark_dirty(event_loop);
+            }
+            Err(e) => {
+                self.push_toast(format!("Theme generation failed: {e}"));
+                self.mark_dirty(event_loop);
+            }
+        }
+    }
+
+    /// Apply a generated theme from the given image path directly (called from
+    /// external tooling, OSC hooks, or the scripted test harness via
+    /// `GLASSY_THEME_GEN_IMAGE`). A no-op with a log warning on decode failure.
+    pub(crate) fn apply_theme_from_image_path(&mut self, path: &str, event_loop: &ActiveEventLoop) {
+        match crate::config::theme_gen::from_image_path(path) {
+            Ok(generated) => {
+                color::set_theme(generated);
+                self.config.theme = "wallpaper".to_string();
+                self.force_full_redraw = true;
+                self.mark_dirty(event_loop);
+            }
+            Err(e) => {
+                log::warn!("glassy: theme-gen from '{path}' failed: {e}");
+            }
+        }
+    }
+
     /// Persist the live-adjustable settings (font size in pt, opacity, bell,
     /// theme, font family, scrollback, status_bar) to the config file, preserving every other
     /// key/comment.

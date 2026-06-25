@@ -150,6 +150,10 @@ pub struct Config {
     /// Whether the cursor blinks by default (when the child has not set a
     /// blinking/steady style via DECSCUSR). Default false (steady).
     pub cursor_blink: bool,
+    /// Optional image path from which the theme was auto-generated at startup
+    /// (from the `wallpaper_theme` config key). Stored so the palette
+    /// "Generate theme from wallpaper" action can re-run the generator live.
+    pub wallpaper_theme: Option<std::path::PathBuf>,
 }
 
 /// The three user-facing default cursor shapes.

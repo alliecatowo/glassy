@@ -30,6 +30,7 @@
 //! restore_session = false              # restore previous tabs/splits/cwds on launch
 //! cursor_style = block                 # default cursor shape: block | beam | underline
 //! cursor_blink = false                 # blink the cursor by default (false = steady)
+//! wallpaper_theme = /path/to/wall.png  # generate theme from image on startup
 //! ```
 //!
 //! Custom keybindings live in a `[keybindings]` section mapping chords to actions:
@@ -82,6 +83,7 @@
 mod cli;
 pub mod keymap;
 pub mod parse;
+pub mod theme_gen;
 pub mod theme_import;
 
 use anyhow::{Context, Result};
