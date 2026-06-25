@@ -363,6 +363,7 @@ mod tests {
                 TapEvent::SemanticMark(_, _) => "mark",
                 TapEvent::Notification(_) => "notification",
                 TapEvent::Progress(_) => "progress",
+                TapEvent::Peek(_) => "peek",
             })
             .collect();
         assert_eq!(kinds, vec!["display", "delete"]);
@@ -716,6 +717,25 @@ mod tests {
         }
         // Wrong prefix rejected.
         assert!(parse_osc777_notification(b"9;hello").is_none());
+    }
+
+    #[test]
+    fn osc1337_peek_parsed() {
+        use super::store::parse_osc1337_peek;
+        // The glassy Peek extension carries the requested file path.
+        match parse_osc1337_peek(b"1337;Peek=/tmp/notes.md") {
+            Some(TapEvent::Peek(p)) => assert_eq!(p, std::path::PathBuf::from("/tmp/notes.md")),
+            other => panic!("expected Peek, got {other:?}"),
+        }
+        // Surrounding whitespace is trimmed.
+        match parse_osc1337_peek(b"1337;Peek=  README.md  ") {
+            Some(TapEvent::Peek(p)) => assert_eq!(p, std::path::PathBuf::from("README.md")),
+            other => panic!("expected Peek, got {other:?}"),
+        }
+        // Empty path and other OSC 1337 keys are rejected.
+        assert!(parse_osc1337_peek(b"1337;Peek=").is_none());
+        assert!(parse_osc1337_peek(b"1337;SetMark").is_none());
+        assert!(parse_osc1337_peek(b"9;hello").is_none());
     }
 
     #[test]

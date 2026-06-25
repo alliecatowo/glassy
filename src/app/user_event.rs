@@ -245,6 +245,15 @@ pub(super) fn dispatch(
             }
             // Progress changes are visual — mark dirty so the status bar repaints.
         }
+        UserEvent::Peek(id, path) => {
+            // OSC 1337 Peek: only the active focused pane's request shows a card
+            // (a background pane peeking would be confusing). Resolve relative
+            // paths against the session's cwd, read a capped head, and stash the
+            // card; the next keystroke/Esc/click dismisses it.
+            if id == app.active_focused_id() {
+                app.show_peek(&path);
+            }
+        }
         UserEvent::TextBlinkPresent(id) => {
             // SGR 5/6 (text blink) detected in the byte stream of the active
             // session. Arm the text-blink timer so `about_to_wait` drives phase

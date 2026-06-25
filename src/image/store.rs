@@ -218,6 +218,11 @@ pub enum TapEvent {
     /// subtle progress indicator in the status bar and/or tab chip. The original
     /// OSC bytes are still passed through to the VT parser unchanged.
     Progress(ProgressState),
+    /// OSC 1337 `Peek=<path>` inline-preview request (a glassy extension, e.g.
+    /// emitted by a `glassy-peek <file>` helper). The UI thread reads a small head
+    /// of the file and shows a syntax/markdown peek card near the cursor. The
+    /// original OSC bytes are still passed through to the VT parser unchanged.
+    Peek(std::path::PathBuf),
 }
 
 #[derive(PartialEq, Eq)]
@@ -480,6 +485,10 @@ impl StreamTap {
         if let Some(ev) = parse_osc777_notification(&osc) {
             return Some(ev);
         }
+        // OSC 1337 — glassy inline-preview request: `1337;Peek=<path>`.
+        if let Some(ev) = parse_osc1337_peek(&osc) {
+            return Some(ev);
+        }
         // OSC 133 — shell-integration semantic marks: `133;A`, `133;B`, etc.
         // (and `133;D;<exit>` carrying the command's exit code).
         parse_osc133_mark(&osc).map(|(mark, exit)| TapEvent::SemanticMark(mark, exit))
@@ -568,6 +577,22 @@ pub(crate) fn parse_osc777_notification(body: &[u8]) -> Option<TapEvent> {
         _ => return None,
     };
     Some(TapEvent::Notification(text))
+}
+
+/// Parse an OSC 1337 body (`1337;Peek=<path>`) into a [`TapEvent::Peek`]. This is
+/// a glassy extension to the iTerm2 OSC 1337 namespace (e.g. emitted by a
+/// `glassy-peek <file>` helper) that asks the terminal to show a small inline
+/// preview of `<path>` near the cursor. The path is taken verbatim (trimmed);
+/// resolution + reading happens on the UI thread. Returns `None` for any other
+/// OSC 1337 key or an empty path.
+pub(crate) fn parse_osc1337_peek(body: &[u8]) -> Option<TapEvent> {
+    let body = std::str::from_utf8(body).ok()?;
+    let rest = body.strip_prefix("1337;")?;
+    let path = rest.strip_prefix("Peek=")?.trim();
+    if path.is_empty() {
+        return None;
+    }
+    Some(TapEvent::Peek(std::path::PathBuf::from(path)))
 }
 
 /// Parse an OSC 133 body (`133;<mark>`) into a shell-integration semantic mark

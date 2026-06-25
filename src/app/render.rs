@@ -1029,6 +1029,26 @@ impl App {
             );
         }
 
+        // Inline file peek card (OSC 1337 Peek): a static frosted preview anchored
+        // to the bottom of the content area, painted under the toasts/modals. Only
+        // present until the next keystroke/click dismisses it, so this is rare.
+        if let Some(peek) = self.peek.as_ref() {
+            let (sw, sh) = renderer.surface_size();
+            let status_h = if self.config.status_bar {
+                STATUS_BAR_H.round() as i32
+            } else {
+                0
+            };
+            let top = tab_strip_h.round() as i32;
+            let area = pane::Rect {
+                x: 0,
+                y: top,
+                w: sw as i32,
+                h: (sh as i32 - top - status_h).max(0),
+            };
+            Self::paint_peek(renderer, peek, area);
+        }
+
         // In-app toast notifications: painted above the terminal chrome but below
         // any modal (settings/help). Toasts are transient overlays that do not block
         // interaction. They are only painted when there are live toasts.

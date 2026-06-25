@@ -249,6 +249,9 @@ pub enum UserEvent {
     /// OSC 9;4 progress report from the running application. The UI thread stores
     /// the latest state per-session and renders a subtle progress indicator.
     Progress(usize, crate::image::ProgressState),
+    /// OSC 1337 `Peek=<path>` inline-preview request (glassy extension). The UI
+    /// thread reads a small head of the file and shows a peek card near the cursor.
+    Peek(usize, PathBuf),
     /// SGR 5 (slow blink) or SGR 6 (rapid blink) detected in the PTY byte stream
     /// for the given session. The UI thread arms the text-blink timer so cells
     /// that have blink active toggle visibility. Sent at most once per read burst

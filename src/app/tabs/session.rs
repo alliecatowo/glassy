@@ -224,6 +224,8 @@ impl App {
                     layout,
                     others: ptys,
                     others_titles,
+                    // Zoom is a transient view mode; a restored split starts tiled.
+                    zoom: pane::Zoom::new(),
                 })
             };
 

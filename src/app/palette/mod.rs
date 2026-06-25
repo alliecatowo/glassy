@@ -33,6 +33,7 @@ pub(crate) enum PaletteCmd {
     SplitHorizontal,
     ClosePane,
     ToggleBroadcastInput,
+    ToggleZoom,
     // --- Overlays ---
     OpenSettings,
     OpenHelp,
@@ -81,7 +82,9 @@ impl PaletteCmd {
         use PaletteCmd::*;
         match self {
             NewTab | CloseTab | NextTab | PrevTab => "Tab",
-            SplitVertical | SplitHorizontal | ClosePane | ToggleBroadcastInput => "Pane",
+            SplitVertical | SplitHorizontal | ClosePane | ToggleBroadcastInput | ToggleZoom => {
+                "Pane"
+            }
             OpenSettings | OpenHelp | OpenSearch => "View",
             Copy | Paste => "Edit",
             ToggleFullscreen | ToggleQuake => "Window",
@@ -109,6 +112,7 @@ impl PaletteCmd {
             SplitHorizontal => "Split horizontal (top / bottom)".into(),
             ClosePane => "Close pane".into(),
             ToggleBroadcastInput => "Toggle broadcast input (all panes)".into(),
+            ToggleZoom => "Zoom / unzoom focused pane".into(),
             OpenSettings => "Settings".into(),
             OpenHelp => "Help / keybindings".into(),
             OpenSearch => "Find in terminal".into(),
@@ -153,6 +157,7 @@ impl PaletteCmd {
             Copy => Some("Ctrl+Shift+C"),
             Paste => Some("Ctrl+Shift+V"),
             ToggleBroadcastInput => Some("Ctrl+Shift+I"),
+            ToggleZoom => Some("Ctrl+Shift+Enter"),
             ToggleFullscreen => Some("F11"),
             ToggleQuake => Some("F12"),
             FontIncrease => Some("Ctrl++"),
@@ -228,6 +233,7 @@ impl App {
             SplitHorizontal,
             ClosePane,
             ToggleBroadcastInput,
+            ToggleZoom,
             OpenSettings,
             OpenHelp,
             OpenSearch,
@@ -484,6 +490,7 @@ impl App {
             SplitHorizontal => self.split_pane(pane::Dir::Horizontal, event_loop),
             ClosePane => self.close_pane(event_loop),
             ToggleBroadcastInput => self.toggle_broadcast_input(event_loop),
+            ToggleZoom => self.toggle_zoom(event_loop),
             OpenSettings => {
                 self.open_settings();
                 // Palette rows are activated on a left RELEASE whose click edge /
@@ -626,6 +633,7 @@ mod tests {
             SplitHorizontal,
             ClosePane,
             ToggleBroadcastInput,
+            ToggleZoom,
             OpenSettings,
             OpenHelp,
             OpenSearch,
