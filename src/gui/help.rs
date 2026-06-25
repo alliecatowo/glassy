@@ -4,7 +4,7 @@
 //! bindings always appear correctly and help text never drifts from reality.
 
 use super::*;
-use crate::config::{KeyAction, KeyMap};
+use crate::config::{KeyAction, KeyMap, Platform};
 
 // ---------------------------------------------------------------------------
 // Wave 6 — Help / keybindings panel (§3.7)
@@ -70,6 +70,7 @@ pub fn build_help(
     anims: &mut HashMap<WidgetId, Anim>,
     state: &mut HelpState,
     keymap: &KeyMap,
+    platform: Platform,
 ) -> HelpResult {
     let mut result = HelpResult::default();
     let m = Metrics::new(cell_w, cell_h);
@@ -90,7 +91,7 @@ pub fn build_help(
 
     // Lay out the help rows once to measure total content height.
     // Derived from the live keymap so custom bindings appear correctly.
-    let rows = help_rows_from_keymap(keymap);
+    let rows = help_rows_from_keymap(keymap, platform);
     let row_h = m.row_h;
     let sep_h = 6.0;
     let section_h = (m.cell_h + 4.0).round();
@@ -384,6 +385,9 @@ const HELP_ACTION_ORDER: &[KeyAction] = &[
     KeyAction::ClosePane,
     KeyAction::NextTab,
     KeyAction::PrevTab,
+    KeyAction::GoToTab(1),
+    KeyAction::MoveTabLeft,
+    KeyAction::MoveTabRight,
     // Split panes
     KeyAction::SplitVertical,
     KeyAction::SplitHorizontal,
@@ -401,6 +405,8 @@ const HELP_ACTION_ORDER: &[KeyAction] = &[
     KeyAction::ScrollDown,
     KeyAction::ScrollTop,
     KeyAction::ScrollBottom,
+    KeyAction::JumpPrevPrompt,
+    KeyAction::JumpNextPrompt,
     // App
     KeyAction::Settings,
     KeyAction::CommandPalette,
@@ -409,10 +415,12 @@ const HELP_ACTION_ORDER: &[KeyAction] = &[
 ];
 
 /// Build the help rows from the live keymap. The displayed chord for each
-/// action is the first chord in the map that maps to that action. If an
-/// action has no binding it is omitted (user may have set it to `none`).
-/// Static extras (Alt+Arrow pane nav, right-click) are appended at the end.
-fn help_rows_from_keymap(keymap: &KeyMap) -> Vec<HelpRow<'static>> {
+/// action is the first chord in the map that maps to that action, rendered with
+/// [`crate::config::Chord::display_for`] so macOS shows ⌘-symbol runs and other
+/// platforms show `+`-joined labels. If an action has no binding it is omitted
+/// (user may have set it to `none`). Static extras (pane nav, right-click) are
+/// appended at the end.
+fn help_rows_from_keymap(keymap: &KeyMap, platform: Platform) -> Vec<HelpRow<'static>> {
     // Build action → first chord mapping. Sort entries for determinism:
     // prefer shorter display strings (fewer modifier bits) so "Ctrl+T" wins
     // over "Ctrl+Shift+Ctrl+T" if the map somehow has duplicates.
@@ -428,10 +436,11 @@ fn help_rows_from_keymap(keymap: &KeyMap) -> Vec<HelpRow<'static>> {
         (mods, c.key.clone())
     });
     for (chord, action) in entries {
-        // Keep the first (fewest-modifier) chord per action.
+        // Keep the first (fewest-modifier) chord per action, rendered for the
+        // host platform (⌘-symbol run on macOS, `+`-joined elsewhere).
         action_chord
             .entry(action)
-            .or_insert_with(|| chord.display());
+            .or_insert_with(|| chord.display_for(platform));
     }
 
     let mut rows: Vec<HelpRow<'static>> = Vec::new();
@@ -464,12 +473,23 @@ fn help_rows_from_keymap(keymap: &KeyMap) -> Vec<HelpRow<'static>> {
     // Simpler: append at end as a separate block.
     rows.push(HelpRow::Gap);
     rows.push(HelpRow::Section("Navigation"));
+    // Pane focus: Alt+Arrow on PC, ⌥Arrow on macOS (the focus_pane handler reads
+    // the alt modifier regardless of platform; this is just the displayed label).
     rows.push(HelpRow::Binding {
-        keys: "Alt+Arrow",
+        keys: if platform.is_mac() {
+            "⌥Arrow"
+        } else {
+            "Alt+Arrow"
+        },
         desc: "Focus adjacent pane",
     });
+    // Hyperlink open: Cmd+Click on macOS, Ctrl+Click elsewhere.
     rows.push(HelpRow::Binding {
-        keys: "Ctrl+Click",
+        keys: if platform.is_mac() {
+            "⌘Click"
+        } else {
+            "Ctrl+Click"
+        },
         desc: "Open hyperlink",
     });
     rows.push(HelpRow::Binding {

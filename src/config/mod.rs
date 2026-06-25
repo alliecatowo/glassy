@@ -54,9 +54,15 @@
 //! ```
 //!
 //! Recognized actions: `new_tab`, `close_pane`, `next_tab`, `prev_tab`,
-//! `split_vertical`, `split_horizontal`, `toggle_fullscreen`, `settings`,
-//! `help`, `search`, `command_palette`, `copy`, `paste`, `toggle_status_bar`,
-//! `font_increase`, `font_decrease`, `font_reset`.
+//! `split_vertical`, `split_horizontal`, `toggle_fullscreen`, `toggle_maximize`,
+//! `settings`, `help`, `search`, `command_palette`, `copy`, `paste`,
+//! `toggle_status_bar`, `font_increase`, `font_decrease`, `font_reset`,
+//! `scroll_up`, `scroll_down`, `scroll_top`, `scroll_bottom`,
+//! `jump_prev_prompt`, `jump_next_prompt` (OSC 133 prompt navigation),
+//! `move_tab_left`, `move_tab_right`, and `go_to_tab_1` .. `go_to_tab_9`.
+//!
+//! Default chords are platform-aware: macOS uses ⌘-based chords (⌘C/⌘V/⌘T/⌘W,
+//! ⌘1-9, ⌘, for settings, ⌘F for find); Linux/Windows use Ctrl / Ctrl+Shift.
 //!
 //! A `[keybindings]` entry overrides the built-in default for that action; to
 //! disable a built-in bind entirely, set the action to `none`.
@@ -83,6 +89,7 @@
 mod cli;
 pub mod keymap;
 pub mod parse;
+pub mod platform;
 pub mod theme_gen;
 pub mod theme_import;
 
@@ -90,6 +97,7 @@ use anyhow::{Context, Result};
 
 pub use keymap::{Chord, KeyAction, KeyMap};
 pub use parse::{path, save};
+pub use platform::Platform;
 
 /// Fully-resolved settings handed to the app: the renderer/PTY `Config` plus the
 /// selected color `Theme` (installed globally by `main`).
@@ -140,6 +148,13 @@ mod tests {
     use super::cli::profile_from_args;
     use super::keymap::{KeyAction, build_keymap, default_keymap, parse_action, parse_chord};
     use super::parse::{RawConfig, parse_bool, parse_config_file};
+    use super::platform::Platform;
+
+    /// Linux/Windows default keymap, used by the bulk of the keybinding tests
+    /// (they assert the Ctrl / Ctrl+Shift chords).
+    fn pc_keymap() -> super::keymap::KeyMap {
+        default_keymap(Platform::Linux)
+    }
 
     // -----------------------------------------------------------------------
     // Settings + RawConfig tests
@@ -456,21 +471,21 @@ opacity = 0.80
 
     #[test]
     fn default_keymap_has_new_tab() {
-        let km = default_keymap();
+        let km = pc_keymap();
         let chord = parse_chord("ctrl+shift+t").unwrap();
         assert_eq!(km.get(&chord), Some(&KeyAction::NewTab));
     }
 
     #[test]
     fn default_keymap_has_f11_fullscreen() {
-        let km = default_keymap();
+        let km = pc_keymap();
         let chord = parse_chord("f11").unwrap();
         assert_eq!(km.get(&chord), Some(&KeyAction::ToggleFullscreen));
     }
 
     #[test]
     fn build_keymap_override_replaces_default() {
-        let base = default_keymap();
+        let base = pc_keymap();
         // Override Ctrl+Shift+T → close_pane
         let overrides = vec![("ctrl+shift+t".to_string(), "close_pane".to_string())];
         let km = build_keymap(base, &overrides);
@@ -480,7 +495,7 @@ opacity = 0.80
 
     #[test]
     fn build_keymap_none_removes_default() {
-        let base = default_keymap();
+        let base = pc_keymap();
         let overrides = vec![("f11".to_string(), "none".to_string())];
         let km = build_keymap(base, &overrides);
         let chord = parse_chord("f11").unwrap();
@@ -489,7 +504,7 @@ opacity = 0.80
 
     #[test]
     fn build_keymap_bad_chord_is_warned_not_fatal() {
-        let base = default_keymap();
+        let base = pc_keymap();
         let overrides = vec![("@@invalid".to_string(), "new_tab".to_string())];
         // build_keymap logs a warning but must not panic or return an error.
         let km = build_keymap(base, &overrides);
@@ -659,6 +674,14 @@ f11 = none\n\
             "scroll_down",
             "scroll_top",
             "scroll_bottom",
+            "jump_prev_prompt",
+            "jump_next_prompt",
+            "prev_prompt",
+            "next_prompt",
+            "move_tab_left",
+            "move_tab_right",
+            "go_to_tab_1",
+            "go_to_tab_9",
         ];
         for name in &known {
             let r = parse_action(name);
@@ -667,6 +690,103 @@ f11 = none\n\
                 "'{name}' must parse to Some(action)"
             );
         }
+    }
+
+    #[test]
+    fn parse_action_go_to_tab_bounds() {
+        // 1..=9 are valid; 0 and 10 are out of range.
+        assert_eq!(
+            parse_action("go_to_tab_1").unwrap(),
+            Some(KeyAction::GoToTab(1))
+        );
+        assert_eq!(
+            parse_action("go_to_tab_9").unwrap(),
+            Some(KeyAction::GoToTab(9))
+        );
+        assert!(parse_action("go_to_tab_0").is_err());
+        assert!(parse_action("go_to_tab_10").is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // Platform-aware keymap tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn mac_keymap_uses_cmd_for_primary_chords() {
+        let km = default_keymap(Platform::Mac);
+        // ⌘T / ⌘C / ⌘V / ⌘, / ⌘F use the meta (Cmd) bit, not Ctrl.
+        for (chord_str, action) in [
+            ("cmd+t", KeyAction::NewTab),
+            ("cmd+c", KeyAction::Copy),
+            ("cmd+v", KeyAction::Paste),
+            ("cmd+,", KeyAction::Settings),
+            ("cmd+f", KeyAction::Search),
+            ("cmd+1", KeyAction::GoToTab(1)),
+            ("cmd+9", KeyAction::GoToTab(9)),
+        ] {
+            let c = parse_chord(chord_str).unwrap();
+            assert!(c.meta, "{chord_str} must set the meta/Cmd bit");
+            assert_eq!(
+                km.get(&c),
+                Some(&action),
+                "macOS '{chord_str}' should map to {action:?}"
+            );
+        }
+        // The PC Ctrl chords must NOT be present on macOS.
+        assert_eq!(km.get(&parse_chord("ctrl+shift+t").unwrap()), None);
+    }
+
+    #[test]
+    fn pc_keymap_uses_ctrl_and_has_goto_and_jump() {
+        let km = default_keymap(Platform::Linux);
+        for (chord_str, action) in [
+            ("ctrl+shift+t", KeyAction::NewTab),
+            ("ctrl+1", KeyAction::GoToTab(1)),
+            ("ctrl+9", KeyAction::GoToTab(9)),
+            ("ctrl+shift+pageup", KeyAction::MoveTabLeft),
+            ("ctrl+shift+pagedown", KeyAction::MoveTabRight),
+            ("ctrl+shift+up", KeyAction::JumpPrevPrompt),
+            ("ctrl+shift+down", KeyAction::JumpNextPrompt),
+        ] {
+            let c = parse_chord(chord_str).unwrap();
+            assert_eq!(
+                km.get(&c),
+                Some(&action),
+                "PC '{chord_str}' should map to {action:?}"
+            );
+        }
+        // The macOS Cmd chords must NOT be present on Linux.
+        assert_eq!(km.get(&parse_chord("cmd+t").unwrap()), None);
+    }
+
+    #[test]
+    fn shared_binds_present_on_both_platforms() {
+        for p in [Platform::Mac, Platform::Linux, Platform::Windows] {
+            let km = default_keymap(p);
+            assert_eq!(
+                km.get(&parse_chord("f11").unwrap()),
+                Some(&KeyAction::ToggleFullscreen),
+                "F11 must be bound on {p:?}"
+            );
+            assert_eq!(
+                km.get(&parse_chord("shift+pageup").unwrap()),
+                Some(&KeyAction::ScrollUp),
+                "Shift+PageUp must be bound on {p:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn chord_display_for_mac_uses_hig_symbols() {
+        // ⇧⌘T — symbols printed together with no separators, in HIG order
+        // (Control, Option, Shift, Command), Command last.
+        let c = parse_chord("cmd+shift+t").unwrap();
+        let d = c.display_for(Platform::Mac);
+        assert_eq!(d, "⇧⌘T", "got {d}");
+        assert!(!d.contains('+'));
+        // Linux still uses the +-joined form.
+        let pc = c.display_for(Platform::Linux);
+        assert!(pc.contains('+'), "got {pc}");
     }
 
     #[test]
@@ -687,7 +807,7 @@ f11 = none\n\
 
     #[test]
     fn build_keymap_adds_new_chord() {
-        let base = default_keymap();
+        let base = pc_keymap();
         let overrides = vec![("ctrl+alt+q".to_string(), "close_pane".to_string())];
         let km = build_keymap(base, &overrides);
         let chord = parse_chord("ctrl+alt+q").unwrap();
@@ -696,7 +816,7 @@ f11 = none\n\
 
     #[test]
     fn build_keymap_bad_action_leaves_default_intact() {
-        let base = default_keymap();
+        let base = pc_keymap();
         let overrides = vec![("ctrl+shift+t".to_string(), "not_an_action".to_string())];
         // Bad action: must log a warning but not panic.
         let km = build_keymap(base, &overrides);
@@ -707,7 +827,7 @@ f11 = none\n\
 
     #[test]
     fn build_keymap_multiple_overrides_applied_in_order() {
-        let base = default_keymap();
+        let base = pc_keymap();
         // First override disables f11; second adds it back as settings.
         let overrides = vec![
             ("f11".to_string(), "none".to_string()),
@@ -720,7 +840,7 @@ f11 = none\n\
 
     #[test]
     fn default_keymap_has_expected_defaults() {
-        let km = default_keymap();
+        let km = pc_keymap();
         let checks: &[(&str, super::keymap::KeyAction)] = &[
             ("ctrl+shift+w", super::keymap::KeyAction::ClosePane),
             ("ctrl+tab", super::keymap::KeyAction::NextTab),
