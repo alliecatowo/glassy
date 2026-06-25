@@ -109,6 +109,9 @@ impl App {
             toasts: Vec::new(),
             confirm_close: None,
             pending_confirm_execute: false,
+            // Quake state is armed lazily in `resumed()` once the window exists
+            // (only when `config.quake` is set); `None` keeps normal mode untouched.
+            quake: None,
         }
     }
 

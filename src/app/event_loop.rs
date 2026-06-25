@@ -264,11 +264,40 @@ impl ApplicationHandler<UserEvent> for App {
             }
         }
 
+        // Quake / dropdown mode: reconfigure the window to be borderless,
+        // top-anchored, always-on-top, and start a slide-in. Done before the first
+        // render so the window is already positioned + sized when shown. A no-op
+        // (leaving normal windowed mode intact) unless `config.quake` is set.
+        // `GLASSY_QUAKE=1` forces it on for headless capture even if the config is
+        // off, and `GLASSY_QUAKE_OPEN=1` snaps it fully open (progress=1) so the
+        // capture frame shows the dropped window rather than mid-slide.
+        if std::env::var_os("GLASSY_QUAKE").is_some() {
+            self.config.quake = true;
+        }
+        self.init_quake(event_loop);
+        if std::env::var_os("GLASSY_QUAKE_OPEN").is_some()
+            && let Some(q) = self.quake.as_mut()
+        {
+            q.progress = 1.0;
+            q.shown = true;
+            q.animating = false;
+        }
+
         // Draw the first frame, then reveal the window (avoids a white flash).
         self.next_frame = Instant::now();
         self.render();
         if let Some(window) = &self.window {
-            window.set_visible(true);
+            // In quake mode the slide animation owns visibility (a slide-in reveals
+            // it); a settled snapped-open quake state still needs an explicit show.
+            // Otherwise (normal mode) reveal unconditionally as before.
+            match self.quake.as_ref() {
+                Some(q) if q.animating => {
+                    // The first step_quake will set_visible(true) on the slide-in.
+                    window.set_visible(true);
+                }
+                Some(q) => window.set_visible(q.shown),
+                None => window.set_visible(true),
+            }
         }
 
         if self.capture.is_some() {
@@ -382,6 +411,8 @@ impl ApplicationHandler<UserEvent> for App {
                 if let Some(w) = &self.window {
                     self.handle_resize(event_loop, w.inner_size());
                 }
+                // A DPI / monitor change moves the quake anchor; re-derive + reposition.
+                self.quake_refresh_geometry(event_loop);
             }
             WindowEvent::RedrawRequested => self.render(),
             _ => {}
@@ -484,6 +515,16 @@ impl ApplicationHandler<UserEvent> for App {
             false
         };
 
+        // Quake slide: while a drop/retract is in flight, advance it and keep the
+        // frame dirty so the window repositions every frame. Like the GUI anims it
+        // runs the loop on `Poll`; once the slide settles `step_quake` returns false
+        // and we fall back to `Wait` (0% idle). A no-op in normal windowed mode.
+        let quake_active = if self.quake_animating() {
+            self.step_quake(now)
+        } else {
+            false
+        };
+
         // Cursor blink: only runs while focused and the child asked for a blinking
         // cursor. When that holds, advance the phase at each `blink_at` deadline and
         // mark dirty so the cursor redraws; otherwise the cursor stays solid and we
@@ -575,8 +616,9 @@ impl ApplicationHandler<UserEvent> for App {
         if !self.dirty {
             // Idle: stay parked on `Wait` (0% CPU) unless a blink flip, a flash
             // boundary, or a spinner frame is pending — then wake at the earliest.
-            // A live GUI animation overrides everything with `Poll` until it settles.
-            if gui_active {
+            // A live GUI animation or quake slide overrides everything with `Poll`
+            // until it settles.
+            if gui_active || quake_active {
                 event_loop.set_control_flow(ControlFlow::Poll);
             } else {
                 let wake = [
@@ -613,8 +655,8 @@ impl ApplicationHandler<UserEvent> for App {
             self.next_frame = now + self.refresh;
             // RedrawRequested will clear `dirty`. Keep a wakeup scheduled for the
             // next blink flip, flash boundary, or spinner frame; else wait for an
-            // event. A live GUI animation keeps us on `Poll` until it settles.
-            if gui_active {
+            // event. A live GUI animation or quake slide keeps us on `Poll`.
+            if gui_active || quake_active {
                 event_loop.set_control_flow(ControlFlow::Poll);
             } else {
                 match self.next_wake(blink_active, flash_active, spin_active) {

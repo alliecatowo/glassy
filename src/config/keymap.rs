@@ -153,6 +153,7 @@ pub enum KeyAction {
     ScrollDown,
     ScrollTop,
     ScrollBottom,
+    QuakeToggle,
 }
 
 impl KeyAction {
@@ -182,6 +183,7 @@ impl KeyAction {
             ScrollDown => "Scroll history down",
             ScrollTop => "Scroll to top",
             ScrollBottom => "Scroll to bottom",
+            QuakeToggle => "Toggle quake dropdown",
         }
     }
 
@@ -193,7 +195,9 @@ impl KeyAction {
             SplitVertical | SplitHorizontal => "Split panes",
             Copy | Paste => "Edit",
             ToggleFullscreen | ToggleMaximize | FontIncrease | FontDecrease | FontReset
-            | ToggleStatusBar | ScrollUp | ScrollDown | ScrollTop | ScrollBottom => "View",
+            | ToggleStatusBar | ScrollUp | ScrollDown | ScrollTop | ScrollBottom | QuakeToggle => {
+                "View"
+            }
             Settings | Help | Search | CommandPalette => "App",
         }
     }
@@ -228,6 +232,7 @@ pub(crate) fn parse_action(s: &str) -> Result<Option<KeyAction>> {
         "scroll_down" => ScrollDown,
         "scroll_top" => ScrollTop,
         "scroll_bottom" => ScrollBottom,
+        "quake_toggle" => QuakeToggle,
         other => bail!("unrecognized keybinding action '{other}'"),
     }))
 }
@@ -264,6 +269,10 @@ pub fn default_keymap() -> KeyMap {
         ("shift+pagedown", ScrollDown),
         ("shift+home", ScrollTop),
         ("shift+end", ScrollBottom),
+        // Quake/dropdown toggle. F12 is the de-facto dropdown-terminal key
+        // (guake/yakuake) and is otherwise unbound. Only meaningful when
+        // `quake = true`; in normal mode `quake_toggle` is a harmless no-op.
+        ("f12", QuakeToggle),
     ];
     let mut map = KeyMap::new();
     for (chord_str, action) in defaults {

@@ -195,6 +195,14 @@ pub(super) fn dispatch(
             }
             return;
         }
+        UserEvent::Ipc(cmd) => {
+            // A `glassy toggle/show/hide` from a compositor hotkey (or a second
+            // launch) arrived over the single-instance socket. Drive the quake
+            // window's slide; `quake_apply` is a no-op in normal windowed mode
+            // (it just raises/focuses the window so the bind isn't a dead key).
+            app.quake_apply(cmd, event_loop);
+            return;
+        }
         UserEvent::ModifyOtherKeys(id, level) => {
             // xterm modifyOtherKeys level changed by the running application
             // (CSI > 4 ; N m intercepted in the PTY loop). Update the field so

@@ -119,6 +119,38 @@ pub(super) fn parse_cli(args: impl Iterator<Item = String>, raw: &mut RawConfig)
             "--word-separator" => {
                 raw.word_separator = Some(next_value(&mut args, "--word-separator")?);
             }
+            "--quake" => {
+                // Optional bool value; bare `--quake` means true.
+                match args.peek().map(|s| s.as_str()) {
+                    Some(v)
+                        if matches!(
+                            v.to_ascii_lowercase().as_str(),
+                            "true" | "yes" | "on" | "1" | "false" | "no" | "off" | "0"
+                        ) =>
+                    {
+                        let v = args.next().unwrap();
+                        raw.quake = Some(parse_bool(&v, "--quake")?);
+                    }
+                    _ => raw.quake = Some(true),
+                }
+            }
+            "--quake-height" => {
+                let v = next_value(&mut args, "--quake-height")?;
+                let h: f32 = v
+                    .parse()
+                    .with_context(|| format!("--quake-height: invalid number '{v}'"))?;
+                if !(h.is_finite() && (0.1..=1.0).contains(&h)) {
+                    bail!("--quake-height must be between 0.1 and 1.0, got {h}");
+                }
+                raw.quake_height = Some(h);
+            }
+            "--quake-animation-ms" => {
+                let v = next_value(&mut args, "--quake-animation-ms")?;
+                let ms: u64 = v
+                    .parse()
+                    .with_context(|| format!("--quake-animation-ms: invalid integer '{v}'"))?;
+                raw.quake_animation_ms = Some(ms.min(5_000));
+            }
             "--restore-session" => {
                 // Optional bool value; bare `--restore-session` means true.
                 match args.peek().map(|s| s.as_str()) {
@@ -201,6 +233,13 @@ fn print_help() {
 
 USAGE:
     glassy [OPTIONS] [-e COMMAND [ARGS...]]
+    glassy toggle | show | hide        Signal a running instance (quake mode)
+
+CONTROL SUBCOMMANDS (for compositor hotkeys — see docs/quake-mode.md):
+    toggle, show, hide     Slide the running quake window in/out. Bind one of
+                           these to a key in YOUR compositor (Wayland has no
+                           portable global hotkey). Also accepted as
+                           --toggle / --show / --hide.
 
 OPTIONS:
     --font-size <PT>       Font size in points
@@ -222,6 +261,12 @@ OPTIONS:
     --profile <NAME>       Activate a [profile.NAME] config section's overrides
     --cwd <PATH>           Working directory for the first tab's shell
     --restore-session [B]  Restore the previous session's tabs/splits (default off)
+    --quake [B]            Quake/dropdown mode: borderless top-anchored slide-down
+                           window (default off). Toggle with the in-app keybind or
+                           bind 'glassy toggle' to a compositor hotkey.
+    --quake-height <F>     Quake window height as a fraction of the monitor (0.1..1.0,
+                           default 0.5)
+    --quake-animation-ms <N> Quake slide duration in ms (0 = instant, default 180)
     -e, --command <CMD>    Run CMD (with the remaining args) instead of the shell
     -h, --help             Print this help and exit
     -V, --version          Print version and exit
@@ -239,7 +284,8 @@ CONFIG FILE:
     Actions: new_tab, close_pane, next_tab, prev_tab, split_vertical,
     split_horizontal, toggle_fullscreen, toggle_maximize, settings, help,
     search, command_palette, copy, paste, toggle_status_bar, font_increase,
-    font_decrease, font_reset, scroll_up, scroll_down, scroll_top, scroll_bottom",
+    font_decrease, font_reset, scroll_up, scroll_down, scroll_top, scroll_bottom,
+    quake_toggle",
         env!("CARGO_PKG_VERSION")
     );
 }

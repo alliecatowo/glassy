@@ -49,6 +49,9 @@ pub(super) struct RawConfig {
     pub color_ansi: Option<[Option<String>; 16]>,
     pub profiles: HashMap<String, Vec<(String, String)>>,
     pub keybinding_overrides: Vec<(String, String)>,
+    pub quake: Option<bool>,
+    pub quake_height: Option<f32>,
+    pub quake_animation_ms: Option<u64>,
 }
 
 impl RawConfig {
@@ -133,6 +136,16 @@ impl RawConfig {
             restore_session: self.restore_session.unwrap_or(false),
             copy_on_select: self.copy_on_select.unwrap_or(false),
             keymap: build_keymap(default_keymap(), &self.keybinding_overrides),
+            quake: self.quake.unwrap_or(false),
+            quake_height: {
+                let h = self.quake_height.unwrap_or(0.5);
+                if h.is_finite() && (0.1..=1.0).contains(&h) {
+                    h
+                } else {
+                    0.5
+                }
+            },
+            quake_animation_ms: self.quake_animation_ms.unwrap_or(180).min(5_000),
         };
 
         Ok(super::Settings { config, theme })
@@ -463,6 +476,24 @@ pub(super) fn apply_kv(key: &str, value: &str, raw: &mut RawConfig) -> Result<()
         }
         "copy_on_select" => {
             raw.copy_on_select = Some(parse_bool(value, "copy_on_select")?);
+        }
+        "quake" => {
+            raw.quake = Some(parse_bool(value, "quake")?);
+        }
+        "quake_height" => {
+            let h: f32 = value
+                .parse()
+                .with_context(|| format!("quake_height: invalid number '{value}'"))?;
+            if !(h.is_finite() && (0.1..=1.0).contains(&h)) {
+                bail!("quake_height must be between 0.1 and 1.0, got {h}");
+            }
+            raw.quake_height = Some(h);
+        }
+        "quake_animation_ms" => {
+            let ms: u64 = value
+                .parse()
+                .with_context(|| format!("quake_animation_ms: invalid integer '{value}'"))?;
+            raw.quake_animation_ms = Some(ms.min(5_000));
         }
         "color.fg" => {
             parse_hex_color(value)?;

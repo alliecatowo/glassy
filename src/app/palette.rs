@@ -34,6 +34,8 @@ pub(crate) enum PaletteCmd {
     Paste,
     // --- Window ---
     ToggleFullscreen,
+    /// Slide the quake/dropdown window away (only registered in quake mode).
+    ToggleQuake,
     // --- Font ---
     FontIncrease,
     FontDecrease,
@@ -61,7 +63,7 @@ impl PaletteCmd {
             SplitVertical | SplitHorizontal | ClosePane => "Pane",
             OpenSettings | OpenHelp | OpenSearch => "View",
             Copy | Paste => "Edit",
-            ToggleFullscreen => "Window",
+            ToggleFullscreen | ToggleQuake => "Window",
             FontIncrease | FontDecrease | FontReset => "Font",
             ToggleStatusBar | TogglePaneHeaders | BellOff | BellVisual | BellAudible
             | ScrollbackIncrease | ScrollbackDecrease => "Setting",
@@ -88,6 +90,7 @@ impl PaletteCmd {
             Copy => "Copy selection".into(),
             Paste => "Paste".into(),
             ToggleFullscreen => "Toggle fullscreen".into(),
+            ToggleQuake => "Toggle quake dropdown".into(),
             FontIncrease => "Increase font size".into(),
             FontDecrease => "Decrease font size".into(),
             FontReset => "Reset font size".into(),
@@ -120,6 +123,7 @@ impl PaletteCmd {
             Copy => Some("Ctrl+Shift+C"),
             Paste => Some("Ctrl+Shift+V"),
             ToggleFullscreen => Some("F11"),
+            ToggleQuake => Some("F12"),
             FontIncrease => Some("Ctrl++"),
             FontDecrease => Some("Ctrl+-"),
             FontReset => Some("Ctrl+0"),
@@ -205,6 +209,10 @@ impl App {
             NextTheme,
             PrevTheme,
         ];
+        // Only surface the quake toggle when the instance is actually in quake mode.
+        if self.config.quake {
+            cmds.push(ToggleQuake);
+        }
         for i in 0..color::THEME_NAMES.len() {
             cmds.push(SetTheme(i));
         }
@@ -429,6 +437,9 @@ impl App {
                     };
                     w.set_fullscreen(fs);
                 }
+            }
+            ToggleQuake => {
+                self.quake_apply(crate::ipc::IpcCommand::Toggle, event_loop);
             }
             FontIncrease => {
                 self.resize_font(FontStep::Inc);
@@ -835,6 +846,7 @@ mod tests {
             Copy,
             Paste,
             ToggleFullscreen,
+            ToggleQuake,
             FontIncrease,
             FontDecrease,
             FontReset,

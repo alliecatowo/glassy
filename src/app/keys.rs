@@ -198,7 +198,11 @@ impl App {
                     | KeyAction::ScrollTop
                     | KeyAction::ScrollBottom
             );
-            if !is_scroll || !self.term_mode().contains(TermMode::ALT_SCREEN) {
+            // The default `quake_toggle` bind (F12) must NOT swallow F12 from
+            // terminal apps when this instance isn't in quake mode — there it is a
+            // no-op, so let the keypress fall through to the child instead.
+            let inert_quake = action == KeyAction::QuakeToggle && self.quake.is_none();
+            if !inert_quake && (!is_scroll || !self.term_mode().contains(TermMode::ALT_SCREEN)) {
                 self.run_key_action(action, event_loop);
                 return;
             }
@@ -460,6 +464,12 @@ impl App {
                     pty.term.lock().scroll_display(Scroll::Bottom);
                 }
                 self.mark_dirty(event_loop);
+            }
+            QuakeToggle => {
+                // In quake mode this slides the window away (the in-app "hide"
+                // key); a fresh `glassy toggle`/keybind brings it back. In normal
+                // mode `quake` is None so this is a no-op.
+                self.quake_apply(crate::ipc::IpcCommand::Toggle, event_loop);
             }
         }
     }

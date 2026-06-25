@@ -246,6 +246,11 @@ pub enum UserEvent {
     /// `CSI > 4 ; N m`. The UI thread updates `App::modify_other_keys` so
     /// subsequent key events are encoded with the correct form.
     ModifyOtherKeys(usize, ModifyOtherKeys),
+    /// A single-instance IPC control command (`glassy toggle/show/hide`) arrived
+    /// over the Unix socket from a second invocation. Drives the quake / dropdown
+    /// window's slide animation. Carries no session id — it's a window-level
+    /// command, not a per-PTY event. See [`crate::ipc`].
+    Ipc(crate::ipc::IpcCommand),
 }
 
 /// Wraps the `ClipboardLoad` reply-builder closure so `UserEvent` can keep its

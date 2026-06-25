@@ -41,6 +41,7 @@ mod mouse;
 mod multipane;
 mod palette;
 mod panes;
+mod quake;
 mod render;
 mod script;
 mod search;
@@ -143,6 +144,18 @@ pub struct Config {
     /// defaults). Built once at config resolution time by [`crate::config`] and
     /// consulted by the keyboard handler before the hard-coded fallback paths.
     pub keymap: crate::config::KeyMap,
+    /// Quake / dropdown mode: when true, glassy launches as a borderless,
+    /// top-anchored window that slides down from the top edge and starts hidden.
+    /// Toggle it with the in-app `quake_toggle` keybind or, externally, by binding
+    /// `glassy toggle` to a compositor hotkey (Wayland has no portable global
+    /// hotkey — see `docs/quake-mode.md`). Default false (normal windowed mode).
+    pub quake: bool,
+    /// Fraction of the monitor height the quake window occupies, in (0, 1].
+    /// Default 0.5 (top half of the screen). Width always spans the full monitor.
+    pub quake_height: f32,
+    /// Quake slide animation duration in milliseconds (each direction). 0 disables
+    /// the animation (instant show/hide). Default 180 ms.
+    pub quake_animation_ms: u64,
 }
 
 /// A tab's split layout: the tiling tree (whose leaf ids are pty/pane ids) plus
@@ -523,6 +536,43 @@ pub struct App {
     /// clicked. The actual close call is deferred to `about_to_wait` (where an
     /// `ActiveEventLoop` reference is available). Cleared after execution.
     pending_confirm_execute: bool,
+
+    // --- Quake / dropdown mode ----------------------------------------------
+    /// Runtime quake-window state, present only when `config.quake` is on. Tracks
+    /// the slide animation phase + geometry so `about_to_wait` can advance the
+    /// drop/retract while staying idle-safe (no wakeups once settled). `None` in
+    /// normal windowed mode, so every standard path is untouched. See `quake.rs`.
+    quake: Option<QuakeState>,
+}
+
+/// Direction + progress of the quake window's slide animation.
+///
+/// `progress` runs 0.0 (fully hidden, parked above the top edge) → 1.0 (fully
+/// shown, flush with the top edge). It is advanced by `about_to_wait` only while
+/// `animating`, and the window's vertical position is derived from it each frame.
+/// `Copy` so a snapshot can be taken across the `&mut self` borrow when calling
+/// `&self` positioning helpers.
+#[derive(Clone, Copy)]
+pub(crate) struct QuakeState {
+    /// Whether the window is logically shown (sliding toward / resting at 1.0) or
+    /// hidden (sliding toward / resting at 0.0).
+    pub shown: bool,
+    /// Current slide progress in [0, 1]. 0 = parked above the screen, 1 = dropped.
+    pub progress: f32,
+    /// True while the slide is in flight (drives `ControlFlow::Poll`); cleared when
+    /// `progress` reaches its target so the loop returns to `Wait` (0% idle).
+    pub animating: bool,
+    /// Last instant the slide was stepped, for dt computation.
+    pub last_step: Instant,
+    /// Cached full window height in physical px (monitor height × `quake_height`),
+    /// so each animation frame can offset the window without re-querying the
+    /// monitor. Recomputed on show and on scale/monitor changes.
+    pub window_h: i32,
+    /// Cached monitor top-left in physical px, so the slide offsets from the right
+    /// origin on a multi-monitor desktop.
+    pub origin: (i32, i32),
+    /// Cached monitor width in physical px (the window spans it fully).
+    pub monitor_w: i32,
 }
 
 /// Pending close that is waiting for user confirmation.
