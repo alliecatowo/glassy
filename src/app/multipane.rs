@@ -283,6 +283,9 @@ impl App {
         // Tab-bar incremental decision: rebuild only when its inputs changed (or a
         // full redraw is forced, e.g. theme change). Computed here so it can update
         // `self.tab_bar_key` after the renderer borrow ends.
+        let tab_pane_counts = self.tab_pane_counts();
+        let tab_active_pos = self.active_pos();
+        let tab_strip_visible = self.tab_bar_visible();
         let new_tab_key = Self::tab_bar_key(
             &tab_snapshot,
             tab_focused,
@@ -294,6 +297,8 @@ impl App {
             tab_count,
             strip_off,
             strip_hist,
+            &tab_pane_counts,
+            tab_active_pos,
         );
         let tab_bar_rebuild = force_full
             || self.tab_bar_key != Some(new_tab_key)
@@ -428,7 +433,10 @@ impl App {
         // split via the overlay pass added to record_multi_passes. Rebuilt only when
         // its inputs changed; otherwise the cached overlay is replayed (no glyph
         // re-shaping) — the second half of the split typing-lag fix.
-        if tab_bar_rebuild {
+        if !tab_strip_visible {
+            renderer.begin_tab_overlay();
+            renderer.commit_tab_overlay();
+        } else if tab_bar_rebuild {
             renderer.begin_tab_overlay();
             Self::paint_tab_bar(
                 renderer,
@@ -442,6 +450,8 @@ impl App {
                 tab_count,
                 strip_off,
                 strip_hist,
+                &tab_pane_counts,
+                tab_active_pos,
             );
             renderer.commit_tab_overlay();
         } else {

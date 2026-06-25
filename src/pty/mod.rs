@@ -95,6 +95,18 @@ pub struct PaneInfo {
 }
 
 impl PaneInfo {
+    /// Best process name to display for this pane: the running foreground command
+    /// (e.g. `vim`, `cargo`, `claude`) when one is detected, else the shell's own
+    /// `comm` (e.g. `zsh`, `bash`). `shell_comm` is read from `/proc/<pid>/comm`
+    /// once at spawn (passed in by the caller). Returns `None` only when nothing
+    /// is known (no /proc, exited child), so callers can fall back to "shell".
+    pub fn process_name<'a>(&'a self, shell_comm: Option<&'a str>) -> Option<&'a str> {
+        self.foreground_comm
+            .as_deref()
+            .filter(|c| !c.is_empty())
+            .or(shell_comm)
+    }
+
     /// Refresh from `/proc` for the shell with `shell_pid`. Reads the pty's tty
     /// foreground pgid from `/proc/<shell_pid>/stat` field 8, then reads that
     /// process's `comm` and the shell's `cwd` symlink. All reads are best-effort
@@ -433,6 +445,11 @@ pub struct Pty {
     /// PID of the spawned shell process. Used to read `/proc/<shell_pid>/cwd`
     /// and the tty foreground pgid for the pane header and status bar.
     pub shell_pid: u32,
+    /// The shell's own `comm` (e.g. `zsh`, `bash`, `fish`), read once at spawn.
+    /// Used as the process-name fallback for the tab label / window title while
+    /// the shell sits at an idle prompt (no foreground child). `None` if the read
+    /// failed.
+    pub shell_comm: Option<String>,
     /// Cached `/proc`-based pane info (cwd + foreground comm). Refreshed on
     /// pane focus and periodically (see `App::refresh_proc_info`). Read under
     /// the UI thread only; no locking needed.
@@ -568,11 +585,18 @@ impl Pty {
         // Read the initial cwd eagerly so the pane header shows the right path on
         // the first frame (before the shell emits its first OSC 7).
         let pane_info = PaneInfo::read(shell_pid);
+        // The shell's own comm (zsh/bash/…) is the process-name fallback at an
+        // idle prompt; read it once here since the shell pid is stable.
+        let shell_comm = std::fs::read_to_string(format!("/proc/{shell_pid}/comm"))
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
         Ok(Pty {
             term,
             images,
             prompts,
             shell_pid,
+            shell_comm,
             pane_info,
             pane_info_at: Instant::now(),
             tx,
@@ -673,7 +697,7 @@ pub fn merge_word_separators(defaults: &str, extras: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{PromptTracker, merge_word_separators};
+    use super::{PaneInfo, PromptTracker, merge_word_separators};
 
     // ---- PromptTracker (OSC 133 jump-to-prompt) tests ------------------------
 
@@ -710,6 +734,38 @@ mod tests {
         let t = PromptTracker::new();
         assert_eq!(t.prev_prompt(5), None);
         assert_eq!(t.next_prompt(5), None);
+    }
+
+    // ---- PaneInfo::process_name tests ----------------------------------------
+
+    #[test]
+    fn process_name_prefers_foreground_comm() {
+        let info = PaneInfo {
+            foreground_comm: Some("vim".into()),
+            ..Default::default()
+        };
+        assert_eq!(info.process_name(Some("zsh")), Some("vim"));
+    }
+
+    #[test]
+    fn process_name_falls_back_to_shell_at_idle_prompt() {
+        let info = PaneInfo::default(); // foreground_comm = None
+        assert_eq!(info.process_name(Some("bash")), Some("bash"));
+    }
+
+    #[test]
+    fn process_name_ignores_empty_foreground_comm() {
+        let info = PaneInfo {
+            foreground_comm: Some(String::new()),
+            ..Default::default()
+        };
+        assert_eq!(info.process_name(Some("fish")), Some("fish"));
+    }
+
+    #[test]
+    fn process_name_none_when_nothing_known() {
+        let info = PaneInfo::default();
+        assert_eq!(info.process_name(None), None);
     }
 
     // ---- merge_word_separators tests -----------------------------------------

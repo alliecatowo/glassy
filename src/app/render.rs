@@ -81,6 +81,8 @@ impl App {
         let tab_mouse = (self.mouse_px.0 as f32, self.mouse_px.1 as f32);
         let tab_spinner = self.spinner_frame;
         let tab_count = self.tab_count();
+        let tab_pane_counts = self.tab_pane_counts();
+        let tab_active_pos = self.active_pos();
         // Tab-bar incremental decision (single-pane path): rebuild only when the
         // painter's inputs changed or a full redraw is forced (e.g. theme), else
         // replay the cached overlay instead of re-shaping every tab title glyph.
@@ -95,6 +97,8 @@ impl App {
             tab_count,
             strip_off,
             strip_hist,
+            &tab_pane_counts,
+            tab_active_pos,
         );
         let tab_bar_rebuild = self.force_full_redraw
             || self.tab_bar_key != Some(new_tab_key)
@@ -213,13 +217,19 @@ impl App {
         let search_inputs = self.search_readout().map(|r| (r, self.search_highlights()));
         // Command-palette inputs snapshotted before the borrow.
         let palette_inputs = self.palette_snapshot();
+        // Resolve the tab-strip pixel height once (0 when hidden), before the
+        // disjoint renderer/pty borrows. Used for the grid origin AND to skip the
+        // tab-bar paint entirely when the strip is hidden.
+        let tab_strip_h = self.effective_tab_bar_h();
+        let tab_strip_visible = self.tab_bar_visible();
 
         let (Some(renderer), Some(pty)) = (self.renderer.as_mut(), self.pty.as_ref()) else {
             return;
         };
         renderer.set_flash(flash);
-        // The single-pane terminal grid is inset below the GUI tab bar in PIXELS.
-        renderer.set_grid_origin_y(tab_bar_h(renderer.cell_metrics().height));
+        // The single-pane terminal grid is inset below the GUI tab bar in PIXELS
+        // (zero when the strip is hidden, so the grid reclaims the band).
+        renderer.set_grid_origin_y(tab_strip_h);
 
         // Hold the terminal lock only long enough to copy out renderable state.
         let mut term = pty.term.lock();
@@ -681,7 +691,12 @@ impl App {
         // overlay quads + atlas glyphs, so it composites above the grid. Drawn
         // before any modal so a modal scrim dims it too. Rebuilt only when its
         // inputs changed; otherwise the cached overlay is replayed.
-        if tab_bar_rebuild {
+        if !tab_strip_visible {
+            // Strip hidden (single tab in Auto, or Never): clear any cached overlay
+            // so nothing paints into the (now reclaimed) top band.
+            renderer.begin_tab_overlay();
+            renderer.commit_tab_overlay();
+        } else if tab_bar_rebuild {
             renderer.begin_tab_overlay();
             Self::paint_tab_bar(
                 renderer,
@@ -695,6 +710,8 @@ impl App {
                 tab_count,
                 strip_off,
                 strip_hist,
+                &tab_pane_counts,
+                tab_active_pos,
             );
             renderer.commit_tab_overlay();
         } else {
@@ -885,8 +902,9 @@ impl App {
         // any modal (settings/help). Toasts are transient overlays that do not block
         // interaction. They are only painted when there are live toasts.
         {
-            let tbh = tab_bar_h(renderer.cell_metrics().height);
-            let still_alive = crate::app::toast::paint_toasts(renderer, &mut self.toasts, tbh);
+            // Toasts tuck below the strip — at the window top when it's hidden.
+            let still_alive =
+                crate::app::toast::paint_toasts(renderer, &mut self.toasts, tab_strip_h);
             if still_alive {
                 // Schedule another frame so the fade animations tick.
                 self.dirty = true;

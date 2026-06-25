@@ -425,6 +425,9 @@ pub struct SettingsView<'a> {
     pub cursor_style_idx: usize,
     /// Default cursor blink enabled.
     pub cursor_blink: bool,
+    /// Tab-strip visibility policy as a segmented index: 0 = Auto, 1 = Always,
+    /// 2 = Never.
+    pub tab_bar_mode: usize,
 }
 
 /// Everything the settings form reported this frame. The App applies each
@@ -474,6 +477,8 @@ pub struct SettingsEvents {
     pub cursor_style: Option<usize>,
     /// Cursor-blink toggle was clicked.
     pub cursor_blink_toggle: bool,
+    /// New tab-bar-mode index if the segmented control changed (0/1/2).
+    pub tab_bar_mode: Option<usize>,
 }
 
 // ---------------------------------------------------------------------------
@@ -518,6 +523,7 @@ mod tests {
             id("settings/scrollback"),
             id("settings/status_bar"),
             id("settings/pane_headers"),
+            id("settings/tab_bar"),
             id("settings/config"),
             id("settings/save"),
             id("settings/close"),

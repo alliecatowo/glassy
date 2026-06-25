@@ -59,6 +59,9 @@ pub(super) struct RawConfig {
     pub wallpaper_theme: Option<String>,
     pub cursor_trail: Option<bool>,
     pub crt_effect: Option<bool>,
+    pub show_tab_bar: Option<String>,
+    pub title_show_cwd: Option<bool>,
+    pub title_show_count: Option<bool>,
 }
 
 impl RawConfig {
@@ -167,6 +170,9 @@ impl RawConfig {
                 .map(PathBuf::from),
             cursor_trail: self.cursor_trail.unwrap_or(false),
             crt_effect: self.crt_effect.unwrap_or(false),
+            show_tab_bar: parse_tab_bar_mode(self.show_tab_bar.as_deref()),
+            title_show_cwd: self.title_show_cwd.unwrap_or(true),
+            title_show_count: self.title_show_count.unwrap_or(false),
         };
 
         Ok(super::Settings { config, theme })
@@ -504,6 +510,23 @@ pub(super) fn apply_kv(key: &str, value: &str, raw: &mut RawConfig) -> Result<()
         "crt_effect" => {
             raw.crt_effect = Some(parse_bool(value, "crt_effect")?);
         }
+        "show_tab_bar" => {
+            // Accepts the three policy words plus the usual bool spellings
+            // (true→always, false→never) so a boolean reads naturally too.
+            let v = value.to_ascii_lowercase();
+            match v.as_str() {
+                "auto" | "always" | "never" => raw.show_tab_bar = Some(v),
+                "true" | "yes" | "on" | "1" => raw.show_tab_bar = Some("always".into()),
+                "false" | "no" | "off" | "0" => raw.show_tab_bar = Some("never".into()),
+                _ => bail!("show_tab_bar must be auto/always/never, got '{value}'"),
+            }
+        }
+        "title_show_cwd" => {
+            raw.title_show_cwd = Some(parse_bool(value, "title_show_cwd")?);
+        }
+        "title_show_count" => {
+            raw.title_show_count = Some(parse_bool(value, "title_show_count")?);
+        }
         "color.fg" => {
             parse_hex_color(value)?;
             raw.color_fg = Some(value.to_string());
@@ -590,6 +613,17 @@ pub(super) fn parse_pos_f32(value: &str, field: &str) -> Result<f32> {
         bail!("{field} must be a positive number, got {value}");
     }
     Ok(v)
+}
+
+/// Map a (validated) `show_tab_bar` token to the [`TabBarMode`] enum, defaulting
+/// to `Auto` when unset. The validation already happened in [`apply_kv`].
+pub(super) fn parse_tab_bar_mode(value: Option<&str>) -> crate::app::TabBarMode {
+    use crate::app::TabBarMode;
+    match value {
+        Some("always") => TabBarMode::Always,
+        Some("never") => TabBarMode::Never,
+        _ => TabBarMode::Auto,
+    }
 }
 
 /// Split a `shell` value (a whitespace-separated program + args) into a `Shell`.

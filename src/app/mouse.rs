@@ -117,11 +117,8 @@ impl App {
         // Tab-bar hover highlighting: track the item under the pointer (only
         // while over the bar's pixel band), repaint when it changes.
         {
-            let bar_h = self
-                .renderer
-                .as_ref()
-                .map(|r| tab_bar_h(r.cell_metrics().height) as f64)
-                .unwrap_or(0.0);
+            // 0 when the strip is hidden, so the top band routes to the terminal.
+            let bar_h = self.effective_tab_bar_h() as f64;
             let new_hover = if position.y < bar_h {
                 self.strip_item_at_px(position.x as f32, position.y as f32)
             } else {
@@ -587,12 +584,8 @@ impl App {
         // GESTURE — one tab per swipe, clamped at the ends (no wrap-around
         // carousel). Horizontal motion is preferred (natural swipe-to-switch).
         let in_strip = {
-            let bar_h = self
-                .renderer
-                .as_ref()
-                .map(|r| tab_bar_h(r.cell_metrics().height) as f64)
-                .unwrap_or(0.0);
-            self.mouse_px.1 < bar_h
+            let bar_h = self.effective_tab_bar_h() as f64;
+            bar_h > 0.0 && self.mouse_px.1 < bar_h
         };
         if in_strip {
             const STEP: f32 = 24.0; // px of swipe travel to trigger one switch

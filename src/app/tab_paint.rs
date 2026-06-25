@@ -29,6 +29,8 @@ impl App {
         tab_count: usize,
         display_offset: i32,
         history_size: usize,
+        pane_counts: &[usize],
+        active_pos: usize,
     ) {
         let m = renderer.cell_metrics();
         let (sw, _sh) = renderer.surface_size();
@@ -69,7 +71,8 @@ impl App {
             .iter()
             .map(|(t, a, b, _)| (t.as_str(), *a, *b))
             .collect();
-        let segs = strip_layout(&descs, bar_w, bar_h, m.width);
+        let tag_reserve = tab_tag_reserve(tab_count, m.width);
+        let segs = strip_layout_ex(&descs, bar_w, bar_h, m.width, tag_reserve, active_pos);
         let multi = descs.len() > 1;
         let spin = SPINNER_FRAMES[spinner_frame % SPINNER_FRAMES.len()];
 
@@ -88,6 +91,7 @@ impl App {
                     let (_title, active, busy) =
                         descs.get(i).copied().unwrap_or(("", false, false));
                     let is_spinning = snapshot.get(i).map(|s| s.3).unwrap_or(false);
+                    let panes = pane_counts.get(i).copied().unwrap_or(1);
                     if dragging == Some(i) {
                         ghost = Some((r, seg.label.clone(), i));
                     }
@@ -113,6 +117,7 @@ impl App {
                         fg_dim,
                         dragging == Some(i),
                         multi,
+                        panes,
                     );
                 }
                 StripItem::TabClose(i) => {
@@ -199,7 +204,7 @@ impl App {
             );
             Self::paint_tab_label(
                 renderer, gr, m.height, m.width, i, &label, true, false, false, spin, active_fg,
-                active_fg, multi,
+                active_fg, multi, 1,
             );
         }
 
@@ -252,6 +257,7 @@ impl App {
         fg_dim: [f32; 4],
         is_ghost: bool,
         multi: bool,
+        pane_count: usize,
     ) {
         if is_ghost {
             return;
@@ -331,7 +337,7 @@ impl App {
         let label_fg = if active { active_fg } else { fg_dim };
         Self::paint_tab_label(
             renderer, r, cell_h, cell_w, idx, label, active, busy, spinning, spin, label_fg,
-            accent, multi,
+            accent, multi, pane_count,
         );
         let _ = fg;
     }
@@ -353,6 +359,7 @@ impl App {
         label_fg: [f32; 4],
         accent: [f32; 4],
         multi: bool,
+        pane_count: usize,
     ) {
         let ty = (r.center_y() - cell_h * 0.5).round();
         let mut tx = r.x + TAB_PAD_X;
@@ -367,6 +374,20 @@ impl App {
         } else if busy && !active {
             renderer.push_overlay_glyph_px(tx.round(), ty, '•', accent);
             tx += cell_w;
+        }
+        // Split indicator: a small pane-layout glyph (◫ for 2 panes, ▦ for >2) just
+        // before the title when this tab is tiled. Drawn in the accent color so the
+        // split status reads at a glance without crowding the label.
+        let indicator = split_indicator(pane_count);
+        if !indicator.is_empty() {
+            renderer.push_overlay_glyph_px_str(tx.round(), ty, indicator, accent);
+            tx += cell_w;
+            // For >2 panes, append the count (e.g. "▦3") so dense tilings are legible.
+            if pane_count > 2 {
+                let n = pane_count.to_string();
+                renderer.push_overlay_glyph_px_str(tx.round(), ty, &n, accent);
+                tx += cell_w * n.chars().count() as f32;
+            }
         }
         let reserve = if multi {
             CLOSE_BOX + TAB_PAD_X

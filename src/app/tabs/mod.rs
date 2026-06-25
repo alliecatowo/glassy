@@ -121,20 +121,21 @@ impl App {
         cell_h: f32,
         pad: f32,
         status_bar_enabled: bool,
+        tab_strip_h: f32,
     ) -> (usize, usize) {
         let usable_w = (size.width as f32 - 2.0 * pad).max(0.0);
         let usable_h = (size.height as f32 - 2.0 * pad).max(0.0);
         let cols = ((usable_w / cell_w).floor() as usize).max(1);
         // Reserve the GUI tab bar at the top and the status bar at the bottom (both
-        // in PIXELS). The tab-bar inset is applied via `Renderer::set_grid_origin_y`;
-        // the status bar simply removes pixels from the available height when enabled.
+        // in PIXELS). `tab_strip_h` is the strip's pixel height (0 when hidden); the
+        // inset is applied via `Renderer::set_grid_origin_y`. The status bar simply
+        // removes pixels from the available height when enabled.
         let status_bar_space = if status_bar_enabled {
             STATUS_BAR_H
         } else {
             0.0
         };
-        let rows =
-            (((usable_h - tab_bar_h(cell_h) - status_bar_space) / cell_h).floor() as usize).max(1);
+        let rows = (((usable_h - tab_strip_h - status_bar_space) / cell_h).floor() as usize).max(1);
         (cols, rows)
     }
 
@@ -177,14 +178,6 @@ impl App {
         self.background.len() + self.pty.is_some() as usize
     }
 
-    /// Reflect the active tab in the native (CSD) window title.
-    pub(crate) fn update_window_title(&self) {
-        let Some(window) = self.window.as_ref() else {
-            return;
-        };
-        window.set_title(&os_title(&self.active_title));
-    }
-
     /// Tab descriptors in stable display order: (title, is_active, has_activity).
     /// Shared by the tab-bar painter and the click/drag hit-tests so the drawn
     /// items and the click targets always agree.
@@ -193,18 +186,31 @@ impl App {
             .iter()
             .map(|&id| {
                 if id == self.active_id {
-                    // A custom (renamed) title overrides the OSC title.
+                    // Title precedence: custom (renamed) > OSC > foreground process
+                    // name (vim/cargo/zsh) so an idle tab shows its shell rather
+                    // than a bare "shell" placeholder.
                     let title = self
                         .active_custom_title
                         .clone()
-                        .unwrap_or_else(|| self.active_title.clone());
+                        .filter(|t| !t.trim().is_empty())
+                        .or_else(|| {
+                            (!self.active_title.trim().is_empty())
+                                .then(|| self.active_title.clone())
+                        })
+                        .or_else(|| self.active_process_name())
+                        .unwrap_or_default();
                     (title, true, false)
                 } else {
                     self.background
                         .iter()
                         .find(|s| s.id == id)
                         .map(|s| {
-                            let title = s.custom_title.clone().unwrap_or_else(|| s.title.clone());
+                            let title = s
+                                .custom_title
+                                .clone()
+                                .filter(|t| !t.trim().is_empty())
+                                .or_else(|| (!s.title.trim().is_empty()).then(|| s.title.clone()))
+                                .unwrap_or_else(|| Self::proc_label_for(&s.pty));
                             (title, false, s.activity)
                         })
                         .unwrap_or((String::new(), false, false))
@@ -214,17 +220,30 @@ impl App {
     }
 
     /// The live pixel tab-bar layout, built from the current descriptors and the
-    /// renderer's surface width + cell metrics. Empty if the renderer is absent.
+    /// renderer's surface width + cell metrics. Empty if the renderer is absent or
+    /// the strip is hidden (so no hidden hit-targets linger). Uses the same tag
+    /// reserve + active-position the painter uses so clicks land where drawn.
     pub(crate) fn tab_layout(&self) -> Vec<StripSeg> {
         let Some(r) = self.renderer.as_ref() else {
             return Vec::new();
         };
+        if !self.tab_bar_visible() {
+            return Vec::new();
+        }
         let m = r.cell_metrics();
         let (sw, _sh) = r.surface_size();
         let descs = self.tab_descs();
         let refs: Vec<(&str, bool, bool)> =
             descs.iter().map(|(t, a, b)| (t.as_str(), *a, *b)).collect();
-        strip_layout(&refs, sw as f32, tab_bar_h(m.height), m.width)
+        let tag_reserve = tab_tag_reserve(self.tab_count(), m.width);
+        strip_layout_ex(
+            &refs,
+            sw as f32,
+            tab_bar_h(m.height),
+            m.width,
+            tag_reserve,
+            self.active_pos(),
+        )
     }
 
     /// The tab-bar item at physical pixel `(px, py)`, if any. Shared by click +
@@ -330,6 +349,9 @@ impl App {
         // New session always starts with the default modifyOtherKeys level.
         self.modify_other_keys = ModifyOtherKeys::default();
         self.reset_pointer_state();
+        // Opening the 2nd tab reveals the Auto-mode strip; reflow so the grid (and
+        // the just-spawned tab) account for the strip's reclaimed height.
+        self.reflow_grid();
         self.update_window_title();
         self.force_full_redraw = true;
         self.mark_dirty(event_loop);
@@ -542,6 +564,9 @@ impl App {
             }
         }
         self.reset_pointer_state();
+        // Closing back to a single tab hides the Auto-mode strip; reflow so the
+        // surviving tab reclaims the strip's height.
+        self.reflow_grid();
         self.update_window_title();
         self.force_full_redraw = true;
         self.mark_dirty(event_loop);

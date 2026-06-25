@@ -47,6 +47,7 @@ mod search;
 mod selection;
 mod settings;
 mod settings_fields;
+mod strip;
 mod tab_paint;
 mod tabs;
 pub(crate) mod toast;
@@ -55,6 +56,7 @@ mod user_event;
 pub(crate) use helpers::*;
 pub(crate) use palette::PaletteState;
 pub(crate) use search::SearchState;
+pub(crate) use strip::*;
 
 /// A runtime font-size adjustment requested via Ctrl +/-/0.
 #[derive(Clone, Copy)]
@@ -163,6 +165,17 @@ pub struct Config {
     /// default to preserve the 0%-idle + perf numbers; when off it is a complete
     /// no-op (no offscreen pass, no allocation).
     pub crt_effect: bool,
+    /// When to show the tab strip. `Auto` (default) hides it while only one tab
+    /// is open and shows it once a second tab is spawned; `Always` keeps it; and
+    /// `Never` hides it unconditionally (the active tab still occupies the full
+    /// height). Settable via the `show_tab_bar` config key + a settings toggle.
+    pub show_tab_bar: TabBarMode,
+    /// Include the active pane's working directory in the OS window title
+    /// (`<process> — <cwd>`). Default true. Config key `title_show_cwd`.
+    pub title_show_cwd: bool,
+    /// Append a ` · N tabs` suffix to the OS window title when more than one tab
+    /// is open. Default false. Config key `title_show_count`.
+    pub title_show_count: bool,
 }
 
 /// The three user-facing default cursor shapes.
@@ -191,6 +204,18 @@ impl CursorStyleConfig {
             Self::Underline => "underline",
         }
     }
+}
+
+/// Tab-strip visibility policy (config key `show_tab_bar`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum TabBarMode {
+    /// Hide the strip with a single tab; reveal it once a second tab opens.
+    #[default]
+    Auto,
+    /// Always reserve and draw the strip, even for one tab.
+    Always,
+    /// Never draw the strip (the grid uses the full window height).
+    Never,
 }
 
 /// A tab's split layout: the tiling tree (whose leaf ids are pty/pane ids) plus

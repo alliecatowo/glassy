@@ -119,8 +119,9 @@ impl App {
             return (col, row);
         }
         let col = ((x - pad) / m.width as f64).floor();
-        // The terminal grid starts below the GUI tab bar: subtract its pixel inset.
-        let grid_top = pad + tab_bar_h(m.height) as f64;
+        // The terminal grid starts below the GUI tab bar: subtract its pixel inset
+        // (0 when the strip is hidden, so the top band maps to the first grid row).
+        let grid_top = pad + self.effective_tab_bar_h() as f64;
         let term_row = ((y - grid_top) / m.height as f64).floor() as i64;
         let col = (col.max(0.0) as usize).min(self.cols.saturating_sub(1));
         let row = (term_row.max(0) as usize).min(self.rows.saturating_sub(1));
@@ -437,16 +438,54 @@ impl App {
             .map(|&id| {
                 if id == self.active_id {
                     let spinning = self.active_busy_until.is_some_and(|t| now < t);
-                    (self.active_title.clone(), true, false, spinning)
+                    // Title precedence: custom > OSC > foreground process name, so
+                    // an idle tab reads "zsh"/"vim" instead of a bare placeholder.
+                    let title = self
+                        .active_custom_title
+                        .clone()
+                        .filter(|t| !t.trim().is_empty())
+                        .or_else(|| {
+                            (!self.active_title.trim().is_empty())
+                                .then(|| self.active_title.clone())
+                        })
+                        .or_else(|| self.active_process_name())
+                        .unwrap_or_default();
+                    (title, true, false, spinning)
                 } else {
                     self.background
                         .iter()
                         .find(|s| s.id == id)
                         .map(|s| {
                             let spinning = s.busy_until.is_some_and(|t| now < t);
-                            (s.title.clone(), false, s.activity, spinning)
+                            let title = s
+                                .custom_title
+                                .clone()
+                                .filter(|t| !t.trim().is_empty())
+                                .or_else(|| (!s.title.trim().is_empty()).then(|| s.title.clone()))
+                                .unwrap_or_else(|| Self::proc_label_for(&s.pty));
+                            (title, false, s.activity, spinning)
                         })
                         .unwrap_or((String::new(), false, false, false))
+                }
+            })
+            .collect()
+    }
+
+    /// Per-tab pane (leaf) counts in stable display order, for the split indicator
+    /// on each chip. 1 means an un-split tab (no indicator). Mirrors the order of
+    /// [`tab_bar_snapshot`] so the painter indexes them in parallel.
+    pub(crate) fn tab_pane_counts(&self) -> Vec<usize> {
+        self.tab_order
+            .iter()
+            .map(|&id| {
+                if id == self.active_id {
+                    self.panes.as_ref().map(|g| g.layout.len()).unwrap_or(1)
+                } else {
+                    self.background
+                        .iter()
+                        .find(|s| s.id == id)
+                        .and_then(|s| s.panes.as_ref().map(|g| g.layout.len()))
+                        .unwrap_or(1)
                 }
             })
             .collect()
@@ -470,6 +509,8 @@ impl App {
         count: usize,
         strip_off: i32,
         strip_hist: usize,
+        pane_counts: &[usize],
+        active_pos: usize,
     ) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -479,6 +520,9 @@ impl App {
             busy.hash(&mut h);
             spinning.hash(&mut h);
         }
+        // Split indicators + scroll-keep-active position change the drawn strip.
+        pane_counts.hash(&mut h);
+        active_pos.hash(&mut h);
         focused.hash(&mut h);
         hovered.hash(&mut h);
         held.hash(&mut h);
