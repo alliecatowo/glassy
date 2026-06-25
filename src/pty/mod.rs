@@ -538,8 +538,12 @@ impl Pty {
         let loop_poller = poller.clone();
         let loop_images = images.clone();
         let loop_prompts = prompts.clone();
+        // 256 KiB stack: the PTY read/parse loop has no deep recursion (only a
+        // fixed read buffer + a handful of local variables), so the default
+        // 8 MiB OS stack is wasteful. See `r#loop::PTY_THREAD_STACK`.
         std::thread::Builder::new()
             .name(format!("glassy-pty-{id}"))
+            .stack_size(r#loop::PTY_THREAD_STACK)
             .spawn(move || {
                 r#loop::run_loop(
                     pty,

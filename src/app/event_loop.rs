@@ -779,11 +779,16 @@ impl ApplicationHandler<UserEvent> for App {
     /// Persist (or clear) the session on a clean exit. When `restore_session` is on,
     /// write the current tabs/splits/cwds so the next launch restores them; when
     /// off, remove any stale state file so a prior session never resurrects.
+    /// Also saves the wgpu pipeline cache so the next launch avoids shader
+    /// recompilation (meaningful on Vulkan; a no-op on other backends).
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
         if self.config.restore_session {
             self.save_session();
         } else {
             crate::session::Session::clear();
+        }
+        if let Some(renderer) = &self.renderer {
+            renderer.save_pipeline_cache();
         }
     }
 }

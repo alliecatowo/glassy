@@ -802,14 +802,18 @@ impl Renderer {
         // unit-quad vertex buffer identically, so when it ran we only need to swap
         // the atlas bind group + instance buffer here.
         if self.image_count > 0 {
-            if fg_count == 0 {
-                pass.set_pipeline(&self.fg_pipeline);
-                pass.set_bind_group(0, &self.uniform_bind_group, &[]);
-                pass.set_vertex_buffer(0, self.unit_quad.slice(..));
+            // image_bind_group is guaranteed Some when image_count > 0 because
+            // draw_image lazily initializes it before pushing any image instance.
+            if let Some(image_bg) = &self.image_bind_group {
+                if fg_count == 0 {
+                    pass.set_pipeline(&self.fg_pipeline);
+                    pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+                    pass.set_vertex_buffer(0, self.unit_quad.slice(..));
+                }
+                pass.set_bind_group(1, image_bg, &[]);
+                pass.set_vertex_buffer(1, self.image_buffer.slice(..));
+                pass.draw(0..4, 0..self.image_count);
             }
-            pass.set_bind_group(1, &self.image_bind_group, &[]);
-            pass.set_vertex_buffer(1, self.image_buffer.slice(..));
-            pass.draw(0..4, 0..self.image_count);
         }
         // Translucent panel overlay (modals / menus): drawn last so it composites
         // over the finished grid + images. Body / backdrop / border rails use the
