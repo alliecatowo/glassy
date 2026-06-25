@@ -1101,13 +1101,15 @@ impl App {
             }
         }
 
-        // Startup benchmark: log time-to-first-frame once.
+        // Startup benchmark: log time-to-first-frame once, then kick off the
+        // deferred ASCII prewarm so it runs after the window is already visible.
         if !self.first_frame_done {
             self.first_frame_done = true;
             log::info!(
                 "glassy time-to-first-frame: {:.1} ms",
                 self.started.elapsed().as_secs_f64() * 1000.0
             );
+            renderer.prewarm_ascii();
         }
 
         // If the glyph atlas overflowed and was repacked this frame, every cached

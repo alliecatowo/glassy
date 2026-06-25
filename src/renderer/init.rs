@@ -675,19 +675,26 @@ impl Renderer {
             renderer.font_has_ligatures
         );
 
-        // Pre-warm the atlas with printable ASCII (regular + bold) so the first
-        // frame is rasterize-free. Bold is prewarm'd because most shell prompts and
-        // editors immediately render bold text; without it there is a visible
-        // first-frame stutter when the first bold glyph triggers an atlas upload.
-        for byte in 0x20u8..=0x7E {
-            renderer.ensure_glyphs(byte as char, false, false);
-            renderer.ensure_glyphs(byte as char, true, false);
-        }
-        log::info!(
-            "  renderer: ascii prewarm done {:.1} ms (total Renderer::new)",
-            ms(t)
-        );
+        log::info!("  renderer: ready {:.1} ms (total Renderer::new)", ms(t));
 
         Ok(renderer)
+    }
+
+    /// Pre-warm the glyph atlas with printable ASCII (regular + bold).
+    ///
+    /// Called on the tick immediately after the first frame is presented so the
+    /// window appears ~10 ms sooner. Bold is included because shell prompts and
+    /// editors render bold text on the first keypress; without it the first bold
+    /// glyph triggers a visible atlas-upload stall.
+    pub fn prewarm_ascii(&mut self) {
+        let t = std::time::Instant::now();
+        for byte in 0x20u8..=0x7E {
+            self.ensure_glyphs(byte as char, false, false);
+            self.ensure_glyphs(byte as char, true, false);
+        }
+        log::info!(
+            "  renderer: ascii prewarm done {:.1} ms (deferred post-first-frame)",
+            t.elapsed().as_secs_f64() * 1000.0
+        );
     }
 }

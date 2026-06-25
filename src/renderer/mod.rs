@@ -111,9 +111,11 @@ const COLOR_ATLAS_SIZE: u32 = 256;
 const IMAGE_ATLAS_SIZE: u32 = 1024;
 /// 1px gap between packed glyphs to avoid bilinear bleed across neighbours.
 const GLYPH_GAP: u32 = 1;
-/// Initial instance-buffer capacity (in instances) so the first `cast_slice`
-/// is never empty and we rarely reallocate.
-const INITIAL_INSTANCES: usize = 4096;
+/// Initial instance-buffer capacity (in instances). An idle terminal at a
+/// shell prompt uses ~80-150 instances; 512 covers that comfortably and
+/// avoids the 4096×80-byte pre-alloc (328 KB) that was never used at idle.
+/// The buffer grows dynamically on the first frame that needs more.
+const INITIAL_INSTANCES: usize = 512;
 
 /// Default window background opacity (the "glassy" namesake) when config/CLI do
 /// not specify one: the alpha applied to the terminal's cell backgrounds and
