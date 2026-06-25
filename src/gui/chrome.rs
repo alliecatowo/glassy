@@ -50,9 +50,9 @@ impl<'r> Ui<'r> {
             .min(surface.0 - 2.0 * m.pad)
             .max(m.cell_w * 28.0);
         // font, opacity, bell, theme, font, scrollback, padding, status_bar,
-        // pane_headers, follow_system, ligatures, restore_session, word_sep,
-        // font_features, config path.
-        const ROWS: usize = 15;
+        // pane_headers, tab_bar, follow_system, ligatures, restore_session,
+        // word_sep, font_features, config path.
+        const ROWS: usize = 16;
         let header_h = m.row_h;
         let footer_h = m.row_h + m.gap;
         // Adaptive row step: the natural step is `row_h + gap`, but if the form
@@ -224,6 +224,19 @@ impl<'r> Ui<'r> {
             self.toggle(id("settings/pane_headers"), ph_toggle_rect, v.pane_headers);
         if new_pane_headers != v.pane_headers {
             ev.pane_headers_toggle = true;
+        }
+        y += step;
+
+        // -- Tab bar (segmented: Auto / Always / Never) ----------------------
+        row_label(self, y, "Tab bar");
+        let tbm = self.segmented(
+            id("settings/tab_bar"),
+            ctrl_rect(y, ctrl_w),
+            &["Auto", "Always", "Never"],
+            v.tab_bar_mode.min(2),
+        );
+        if tbm != v.tab_bar_mode {
+            ev.tab_bar_mode = Some(tbm);
         }
         y += step;
 

@@ -317,6 +317,12 @@ impl App {
         // Effective uniform padding shown in the form: the explicit `padding`
         // override if set, else 0 (meaning "cell-derived default").
         let padding_px = config.padding.unwrap_or(0.0).round().max(0.0) as u32;
+        // Tab-bar policy as a segmented index (Auto / Always / Never).
+        let tab_bar_mode = match config.show_tab_bar {
+            crate::app::TabBarMode::Auto => 0,
+            crate::app::TabBarMode::Always => 1,
+            crate::app::TabBarMode::Never => 2,
+        };
 
         let (sw, sh) = renderer.surface_size();
         let (cw, ch) = {
@@ -356,6 +362,7 @@ impl App {
             padding: padding_px,
             word_separator: &config.word_separator,
             font_features: &font_features_str,
+            tab_bar_mode,
         };
         ui.build_settings((sw as f32, sh as f32), &view, fields)
     }
@@ -422,6 +429,10 @@ impl App {
         }
         if ev.pane_headers_toggle {
             self.toggle_pane_headers();
+            changed = true;
+        }
+        if let Some(idx) = ev.tab_bar_mode {
+            self.set_tab_bar_mode_index(idx);
             changed = true;
         }
         if ev.follow_system_toggle {

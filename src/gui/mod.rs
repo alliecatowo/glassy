@@ -421,6 +421,9 @@ pub struct SettingsView<'a> {
     pub word_separator: &'a str,
     /// OpenType font-feature tags as a single display string (e.g. "ss01 calt=0").
     pub font_features: &'a str,
+    /// Tab-strip visibility policy as a segmented index: 0 = Auto, 1 = Always,
+    /// 2 = Never.
+    pub tab_bar_mode: usize,
 }
 
 /// Everything the settings form reported this frame. The App applies each
@@ -466,6 +469,8 @@ pub struct SettingsEvents {
     pub restore_session_toggle: bool,
     /// Padding stepper delta in clicks (-1 / 0 / +1).
     pub padding_delta: i32,
+    /// New tab-bar-mode index if the segmented control changed (0/1/2).
+    pub tab_bar_mode: Option<usize>,
 }
 
 // ---------------------------------------------------------------------------
@@ -510,6 +515,7 @@ mod tests {
             id("settings/scrollback"),
             id("settings/status_bar"),
             id("settings/pane_headers"),
+            id("settings/tab_bar"),
             id("settings/config"),
             id("settings/save"),
             id("settings/close"),

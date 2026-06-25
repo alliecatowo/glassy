@@ -28,6 +28,9 @@
 //! font_features = ss01, calt=0         # OpenType feature tags to force on/off (comma or space separated)
 //! cwd         = /home/me/projects      # working directory for the first tab's shell
 //! restore_session = false              # restore previous tabs/splits/cwds on launch
+//! show_tab_bar = auto                  # tab strip: auto (hide at 1 tab) / always / never
+//! title_show_cwd = true                # include the cwd in the OS window title
+//! title_show_count = false             # append " · N tabs" to the window title
 //! ```
 //!
 //! Custom keybindings live in a `[keybindings]` section mapping chords to actions:
@@ -261,6 +264,43 @@ opacity = 0.80
     // -----------------------------------------------------------------------
     // Config file tests
     // -----------------------------------------------------------------------
+
+    #[test]
+    fn show_tab_bar_parses_words_and_bools() {
+        use crate::app::TabBarMode;
+        // Default is Auto.
+        let s = RawConfig::default().into_settings().unwrap();
+        assert_eq!(s.config.show_tab_bar, TabBarMode::Auto);
+        // Word forms.
+        for (word, expect) in [
+            ("auto", TabBarMode::Auto),
+            ("always", TabBarMode::Always),
+            ("never", TabBarMode::Never),
+            // Bool spellings map to always/never.
+            ("true", TabBarMode::Always),
+            ("off", TabBarMode::Never),
+        ] {
+            let mut raw = RawConfig::default();
+            parse_config_file(&format!("show_tab_bar = {word}\n"), &mut raw).unwrap();
+            let s = raw.into_settings().unwrap();
+            assert_eq!(s.config.show_tab_bar, expect, "show_tab_bar = {word}");
+        }
+        // Garbage is a hard error.
+        let mut bad = RawConfig::default();
+        assert!(parse_config_file("show_tab_bar = sometimes\n", &mut bad).is_err());
+    }
+
+    #[test]
+    fn title_toggles_parse_with_defaults() {
+        let s = RawConfig::default().into_settings().unwrap();
+        assert!(s.config.title_show_cwd); // default on
+        assert!(!s.config.title_show_count); // default off
+        let mut raw = RawConfig::default();
+        parse_config_file("title_show_cwd = off\ntitle_show_count = on\n", &mut raw).unwrap();
+        let s = raw.into_settings().unwrap();
+        assert!(!s.config.title_show_cwd);
+        assert!(s.config.title_show_count);
+    }
 
     #[test]
     fn restore_session_defaults_off_and_parses() {

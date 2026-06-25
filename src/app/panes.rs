@@ -10,11 +10,11 @@ impl App {
     /// renderer exists.
     pub(crate) fn content_area(&self) -> Option<pane::Rect> {
         let r = self.renderer.as_ref()?;
-        let m = r.cell_metrics();
         // The content (panes/grid) begins below the GUI tab bar and ends above the
         // status bar. Both insets are in pixels; the per-pane `pad` is applied by
-        // the pane sizing math independently.
-        let strip_bottom = tab_bar_h(m.height).round() as i32;
+        // the pane sizing math independently. The strip height is 0 when hidden so
+        // panes reclaim the band.
+        let strip_bottom = self.effective_tab_bar_h().round() as i32;
         let status_h = if self.config.status_bar {
             STATUS_BAR_H.round() as i32
         } else {

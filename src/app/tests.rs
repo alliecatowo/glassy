@@ -1,10 +1,22 @@
 //! Unit tests for the App module. Extracted from mod.rs to keep it under 700 lines.
 
 use super::{
-    MenuAction, StripItem, WheelAction, actions_to_entries, image_dst_size, motion_button,
-    move_in_order, strip_item_at, strip_layout, wheel_action,
+    MenuAction, StripItem, WheelAction, actions_to_entries, compact_cwd, compose_window_title,
+    image_dst_size, motion_button, move_in_order, split_indicator, strip_item_at, strip_layout_ex,
+    tab_tag_reserve, wheel_action,
 };
 use crate::gui::MenuEntry;
+
+/// Test shim: the simple 4-arg layout used by the older tests (0 tag reserve,
+/// first tab active). Production paths call `strip_layout_ex` directly.
+fn strip_layout(
+    tabs: &[(&str, bool, bool)],
+    bar_w: f32,
+    bar_h: f32,
+    cell_w: f32,
+) -> Vec<super::StripSeg> {
+    strip_layout_ex(tabs, bar_w, bar_h, cell_w, 0.0, 0)
+}
 
 #[test]
 fn context_menu_entries_group_with_separators() {
@@ -100,13 +112,14 @@ fn settings_focus_order_matches_gui_ids_and_is_distinct() {
     assert_eq!(order[6], gui::id("settings/padding"));
     assert_eq!(order[7], gui::id("settings/status_bar"));
     assert_eq!(order[8], gui::id("settings/pane_headers"));
-    assert_eq!(order[9], gui::id("settings/follow_system"));
-    assert_eq!(order[10], gui::id("settings/ligatures"));
-    assert_eq!(order[11], gui::id("settings/restore_session"));
-    assert_eq!(order[12], gui::id("settings/word_separator"));
-    assert_eq!(order[13], gui::id("settings/font_features"));
-    assert_eq!(order[14], gui::id("settings/config"));
-    assert_eq!(order[15], gui::id("settings/save"));
+    assert_eq!(order[9], gui::id("settings/tab_bar"));
+    assert_eq!(order[10], gui::id("settings/follow_system"));
+    assert_eq!(order[11], gui::id("settings/ligatures"));
+    assert_eq!(order[12], gui::id("settings/restore_session"));
+    assert_eq!(order[13], gui::id("settings/word_separator"));
+    assert_eq!(order[14], gui::id("settings/font_features"));
+    assert_eq!(order[15], gui::id("settings/config"));
+    assert_eq!(order[16], gui::id("settings/save"));
     for (i, a) in order.iter().enumerate() {
         for b in order.iter().skip(i + 1) {
             assert_ne!(a, b);
@@ -200,6 +213,134 @@ fn strip_layout_carries_titles_by_position() {
     };
     assert_eq!(lbl(StripItem::Tab(0)), "a");
     assert_eq!(lbl(StripItem::Tab(1)), "b");
+}
+
+#[test]
+fn new_tab_button_sits_after_the_tabs() {
+    // The + must render to the RIGHT of the last tab chip, not before the first.
+    let segs = strip_layout(&[("a", true, false), ("b", false, false)], 1200.0, BH, CW);
+    let plus_x = segs
+        .iter()
+        .find(|s| s.item == StripItem::NewTab)
+        .map(|s| s.rect.x)
+        .expect("a + button");
+    let last_tab_right = segs
+        .iter()
+        .filter_map(|s| match s.item {
+            StripItem::Tab(_) => Some(s.rect.x + s.rect.w),
+            _ => None,
+        })
+        .fold(0.0_f32, f32::max);
+    assert!(
+        plus_x >= last_tab_right - 0.5,
+        "+ ({plus_x}) must be at/after the last tab right edge ({last_tab_right})"
+    );
+}
+
+#[test]
+fn many_tabs_stop_shrinking_at_min_width_and_scroll() {
+    // 30 tabs on a narrow bar: each chip must be >= TAB_MIN_W (no infinite
+    // squeeze), so the strip overflows and only a subset is laid out (scrolled).
+    use super::TAB_MIN_W;
+    let tabs: Vec<(&str, bool, bool)> = (0..30)
+        .map(|i| {
+            if i == 0 {
+                ("a", true, false)
+            } else {
+                ("x", false, false)
+            }
+        })
+        .collect();
+    let segs = strip_layout_ex(&tabs, 900.0, BH, CW, 0.0, 0);
+    let widths: Vec<f32> = segs
+        .iter()
+        .filter_map(|s| matches!(s.item, StripItem::Tab(_)).then_some(s.rect.w))
+        .collect();
+    assert!(!widths.is_empty());
+    for w in &widths {
+        assert!(*w >= TAB_MIN_W - 0.5, "chip {w} below TAB_MIN_W");
+    }
+    // Overflow: not all 30 chips fit.
+    assert!(
+        widths.len() < 30,
+        "expected overflow, got {} chips",
+        widths.len()
+    );
+}
+
+#[test]
+fn scroll_keeps_active_tab_visible() {
+    // The active tab is far to the right; the layout must scroll so it appears.
+    let mut tabs: Vec<(&str, bool, bool)> = (0..30).map(|_| ("x", false, false)).collect();
+    tabs[27] = ("active", true, false);
+    let segs = strip_layout_ex(&tabs, 900.0, BH, CW, 0.0, 27);
+    assert!(
+        segs.iter().any(|s| s.item == StripItem::Tab(27)),
+        "active tab (27) must be laid out (scrolled into view)"
+    );
+}
+
+#[test]
+fn tag_reserve_keeps_tabs_left_of_counter() {
+    // With a tag reserve, no tab chip and no + button may extend into the
+    // reserved right-hand band (where the "N tabs" counter is drawn).
+    let reserve = tab_tag_reserve(9, CW);
+    assert!(reserve > 0.0);
+    let tabs: Vec<(&str, bool, bool)> = (0..9).map(|_| ("t", false, false)).collect();
+    let bar_w = 1000.0;
+    let segs = strip_layout_ex(&tabs, bar_w, BH, CW, reserve, 0);
+    // The right controls start at bar_w - 3*CTRL - gap; the counter sits to their
+    // left within `reserve`. Tabs + the `+` must end before that counter band.
+    let counter_left = bar_w - super::CTRL_BTN * 3.0 - super::TAB_GAP - reserve;
+    for s in &segs {
+        if matches!(s.item, StripItem::Tab(_) | StripItem::NewTab) {
+            assert!(
+                s.rect.x + s.rect.w <= counter_left + super::CTRL_BTN + 1.0,
+                "{:?} overruns the counter band",
+                s.item
+            );
+        }
+    }
+}
+
+#[test]
+fn tab_tag_reserve_is_zero_for_single_tab() {
+    assert_eq!(tab_tag_reserve(1, CW), 0.0);
+    assert!(tab_tag_reserve(2, CW) > 0.0);
+}
+
+#[test]
+fn split_indicator_glyphs() {
+    assert_eq!(split_indicator(1), "");
+    assert_eq!(split_indicator(0), "");
+    assert_eq!(split_indicator(2), "◫");
+    assert_eq!(split_indicator(3), "▦");
+    assert_eq!(split_indicator(9), "▦");
+}
+
+#[test]
+fn compose_window_title_variants() {
+    assert_eq!(
+        compose_window_title("vim", Some("~/proj"), None),
+        "vim — ~/proj"
+    );
+    assert_eq!(compose_window_title("vim", None, None), "vim");
+    assert_eq!(
+        compose_window_title("zsh", Some("~/p"), Some(3)),
+        "zsh — ~/p · 3 tabs"
+    );
+    // count of 1 adds no suffix; empty primary falls back to glassy.
+    assert_eq!(compose_window_title("zsh", None, Some(1)), "zsh");
+    assert_eq!(compose_window_title("", None, None), "glassy");
+}
+
+#[test]
+fn compact_cwd_collapses_home_and_shortens() {
+    // Absolute deep path keeps the last two components with a leading ellipsis.
+    let p = std::path::Path::new("/usr/local/share/glassy");
+    assert_eq!(compact_cwd(p), "…/share/glassy");
+    // Shallow absolute path is kept verbatim.
+    assert_eq!(compact_cwd(std::path::Path::new("/etc")), "/etc");
 }
 
 #[test]

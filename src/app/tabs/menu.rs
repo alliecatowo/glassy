@@ -262,13 +262,13 @@ impl App {
     }
 
     pub(crate) fn strip_click(&mut self, event_loop: &ActiveEventLoop) -> bool {
-        let Some(renderer) = self.renderer.as_ref() else {
+        if self.renderer.is_none() {
             return false;
-        };
-        let m = renderer.cell_metrics();
+        }
         let (x, y) = self.mouse_px;
-        // The tab bar occupies the pixel band [0, tab_bar_h).
-        if y >= tab_bar_h(m.height) as f64 {
+        // The tab bar occupies the pixel band [0, tab_bar_h); 0 when hidden, so the
+        // band is empty and every click falls through to the terminal/panes.
+        if y >= self.effective_tab_bar_h() as f64 {
             return false;
         }
         // Hit-test against the pixel tab-bar layout (the same helper the painter
@@ -389,7 +389,13 @@ impl App {
                             + pad_x * 2.0)
                             .max(cell_w * 8.0)
                             .ceil();
-                        let bar_h = tab_bar_h(m.height);
+                        // Anchor just below the strip (or the window top when the
+                        // strip is hidden).
+                        let bar_h = if self.tab_bar_visible() {
+                            tab_bar_h(m.height)
+                        } else {
+                            0.0
+                        };
                         self.menu_anchor_px = Some(((sw as f32 - est_w).max(0.0), bar_h + 2.0));
                     }
                 } else {

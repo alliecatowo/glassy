@@ -34,7 +34,7 @@ impl App {
     /// for Tab / Shift+Tab / Up / Down focus movement (the form itself collects
     /// the live order each paint, but key handling runs between paints so it walks
     /// this fixed list — identical ordering keeps focus stable).
-    pub(crate) fn settings_focus_order() -> [gui::WidgetId; 16] {
+    pub(crate) fn settings_focus_order() -> [gui::WidgetId; 17] {
         [
             gui::id("settings/font_size"),
             gui::id("settings/opacity"),
@@ -45,6 +45,7 @@ impl App {
             gui::id("settings/padding"),
             gui::id("settings/status_bar"),
             gui::id("settings/pane_headers"),
+            gui::id("settings/tab_bar"),
             gui::id("settings/follow_system"),
             gui::id("settings/ligatures"),
             gui::id("settings/restore_session"),
@@ -184,6 +185,10 @@ impl App {
             self.toggle_status_bar();
         } else if f == Some(gui::id("settings/pane_headers")) {
             self.toggle_pane_headers();
+        } else if f == Some(gui::id("settings/tab_bar")) {
+            // Segmented Auto → Always → Never → Auto.
+            let cur = self.tab_bar_mode_index() as i32;
+            self.set_tab_bar_mode_index(((cur + 1).rem_euclid(3)) as usize);
         } else if f == Some(gui::id("settings/follow_system")) {
             self.config.follow_system = !self.config.follow_system;
             self.settings_saved = false;
@@ -206,12 +211,19 @@ impl App {
     /// Shared by the settings toggle (mouse + keyboard) and the menu action.
     pub(crate) fn toggle_status_bar(&mut self) {
         self.config.status_bar = !self.config.status_bar;
+        let strip_h = self.effective_tab_bar_h();
         if let Some(window) = self.window.as_ref() {
             let size = window.inner_size();
             if let Some(r) = self.renderer.as_ref() {
                 let m = r.cell_metrics();
-                let (cols, rows) =
-                    Self::grid_for(size, m.width, m.height, r.pad(), self.config.status_bar);
+                let (cols, rows) = Self::grid_for(
+                    size,
+                    m.width,
+                    m.height,
+                    r.pad(),
+                    self.config.status_bar,
+                    strip_h,
+                );
                 self.cols = cols;
                 self.rows = rows;
                 if let Some(pty) = self.pty.as_mut() {
@@ -233,6 +245,32 @@ impl App {
         if self.is_split() {
             self.resize_panes();
         }
+        self.force_full_redraw = true;
+    }
+
+    /// Tab-bar mode as a segmented index: 0 = Auto, 1 = Always, 2 = Never.
+    pub(crate) fn tab_bar_mode_index(&self) -> usize {
+        match self.config.show_tab_bar {
+            crate::app::TabBarMode::Auto => 0,
+            crate::app::TabBarMode::Always => 1,
+            crate::app::TabBarMode::Never => 2,
+        }
+    }
+
+    /// Set the tab-bar mode from a segmented index, then reflow the grid since the
+    /// strip's visibility (and thus the available content height) may have changed.
+    pub(crate) fn set_tab_bar_mode_index(&mut self, idx: usize) {
+        let mode = match idx {
+            1 => crate::app::TabBarMode::Always,
+            2 => crate::app::TabBarMode::Never,
+            _ => crate::app::TabBarMode::Auto,
+        };
+        if mode == self.config.show_tab_bar {
+            return;
+        }
+        self.config.show_tab_bar = mode;
+        self.reflow_grid();
+        self.settings_saved = false;
         self.force_full_redraw = true;
     }
 
@@ -351,6 +389,7 @@ impl App {
         if let Some(r) = self.renderer.as_mut() {
             r.set_pad(next * scale);
         }
+        let strip_h = self.effective_tab_bar_h();
         // Reflow: the inset changed, so the grid size + PTY must be recomputed.
         if let (Some(window), Some(renderer)) = (self.window.as_ref(), self.renderer.as_ref()) {
             let size = window.inner_size();
@@ -361,6 +400,7 @@ impl App {
                 m.height,
                 renderer.pad(),
                 self.config.status_bar,
+                strip_h,
             );
             self.cols = cols;
             self.rows = rows;
@@ -498,6 +538,10 @@ impl App {
             ("scrollback", self.config.scrollback.to_string()),
             ("status_bar", self.config.status_bar.to_string()),
             ("pane_headers", self.config.pane_headers.to_string()),
+            (
+                "show_tab_bar",
+                tab_bar_mode_word(self.config.show_tab_bar).to_string(),
+            ),
             ("follow_system", self.config.follow_system.to_string()),
             ("ligatures", self.config.ligatures.to_string()),
             ("restore_session", self.config.restore_session.to_string()),
@@ -519,18 +563,27 @@ impl App {
     /// renderer, recompute the grid for the new cell box + padding, and resize the
     /// PTY. A no-op before the renderer/PTY exist.
     pub(crate) fn resize_font(&mut self, step: FontStep) {
+        // Read visibility before the mutable renderer borrow below.
+        let strip_visible = self.tab_bar_visible();
+        let base_font_px = self.base_font_px;
         let (Some(renderer), Some(pty)) = (self.renderer.as_mut(), self.pty.as_ref()) else {
             return;
         };
         let target = match step {
             FontStep::Inc => renderer.font_px() + FONT_STEP_PX,
             FontStep::Dec => renderer.font_px() - FONT_STEP_PX,
-            FontStep::Reset => self.base_font_px.unwrap_or_else(|| renderer.font_px()),
+            FontStep::Reset => base_font_px.unwrap_or_else(|| renderer.font_px()),
         };
         renderer.set_font_size(target);
 
         // Recompute the grid for the new cell metrics + padding against the
-        // current surface, and inform the PTY.
+        // current surface, and inform the PTY. The strip height tracks the (new)
+        // cell height, so re-derive it here from the post-resize metrics.
+        let strip_h = if strip_visible {
+            tab_bar_h(renderer.cell_metrics().height)
+        } else {
+            0.0
+        };
         if let Some(window) = self.window.as_ref() {
             let size = window.inner_size();
             let m = renderer.cell_metrics();
@@ -540,6 +593,7 @@ impl App {
                 m.height,
                 renderer.pad(),
                 self.config.status_bar,
+                strip_h,
             );
             self.cols = cols;
             self.rows = rows;
@@ -582,17 +636,24 @@ impl App {
         if size.width == 0 || size.height == 0 {
             return;
         }
+        let strip_visible = self.tab_bar_visible();
         let Some(renderer) = self.renderer.as_mut() else {
             return;
         };
         renderer.resize(size.width, size.height);
         let m = renderer.cell_metrics();
+        let strip_h = if strip_visible {
+            tab_bar_h(m.height)
+        } else {
+            0.0
+        };
         let (cols, rows) = Self::grid_for(
             size,
             m.width,
             m.height,
             renderer.pad(),
             self.config.status_bar,
+            strip_h,
         );
         let (cw, ch) = (m.width.round() as u16, m.height.round() as u16);
 

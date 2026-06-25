@@ -95,12 +95,20 @@ impl ApplicationHandler<UserEvent> for App {
         let size = window.inner_size();
         renderer.resize(size.width, size.height);
         let m = renderer.cell_metrics();
+        // At resume the first (single) tab does not yet exist, so the strip is
+        // hidden in Auto mode — reserve 0; it is reflowed once a 2nd tab opens.
+        let strip_h = if self.tab_bar_visible() {
+            tab_bar_h(m.height)
+        } else {
+            0.0
+        };
         let (cols, rows) = Self::grid_for(
             size,
             m.width,
             m.height,
             renderer.pad(),
             self.config.status_bar,
+            strip_h,
         );
         self.cols = cols;
         self.rows = rows;
@@ -233,6 +241,23 @@ impl ApplicationHandler<UserEvent> for App {
             for _ in 1..n.min(12) {
                 self.new_tab(event_loop);
             }
+        }
+        // Headless: inject a fake foreground process name on every open tab so the
+        // process-aware tab label + window title can be captured without launching
+        // a real child. Value = the comm to show (e.g. "vim"); empty falls back to
+        // the shell name path.
+        if let Ok(name) = std::env::var("GLASSY_PROCNAME")
+            && !name.trim().is_empty()
+        {
+            let name = name.trim().to_string();
+            if let Some(p) = self.pty.as_mut() {
+                p.pane_info.foreground_comm = Some(name.clone());
+            }
+            for s in &mut self.background {
+                s.pty.pane_info.foreground_comm = Some(name.clone());
+            }
+            self.update_window_title();
+            self.force_full_redraw = true;
         }
         // Headless: inject a toast notification at startup so the toast overlay
         // can be captured (GLASSY_TOAST=1 shows a default message; any non-empty
@@ -392,8 +417,27 @@ impl ApplicationHandler<UserEvent> for App {
         // Periodically refresh /proc-based pane info (cwd + foreground process).
         // Only done for panes of the active tab; background tabs refresh on focus.
         // This is cheap (a few symlink reads) and keeps the header/status bar live.
+        // Track the active pane's process name across the refresh so a change
+        // (e.g. launching vim, returning to the prompt) re-derives the window title
+        // + tab label and schedules a repaint — without that, a process-aware title
+        // would only update on OSC/tab events.
+        let proc_before = self
+            .pty
+            .as_ref()
+            .and_then(|p| p.pane_info.foreground_comm.clone());
         if let Some(pty) = self.pty.as_mut() {
             Self::maybe_refresh_proc_info(pty);
+        }
+        let proc_after = self
+            .pty
+            .as_ref()
+            .and_then(|p| p.pane_info.foreground_comm.clone());
+        if proc_before != proc_after {
+            // Only the derived title needs updating when no OSC/custom title is set;
+            // update unconditionally (cheap) and repaint so the tab chip re-shapes.
+            self.update_window_title();
+            self.force_full_redraw = true;
+            self.mark_dirty(event_loop);
         }
         if let Some(g) = self.panes.as_mut() {
             for pty in g.others.values_mut() {
