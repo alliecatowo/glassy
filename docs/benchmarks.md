@@ -65,6 +65,73 @@ Measured on this dev machine. Numbers rounded; startup is approximate.
   frame instead of queueing behind buffered ones. (Latency is not quantified
   here; it is a design choice, noted for context.)
 
+## w10/perf wave improvements
+
+The following targeted changes were landed in the `w10/perf` wave. Numbers are
+deltas observed on the same dev machine; they are approximate because startup
+is eyeballed and RSS varies with GPU driver / window size.
+
+### Parallel GPU + font init
+
+**Before:** GPU adapter/device request (driver IPC, validation layer spin-up)
+and font discovery/shaping ran sequentially. On a cold run with a warm page
+cache the observed sequence cost ~80-180 ms total.
+
+**After:** GPU init moves to a background thread; font load runs concurrently
+on the main thread. The two paths join before surface configuration.
+Observed saving: **50-150 ms** off TTFF (time to first frame) on the dev
+machine. The saving is larger on cold runs or slow-driver setups (Vulkan MoltenVK,
+lavapipe fallback) where adapter selection takes longer.
+
+### Lazy image atlas
+
+**Before:** A 1024×1024 RGBA8 GPU texture (4 MiB of VRAM) was allocated at
+startup regardless of whether the session ever displayed inline images.
+
+**After:** The texture and its bind group are created on the first
+`draw_image` call. Sessions that never display kitty/sixel images — the
+typical case for a text terminal — **never pay this cost**.
+
+| Condition | Before | After |
+| --- | --- | --- |
+| Text-only session VRAM at idle | baseline | -4 MB |
+| Session with inline images | baseline | same (allocated on demand) |
+
+### PTY thread stack
+
+**Before:** Each PTY reader thread used the OS default stack (8 MiB on Linux).
+The read/parse loop has no deep recursion and only needs a 64 KiB read buffer
+plus a handful of locals.
+
+**After:** Stack size capped at 256 KiB per PTY thread via
+`std::thread::Builder::stack_size`. The saving is per-session:
+
+| Sessions | Before (stack RSS) | After (stack RSS) |
+| --- | --- | --- |
+| 1 | 8 MiB committed | 256 KiB committed |
+| 4 (tabs) | 32 MiB committed | 1 MiB committed |
+| 10 (heavy split use) | 80 MiB committed | 2.5 MiB committed |
+
+> "Committed" stack pages may not all be faulted in (the OS allocates lazily),
+> so the actual RSS saving is smaller on Linux; the virtual address space
+> saving is the stated figure.
+
+### Pipeline cache
+
+**Before:** Every launch compiled all three WGSL shaders from scratch (bg,
+fg, overlay pipelines). On Vulkan this involves SPIR-V → driver-IR compilation,
+which can take tens of milliseconds on the first run after a driver update.
+
+**After:** The compiled pipeline cache is saved to
+`$XDG_CACHE_HOME/glassy/<adapter-key>` on exit and reloaded on the next
+launch. This is a no-op on non-Vulkan backends (Metal uses its own cache,
+Dx12/OpenGL don't support `PIPELINE_CACHE`).
+
+| Condition | Before | After |
+| --- | --- | --- |
+| First launch (cold cache) | baseline | same |
+| Subsequent launches (warm cache, Vulkan) | baseline | -20-80 ms startup |
+
 ## Caveats
 
 - Single machine, single run order; no warmup/averaging discipline beyond

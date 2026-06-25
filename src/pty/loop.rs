@@ -24,6 +24,21 @@ use crate::pty::{EventProxy, LoopMsg, PromptTracker};
 /// within this, but we never stall longer.
 const SYNC_TIMEOUT: Duration = Duration::from_millis(16);
 
+/// PTY read buffer size. 64 KiB is large enough to drain the kernel pipe buffer
+/// (also 64 KiB on Linux) in a single syscall; smaller reads would need more
+/// round-trips for high-throughput commands like `cat big_file`.
+pub(crate) const PTY_READ_BUF: usize = 65536;
+
+/// Maximum number of simultaneously queued [`polling::Event`]s; one is always
+/// enough since we register a single fd (the PTY master).
+pub(crate) const PTY_POLL_EVENTS_CAP: usize = 64;
+
+/// Stack size for the PTY reader thread. The default per-thread stack (8 MiB on
+/// Linux) is far larger than the read/parse loop needs: the loop has no deep
+/// recursion and only uses stack for the fixed-size read buffer plus a handful of
+/// local variables. 256 KiB is ample and cuts the per-session RSS footprint.
+pub(crate) const PTY_THREAD_STACK: usize = 256 * 1024; // 256 KiB
+
 /// PTY read/parse loop: waits on the master fd, drains control messages, reads
 /// available bytes, taps image/OSC sequences, and feeds the rest to the VT parser.
 ///
@@ -69,8 +84,8 @@ pub fn run_loop(
         return;
     }
 
-    let mut events = Events::with_capacity(NonZeroUsize::new(64).unwrap());
-    let mut buf = vec![0u8; 65536];
+    let mut events = Events::with_capacity(NonZeroUsize::new(PTY_POLL_EVENTS_CAP).unwrap());
+    let mut buf = vec![0u8; PTY_READ_BUF];
     // Set true only on the paths that actually mean the child is gone (EOF / read
     // error). A transient poller error or a UI-initiated shutdown must NOT report
     // a child exit, which would wrongly close the session.
@@ -287,5 +302,53 @@ pub fn run_loop(
     let _ = poller.delete(unsafe { BorrowedFd::borrow_raw(fd) });
     if child_exited {
         EventListener::send_event(&proxy, Event::Exit);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// PTY_READ_BUF must equal the Linux kernel pipe buffer (64 KiB) so a single
+    /// read can drain it in one syscall. Any smaller value means high-throughput
+    /// `cat big_file` needs multiple round-trips.
+    #[test]
+    fn pty_read_buf_matches_kernel_pipe_buffer() {
+        assert_eq!(PTY_READ_BUF, 65536, "PTY_READ_BUF must equal 64 KiB");
+    }
+
+    /// PTY_THREAD_STACK must be at least large enough to hold PTY_READ_BUF on the
+    /// stack with headroom for the frame chain. We require at least 4× PTY_READ_BUF
+    /// (256 KiB) to guarantee safety.
+    #[test]
+    fn pty_thread_stack_is_safe_relative_to_read_buf() {
+        const {
+            assert!(
+                PTY_THREAD_STACK >= PTY_READ_BUF * 4,
+                "PTY_THREAD_STACK must be at least 4× PTY_READ_BUF"
+            )
+        }
+    }
+
+    /// PTY_POLL_EVENTS_CAP must be > 0 so NonZeroUsize::new never panics.
+    #[test]
+    fn pty_poll_events_cap_is_nonzero() {
+        const { assert!(PTY_POLL_EVENTS_CAP > 0, "PTY_POLL_EVENTS_CAP must be > 0") }
+    }
+
+    /// PTY_READ_BUF and PTY_THREAD_STACK must be powers of two to align well
+    /// with typical memory allocators and CPU cache lines.
+    #[test]
+    fn pty_constants_are_powers_of_two() {
+        assert_eq!(
+            PTY_READ_BUF.count_ones(),
+            1,
+            "PTY_READ_BUF must be a power of two"
+        );
+        assert_eq!(
+            PTY_THREAD_STACK.count_ones(),
+            1,
+            "PTY_THREAD_STACK must be a power of two"
+        );
     }
 }

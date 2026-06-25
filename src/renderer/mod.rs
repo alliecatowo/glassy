@@ -20,6 +20,7 @@ use crate::text::{CellMetrics, Text};
 mod cell;
 mod frame;
 mod geometry;
+mod image_draw;
 mod init;
 mod multipane;
 mod overlay;
@@ -44,7 +45,6 @@ fn pipeline_cache_dir() -> std::path::PathBuf {
 
 /// Save the pipeline cache bytes to disk atomically (write temp, rename over).
 /// Failures are logged and silently swallowed; a missing cache is never fatal.
-#[allow(dead_code)] // wired in by app.rs in a subsequent wave (call on exit)
 fn save_pipeline_cache(cache: &wgpu::PipelineCache, adapter_info: &wgpu::AdapterInfo) {
     let Some(key) = wgpu::util::pipeline_cache_key(adapter_info) else {
         return;
@@ -303,10 +303,8 @@ pub struct Renderer {
     /// `PIPELINE_CACHE`; `None` on other backends. Passed to all three
     /// `create_render_pipeline` calls. Saved to disk on exit via
     /// [`Renderer::save_pipeline_cache`].
-    #[allow(dead_code)] // read by save_pipeline_cache, wired in by app.rs later
     pipeline_cache: Option<wgpu::PipelineCache>,
     /// GPU adapter info, used to derive the cache file name on save.
-    #[allow(dead_code)] // read by save_pipeline_cache, wired in by app.rs later
     adapter_info: wgpu::AdapterInfo,
 
     unit_quad: wgpu::Buffer,
@@ -325,8 +323,16 @@ pub struct Renderer {
     /// Dedicated RGBA8 atlas + bind group for inline images. The fg shader's
     /// color path (`flags == 1`) samples binding 2; this bind group puts the
     /// image atlas there so image quads reuse the fg pipeline unchanged.
-    image_atlas_texture: wgpu::Texture,
-    image_bind_group: wgpu::BindGroup,
+    ///
+    /// Both fields start as `None` and are allocated lazily on the first
+    /// `draw_image` call. Sessions that never display an inline image never pay
+    /// the 4 MB GPU texture allocation (IMAGE_ATLAS_SIZE² × 4 bytes).
+    image_atlas_texture: Option<wgpu::Texture>,
+    image_bind_group: Option<wgpu::BindGroup>,
+    /// Bind group layout and sampler shared with the glyph atlas, kept alive so
+    /// the image bind group can be created lazily without re-creating the layout.
+    image_atlas_bind_group_layout: wgpu::BindGroupLayout,
+    image_atlas_sampler: wgpu::Sampler,
     image_packer: Packer,
     /// Image id -> packed location in the image atlas (uploaded once per id).
     image_cache: HashMap<u32, AtlasGlyph>,

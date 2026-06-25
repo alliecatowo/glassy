@@ -201,85 +201,6 @@ impl Renderer {
         self.overlay_text.clear();
     }
 
-    /// Queue an inline image to be drawn this frame at pixel rect
-    /// `(x, y, dst_w, dst_h)`. `rgba` is straight-alpha RGBA8, `img_w`x`img_h`.
-    /// The pixels are uploaded into the image atlas once per `id` and cached;
-    /// subsequent frames only push a quad. Oversized images (larger than the
-    /// atlas) are skipped.
-    #[allow(clippy::too_many_arguments)]
-    pub fn draw_image(
-        &mut self,
-        id: u32,
-        rgba: &[u8],
-        img_w: u32,
-        img_h: u32,
-        x: f32,
-        y: f32,
-        dst_w: f32,
-        dst_h: f32,
-    ) {
-        if img_w == 0 || img_h == 0 || rgba.len() < (img_w * img_h * 4) as usize {
-            return;
-        }
-        let glyph = match self.image_cache.get(&id).copied() {
-            Some(g) => g,
-            None => {
-                let (px, py) = match self.image_packer.alloc(img_w, img_h) {
-                    Some(o) => o,
-                    None => {
-                        // Atlas full: drop cached images and repack from scratch.
-                        self.image_cache.clear();
-                        self.image_packer.reset();
-                        match self.image_packer.alloc(img_w, img_h) {
-                            Some(o) => o,
-                            None => return, // image larger than the atlas
-                        }
-                    }
-                };
-                self.queue.write_texture(
-                    wgpu::TexelCopyTextureInfo {
-                        texture: &self.image_atlas_texture,
-                        mip_level: 0,
-                        origin: wgpu::Origin3d { x: px, y: py, z: 0 },
-                        aspect: wgpu::TextureAspect::All,
-                    },
-                    rgba,
-                    wgpu::TexelCopyBufferLayout {
-                        offset: 0,
-                        bytes_per_row: Some(img_w * 4),
-                        rows_per_image: Some(img_h),
-                    },
-                    wgpu::Extent3d {
-                        width: img_w,
-                        height: img_h,
-                        depth_or_array_layers: 1,
-                    },
-                );
-                let inv = 1.0 / IMAGE_ATLAS_SIZE as f32;
-                let g = AtlasGlyph {
-                    uv_min: [px as f32 * inv, py as f32 * inv],
-                    uv_max: [(px + img_w) as f32 * inv, (py + img_h) as f32 * inv],
-                    px_w: img_w as f32,
-                    px_h: img_h as f32,
-                    left: 0,
-                    top: 0,
-                    is_color: true,
-                };
-                self.image_cache.insert(id, g);
-                g
-            }
-        };
-        self.image_overlay.push(FgInstance {
-            pos: [x, y],
-            size: [dst_w, dst_h],
-            uv_min: glyph.uv_min,
-            uv_max: glyph.uv_max,
-            color: [1.0, 1.0, 1.0, 1.0],
-            flags: 1,
-            _pad: [0; 3],
-        });
-    }
-
     /// Begin (re)building grid row `row`: subsequent `push_cell`/`push_cursor`
     /// calls land in this row's instance storage, replacing its previous contents.
     /// Out-of-range rows are ignored (clamped to a scratch slot) so a stale cursor
@@ -349,7 +270,6 @@ impl Renderer {
     /// exits so the next launch can skip shader compilation. Failures are logged
     /// but never fatal. On backends that don't support `PIPELINE_CACHE` this is
     /// a no-op.
-    #[allow(dead_code)] // public API; wired in by app.rs in a subsequent wave
     pub fn save_pipeline_cache(&self) {
         if let Some(cache) = &self.pipeline_cache {
             save_pipeline_cache(cache, &self.adapter_info);

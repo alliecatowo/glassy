@@ -338,43 +338,15 @@ impl Renderer {
             ],
         });
 
-        // Dedicated image atlas + bind group, sharing the atlas layout/sampler.
-        // The image atlas view occupies both the mask (0) and color (2) slots;
-        // image quads use `flags == 1`, so only slot 2 is actually sampled.
-        let image_atlas_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("image-atlas"),
-            size: wgpu::Extent3d {
-                width: IMAGE_ATLAS_SIZE,
-                height: IMAGE_ATLAS_SIZE,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-        let image_atlas_view =
-            image_atlas_texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let image_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("image-bg"),
-            layout: &atlas_bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&image_atlas_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&atlas_sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::TextureView(&image_atlas_view),
-                },
-            ],
-        });
+        // Dedicated image atlas + bind group: lazily allocated on first draw_image.
+        // Most terminal sessions never display inline images, so we skip the 4 MB
+        // GPU texture at startup. The atlas_bind_group_layout and atlas_sampler are
+        // kept in the Renderer struct so the bind group can be created later without
+        // re-creating the layout (which requires device access at that point).
+        //
+        // `atlas_sampler` is moved into the Renderer struct below; `atlas_bind_group_layout`
+        // is cloned into it as well (BindGroupLayout is Arc-backed and cheap to clone).
+        // The image_atlas_texture and image_bind_group fields start as None.
 
         // --- Shader + pipelines. ---
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -591,8 +563,11 @@ impl Renderer {
             mask_atlas_texture,
             color_atlas_texture,
             atlas_bind_group,
-            image_atlas_texture,
-            image_bind_group,
+            // Image atlas is lazily allocated on the first draw_image call:
+            image_atlas_texture: None,
+            image_bind_group: None,
+            image_atlas_bind_group_layout: atlas_bind_group_layout,
+            image_atlas_sampler: atlas_sampler,
             image_packer: Packer::new(IMAGE_ATLAS_SIZE),
             image_cache: HashMap::new(),
             image_overlay: Vec::new(),
