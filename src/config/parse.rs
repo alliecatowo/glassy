@@ -64,6 +64,7 @@ pub(super) struct RawConfig {
     pub show_tab_bar: Option<String>,
     pub title_show_cwd: Option<bool>,
     pub title_show_count: Option<bool>,
+    pub minimap: Option<bool>,
 }
 
 impl RawConfig {
@@ -180,6 +181,7 @@ impl RawConfig {
                 .filter(|s| s.chars().filter(|c| c.is_ascii_alphabetic()).count() >= 2)
                 .map(|s| s.chars().filter(|c| c.is_ascii_alphabetic()).collect()),
             command_badges: self.command_badges.unwrap_or(true),
+            minimap: self.minimap.unwrap_or(false),
         };
 
         Ok(super::Settings { config, theme })
@@ -541,6 +543,9 @@ pub(super) fn apply_kv(key: &str, value: &str, raw: &mut RawConfig) -> Result<()
         }
         "command_badges" => {
             raw.command_badges = Some(parse_bool(value, "command_badges")?);
+        }
+        "minimap" => {
+            raw.minimap = Some(parse_bool(value, "minimap")?);
         }
         "color.fg" => {
             parse_hex_color(value)?;

@@ -400,6 +400,7 @@ const HELP_ACTION_ORDER: &[KeyAction] = &[
     KeyAction::FontDecrease,
     KeyAction::FontReset,
     KeyAction::ToggleStatusBar,
+    KeyAction::ToggleMinimap,
     KeyAction::ToggleFullscreen,
     KeyAction::ToggleMaximize,
     KeyAction::ScrollUp,

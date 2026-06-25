@@ -91,6 +91,14 @@ impl App {
             return;
         }
 
+        // Scrubbing the minimap strip: keep jumping the viewport to the pointer's
+        // vertical position until the button is released. Takes priority over
+        // hover/selection so a drag never leaks into a text selection.
+        if self.minimap_dragging {
+            self.minimap_jump_to(position.y, event_loop);
+            return;
+        }
+
         // Dragging a pane resize gutter: re-tile under the pointer. Takes
         // priority over hover/selection; repaint so the divider + content
         // follow. The OS resize cursor stays set for the drag's duration.

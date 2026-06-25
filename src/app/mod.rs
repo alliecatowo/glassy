@@ -39,6 +39,7 @@ mod helpers;
 mod hints;
 mod input;
 mod keys;
+mod minimap;
 mod mouse;
 mod multipane;
 mod palette;
@@ -188,6 +189,10 @@ pub struct Config {
     /// true (a no-op until a shell-integration script is sourced). Disable with
     /// `command_badges = false`.
     pub command_badges: bool,
+    /// Show the scrollback minimap / overview strip at the right edge: a thin
+    /// downsampled colour-per-row preview of the whole buffer with click/drag to
+    /// jump. Default false (opt-in). See [`crate::app::minimap`].
+    pub minimap: bool,
 }
 
 /// The three user-facing default cursor shapes.
@@ -633,6 +638,17 @@ pub struct App {
     /// command palette. Per-pane fold state for split tabs is a follow-up; for
     /// now this tracks the focused pane's blocks.
     fold_state: command_blocks::FoldState,
+
+    // --- Scrollback minimap / overview strip (P2) ----------------------------
+    /// Incrementally-cached downsample of the scrollback (one colour per buffer
+    /// line), rebuilt only on dirty rows so the strip never re-reads the whole
+    /// grid each frame (preserves the 0%-idle invariant). Empty when the minimap
+    /// is disabled or no buffer exists. See [`minimap`].
+    minimap_cache: minimap::MinimapCache,
+    /// True while a left-drag is scrubbing the minimap strip, so subsequent
+    /// `CursorMoved` events keep jumping the viewport until the button is
+    /// released. Set on a left-press over the strip, cleared on release.
+    minimap_dragging: bool,
 }
 
 /// Pending close that is waiting for user confirmation.

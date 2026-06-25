@@ -34,6 +34,7 @@
 //! show_tab_bar = auto                  # tab strip: auto (hide at 1 tab) / always / never
 //! title_show_cwd = true                # include the cwd in the OS window title
 //! title_show_count = false             # append " · N tabs" to the window title
+//! minimap     = false                  # scrollback minimap / overview strip (right edge)
 //! ```
 //!
 //! Custom keybindings live in a `[keybindings]` section mapping chords to actions:

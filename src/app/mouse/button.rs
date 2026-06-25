@@ -163,6 +163,7 @@ impl App {
 
         if !pressed {
             self.dragging_tab = None; // end any tab drag-reorder on release
+            self.minimap_dragging = false; // end any minimap scrub on release
             // End any gutter drag; re-evaluate the cursor for the spot we
             // released over (still a gutter -> resize arrow, else default).
             if self.dragging_gutter.take().is_some() {
@@ -175,6 +176,21 @@ impl App {
             if self.held_strip_item.take().is_some() {
                 self.mark_dirty(event_loop);
             }
+        }
+
+        // A left press over the scrollback minimap strip jumps the viewport to
+        // that position and begins a scrub-drag (subsequent CursorMoved events
+        // keep jumping until release). Consumed so it never starts a text
+        // selection beneath the strip. Checked before the gutter/terminal paths.
+        if button == MouseButton::Left
+            && pressed
+            && self.minimap_active()
+            && self.minimap_hit(self.mouse_px.0, self.mouse_px.1)
+        {
+            self.minimap_dragging = true;
+            self.minimap_jump_to(self.mouse_px.1, event_loop);
+            self.held_button = None;
+            return;
         }
 
         // A left press over a pane resize gutter begins a drag and MUST NOT

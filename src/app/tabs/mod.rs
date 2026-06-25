@@ -112,6 +112,8 @@ impl App {
             broadcast_input: false,
             hints: None,
             fold_state: command_blocks::FoldState::default(),
+            minimap_cache: Default::default(),
+            minimap_dragging: false,
         }
     }
 

@@ -15,6 +15,31 @@ impl App {
             return;
         }
 
+        // Scrollback minimap: refresh the incrementally-cached downsample in its
+        // own brief term-lock scope BEFORE the renderer/pty split below (so the
+        // `&mut self.minimap_cache` borrow does not collide with the `&self.pty`
+        // borrow the main path holds). Only runs on frames that are already
+        // painting and only re-reads the on-screen window (history stays cached),
+        // so the 0%-idle invariant is preserved. The strip quads are emitted later
+        // (after the status bar) from the cached colours.
+        if self.minimap_active() {
+            // Take the cache out so its `&mut` borrow does not collide with the
+            // `&self.pty` borrow used to reach the term lock; swap it back after.
+            let mut cache = std::mem::take(&mut self.minimap_cache);
+            // Scrolling does NOT shift cached line indices (scrollback content is
+            // stable; only the viewport band moves), so a scroll alone is NOT a
+            // full rebuild. Only an explicit full redraw (resize / theme / clear)
+            // — plus the dimension check inside `refresh` — triggers one.
+            let force = self.force_full_redraw;
+            if let Some(pty) = self.pty.as_ref() {
+                let term = pty.term.lock();
+                let off = term.grid().display_offset() as i32;
+                let colors = *term.colors();
+                cache.refresh(&term, &colors, off, force);
+            }
+            self.minimap_cache = cache;
+        }
+
         // The OSC8 hyperlink under the pointer, underlined for affordance.
         // Captured before the renderer borrow.
         let hovered_link = self.hovered_link.clone();
@@ -177,6 +202,16 @@ impl App {
             (Vec::new(), Vec::new())
         };
 
+        // Minimap snapshot: the strip rect (computed under `&self` before the
+        // renderer borrow) plus the data to position the viewport indicator.
+        // `None` when the minimap is disabled / unavailable this frame.
+        let minimap_inputs = if self.minimap_active() {
+            self.minimap_rect()
+                .map(|rect| (rect, sb_disp_off, self.rows))
+        } else {
+            None
+        };
+
         // Settings-form inputs (whole-`self` method calls) snapshotted BEFORE the
         // disjoint `renderer`/`pty` borrows below.
         let settings_inputs = if self.settings_open {
@@ -257,7 +292,13 @@ impl App {
         // inside the renderer borrow). `None` when hints mode is closed.
         let hints_inputs = self.hints_snapshot();
 
+        // Take the minimap cache out into a local so the strip painter can read it
+        // while `&mut self.renderer` is borrowed below (both are `self` fields);
+        // it is moved back at the end of the frame. Cheap (a Vec pointer swap).
+        let minimap_cache = std::mem::take(&mut self.minimap_cache);
+
         let (Some(renderer), Some(pty)) = (self.renderer.as_mut(), self.pty.as_ref()) else {
+            self.minimap_cache = minimap_cache;
             return;
         };
         renderer.set_flash(flash);
@@ -791,6 +832,13 @@ impl App {
             );
         }
 
+        // Scrollback minimap strip: a thin right-edge overview composited over the
+        // grid (below the modals). Reads only the cached colours refreshed near the
+        // top of this frame; drawn from the taken-out `minimap_cache` local.
+        if let Some((rect, off, screen)) = minimap_inputs {
+            Self::paint_minimap(renderer, &minimap_cache, rect, off, screen);
+        }
+
         // Find bar (Ctrl+Shift+F): match highlights + bottom bar. Drawn above the
         // grid/status bar but below the palette/settings/help modals (a modal scrim
         // dims it like everything else). Highlights are anchored to the grid by the
@@ -1043,6 +1091,9 @@ impl App {
                 w.request_redraw();
             }
         }
+
+        // Move the minimap cache back now the renderer borrow has ended.
+        self.minimap_cache = minimap_cache;
 
         self.dirty = false;
 

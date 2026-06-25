@@ -227,6 +227,8 @@ pub enum KeyAction {
     /// Toggle folding (collapse/expand output) of the command block currently in
     /// view — a Warp-style command-block affordance driven by OSC 133 marks.
     ToggleFold,
+    /// Toggle the scrollback minimap / overview strip on the right edge.
+    ToggleMinimap,
 }
 
 impl KeyAction {
@@ -264,6 +266,7 @@ impl KeyAction {
             BroadcastInput => "Broadcast input to all panes",
             Hints => "Hints (label & open links)",
             ToggleFold => "Fold/unfold command output",
+            ToggleMinimap => "Toggle minimap",
         }
     }
 
@@ -277,8 +280,8 @@ impl KeyAction {
             SplitVertical | SplitHorizontal | BroadcastInput => "Split panes",
             Copy | Paste => "Edit",
             ToggleFullscreen | ToggleMaximize | FontIncrease | FontDecrease | FontReset
-            | ToggleStatusBar | ScrollUp | ScrollDown | ScrollTop | ScrollBottom
-            | JumpPrevPrompt | JumpNextPrompt | ToggleFold => "View",
+            | ToggleStatusBar | ToggleMinimap | ScrollUp | ScrollDown | ScrollTop
+            | ScrollBottom | JumpPrevPrompt | JumpNextPrompt | ToggleFold => "View",
             Settings | Help | Search | CommandPalette | Hints => "App",
         }
     }
@@ -320,6 +323,7 @@ pub(crate) fn parse_action(s: &str) -> Result<Option<KeyAction>> {
         "broadcast_input" => BroadcastInput,
         "hints" => Hints,
         "toggle_fold" => ToggleFold,
+        "toggle_minimap" => ToggleMinimap,
         // go_to_tab_1 .. go_to_tab_9 select a tab by 1-based position.
         s if s.starts_with("go_to_tab_") => match s["go_to_tab_".len()..].parse::<u8>() {
             Ok(n @ 1..=9) => GoToTab(n),
@@ -378,6 +382,7 @@ fn shared_default_binds() -> &'static [(&'static str, KeyAction)] {
         ("shift+end", ScrollBottom),
         ("ctrl+shift+h", Hints),
         ("ctrl+shift+z", ToggleFold),
+        ("ctrl+shift+m", ToggleMinimap),
     ]
 }
 
@@ -398,6 +403,7 @@ fn pc_default_binds() -> &'static [(&'static str, KeyAction)] {
         ("ctrl+shift+c", Copy),
         ("ctrl+shift+v", Paste),
         ("ctrl+shift+b", ToggleStatusBar),
+        ("ctrl+shift+m", ToggleMinimap),
         ("ctrl++", FontIncrease),
         ("ctrl+=", FontIncrease),
         ("ctrl+-", FontDecrease),
