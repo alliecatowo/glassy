@@ -327,6 +327,18 @@ impl ApplicationHandler<UserEvent> for App {
                 _ => {}
             }
         }
+        // Headless: enable broadcast input at startup (splits the tab first so
+        // there are multiple panes to broadcast to, and turns the status bar on
+        // so the BCAST indicator is visible) so the indicator + the multi-pane
+        // fan-out can be captured.
+        if std::env::var_os("GLASSY_BROADCAST").is_some() {
+            if !self.is_split() {
+                self.split_pane(pane::Dir::Vertical, event_loop);
+            }
+            self.broadcast_input = true;
+            self.config.status_bar = true;
+            self.force_full_redraw = true;
+        }
 
         // Headless: generate and apply a theme from an image path at startup so the
         // resulting colour palette can be captured.

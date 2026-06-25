@@ -25,6 +25,7 @@ pub(crate) enum PaletteCmd {
     SplitVertical,
     SplitHorizontal,
     ClosePane,
+    ToggleBroadcastInput,
     // --- Overlays ---
     OpenSettings,
     OpenHelp,
@@ -60,7 +61,7 @@ impl PaletteCmd {
         use PaletteCmd::*;
         match self {
             NewTab | CloseTab | NextTab | PrevTab => "Tab",
-            SplitVertical | SplitHorizontal | ClosePane => "Pane",
+            SplitVertical | SplitHorizontal | ClosePane | ToggleBroadcastInput => "Pane",
             OpenSettings | OpenHelp | OpenSearch => "View",
             Copy | Paste => "Edit",
             ToggleFullscreen => "Window",
@@ -84,6 +85,7 @@ impl PaletteCmd {
             SplitVertical => "Split vertical (left | right)".into(),
             SplitHorizontal => "Split horizontal (top / bottom)".into(),
             ClosePane => "Close pane".into(),
+            ToggleBroadcastInput => "Toggle broadcast input (all panes)".into(),
             OpenSettings => "Settings".into(),
             OpenHelp => "Help / keybindings".into(),
             OpenSearch => "Find in terminal".into(),
@@ -122,6 +124,7 @@ impl PaletteCmd {
             OpenSearch => Some("Ctrl+Shift+F"),
             Copy => Some("Ctrl+Shift+C"),
             Paste => Some("Ctrl+Shift+V"),
+            ToggleBroadcastInput => Some("Ctrl+Shift+I"),
             ToggleFullscreen => Some("F11"),
             FontIncrease => Some("Ctrl++"),
             FontDecrease => Some("Ctrl+-"),
@@ -189,6 +192,7 @@ impl App {
             SplitVertical,
             SplitHorizontal,
             ClosePane,
+            ToggleBroadcastInput,
             OpenSettings,
             OpenHelp,
             OpenSearch,
@@ -398,6 +402,7 @@ impl App {
             SplitVertical => self.split_pane(pane::Dir::Vertical, event_loop),
             SplitHorizontal => self.split_pane(pane::Dir::Horizontal, event_loop),
             ClosePane => self.close_pane(event_loop),
+            ToggleBroadcastInput => self.toggle_broadcast_input(event_loop),
             OpenSettings => {
                 self.open_settings();
                 // Palette rows are activated on a left RELEASE whose click edge /
@@ -836,6 +841,7 @@ mod tests {
             SplitVertical,
             SplitHorizontal,
             ClosePane,
+            ToggleBroadcastInput,
             OpenSettings,
             OpenHelp,
             OpenSearch,

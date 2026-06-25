@@ -77,6 +77,7 @@ impl App {
             None => (TermMode::empty(), 0, 0, 0),
         };
         let sb_focused = self.focused;
+        let sb_broadcast = self.broadcast_input;
         let sb_surface_h = self
             .renderer
             .as_ref()
@@ -495,6 +496,7 @@ impl App {
                 sb_cwd.as_deref(),
                 sb_git_branch.as_deref(),
                 sb_progress,
+                sb_broadcast,
             );
         }
 

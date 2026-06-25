@@ -218,6 +218,9 @@ pub enum KeyAction {
     MoveTabLeft,
     /// Move the active tab one slot right in the tab order.
     MoveTabRight,
+    /// Toggle broadcast input: typed keys/pastes go to every pane of the
+    /// active tab at once.
+    BroadcastInput,
 }
 
 impl KeyAction {
@@ -252,6 +255,7 @@ impl KeyAction {
             GoToTab(_) => "Go to tab N",
             MoveTabLeft => "Move tab left",
             MoveTabRight => "Move tab right",
+            BroadcastInput => "Broadcast input to all panes",
         }
     }
 
@@ -262,7 +266,7 @@ impl KeyAction {
             NewTab | ClosePane | NextTab | PrevTab | GoToTab(_) | MoveTabLeft | MoveTabRight => {
                 "Tabs"
             }
-            SplitVertical | SplitHorizontal => "Split panes",
+            SplitVertical | SplitHorizontal | BroadcastInput => "Split panes",
             Copy | Paste => "Edit",
             ToggleFullscreen | ToggleMaximize | FontIncrease | FontDecrease | FontReset
             | ToggleStatusBar | ScrollUp | ScrollDown | ScrollTop | ScrollBottom
@@ -305,6 +309,7 @@ pub(crate) fn parse_action(s: &str) -> Result<Option<KeyAction>> {
         "jump_next_prompt" | "next_prompt" => JumpNextPrompt,
         "move_tab_left" => MoveTabLeft,
         "move_tab_right" => MoveTabRight,
+        "broadcast_input" => BroadcastInput,
         // go_to_tab_1 .. go_to_tab_9 select a tab by 1-based position.
         s if s.starts_with("go_to_tab_") => match s["go_to_tab_".len()..].parse::<u8>() {
             Ok(n @ 1..=9) => GoToTab(n),
@@ -374,6 +379,7 @@ fn pc_default_binds() -> &'static [(&'static str, KeyAction)] {
         ("ctrl+shift+tab", PrevTab),
         ("ctrl+shift+e", SplitVertical),
         ("ctrl+shift+o", SplitHorizontal),
+        ("ctrl+shift+i", BroadcastInput),
         ("ctrl+,", Settings),
         ("ctrl+shift+f", Search),
         ("ctrl+shift+p", CommandPalette),
@@ -464,4 +470,39 @@ pub(crate) fn build_keymap(mut base: KeyMap, overrides: &[(String, String)]) -> 
         }
     }
     base
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn broadcast_input_action_round_trips() {
+        // The new action parses from its config name and reports a description
+        // + section like every other action.
+        assert_eq!(
+            parse_action("broadcast_input").unwrap(),
+            Some(KeyAction::BroadcastInput)
+        );
+        assert!(!KeyAction::BroadcastInput.description().is_empty());
+        assert_eq!(KeyAction::BroadcastInput.section(), "Split panes");
+    }
+
+    #[test]
+    fn broadcast_input_has_default_binding() {
+        // Ctrl+Shift+I is bound to BroadcastInput out of the box.
+        let map = default_keymap(Platform::Linux);
+        let chord = parse_chord("ctrl+shift+i").unwrap();
+        assert_eq!(map.get(&chord), Some(&KeyAction::BroadcastInput));
+    }
+
+    #[test]
+    fn broadcast_input_binding_can_be_disabled() {
+        // A user "none" override removes the default bind.
+        let map = build_keymap(
+            default_keymap(Platform::Linux),
+            &[("ctrl+shift+i".into(), "none".into())],
+        );
+        assert!(!map.values().any(|&a| a == KeyAction::BroadcastInput));
+    }
 }

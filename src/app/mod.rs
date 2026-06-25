@@ -596,6 +596,16 @@ pub struct App {
     /// clicked. The actual close call is deferred to `about_to_wait` (where an
     /// `ActiveEventLoop` reference is available). Cleared after execution.
     pending_confirm_execute: bool,
+
+    // --- Broadcast input -----------------------------------------------------
+    /// When `true`, typed input (and pastes) are mirrored to EVERY pane of the
+    /// active tab simultaneously, not just the focused pane — a "send to all
+    /// panes" mode for driving several shells at once. Toggled by the
+    /// `BroadcastInput` key action / command-palette entry; a visual indicator
+    /// (the status-bar `BCAST` tag) shows while it is on. Has no effect on a
+    /// single-pane tab (there is only one pane to write to). Off by default;
+    /// purely additive so the 0%-idle path is untouched.
+    broadcast_input: bool,
 }
 
 /// Pending close that is waiting for user confirmation.
