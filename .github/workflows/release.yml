@@ -6,6 +6,11 @@ on:
   push:
     tags:
       - "v*"
+  # Manual trigger — used to validate the macOS/Windows build jobs on demand
+  # (e.g. `gh workflow run release.yml --ref develop`) without cutting a real
+  # version tag. On a non-tag ref the version falls back to the Cargo.toml
+  # value, and the publish/release step is skipped (it is tag-gated).
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
