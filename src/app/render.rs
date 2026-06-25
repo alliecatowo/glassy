@@ -816,6 +816,7 @@ impl App {
                 &mut self.gui_anims,
                 &mut self.help_state,
                 &self.config.keymap,
+                crate::config::Platform::display_override(),
             );
             if help_result.close {
                 self.help_open = false;

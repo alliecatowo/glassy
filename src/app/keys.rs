@@ -461,6 +461,55 @@ impl App {
                 }
                 self.mark_dirty(event_loop);
             }
+            JumpPrevPrompt => self.jump_prompt(-1, event_loop),
+            JumpNextPrompt => self.jump_prompt(1, event_loop),
+            GoToTab(n) => {
+                // 1-based position from the chord → 0-based index into tab_order.
+                self.activate_tab((n as usize).saturating_sub(1), event_loop);
+            }
+            MoveTabLeft => self.move_active_tab(-1, event_loop),
+            MoveTabRight => self.move_active_tab(1, event_loop),
         }
+    }
+
+    /// Scroll the viewport to the previous (`dir < 0`) or next (`dir > 0`) OSC 133
+    /// prompt-start mark recorded by the focused pane's [`PromptTracker`].
+    ///
+    /// Prompt rows are stored in the same anchored coordinate space the renderer
+    /// uses for image placements: `stored_row = screen_line + display_offset` at
+    /// record time. The row currently at the TOP of the viewport therefore sits at
+    /// stored-row `display_offset`, so we query the tracker with the live
+    /// `display_offset` and scroll so the found prompt lands at the top (clamping
+    /// the resulting offset into the valid `[0, history_size]` range). A no-op when
+    /// there is no prompt in the requested direction.
+    pub(super) fn jump_prompt(&mut self, dir: i32, event_loop: &ActiveEventLoop) {
+        let Some(pty) = &self.pty else {
+            return;
+        };
+        let mut term = pty.term.lock();
+        let display_offset = term.grid().display_offset() as i32;
+        let history = term.grid().history_size() as i32;
+        let target = {
+            let prompts = match pty.prompts.lock() {
+                Ok(p) => p,
+                Err(_) => return,
+            };
+            if dir < 0 {
+                prompts.prev_prompt(display_offset)
+            } else {
+                prompts.next_prompt(display_offset)
+            }
+        };
+        let Some(target_row) = target else {
+            return;
+        };
+        // Anchor the found prompt at the top of the viewport.
+        let target_offset = target_row.clamp(0, history);
+        let delta = target_offset - display_offset;
+        if delta != 0 {
+            term.scroll_display(Scroll::Delta(delta));
+        }
+        drop(term);
+        self.mark_dirty(event_loop);
     }
 }

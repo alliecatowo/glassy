@@ -10,6 +10,7 @@ use crate::color;
 use crate::renderer::DEFAULT_OPACITY;
 
 use super::keymap::{build_keymap, default_keymap};
+use super::platform::Platform;
 
 const DEFAULT_FONT_SIZE: f32 = 14.0;
 const DEFAULT_SCROLLBACK: usize = 10_000;
@@ -132,7 +133,10 @@ impl RawConfig {
             initial_cwd: self.cwd.filter(|s| !s.is_empty()).map(PathBuf::from),
             restore_session: self.restore_session.unwrap_or(false),
             copy_on_select: self.copy_on_select.unwrap_or(false),
-            keymap: build_keymap(default_keymap(), &self.keybinding_overrides),
+            keymap: build_keymap(
+                default_keymap(Platform::current()),
+                &self.keybinding_overrides,
+            ),
         };
 
         Ok(super::Settings { config, theme })

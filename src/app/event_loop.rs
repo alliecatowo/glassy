@@ -173,6 +173,21 @@ impl ApplicationHandler<UserEvent> for App {
                 pty.write(bytes);
             }
         }
+        // Headless: rebuild the keymap for a chosen platform so the help panel
+        // shows that platform's real chords (e.g. ⌘T) on a Linux capture build.
+        //   GLASSY_KEYMAP_PLATFORM=mac|linux|windows
+        // Pair with GLASSY_HELP=1 (+ GLASSY_HELP_PLATFORM=mac for HIG rendering)
+        // to screenshot the macOS keybinding reference from CI on Linux.
+        if let Ok(spec) = std::env::var("GLASSY_KEYMAP_PLATFORM") {
+            use crate::config::Platform;
+            let p = match spec.trim().to_ascii_lowercase().as_str() {
+                "mac" | "macos" | "darwin" => Platform::Mac,
+                "windows" | "win" => Platform::Windows,
+                _ => Platform::Linux,
+            };
+            self.config.keymap = crate::config::keymap::default_keymap(p);
+            self.force_full_redraw = true;
+        }
         // Headless: open an overlay at startup for capture verification.
         if std::env::var_os("GLASSY_HELP").is_some() {
             self.help_open = true;

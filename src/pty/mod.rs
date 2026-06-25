@@ -334,9 +334,9 @@ const MAX_PROMPT_OFFSETS: usize = 1024;
 /// The list is sorted ascending by row (marks arrive in stream order) and is
 /// capped at [`MAX_PROMPT_OFFSETS`] entries.
 ///
-/// The navigation methods are not yet called by the UI (pending the Shift+Up/Down
-/// keybind wiring in `app/input.rs`); they are `#[allow(dead_code)]` until then.
-#[allow(dead_code)]
+/// The navigation methods ([`PromptTracker::prev_prompt`] /
+/// [`PromptTracker::next_prompt`]) are wired into the JumpPrevPrompt /
+/// JumpNextPrompt key actions via `App::jump_prompt` in `app/keys.rs`.
 #[derive(Default)]
 pub struct PromptTracker {
     /// Absolute grid rows of `A` (prompt-start) marks, kept sorted ascending. A
@@ -345,7 +345,6 @@ pub struct PromptTracker {
     pub rows: std::collections::VecDeque<i32>,
 }
 
-#[allow(dead_code)]
 impl PromptTracker {
     pub fn new() -> Self {
         Self::default()
@@ -422,15 +421,14 @@ pub struct Pty {
     pub term: Arc<FairMutex<Term<EventProxy>>>,
     /// Decoded inline images received from the PTY, for the renderer to draw.
     pub images: Arc<FairMutex<ImageStore>>,
-    /// OSC 133 prompt-start row offsets, for Shift+Up/Down jump-to-prompt. The
-    /// PTY loop records a new row each time an `A` mark is seen; the UI reads
-    /// this via `prompts.lock()` without taking any other lock.
+    /// OSC 133 prompt-start row offsets, for jump-to-prompt. The PTY loop records
+    /// a new row each time an `A` mark is seen; the UI reads this via
+    /// `prompts.lock()` without taking any other lock.
     ///
-    /// Wire-up (CAPABILITIES backlog — OSC 133 p1 item): in `app/input.rs`
-    /// handle Shift+Up/Shift+Down by calling `pty.prompts.lock().prev_prompt` /
-    /// `next_prompt` against the current `display_offset` and issuing a
-    /// `term.scroll_display(Scroll::Delta)` to jump there.
-    #[allow(dead_code)]
+    /// Consumed by the JumpPrevPrompt / JumpNextPrompt key actions: `App::jump_prompt`
+    /// (in `app/keys.rs`) calls `pty.prompts.lock().prev_prompt` / `next_prompt`
+    /// against the live `display_offset` and issues a `scroll_display(Scroll::Delta)`
+    /// to jump there.
     pub prompts: Arc<Mutex<PromptTracker>>,
     /// PID of the spawned shell process. Used to read `/proc/<shell_pid>/cwd`
     /// and the tty foreground pgid for the pane header and status bar.
@@ -669,7 +667,44 @@ pub fn merge_word_separators(defaults: &str, extras: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::merge_word_separators;
+    use super::{PromptTracker, merge_word_separators};
+
+    // ---- PromptTracker (OSC 133 jump-to-prompt) tests ------------------------
+
+    #[test]
+    fn prompt_tracker_keeps_rows_sorted_and_deduped() {
+        let mut t = PromptTracker::new();
+        // Insert out of order with a duplicate.
+        for r in [30, 10, 20, 10, 40] {
+            t.push(r);
+        }
+        let rows: Vec<i32> = t.rows.iter().copied().collect();
+        assert_eq!(rows, vec![10, 20, 30, 40], "sorted + deduped");
+    }
+
+    #[test]
+    fn prompt_tracker_prev_next_find_neighbors() {
+        let mut t = PromptTracker::new();
+        for r in [10, 20, 30] {
+            t.push(r);
+        }
+        // From row 25 (between 20 and 30): prev=20, next=30.
+        assert_eq!(t.prev_prompt(25), Some(20));
+        assert_eq!(t.next_prompt(25), Some(30));
+        // Exactly on a mark is excluded (strict </>), so we step past it.
+        assert_eq!(t.prev_prompt(20), Some(10));
+        assert_eq!(t.next_prompt(20), Some(30));
+        // Beyond the ends: no neighbor in that direction.
+        assert_eq!(t.prev_prompt(10), None);
+        assert_eq!(t.next_prompt(30), None);
+    }
+
+    #[test]
+    fn prompt_tracker_empty_returns_none() {
+        let t = PromptTracker::new();
+        assert_eq!(t.prev_prompt(5), None);
+        assert_eq!(t.next_prompt(5), None);
+    }
 
     // ---- merge_word_separators tests -----------------------------------------
 

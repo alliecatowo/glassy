@@ -1,5 +1,6 @@
 //! Keybinding types and parsing: chords, actions, and the keymap.
 
+use super::platform::Platform;
 use anyhow::{Result, bail};
 use std::collections::HashMap;
 
@@ -75,6 +76,60 @@ impl Chord {
             let upper_key = self.key.to_ascii_uppercase();
             parts.push(&upper_key);
             parts.join("+")
+        }
+    }
+
+    /// Platform-correct display label. On macOS this is the Apple HIG symbol run
+    /// (⌃⌥⇧⌘ printed in canonical order with no separators, e.g. `⇧⌘T`); on
+    /// every other platform it is the `+`-joined form from [`Chord::display`].
+    pub fn display_for(&self, platform: Platform) -> String {
+        if !platform.is_mac() {
+            return self.display();
+        }
+        // HIG modifier order: Control, Option, Shift, Command — printed together.
+        let mut out = String::new();
+        if self.ctrl {
+            out.push('⌃');
+        }
+        if self.alt {
+            out.push('⌥');
+        }
+        if self.shift {
+            out.push('⇧');
+        }
+        if self.meta {
+            out.push('⌘');
+        }
+        out.push_str(&self.key_label());
+        out
+    }
+
+    /// The bare key portion of the chord (no modifiers), e.g. `"T"`, `"F11"`,
+    /// `"Tab"`, `","`. Shared by [`Chord::display`] and [`Chord::display_for`].
+    fn key_label(&self) -> String {
+        let named = match self.key.as_str() {
+            "tab" => Some("Tab"),
+            "space" => Some("Space"),
+            "enter" => Some("Enter"),
+            "escape" => Some("Esc"),
+            "backspace" => Some("Backspace"),
+            "delete" => Some("Delete"),
+            "home" => Some("Home"),
+            "end" => Some("End"),
+            "pageup" => Some("PgUp"),
+            "pagedown" => Some("PgDn"),
+            "arrowup" | "up" => Some("Up"),
+            "arrowdown" | "down" => Some("Down"),
+            "arrowleft" | "left" => Some("Left"),
+            "arrowright" | "right" => Some("Right"),
+            _ => None,
+        };
+        if let Some(n) = named {
+            n.to_string()
+        } else if self.key.starts_with('f') && self.key[1..].parse::<u32>().is_ok() {
+            format!("F{}", &self.key[1..])
+        } else {
+            self.key.to_ascii_uppercase()
         }
     }
 }
@@ -153,6 +208,16 @@ pub enum KeyAction {
     ScrollDown,
     ScrollTop,
     ScrollBottom,
+    /// Scroll the viewport to the previous OSC 133 prompt mark (jump-to-prompt).
+    JumpPrevPrompt,
+    /// Scroll the viewport to the next OSC 133 prompt mark (jump-to-prompt).
+    JumpNextPrompt,
+    /// Activate the tab at the given 1-based position (Ctrl/Cmd+1..9).
+    GoToTab(u8),
+    /// Move the active tab one slot left in the tab order.
+    MoveTabLeft,
+    /// Move the active tab one slot right in the tab order.
+    MoveTabRight,
 }
 
 impl KeyAction {
@@ -182,6 +247,11 @@ impl KeyAction {
             ScrollDown => "Scroll history down",
             ScrollTop => "Scroll to top",
             ScrollBottom => "Scroll to bottom",
+            JumpPrevPrompt => "Jump to previous prompt",
+            JumpNextPrompt => "Jump to next prompt",
+            GoToTab(_) => "Go to tab N",
+            MoveTabLeft => "Move tab left",
+            MoveTabRight => "Move tab right",
         }
     }
 
@@ -189,11 +259,14 @@ impl KeyAction {
     pub fn section(self) -> &'static str {
         use KeyAction::*;
         match self {
-            NewTab | ClosePane | NextTab | PrevTab => "Tabs",
+            NewTab | ClosePane | NextTab | PrevTab | GoToTab(_) | MoveTabLeft | MoveTabRight => {
+                "Tabs"
+            }
             SplitVertical | SplitHorizontal => "Split panes",
             Copy | Paste => "Edit",
             ToggleFullscreen | ToggleMaximize | FontIncrease | FontDecrease | FontReset
-            | ToggleStatusBar | ScrollUp | ScrollDown | ScrollTop | ScrollBottom => "View",
+            | ToggleStatusBar | ScrollUp | ScrollDown | ScrollTop | ScrollBottom
+            | JumpPrevPrompt | JumpNextPrompt => "View",
             Settings | Help | Search | CommandPalette => "App",
         }
     }
@@ -228,6 +301,15 @@ pub(crate) fn parse_action(s: &str) -> Result<Option<KeyAction>> {
         "scroll_down" => ScrollDown,
         "scroll_top" => ScrollTop,
         "scroll_bottom" => ScrollBottom,
+        "jump_prev_prompt" | "prev_prompt" => JumpPrevPrompt,
+        "jump_next_prompt" | "next_prompt" => JumpNextPrompt,
+        "move_tab_left" => MoveTabLeft,
+        "move_tab_right" => MoveTabRight,
+        // go_to_tab_1 .. go_to_tab_9 select a tab by 1-based position.
+        s if s.starts_with("go_to_tab_") => match s["go_to_tab_".len()..].parse::<u8>() {
+            Ok(n @ 1..=9) => GoToTab(n),
+            _ => bail!("go_to_tab_N requires N in 1..=9, got '{s}'"),
+        },
         other => bail!("unrecognized keybinding action '{other}'"),
     }))
 }
@@ -236,21 +318,63 @@ pub(crate) fn parse_action(s: &str) -> Result<Option<KeyAction>> {
 /// user overrides on top of the built-in defaults.
 pub type KeyMap = HashMap<Chord, KeyAction>;
 
-/// The built-in default keybindings. These are used as a base; user-supplied
-/// `[keybindings]` entries override or extend them.
-pub fn default_keymap() -> KeyMap {
+/// The built-in default keybindings for `platform`. These are used as a base;
+/// user-supplied `[keybindings]` entries override or extend them.
+///
+/// On macOS the primary modifier is ⌘ (Super/Meta) and follows Apple HIG
+/// conventions (⌘C/⌘V/⌘T/⌘W, ⌘1-9, ⌘, for Settings, ⌘F for Find); every other
+/// platform keeps the familiar Ctrl / Ctrl+Shift chords. Cross-platform binds
+/// (F-keys, Shift+Page navigation) are identical on every platform and are
+/// listed once in [`shared_default_binds`].
+pub fn default_keymap(platform: Platform) -> KeyMap {
+    let mut map = KeyMap::new();
+    let push = |map: &mut KeyMap, chord_str: &str, action: KeyAction| match parse_chord(chord_str) {
+        Ok(c) => {
+            map.insert(c, action);
+        }
+        Err(e) => log::warn!("glassy: bad default chord '{chord_str}': {e}"),
+    };
+    if platform.is_mac() {
+        for (chord_str, action) in mac_default_binds() {
+            push(&mut map, chord_str, *action);
+        }
+    } else {
+        for (chord_str, action) in pc_default_binds() {
+            push(&mut map, chord_str, *action);
+        }
+    }
+    for (chord_str, action) in shared_default_binds() {
+        push(&mut map, chord_str, *action);
+    }
+    map
+}
+
+/// Platform-agnostic default binds shared by every platform: function-key
+/// toggles, Shift+Page scrollback navigation, and OSC 133 prompt jumps.
+fn shared_default_binds() -> &'static [(&'static str, KeyAction)] {
     use KeyAction::*;
-    let defaults: &[(&str, KeyAction)] = &[
+    &[
+        ("f11", ToggleFullscreen),
+        ("f10", ToggleMaximize),
+        ("f1", Help),
+        ("shift+pageup", ScrollUp),
+        ("shift+pagedown", ScrollDown),
+        ("shift+home", ScrollTop),
+        ("shift+end", ScrollBottom),
+    ]
+}
+
+/// Linux / Windows default binds: Ctrl / Ctrl+Shift chords.
+fn pc_default_binds() -> &'static [(&'static str, KeyAction)] {
+    use KeyAction::*;
+    &[
         ("ctrl+shift+t", NewTab),
         ("ctrl+shift+w", ClosePane),
         ("ctrl+tab", NextTab),
         ("ctrl+shift+tab", PrevTab),
         ("ctrl+shift+e", SplitVertical),
         ("ctrl+shift+o", SplitHorizontal),
-        ("f11", ToggleFullscreen),
-        ("f10", ToggleMaximize),
         ("ctrl+,", Settings),
-        ("f1", Help),
         ("ctrl+shift+f", Search),
         ("ctrl+shift+p", CommandPalette),
         ("ctrl+shift+c", Copy),
@@ -260,21 +384,57 @@ pub fn default_keymap() -> KeyMap {
         ("ctrl+=", FontIncrease),
         ("ctrl+-", FontDecrease),
         ("ctrl+0", FontReset),
-        ("shift+pageup", ScrollUp),
-        ("shift+pagedown", ScrollDown),
-        ("shift+home", ScrollTop),
-        ("shift+end", ScrollBottom),
-    ];
-    let mut map = KeyMap::new();
-    for (chord_str, action) in defaults {
-        match parse_chord(chord_str) {
-            Ok(c) => {
-                map.insert(c, *action);
-            }
-            Err(e) => log::warn!("glassy: bad default chord '{chord_str}': {e}"),
-        }
-    }
-    map
+        ("ctrl+shift+pageup", MoveTabLeft),
+        ("ctrl+shift+pagedown", MoveTabRight),
+        ("ctrl+shift+up", JumpPrevPrompt),
+        ("ctrl+shift+down", JumpNextPrompt),
+        ("ctrl+1", GoToTab(1)),
+        ("ctrl+2", GoToTab(2)),
+        ("ctrl+3", GoToTab(3)),
+        ("ctrl+4", GoToTab(4)),
+        ("ctrl+5", GoToTab(5)),
+        ("ctrl+6", GoToTab(6)),
+        ("ctrl+7", GoToTab(7)),
+        ("ctrl+8", GoToTab(8)),
+        ("ctrl+9", GoToTab(9)),
+    ]
+}
+
+/// macOS default binds: ⌘-based chords following Apple HIG. Cmd parses to the
+/// `meta` modifier bit (see [`parse_chord`]'s `cmd`/`command`/`super` aliases).
+fn mac_default_binds() -> &'static [(&'static str, KeyAction)] {
+    use KeyAction::*;
+    &[
+        ("cmd+t", NewTab),
+        ("cmd+w", ClosePane),
+        ("ctrl+tab", NextTab),
+        ("ctrl+shift+tab", PrevTab),
+        ("cmd+d", SplitVertical),
+        ("cmd+shift+d", SplitHorizontal),
+        ("cmd+,", Settings),
+        ("cmd+f", Search),
+        ("cmd+shift+p", CommandPalette),
+        ("cmd+c", Copy),
+        ("cmd+v", Paste),
+        ("cmd+shift+b", ToggleStatusBar),
+        ("cmd++", FontIncrease),
+        ("cmd+=", FontIncrease),
+        ("cmd+-", FontDecrease),
+        ("cmd+0", FontReset),
+        ("cmd+shift+[", MoveTabLeft),
+        ("cmd+shift+]", MoveTabRight),
+        ("cmd+shift+up", JumpPrevPrompt),
+        ("cmd+shift+down", JumpNextPrompt),
+        ("cmd+1", GoToTab(1)),
+        ("cmd+2", GoToTab(2)),
+        ("cmd+3", GoToTab(3)),
+        ("cmd+4", GoToTab(4)),
+        ("cmd+5", GoToTab(5)),
+        ("cmd+6", GoToTab(6)),
+        ("cmd+7", GoToTab(7)),
+        ("cmd+8", GoToTab(8)),
+        ("cmd+9", GoToTab(9)),
+    ]
 }
 
 /// Apply user-supplied keybinding overrides (`[keybindings]` section) onto `base`,

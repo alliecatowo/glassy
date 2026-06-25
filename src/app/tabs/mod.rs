@@ -355,6 +355,25 @@ impl App {
         self.activate_tab(next as usize, event_loop);
     }
 
+    /// Reorder the active tab one slot left (`dir < 0`) or right (`dir > 0`) in
+    /// `tab_order`, without wrapping. The highlight follows the moved tab; clamps
+    /// (no-op) at the first/last slot. Used by the MoveTabLeft/MoveTabRight key
+    /// actions. Marks the session dirty so the new order is persisted.
+    pub(crate) fn move_active_tab(&mut self, dir: isize, event_loop: &ActiveEventLoop) {
+        let from = self.active_pos();
+        let to = from as isize + dir;
+        if to < 0 || to >= self.tab_order.len() as isize {
+            return;
+        }
+        let to = to as usize;
+        move_in_order(&mut self.tab_order, from, to);
+        // Only the order changed (active_id is unchanged), so no PTY swap is
+        // needed — just flag a repaint + persist.
+        self.session_dirty = true;
+        self.force_full_redraw = true;
+        self.mark_dirty(event_loop);
+    }
+
     /// Position of the active tab within `tab_order`.
     pub(crate) fn active_pos(&self) -> usize {
         self.tab_order
