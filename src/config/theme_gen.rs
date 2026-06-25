@@ -4,28 +4,11 @@
 //! byte slices or a flat `&[(r,g,b)]` sample list) using a two-pass approach:
 //!
 //! 1. **Median-cut** colour quantisation (8 buckets → 8 representative colours).
-//! 2. **ANSI role assignment** — map the 8 extracted colours to the 16 ANSI
-//!    slots by hue/luminance: darks → blacks/dim, lights → whites/bright, then
-//!    spread the remaining mid-range colours over red, green, yellow, blue,
-//!    magenta, cyan by rotating through dominant hues.
-//! 3. **Contrast-safe adjustment** — the bg/fg pair is nudged until the WCAG
-//!    relative-luminance contrast ratio reaches at least 4.5 : 1.
+//! 2. **ANSI role assignment** — map colours to all 16 ANSI slots by hue/luminance.
+//! 3. **Contrast-safe adjustment** — nudge fg until WCAG contrast ≥ 4.5 : 1.
 //!
-//! The public surface is deliberately narrow:
-//!
-//! ```text
-//! // From a PNG file path (uses the `png` crate already in Cargo.toml):
-//! let theme = theme_gen::from_image_path("/path/to/wall.png")?;
-//!
-//! // From a raw RGBA8 pixel buffer (e.g. already decoded by the kitty renderer):
-//! let theme = theme_gen::from_rgba(width, height, &rgba_bytes);
-//!
-//! // From a compact RGB sample list (useful for tests):
-//! let theme = theme_gen::from_rgb_samples(&[(r,g,b), ...]);
-//! ```
-//!
-//! No heavy image deps are introduced; we reuse the `png` crate that already
-//! appears in `Cargo.toml` for the kitty graphics protocol.
+//! Entry points: [`from_image_path`], [`from_rgba`], [`from_rgb_samples`].
+//! No new image deps — reuses the `png` crate already in `Cargo.toml`.
 
 use alacritty_terminal::vte::ansi::Rgb;
 use anyhow::{Context, Result, bail};
