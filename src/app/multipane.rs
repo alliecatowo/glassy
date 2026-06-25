@@ -436,7 +436,11 @@ impl App {
         // its inputs changed; otherwise the cached overlay is replayed (no glyph
         // re-shaping) — the second half of the split typing-lag fix.
         if !tab_strip_visible {
+            // Single tab but split into panes: still paint the one floating
+            // icon cluster (Help/Settings/Menu) in the top-right corner — it's
+            // window chrome, not per-pane, so a split must not make it vanish.
             renderer.begin_tab_overlay();
+            Self::paint_floating_icons(renderer, tab_hovered, tab_held, tab_focused);
             renderer.commit_tab_overlay();
         } else if tab_bar_rebuild {
             renderer.begin_tab_overlay();

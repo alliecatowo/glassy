@@ -225,18 +225,11 @@ impl App {
         // Collapse back to single-pane if only one leaf remains.
         if g.layout.len() == 1 {
             self.panes = None;
-            // The PTY now in `self.pty` is the sole pane; resize it to the full
-            // content area (the single-pane resize uses self.cols/self.rows, which
-            // handle_resize keeps current).
-            if let Some(area) = self.content_area()
-                && let Some(pty) = &self.pty
-            {
-                let (cols, rows) = self.pane_grid(area);
-                let m = self.renderer.as_ref().unwrap().cell_metrics();
-                pty.resize(cols, rows, m.width.round() as u16, m.height.round() as u16);
-                self.cols = cols;
-                self.rows = rows;
-            }
+            // Reflow with the canonical single-pane sizing (the same path
+            // handle_resize and the renderer use). The old bespoke pane_grid resize
+            // disagreed with the render path, leaving the grid half-sized until the
+            // next window resize forced a reflow.
+            self.reflow_grid();
         } else {
             self.resize_panes();
         }

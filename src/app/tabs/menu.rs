@@ -272,6 +272,17 @@ impl App {
         // and fall through to the terminal — no separate y-range guard needed.
         let item = self.strip_item_at_px(x as f32, y as f32);
         if item.is_none() {
+            // Empty space in the top chrome band: drag the window (macOS, where the
+            // OS title bar is hidden and its auto-drag disabled, so we move the
+            // window manually — this is what the titlebar drag used to do). Below
+            // the band, fall through to the terminal.
+            #[cfg(target_os = "macos")]
+            if (y as f32) < self.effective_tab_bar_h()
+                && let Some(w) = self.window.as_ref()
+            {
+                let _ = w.drag_window();
+                return true;
+            }
             return false;
         }
         // Record the pressed item so the strip draws it inset (released in the

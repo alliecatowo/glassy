@@ -44,6 +44,14 @@ impl ApplicationHandler<UserEvent> for App {
             }
         };
         window.set_ime_allowed(true);
+
+        // macOS: with the title bar hidden and content fullsize, AppKit's titlebar
+        // would auto-drag the window when the user drags our tab chips. Disable
+        // OS-driven window moving so tab drags reach glassy; empty chrome areas
+        // move the window manually via `drag_window()` (see strip_click).
+        #[cfg(target_os = "macos")]
+        Self::disable_macos_window_drag(&window);
+
         let ms = |t: Instant| t.elapsed().as_secs_f64() * 1000.0;
         log::info!("startup: window created at {:.1} ms", ms(self.started));
 
@@ -874,6 +882,34 @@ impl ApplicationHandler<UserEvent> for App {
         }
         if let Some(renderer) = &self.renderer {
             renderer.save_pipeline_cache();
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl App {
+    /// Turn off AppKit's automatic title-bar window dragging. With the title bar
+    /// hidden + fullsize content view, AppKit would move the window whenever the
+    /// user drags anywhere in the top band — including our tab chips, which should
+    /// reorder instead. glassy re-implements window dragging for *empty* chrome
+    /// areas via `Window::drag_window()` (see `strip_click`), so the only behavior
+    /// removed here is the auto-drag that was stealing tab-reorder gestures.
+    fn disable_macos_window_drag(window: &Window) {
+        use objc2_app_kit::NSView;
+        use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+        let Ok(handle) = window.window_handle() else {
+            return;
+        };
+        if let RawWindowHandle::AppKit(h) = handle.as_raw() {
+            // SAFETY: AppKit window handles carry a valid, retained NSView pointer
+            // for the window's lifetime; we only read its containing NSWindow.
+            unsafe {
+                let view: &NSView = &*(h.ns_view.as_ptr() as *const NSView);
+                if let Some(ns_window) = view.window() {
+                    ns_window.setMovable(false);
+                }
+            }
         }
     }
 }
