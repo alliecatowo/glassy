@@ -636,6 +636,50 @@ impl App {
             }
         }
 
+        // Cursor defaults: update the config and push the new default_cursor_style to
+        // all live PTYs so the next new tab/pane will open with the updated shape/blink.
+        // DECSCUSR from the running app still overrides at runtime (the terminal layer wins).
+        if new_config.cursor_style != self.config.cursor_style
+            || new_config.cursor_blink != self.config.cursor_blink
+        {
+            self.config.cursor_style = new_config.cursor_style;
+            self.config.cursor_blink = new_config.cursor_blink;
+            // Push the new default cursor style to every live PTY so it takes effect on
+            // the next reset/RIS, or on panes that have not yet received a DECSCUSR.
+            let new_cursor_style = alacritty_terminal::vte::ansi::CursorStyle {
+                shape: self.config.cursor_style.to_cursor_shape(),
+                blinking: self.config.cursor_blink,
+            };
+            let push_cursor =
+                |pty: &crate::pty::Pty, cs: alacritty_terminal::vte::ansi::CursorStyle| {
+                    use alacritty_terminal::term::Config as TermConfig;
+                    let scrollback = pty.term.lock().grid().history_size();
+                    pty.term.lock().set_options(TermConfig {
+                        scrolling_history: scrollback,
+                        default_cursor_style: cs,
+                        ..TermConfig::default()
+                    });
+                };
+            if let Some(pty) = self.pty.as_ref() {
+                push_cursor(pty, new_cursor_style);
+            }
+            if let Some(g) = self.panes.as_ref() {
+                for pty in g.others.values() {
+                    push_cursor(pty, new_cursor_style);
+                }
+            }
+            for s in &self.background {
+                push_cursor(&s.pty, new_cursor_style);
+                if let Some(g) = s.panes.as_ref() {
+                    for pty in g.others.values() {
+                        push_cursor(pty, new_cursor_style);
+                    }
+                }
+            }
+            self.dirty = true;
+            self.force_full_redraw = true;
+        }
+
         // Theme: hot-swap the global theme. If follow_system is on, also recompute
         // the active theme based on the system preference.
         if new_config.follow_system {
