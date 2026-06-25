@@ -606,23 +606,23 @@ pub(crate) fn parse_osc133_mark(body: &[u8]) -> Option<(char, Option<i32>)> {
 /// `localhost`, or the current hostname (case-insensitive). Remote hosts are
 /// rejected so a cwd from another machine is never used to spawn a local shell.
 ///
-/// Hostname is read from `/proc/sys/kernel/hostname` only — never from `$HOSTNAME`
-/// which is a user-controlled environment variable and could be spoofed by a
-/// malicious program running in the terminal.
+/// Hostname comes from the kernel via `uname(2)` (`nodename`) — portable across
+/// Linux/macOS/BSD and never from `$HOSTNAME`, a user-controlled environment
+/// variable a malicious program in the terminal could spoof.
 fn host_is_local(host: &str) -> bool {
     if host.is_empty() || host.eq_ignore_ascii_case("localhost") {
         return true;
     }
-    std::fs::read_to_string("/proc/sys/kernel/hostname")
-        .ok()
-        .map(|s| s.trim().to_string())
-        .is_some_and(|h| {
-            // Match either the full hostname or its short (pre-dot) form.
-            h.eq_ignore_ascii_case(host)
-                || h.split('.')
-                    .next()
-                    .is_some_and(|s| s.eq_ignore_ascii_case(host))
-        })
+    let uname = rustix::system::uname();
+    let Ok(node) = uname.nodename().to_str() else {
+        return false;
+    };
+    // Match either the full hostname or its short (pre-dot) form.
+    node.eq_ignore_ascii_case(host)
+        || node
+            .split('.')
+            .next()
+            .is_some_and(|s| s.eq_ignore_ascii_case(host))
 }
 
 /// Percent-decode a byte string (`%XX` -> the byte). Invalid escapes are passed
