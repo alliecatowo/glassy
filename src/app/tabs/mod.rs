@@ -97,6 +97,9 @@ impl App {
             palette: None,
             palette_rows: Vec::new(),
             active_progress: None,
+            text_blink_on: true,
+            text_blink_at: Instant::now() + BLINK_INTERVAL,
+            text_blink_active: false,
         }
     }
 

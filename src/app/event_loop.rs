@@ -486,6 +486,18 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 // Progress changes are visual — mark dirty so the status bar repaints.
             }
+            UserEvent::TextBlinkPresent(id) => {
+                // SGR 5/6 (text blink) detected in the byte stream of the active
+                // session. Arm the text-blink timer so `about_to_wait` drives phase
+                // flips and periodic redraws (like the cursor-blink timer). Only the
+                // active focused pane can have its blinking cells visible on screen.
+                if id == self.active_focused_id() && !self.text_blink_active {
+                    self.text_blink_active = true;
+                    self.text_blink_on = true;
+                    self.text_blink_at = Instant::now() + BLINK_INTERVAL;
+                }
+                // Already active or not our session: still mark dirty for the redraw.
+            }
         }
         self.mark_dirty(event_loop);
     }
@@ -691,6 +703,23 @@ impl ApplicationHandler<UserEvent> for App {
         } else {
             // Settle to the solid (visible) phase so re-focusing shows the cursor.
             self.blink_on = true;
+        }
+
+        // Text blink (SGR 5/6): runs while the active session has blinking cells.
+        // Drives a periodic phase flip at the same cadence as the cursor blink so
+        // the UI redraws and the render path can suppress blinking cells. When the
+        // window loses focus we freeze in the visible phase (cells always shown).
+        if self.text_blink_active {
+            if self.focused {
+                if now >= self.text_blink_at {
+                    self.text_blink_on = !self.text_blink_on;
+                    self.text_blink_at = now + BLINK_INTERVAL;
+                    self.dirty = true;
+                }
+            } else {
+                // Unfocused: freeze visible so nothing flickers in background tabs.
+                self.text_blink_on = true;
+            }
         }
 
         // Visual-bell flash: while the flash window is open, keep redrawing so the

@@ -103,6 +103,65 @@ pub fn scan_sync_2026(bytes: &[u8]) -> (u32, u32) {
     (begin, end)
 }
 
+/// Scan a VT byte run for SGR text-blink attributes (SGR 5 = slow, SGR 6 = rapid).
+///
+/// Returns `true` if any `CSI 5 m` or `CSI 6 m` sequence (or compound SGRs
+/// containing parameter 5 or 6) is found. This is a positive-only detection:
+/// `false` means no blink SGRs were seen, but it does not mean no blinking cells
+/// exist (they may have been set in a previous read). The caller uses this to arm
+/// the text-blink timer.
+///
+/// Note: alacritty_terminal silently ignores SGR 5/6, so we scan the raw bytes
+/// ourselves to detect whether blinking cells exist on screen.
+pub fn scan_has_blink_sgr(bytes: &[u8]) -> bool {
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != 0x1b {
+            i += 1;
+            continue;
+        }
+        // CSI: ESC [
+        if bytes.get(i + 1) != Some(&b'[') {
+            i += 1;
+            continue;
+        }
+        let mut j = i + 2;
+        // Skip private-mode prefix chars (< > = ?)
+        while j < bytes.len() && matches!(bytes[j], b'<' | b'>' | b'=' | b'?') {
+            j += 1;
+        }
+        // Collect parameters up to the final byte.
+        let mut cur: Option<u32> = None;
+        let mut found = false;
+        while j < bytes.len() {
+            let b = bytes[j];
+            if b.is_ascii_digit() {
+                cur = Some(cur.unwrap_or(0) * 10 + (b - b'0') as u32);
+                j += 1;
+            } else if b == b';' || b == b':' {
+                // Check the param accumulated so far.
+                if matches!(cur, Some(5) | Some(6)) {
+                    found = true;
+                }
+                cur = None;
+                j += 1;
+            } else {
+                // Final byte.
+                if b == b'm' && matches!(cur, Some(5) | Some(6)) {
+                    found = true;
+                }
+                j += 1;
+                break;
+            }
+        }
+        if found {
+            return true;
+        }
+        i = j;
+    }
+    false
+}
+
 /// Whether a VT byte run contains a full-screen erase (`CSI 2J` or `CSI 3J`) or a
 /// terminal reset (`ESC c`, RIS) — the signals that the screen content (and thus
 /// any inline images anchored to it) is being wiped, e.g. by `clear`/`reset`.
@@ -306,6 +365,64 @@ mod tests {
         // Any level > 2 should fall back to Reset.
         let seq = b"\x1b[>4;99m";
         assert_eq!(scan_modify_other_keys(seq), Some(ModifyOtherKeys::Reset));
+    }
+
+    // ---- scan_has_blink_sgr tests ------------------------------------------
+
+    use super::scan_has_blink_sgr;
+
+    #[test]
+    fn blink_sgr5_detected() {
+        // CSI 5 m — slow blink
+        assert!(scan_has_blink_sgr(b"\x1b[5m"));
+    }
+
+    #[test]
+    fn blink_sgr6_detected() {
+        // CSI 6 m — rapid blink
+        assert!(scan_has_blink_sgr(b"\x1b[6m"));
+    }
+
+    #[test]
+    fn blink_sgr_in_compound_sequence() {
+        // CSI 1;5;31 m — bold + blink + red fg
+        assert!(scan_has_blink_sgr(b"\x1b[1;5;31m"));
+    }
+
+    #[test]
+    fn blink_sgr_not_confused_with_other_params() {
+        // SGR 4 (underline), 7 (inverse), 25 (cancel blink) — none are blink.
+        assert!(!scan_has_blink_sgr(b"\x1b[4m"));
+        assert!(!scan_has_blink_sgr(b"\x1b[7m"));
+        assert!(!scan_has_blink_sgr(b"\x1b[25m"));
+    }
+
+    #[test]
+    fn blink_sgr_cancel_blink_not_detected() {
+        // SGR 25 cancels blink — this is not itself a "blink present" signal.
+        assert!(!scan_has_blink_sgr(b"\x1b[25m"));
+    }
+
+    #[test]
+    fn blink_sgr_plain_text_not_detected() {
+        assert!(!scan_has_blink_sgr(b"hello world"));
+    }
+
+    #[test]
+    fn blink_sgr_embedded_in_run() {
+        // Mixed text + SGR 6.
+        assert!(scan_has_blink_sgr(b"abc\x1b[6mdef"));
+    }
+
+    #[test]
+    fn blink_sgr_csi_private_not_confused() {
+        // DECSET sequences (CSI ? ... h) — must not be detected as blink SGR.
+        assert!(!scan_has_blink_sgr(b"\x1b[?5h"));
+    }
+
+    #[test]
+    fn blink_sgr_empty_input() {
+        assert!(!scan_has_blink_sgr(b""));
     }
 
     // ---- scan_sync_2026 additional cases -----------------------------------

@@ -470,6 +470,19 @@ pub struct App {
     /// Latest OSC 9;4 progress state for the active session. `None` once
     /// `ProgressState::Remove` is received or the session exits.
     active_progress: Option<crate::image::ProgressState>,
+
+    // --- Text-blink SGR 5/6 state -----------------------------------------------
+    /// Current text-blink phase: `true` = cells visible, `false` = cells hidden.
+    /// Mirrors `blink_on` for the cursor, but controls the SGR 5/6 text-blink
+    /// timer (driven at the same cadence). Only active while `text_blink_active`.
+    text_blink_on: bool,
+    /// When the next text-blink phase flip is due. Lazily seeded the first time
+    /// a `TextBlinkPresent` event is received; thereafter advanced by `BLINK_INTERVAL`.
+    text_blink_at: Instant,
+    /// True while the active session has blinking text (SGR 5/6 cells present).
+    /// Armed by `UserEvent::TextBlinkPresent`; cleared when the grid is cleared
+    /// (RIS / CSI 2J / screen erase) or the session exits.
+    text_blink_active: bool,
 }
 
 #[cfg(test)]
