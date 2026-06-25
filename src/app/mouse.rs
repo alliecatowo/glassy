@@ -186,6 +186,7 @@ impl App {
         if button == MouseButton::Left {
             if pressed {
                 self.gui_click_edge = false;
+                self.note_gui_left_press();
             } else {
                 // Set the press→release edge; the press latch (`gui_pressed`)
                 // is cleared only AFTER the next paint consumes this edge so

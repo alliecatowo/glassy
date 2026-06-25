@@ -419,10 +419,17 @@ impl App {
     }
 
     /// Paint the inline tab-rename editor over the chip rect `r`: an opaque raised
-    /// field with an accent ring, the in-progress `buffer` text (tail-clipped so the
-    /// caret stays visible), and a block caret at the end. Associated (no `&self`)
+    /// field with an accent ring, the in-progress `buffer` text (h-scrolled to keep
+    /// the caret visible), the selection band, and the caret at its real column.
+    /// `caret`/`selection` are char offsets into `buffer`. Associated (no `&self`)
     /// so it composes with the caller's `&mut Renderer` borrow.
-    pub(crate) fn paint_tab_rename(renderer: &mut Renderer, r: gui::Rect, buffer: &str) {
+    pub(crate) fn paint_tab_rename(
+        renderer: &mut Renderer,
+        r: gui::Rect,
+        buffer: &str,
+        caret: usize,
+        selection: Option<(usize, usize)>,
+    ) {
         let m = renderer.cell_metrics();
         let cell_w = m.width;
         let cell_h = m.height;
@@ -449,32 +456,44 @@ impl App {
             );
         }
 
-        // Text area: pad in, reserve one cell for the caret. Tail-clip so the END
-        // of the buffer stays visible while typing (the natural caret position).
+        // Text area: pad in, reserve one cell for the caret. H-scroll a window so
+        // the caret stays visible (matching the shared text-field model).
         let pad = (cell_w * 0.6).round();
         let ty = (r.center_y() - cell_h * 0.5).round();
+        let text_x0 = r.x + pad;
         let text_w = (r.w - 2.0 * pad - cell_w).max(0.0);
-        let max_chars = (text_w / cell_w).floor() as usize;
+        let max_chars = (text_w / cell_w).floor().max(0.0) as usize;
         let chars: Vec<char> = buffer.chars().collect();
-        let visible: String = if chars.len() <= max_chars {
-            buffer.to_string()
-        } else if max_chars >= 1 {
-            // Keep the tail; lead with an ellipsis. max_chars >= 1 here, so the
-            // subtraction never underflows.
-            let tail = &chars[chars.len() - (max_chars - 1)..];
-            let mut s = String::from("…");
-            s.extend(tail.iter());
-            s
+        // First visible char so the caret column lands inside the window.
+        let scroll = if max_chars == 0 || caret < max_chars {
+            0
         } else {
-            String::new()
+            caret + 1 - max_chars
         };
-        let mut cx = r.x + pad;
-        for ch in visible.chars() {
+        let end = (scroll + max_chars).min(chars.len());
+
+        // Selection band behind the glyphs, clipped to the visible window.
+        if let Some((lo, hi)) = selection {
+            let vlo = lo.max(scroll);
+            let vhi = hi.min(end);
+            if vhi > vlo {
+                let sx = text_x0 + (vlo - scroll) as f32 * cell_w;
+                let sw = (vhi - vlo) as f32 * cell_w;
+                let mut band = color::selection_bg();
+                band[3] = 0.45;
+                renderer.push_overlay_px(sx.round(), ty, sw.round(), cell_h, band);
+            }
+        }
+
+        let mut cx = text_x0;
+        for &ch in &chars[scroll..end] {
             renderer.push_overlay_glyph_px(cx.round(), ty, ch, gui::fg());
             cx += cell_w;
         }
-        // Block caret immediately after the last visible glyph.
-        renderer.push_overlay_px(cx.round(), ty, 2.0, cell_h, color::accent());
+        // Caret at its real column within the visible window.
+        let caret_col = caret.clamp(scroll, end);
+        let caret_x = text_x0 + (caret_col - scroll) as f32 * cell_w;
+        renderer.push_overlay_px(caret_x.round(), ty, 2.0, cell_h, color::accent());
     }
 
     /// Paint one tab chip's surface (connector + rail for active, recess for
@@ -654,6 +673,7 @@ impl App {
         gui_pressed: &mut Option<gui::WidgetId>,
         gui_focused: &mut Option<gui::WidgetId>,
         gui_anims: &mut std::collections::HashMap<gui::WidgetId, gui::Anim>,
+        fields: &mut gui::SettingsFields,
     ) -> gui::SettingsEvents {
         // Theme names + per-theme accent swatches (the cursor color each theme
         // deliberately picks to pop).
@@ -720,7 +740,7 @@ impl App {
             word_separator: &config.word_separator,
             font_features: &font_features_str,
         };
-        ui.build_settings((sw as f32, sh as f32), &view)
+        ui.build_settings((sw as f32, sh as f32), &view, fields)
     }
 
     /// Apply the settings-form events to the live config + renderer + theme. Runs

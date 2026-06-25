@@ -16,8 +16,10 @@ use alacritty_terminal::term::search::{Match, RegexSearch};
 /// exactly while the bar is open. The compiled `RegexSearch` and the collected
 /// match list are rebuilt whenever the query string changes.
 pub(crate) struct SearchState {
-    /// The live query text the user is typing.
-    pub query: String,
+    /// The live query the user is typing, as an editable model (caret, selection,
+    /// word-jump, clipboard) shared with every other glassy text field via
+    /// [`gui::TextEdit`].
+    pub edit: gui::TextEdit,
     /// Every match in the focused pane's grid + scrollback, top-to-bottom. Each
     /// is an inclusive `start..=end` grid `Point` range. Empty when the query is
     /// empty or compiles to no matches.
@@ -34,11 +36,16 @@ pub(crate) struct SearchState {
 impl SearchState {
     fn new() -> Self {
         SearchState {
-            query: String::new(),
+            edit: gui::TextEdit::default(),
             matches: Vec::new(),
             current: None,
             bad_regex: false,
         }
+    }
+
+    /// The current query text (what the regex compiler + painter consume).
+    pub fn query(&self) -> String {
+        self.edit.text()
     }
 }
 
@@ -62,7 +69,7 @@ impl App {
                 && !sel.is_empty()
                 && !sel.contains('\n')
             {
-                st.query = sel;
+                st.edit.set_text(&sel);
             }
             self.search = Some(st);
             self.recompute_search();
@@ -88,49 +95,50 @@ impl App {
         if self.search.is_none() {
             return false;
         }
-        match key {
-            Key::Named(NamedKey::Escape) => {
+        let ctrl = self.mods.control_key();
+        let shift = self.mods.shift_key();
+        let (named, text) = super::settings::key_to_text_parts(key);
+        let action = gui::map_text_key(named.as_deref(), text.as_deref(), ctrl, shift);
+        match action {
+            // Esc closes the bar; Enter jumps to the next/prev match (Shift = prev).
+            gui::TextInputAction::Cancel => {
                 self.close_search(event_loop);
-                true
+                return true;
             }
-            Key::Named(NamedKey::Enter) => {
-                let dir = if self.mods.shift_key() {
+            gui::TextInputAction::Submit => {
+                let dir = if shift {
                     Direction::Left
                 } else {
                     Direction::Right
                 };
                 self.search_jump(dir, event_loop);
-                true
+                return true;
             }
-            Key::Named(NamedKey::Backspace) => {
-                if let Some(st) = self.search.as_mut() {
-                    st.query.pop();
-                }
-                self.recompute_search();
-                self.force_full_redraw = true;
-                self.mark_dirty(event_loop);
-                true
-            }
-            Key::Character(s) => {
-                if let Some(st) = self.search.as_mut() {
-                    st.query.push_str(s.as_str());
-                }
-                self.recompute_search();
-                self.force_full_redraw = true;
-                self.mark_dirty(event_loop);
-                true
-            }
-            Key::Named(NamedKey::Space) => {
-                if let Some(st) = self.search.as_mut() {
-                    st.query.push(' ');
-                }
-                self.recompute_search();
-                self.force_full_redraw = true;
-                self.mark_dirty(event_loop);
-                true
-            }
-            _ => false,
+            gui::TextInputAction::None => return false,
+            _ => {}
         }
+        let paste_text = if matches!(action, gui::TextInputAction::Paste) {
+            self.clipboard_text()
+        } else {
+            None
+        };
+        let Some(st) = self.search.as_mut() else {
+            return false;
+        };
+        let res = gui::apply_text_action(&mut st.edit, action, paste_text.as_deref());
+        match &res.clip {
+            gui::ClipReq::Copy(s) | gui::ClipReq::Cut(s) => {
+                let owned = s.clone();
+                self.copy_text_to_clipboard(&owned);
+            }
+            gui::ClipReq::None | gui::ClipReq::Paste => {}
+        }
+        if res.changed {
+            self.recompute_search();
+        }
+        self.force_full_redraw = true;
+        self.mark_dirty(event_loop);
+        true
     }
 
     /// Recompile the query and collect every match in the focused pane's grid +
@@ -140,7 +148,7 @@ impl App {
         // Snapshot the query out of `self.search` to avoid a borrow conflict with
         // the `self.pty` lock below.
         let query = match self.search.as_ref() {
-            Some(st) => st.query.clone(),
+            Some(st) => st.query(),
             None => return,
         };
         let mut matches: Vec<Match> = Vec::new();
@@ -261,11 +269,30 @@ impl App {
         out
     }
 
-    /// Snapshot of the find-bar paint inputs (count, current index, bad-regex).
-    pub(crate) fn search_readout(&self) -> Option<(String, usize, Option<usize>, bool)> {
-        self.search
-            .as_ref()
-            .map(|st| (st.query.clone(), st.matches.len(), st.current, st.bad_regex))
+    /// Snapshot of the find-bar paint inputs: `(query, caret, selection,
+    /// match_count, current, bad_regex)`. Caret + selection are char offsets into
+    /// `query` so the painter can draw the real caret column and selection band.
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn search_readout(
+        &self,
+    ) -> Option<(
+        String,
+        usize,
+        Option<(usize, usize)>,
+        usize,
+        Option<usize>,
+        bool,
+    )> {
+        self.search.as_ref().map(|st| {
+            (
+                st.query(),
+                st.edit.caret(),
+                st.edit.selection(),
+                st.matches.len(),
+                st.current,
+                st.bad_regex,
+            )
+        })
     }
 
     /// Paint the find bar (bottom of the window) + all match highlights. Called
@@ -282,6 +309,8 @@ impl App {
         surface: (f32, f32),
         origin: (f32, f32),
         query: &str,
+        caret: usize,
+        selection: Option<(usize, usize)>,
         match_count: usize,
         current: Option<usize>,
         bad_regex: bool,
@@ -325,12 +354,22 @@ impl App {
         renderer.push_overlay_glyph_px(cx.round(), ty, '\u{203A}', color::accent());
         cx += cell_w * 2.0;
 
-        // Query text (or a dim placeholder), with a block caret at the end.
+        // Query text (or a dim placeholder). The text starts after the chevron.
+        let text_x0 = inner_pad + cell_w * 2.0;
         let text_col = if bad_regex {
             color::danger()
         } else {
             gui::fg()
         };
+        // Selection band behind the glyphs (when a range is selected).
+        if let Some((lo, hi)) = selection
+            && hi > lo
+        {
+            let sx = text_x0 + lo as f32 * cell_w;
+            let sw = (hi - lo) as f32 * cell_w;
+            let sel = with_alpha(color::selection_bg(), 0.45);
+            renderer.push_overlay_px(sx.round(), ty, sw.round(), cell_h, sel);
+        }
         if query.is_empty() {
             for ch in "search…".chars() {
                 renderer.push_overlay_glyph_px(cx.round(), ty, ch, gui::fg_dim());
@@ -342,8 +381,8 @@ impl App {
                 cx += cell_w;
             }
         }
-        // Caret after the query.
-        let caret_x = inner_pad + cell_w * 2.0 + query.chars().count() as f32 * cell_w;
+        // Caret at the real caret column (char offset into the query).
+        let caret_x = text_x0 + caret as f32 * cell_w;
         renderer.push_overlay_px(caret_x.round(), ty, 2.0, cell_h, color::accent());
 
         // Trailing match-count readout, right-aligned.
@@ -575,7 +614,7 @@ mod tests {
     #[test]
     fn search_state_new_has_empty_matches() {
         let st = SearchState::new();
-        assert!(st.query.is_empty());
+        assert!(st.query().is_empty());
         assert!(st.matches.is_empty());
         assert!(st.current.is_none());
         assert!(!st.bad_regex);

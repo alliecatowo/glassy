@@ -208,7 +208,7 @@ impl ApplicationHandler<UserEvent> for App {
             if !q.is_empty()
                 && let Some(p) = self.palette.as_mut()
             {
-                p.query = q;
+                p.edit.set_text(&q);
                 self.refilter_palette();
             }
             self.force_full_redraw = true;
@@ -221,7 +221,7 @@ impl ApplicationHandler<UserEvent> for App {
             if !q.is_empty()
                 && let Some(st) = self.search.as_mut()
             {
-                st.query = q;
+                st.edit.set_text(&q);
             }
             self.recompute_search();
             self.force_full_redraw = true;

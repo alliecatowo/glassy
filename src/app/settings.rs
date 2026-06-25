@@ -2,13 +2,39 @@
 
 use super::*;
 
+/// Split a winit logical key into the `(named_name, character_text)` pair that
+/// [`gui::map_text_key`] consumes: a lowercase name for the named keys the text
+/// fields care about, or the printable string for a character key. Returns
+/// `(None, None)` for keys neither editor needs.
+pub(crate) fn key_to_text_parts(key: &Key) -> (Option<String>, Option<String>) {
+    match key {
+        Key::Named(named) => {
+            let name = match named {
+                NamedKey::Escape => "escape",
+                NamedKey::Enter => "enter",
+                NamedKey::Space => "space",
+                NamedKey::Backspace => "backspace",
+                NamedKey::Delete => "delete",
+                NamedKey::Home => "home",
+                NamedKey::End => "end",
+                NamedKey::ArrowLeft => "arrowleft",
+                NamedKey::ArrowRight => "arrowright",
+                _ => return (None, None),
+            };
+            (Some(name.to_string()), None)
+        }
+        Key::Character(s) => (None, Some(s.to_string())),
+        _ => (None, None),
+    }
+}
+
 impl App {
     /// The keyboard tab order of the settings form, in declaration order. These
     /// mirror the widget ids emitted by [`gui::Ui::build_settings`] and are used
     /// for Tab / Shift+Tab / Up / Down focus movement (the form itself collects
     /// the live order each paint, but key handling runs between paints so it walks
     /// this fixed list — identical ordering keeps focus stable).
-    pub(crate) fn settings_focus_order() -> [gui::WidgetId; 14] {
+    pub(crate) fn settings_focus_order() -> [gui::WidgetId; 16] {
         [
             gui::id("settings/font_size"),
             gui::id("settings/opacity"),
@@ -22,6 +48,8 @@ impl App {
             gui::id("settings/follow_system"),
             gui::id("settings/ligatures"),
             gui::id("settings/restore_session"),
+            gui::id("settings/word_separator"),
+            gui::id("settings/font_features"),
             gui::id("settings/config"),
             gui::id("settings/save"),
         ]
@@ -35,6 +63,11 @@ impl App {
         self.settings_drop = gui::SettingsDrop::None;
         self.settings_saved = false;
         self.gui_focused = Some(Self::settings_focus_order()[0]);
+        // Seed the editable text fields from the live config.
+        self.settings_word_sep = gui::TextEdit::new(&self.config.word_separator);
+        self.settings_word_sep_ms = gui::TextInputMouse::default();
+        self.settings_font_feat = gui::TextEdit::new(&self.config.font_features.join(" "));
+        self.settings_font_feat_ms = gui::TextInputMouse::default();
         // Seed the click-outside hit rect to the WHOLE surface so a stray press
         // landing in the same frame the form opens (before the first paint sets
         // the real panel rect at `render`) is treated as "inside" and never

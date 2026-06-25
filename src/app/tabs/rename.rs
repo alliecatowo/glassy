@@ -2,6 +2,10 @@
 
 use super::super::*;
 
+/// Snapshot of the inline rename editor for the painter: `(pos, buffer, caret,
+/// selection)`, where `caret`/`selection` are char offsets into `buffer`.
+pub(crate) type RenameSnapshot = (usize, String, usize, Option<(usize, usize)>);
+
 impl App {
     /// The custom title for the tab at stable position `pos`, if the user set one.
     pub(crate) fn custom_title_at(&self, pos: usize) -> Option<&str> {
@@ -24,7 +28,8 @@ impl App {
             return;
         }
         let seed = self.custom_title_at(pos).unwrap_or("").to_string();
-        self.tab_rename = Some((pos, seed));
+        // Cap the title so a held key / paste can't grow it unbounded.
+        self.tab_rename = Some((pos, gui::TextEdit::with_max_len(&seed, 64)));
         // The rename editor owns the keyboard; dismiss other overlays/menus.
         self.menu_open = false;
         self.menu_items = None;
@@ -40,9 +45,11 @@ impl App {
         self.tab_rename.is_some()
     }
 
-    /// Snapshot of the rename editor for the painter: `(pos, buffer)`.
-    pub(crate) fn tab_rename_state(&self) -> Option<(usize, String)> {
-        self.tab_rename.as_ref().map(|(p, b)| (*p, b.clone()))
+    /// Snapshot of the rename editor for the painter (see [`RenameSnapshot`]).
+    pub(crate) fn tab_rename_state(&self) -> Option<RenameSnapshot> {
+        self.tab_rename
+            .as_ref()
+            .map(|(p, e)| (*p, e.text(), e.caret(), e.selection()))
     }
 
     /// Set (or clear) the custom title of the tab at stable position `pos`. An
@@ -63,8 +70,8 @@ impl App {
     /// Commit the inline rename (Enter): apply the buffer as the tab's custom title
     /// and close the editor. An empty buffer clears any existing custom title.
     pub(crate) fn commit_tab_rename(&mut self, event_loop: &ActiveEventLoop) {
-        if let Some((pos, buf)) = self.tab_rename.take() {
-            self.set_custom_title(pos, Some(buf));
+        if let Some((pos, edit)) = self.tab_rename.take() {
+            self.set_custom_title(pos, Some(edit.text()));
             self.save_session();
             self.force_full_redraw = true;
             self.mark_dirty(event_loop);
@@ -81,48 +88,46 @@ impl App {
 
     /// Handle a keypress while the inline rename editor is open. Returns `true` if
     /// the key was consumed (it never reaches the child). Enter commits, Esc
-    /// cancels, Backspace edits, printable text + Space append to the buffer.
+    /// cancels; all other editing (caret nav, selection, word-jump, clipboard)
+    /// flows through the shared [`gui::TextEdit`] path every glassy field uses.
     pub(crate) fn handle_rename_key(&mut self, key: &Key, event_loop: &ActiveEventLoop) -> bool {
         if self.tab_rename.is_none() {
             return false;
         }
-        match key {
-            Key::Named(NamedKey::Escape) => {
+        let ctrl = self.mods.control_key();
+        let shift = self.mods.shift_key();
+        let (named, text) = super::super::settings::key_to_text_parts(key);
+        let action = gui::map_text_key(named.as_deref(), text.as_deref(), ctrl, shift);
+        match action {
+            gui::TextInputAction::Cancel => {
                 self.cancel_tab_rename(event_loop);
-                true
+                return true;
             }
-            Key::Named(NamedKey::Enter) => {
+            gui::TextInputAction::Submit => {
                 self.commit_tab_rename(event_loop);
-                true
+                return true;
             }
-            Key::Named(NamedKey::Backspace) => {
-                if let Some((_, buf)) = self.tab_rename.as_mut() {
-                    buf.pop();
-                }
-                self.force_full_redraw = true;
-                self.mark_dirty(event_loop);
-                true
-            }
-            Key::Named(NamedKey::Space) => {
-                if let Some((_, buf)) = self.tab_rename.as_mut() {
-                    buf.push(' ');
-                }
-                self.force_full_redraw = true;
-                self.mark_dirty(event_loop);
-                true
-            }
-            Key::Character(s) => {
-                if let Some((_, buf)) = self.tab_rename.as_mut() {
-                    // Cap the title so a held key / paste can't grow it unbounded.
-                    if buf.chars().count() < 64 {
-                        buf.push_str(s.as_str());
-                    }
-                }
-                self.force_full_redraw = true;
-                self.mark_dirty(event_loop);
-                true
-            }
-            _ => false,
+            gui::TextInputAction::None => return false,
+            _ => {}
         }
+        let paste_text = if matches!(action, gui::TextInputAction::Paste) {
+            self.clipboard_text()
+        } else {
+            None
+        };
+        let Some((_, edit)) = self.tab_rename.as_mut() else {
+            return false;
+        };
+        let res = gui::apply_text_action(edit, action, paste_text.as_deref());
+        match &res.clip {
+            gui::ClipReq::Copy(s) | gui::ClipReq::Cut(s) => {
+                let owned = s.clone();
+                self.copy_text_to_clipboard(&owned);
+            }
+            gui::ClipReq::None | gui::ClipReq::Paste => {}
+        }
+        self.force_full_redraw = true;
+        self.mark_dirty(event_loop);
+        true
     }
 }
