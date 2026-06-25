@@ -100,6 +100,9 @@ impl App {
             text_blink_on: true,
             text_blink_at: Instant::now() + BLINK_INTERVAL,
             text_blink_active: false,
+            toasts: Vec::new(),
+            confirm_close: None,
+            pending_confirm_execute: false,
         }
     }
 
@@ -410,6 +413,41 @@ impl App {
         // rows (otherwise stale content from the other tab bleeds through).
         self.force_full_redraw = true;
         self.mark_dirty(event_loop);
+    }
+
+    /// True when the active focused pane has a running foreground child (best-
+    /// effort via `PaneInfo.foreground_comm` which is polled from `/proc`).
+    /// Returns `false` when the shell is idle (prompt), no PTY, or the read fails.
+    pub(crate) fn has_running_child(&self) -> bool {
+        self.pty
+            .as_ref()
+            .and_then(|p| p.pane_info.foreground_comm.as_deref())
+            .map(|comm| !comm.is_empty())
+            .unwrap_or(false)
+    }
+
+    /// Like `close_pane` but checks for a running child first. When one is
+    /// detected, sets `confirm_close` (shows the modal) instead of closing
+    /// immediately. The modal's "Close" button then calls `close_pane` directly.
+    pub(crate) fn try_close_pane(&mut self, event_loop: &ActiveEventLoop) {
+        if self.has_running_child() {
+            self.confirm_close = Some(ConfirmClose::ActivePane);
+            self.force_full_redraw = true;
+            self.mark_dirty(event_loop);
+        } else {
+            self.close_pane(event_loop);
+        }
+    }
+
+    /// Like `close_active_tab` but checks for a running child first.
+    pub(crate) fn try_close_active_tab(&mut self, event_loop: &ActiveEventLoop) {
+        if self.has_running_child() {
+            self.confirm_close = Some(ConfirmClose::ActiveTab);
+            self.force_full_redraw = true;
+            self.mark_dirty(event_loop);
+        } else {
+            self.close_active_tab(event_loop);
+        }
     }
 
     /// Close the active tab; activate the neighbor at its position, else exit.

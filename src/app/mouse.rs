@@ -511,20 +511,27 @@ impl App {
                 self.mark_dirty(event_loop);
             }
             // Left release: finish the drag; the selection persists for copy.
-            // Copy-on-select: a completed selection is mirrored to the
-            // clipboard immediately (the de-facto X11/terminal convention),
-            // so a middle-click / Ctrl+Shift+V paste works without an
-            // explicit copy. A no-op when nothing was actually selected.
+            // When `copy_on_select` is on, a completed selection is mirrored
+            // to the clipboard immediately (the de-facto X11/terminal
+            // convention). On Linux/X11 we also set the PRIMARY selection so
+            // middle-click paste works.  A no-op when nothing was selected.
             (MouseButton::Left, false) => {
                 let was_selecting = self.selecting;
                 self.selecting = false;
-                if was_selecting {
+                if was_selecting && self.config.copy_on_select {
                     self.copy_selection();
+                    // On Linux/X11, mirror to PRIMARY so middle-click paste works.
+                    #[cfg(target_os = "linux")]
+                    self.copy_selection_to_primary();
                 }
             }
-            // Middle click pastes the clipboard (primary on X11 would be
-            // ideal, but arboard exposes only the standard clipboard).
+            // Middle click: paste from PRIMARY selection on Linux (the standard
+            // X11 "paste what you just highlighted" convention).  Falls back to
+            // the standard clipboard when PRIMARY is unavailable.
             (MouseButton::Middle, true) => {
+                #[cfg(target_os = "linux")]
+                self.paste_primary_or_clipboard();
+                #[cfg(not(target_os = "linux"))]
                 self.paste_clipboard();
                 self.mark_dirty(event_loop);
             }

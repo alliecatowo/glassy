@@ -1,248 +1,21 @@
-//! Chrome painting: tab bar, status bar, settings overlay.
+//! Chrome painting: status bar, settings overlay, tab-rename editor,
+//! confirm-close modal. Tab-bar and chip painting are in tab_paint.rs.
 
 use super::*;
 
+/// Result returned from [`App::paint_confirm_close`] each frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConfirmCloseResult {
+    /// The modal is still open (user has not interacted yet).
+    Pending,
+    /// The user clicked "Close" — proceed with the close.
+    Confirm,
+    /// The user clicked "Cancel" — abort the close.
+    Cancel,
+}
+
 impl App {
-    /// Paint the real GUI tab bar (§3.1) into the pixel band `[0, tab_bar_h)`. The
-    /// ACTIVE tab is an E2 raised chip whose top corners are rounded and whose body
-    /// is flush to the bar bottom, with a 3px connector quad that overpaints the
-    /// content hairline so the tab "opens into" the content surface, plus a top
-    /// accent rail. Inactive tabs are recessed E1 chips sitting above the bar
-    /// bottom. The close button fades in on hover with its own danger-tinted
-    /// hover/press state. +/?/* / # are icon buttons. The rich (Unicode) title is
-    /// drawn through the glyph atlas via `push_overlay_glyph_px` (tofu-proof). A
-    /// held tab is lifted to a drag-ghost following the pointer.
-    ///
-    /// Associated (not `&self`) so it composes with the caller's `&mut Renderer`
-    /// borrow; all `self`-derived data arrives via `snapshot` + scalars.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn paint_tab_bar(
-        renderer: &mut Renderer,
-        snapshot: &[(String, bool, bool, bool)],
-        focused: bool,
-        hovered: Option<StripItem>,
-        held: Option<StripItem>,
-        dragging: Option<usize>,
-        mouse_px: (f32, f32),
-        spinner_frame: usize,
-        tab_count: usize,
-        display_offset: i32,
-        history_size: usize,
-    ) {
-        let m = renderer.cell_metrics();
-        let (sw, _sh) = renderer.surface_size();
-        let bar_w = sw as f32;
-        let bar_h = tab_bar_h(m.height);
-        if bar_w <= 0.0 || bar_h <= 0.0 {
-            return;
-        }
-
-        // Dim the whole bar while unfocused so an idle window reads as "asleep".
-        let fdim = if focused { 1.0 } else { 0.7 };
-        let mul = |c: [f32; 4]| [c[0] * fdim, c[1] * fdim, c[2] * fdim, c[3]];
-
-        let bar_bg = mul(gui::glass_body());
-        let surface = mul(gui::glass_raised());
-        // Active-tab chip is lifted one more stop above the bar (E2+): noticeably
-        // brighter/more opaque than inactive chips so it clearly reads as "foreground".
-        let active_surface = mul(gui::glass_active_tab());
-        let accent = mul(color::accent());
-        let danger = mul(color::danger());
-        let fg = mul(gui::fg());
-        let fg_dim = mul(gui::fg_dim());
-        // Active-tab label color derived from the LUMA of the ACTIVE chip body so
-        // it is always legible (near-black on light themes, near-white on dark ones).
-        let raised = gui::glass_active_tab();
-        let chip_luma = 0.2126 * raised[0] + 0.7152 * raised[1] + 0.0722 * raised[2];
-        let active_fg = if chip_luma > 0.5 {
-            mul([0.04, 0.04, 0.05, 1.0])
-        } else {
-            mul([0.97, 0.97, 0.98, 1.0])
-        };
-
-        // 1) Bar backdrop (E1). The old top accent rail + bottom hairline drew two
-        //    bright 1px seams that read as harsh white/light lines across the whole
-        //    bar on light-accent themes; dropped so the bar edge is clean soft glass.
-        renderer.push_overlay_px(0.0, 0.0, bar_w, bar_h, bar_bg);
-
-        // 2) Brand mark on the far left.
-        let mark_y = (bar_h - m.height) * 0.5;
-        renderer.push_overlay_glyph_px((m.width).round(), mark_y.round(), '◆', accent);
-
-        // 3) Lay out the bar (pixel rects) and paint each item.
-        let descs: Vec<(&str, bool, bool)> = snapshot
-            .iter()
-            .map(|(t, a, b, _)| (t.as_str(), *a, *b))
-            .collect();
-        let segs = strip_layout(&descs, bar_w, bar_h, m.width);
-        let multi = descs.len() > 1;
-        let spin = SPINNER_FRAMES[spinner_frame % SPINNER_FRAMES.len()];
-
-        // Helper: state-driven fill for a control/chip surface.
-        let press_fill = |base: [f32; 4]| [base[0] * 0.85, base[1] * 0.85, base[2] * 0.85, base[3]];
-        let hover_fill = |base: [f32; 4]| gui::state_fill(base, 0.7, false);
-
-        // Track a held tab so we can defer its drag-ghost to the very top.
-        let mut ghost: Option<(gui::Rect, String, usize)> = None;
-
-        for seg in &segs {
-            let r = seg.rect;
-            let is_hover = hovered == Some(seg.item);
-            let is_held = held == Some(seg.item);
-            match seg.item {
-                StripItem::Tab(i) => {
-                    let (_title, active, busy) =
-                        descs.get(i).copied().unwrap_or(("", false, false));
-                    let is_spinning = snapshot.get(i).map(|s| s.3).unwrap_or(false);
-                    // A dragged tab is rendered last as a ghost; reserve it.
-                    if dragging == Some(i) {
-                        ghost = Some((r, seg.label.clone(), i));
-                    }
-                    Self::paint_tab_chip(
-                        renderer,
-                        r,
-                        m.height,
-                        m.width,
-                        i,
-                        &seg.label,
-                        active,
-                        busy,
-                        is_spinning,
-                        is_hover,
-                        is_held,
-                        spin,
-                        bar_h,
-                        surface,
-                        active_surface,
-                        accent,
-                        active_fg,
-                        fg,
-                        fg_dim,
-                        dragging == Some(i),
-                        multi,
-                    );
-                }
-                StripItem::TabClose(i) => {
-                    let active = descs.get(i).map(|d| d.1).unwrap_or(false);
-                    // Close fades in on hover of either the close box or its tab.
-                    let tab_hover = hovered == Some(StripItem::Tab(i)) || is_hover;
-                    if tab_hover && dragging.is_none() {
-                        if is_hover {
-                            let a = if is_held { 0.30 } else { 0.18 };
-                            renderer.push_overlay_rrect_px(
-                                r.x,
-                                r.y,
-                                r.w,
-                                r.h,
-                                3.0,
-                                [danger[0], danger[1], danger[2], a],
-                            );
-                        }
-                        let cfg = if is_hover {
-                            danger
-                        } else if active {
-                            active_fg
-                        } else {
-                            fg_dim
-                        };
-                        let gx = r.x + (r.w - m.width) * 0.5;
-                        let gy = r.center_y() - m.height * 0.5;
-                        renderer.push_overlay_glyph_px(gx.round(), gy.round(), '✕', cfg);
-                    }
-                }
-                StripItem::NewTab | StripItem::Help | StripItem::Settings | StripItem::Menu => {
-                    let glyph = match seg.item {
-                        // U+002B PLUS SIGN — universally rasterized, clearly "new tab".
-                        StripItem::NewTab => '+',
-                        // U+003F QUESTION MARK — clean, universally supported.
-                        StripItem::Help => '?',
-                        // U+F013 nf-fa-cog — Nerd Font gear icon; present in FiraCode Nerd
-                        // Font (the default) and any Nerd Font patched face. Falls back to
-                        // U+2699 GEAR via the standard symbol fallback chain on systems
-                        // without a Nerd Font installed.
-                        StripItem::Settings => '\u{F013}',
-                        // U+2261 IDENTICAL TO (≡) — triple bar reads as "hamburger menu";
-                        // BMP, ASCII-width, universally rasterized in monospace fonts.
-                        _ => '\u{2261}',
-                    };
-                    let base = surface;
-                    if is_held {
-                        renderer.push_overlay_rrect_px(
-                            r.x,
-                            r.y,
-                            r.w,
-                            r.h,
-                            gui_radius(m.height),
-                            press_fill(base),
-                        );
-                    } else if is_hover {
-                        renderer.push_overlay_rrect_px(
-                            r.x,
-                            r.y,
-                            r.w,
-                            r.h,
-                            gui_radius(m.height),
-                            hover_fill(base),
-                        );
-                    }
-                    let nudge = if is_held { 1.0 } else { 0.0 };
-                    let cfg = if is_hover || is_held { fg } else { fg_dim };
-                    let gx = r.x + (r.w - m.width) * 0.5;
-                    let gy = r.center_y() - m.height * 0.5 + nudge;
-                    renderer.push_overlay_glyph_px(gx.round(), gy.round(), glyph, cfg);
-                }
-            }
-        }
-
-        // 4) Drag-ghost: redraw the held tab lifted to the top, following the
-        //    pointer's x, so it visibly floats above its siblings while reordering.
-        if let Some((r, label, i)) = ghost {
-            let gx = (mouse_px.0 - r.w * 0.5).clamp(0.0, bar_w - r.w);
-            let gr = gui::Rect::new(gx, r.y - 2.0, r.w, r.h);
-            renderer.push_overlay_rrect_px(
-                gr.x,
-                gr.y,
-                gr.w,
-                gr.h,
-                TAB_RADIUS,
-                mul(gui::glass_float()),
-            );
-            renderer.push_overlay_px(
-                gr.x,
-                gr.y,
-                gr.w,
-                2.0,
-                [accent[0], accent[1], accent[2], accent[3] * 0.5],
-            );
-            Self::paint_tab_label(
-                renderer, gr, m.height, m.width, i, &label, true, false, false, spin, active_fg,
-                active_fg, multi,
-            );
-        }
-
-        // 5) Tab-count badge + scrollback %, tucked just left of the right controls
-        //    as dim labels (fixed-width so the controls never shift).
-        let right_ctrl_x = bar_w - CTRL_BTN * 3.0 - TAB_GAP;
-        let mut tag_right = right_ctrl_x - m.width;
-        let ty = ((bar_h - m.height) * 0.5).round();
-        if display_offset > 0 {
-            let pct = if history_size > 0 {
-                ((display_offset as f32 / history_size as f32) * 100.0).round() as u32
-            } else {
-                100
-            }
-            .min(100);
-            let s = format!("⇡{pct:>3}%");
-            let w = renderer.text_width_px(&s);
-            renderer.push_overlay_glyph_px_str((tag_right - w).round(), ty, &s, accent);
-            tag_right -= w + m.width;
-        }
-        if tab_count > 1 {
-            let s = format!("{tab_count} tabs");
-            let w = renderer.text_width_px(&s);
-            renderer.push_overlay_glyph_px_str((tag_right - w).round(), ty, &s, fg_dim);
-        }
-    }
+    // paint_tab_bar, paint_tab_chip, paint_tab_label live in tab_paint.rs.
 
     /// Paint the Wave-4 status bar (§3.4): a `STATUS_BAR_H`-px E1 band at the
     /// bottom of the window. Content is laid out as fixed-width right-aligned
@@ -477,181 +250,6 @@ impl App {
         renderer.push_overlay_px(cx.round(), ty, 2.0, cell_h, color::accent());
     }
 
-    /// Paint one tab chip's surface (connector + rail for active, recess for
-    /// inactive) and its label. Split out so the drag-ghost can reuse the label
-    /// pass without the surface.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn paint_tab_chip(
-        renderer: &mut Renderer,
-        r: gui::Rect,
-        cell_h: f32,
-        cell_w: f32,
-        idx: usize,
-        label: &str,
-        active: bool,
-        busy: bool,
-        spinning: bool,
-        hover: bool,
-        held: bool,
-        spin: char,
-        bar_h: f32,
-        surface: [f32; 4],
-        active_surface: [f32; 4],
-        accent: [f32; 4],
-        active_fg: [f32; 4],
-        fg: [f32; 4],
-        fg_dim: [f32; 4],
-        is_ghost: bool,
-        multi: bool,
-    ) {
-        if is_ghost {
-            return; // drawn separately as the lifted ghost
-        }
-        let _ = busy;
-        if active {
-            // E2+ raised body: brighter/more opaque than the bar and inactive chips
-            // so the active tab clearly reads as "in focus". Only the TOP corners are
-            // rounded; the bottom edge is square and flush to the content seam. The
-            // per-corner rrect means there is no bottom corner feather to leak
-            // background through, so the connector patch below is gap-free.
-            renderer.push_overlay_rrect4_px(
-                r.x,
-                r.y,
-                r.w,
-                r.h,
-                [TAB_RADIUS, TAB_RADIUS, 0.0, 0.0],
-                active_surface,
-            );
-            // Connector: a thin patch over the seam, capped at the bar bottom edge
-            // (y = bar_h - 2 .. bar_h) so the active chip is FLUSH with the bar and
-            // never drops below it. (The old `bar_h - 2, h = 4` ran 2px into the
-            // content area, making the active tab look 2px taller than the bar.)
-            // The chip body's bottom is square (no corner feather), so a flush
-            // patch leaves no background hairline at the seam.
-            renderer.push_overlay_px(r.x, bar_h - 2.0, r.w, 2.0, active_surface);
-            // Soft accent crown (2px, low alpha). Inset horizontally by the corner
-            // radius so the bar spans only the FLAT top edge between the two rounded
-            // corners and never enters the corner zones — there is therefore no way
-            // for the accent to bleed outside the chip's rounded top corners onto the
-            // bar background. (The old full-width sharp quad filled those corner
-            // zones and, showing through the body's transparent rounded corners, read
-            // as a white/light rectangular fill behind the corners.) Drawn into
-            // `overlay_text` like the body so the pass order is consistent.
-            let crown = [accent[0], accent[1], accent[2], accent[3] * 0.5];
-            let crown_w = (r.w - 2.0 * TAB_RADIUS).max(0.0);
-            if crown_w > 0.0 {
-                renderer.push_overlay_rrect4_px(
-                    r.x + TAB_RADIUS,
-                    r.y,
-                    crown_w,
-                    2.0,
-                    [0.0, 0.0, 0.0, 0.0],
-                    crown,
-                );
-            }
-        } else {
-            // Inactive: strongly recessed chip — clearly subordinate to the active tab.
-            // Inset by 2px top and shrink 4px total height so it visually "recedes".
-            let rr = gui::Rect::new(r.x, r.y + 3.0, r.w, r.h - 5.0);
-            let fill = if held {
-                // Press: briefly brighten to surface level.
-                [surface[0], surface[1], surface[2], surface[3] * 0.70]
-            } else if hover {
-                // Hover: lift partway toward active.
-                [surface[0], surface[1], surface[2], surface[3] * 0.55]
-            } else {
-                // Rest: very recessed (alpha 0.20) so active tab contrast is obvious.
-                [surface[0], surface[1], surface[2], surface[3] * 0.20]
-            };
-            renderer.push_overlay_rrect_px(rr.x, rr.y, rr.w, rr.h, TAB_RADIUS, fill);
-            // Bottom groove anchors inactive chip visually.
-            if !hover && !held {
-                let h = gui::hairline();
-                renderer.push_overlay_px(
-                    rr.x,
-                    rr.y + rr.h - 1.0,
-                    rr.w,
-                    1.0,
-                    [h[0], h[1], h[2], h[3] * 0.4],
-                );
-            }
-            // Hover accent crown (soft, low alpha) signals interactability without
-            // a harsh bright edge line.
-            if hover && !held {
-                renderer.push_overlay_px(
-                    rr.x,
-                    rr.y,
-                    rr.w,
-                    1.0,
-                    [accent[0], accent[1], accent[2], accent[3] * 0.25],
-                );
-            }
-        }
-        let label_fg = if active { active_fg } else { fg_dim };
-        Self::paint_tab_label(
-            renderer, r, cell_h, cell_w, idx, label, active, busy, spinning, spin, label_fg,
-            accent, multi,
-        );
-        let _ = fg;
-    }
-
-    /// Draw a tab chip's status glyph + numbered title, clipped to the chip's text
-    /// area (leaving room for the close box on the right).
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn paint_tab_label(
-        renderer: &mut Renderer,
-        r: gui::Rect,
-        cell_h: f32,
-        cell_w: f32,
-        idx: usize,
-        label: &str,
-        active: bool,
-        busy: bool,
-        spinning: bool,
-        spin: char,
-        label_fg: [f32; 4],
-        accent: [f32; 4],
-        multi: bool,
-    ) {
-        let ty = (r.center_y() - cell_h * 0.5).round();
-        let mut tx = r.x + TAB_PAD_X;
-        // Leading status glyph: spinner while streaming, dot for background activity.
-        if spinning {
-            renderer.push_overlay_glyph_px(
-                tx.round(),
-                ty,
-                spin,
-                if active { label_fg } else { accent },
-            );
-            tx += cell_w;
-        } else if busy && !active {
-            renderer.push_overlay_glyph_px(tx.round(), ty, '•', accent);
-            tx += cell_w;
-        }
-        // Fit-to-width title (tail-ellipsized). A numeric prefix is shown only in
-        // multi-tab mode (a lone tab is titled by the window). Reserve room for the
-        // close box on the right when one exists (multi-tab only).
-        let reserve = if multi {
-            CLOSE_BOX + TAB_PAD_X
-        } else {
-            TAB_PAD_X
-        };
-        let text_w = (r.w - (tx - r.x) - reserve).max(0.0);
-        let max_chars = (text_w / cell_w).floor() as usize;
-        let s = if multi {
-            // The "N " number prefix is shown before the title; reserve its width
-            // (digits + a space) from max_chars BEFORE fitting the title, so the
-            // composed string never overflows the chip (prefix + fit_label must be
-            // ≤ max_chars together).
-            let prefix = format!("{} ", idx + 1);
-            let title_max = max_chars.saturating_sub(prefix.chars().count()).max(1);
-            format!("{}{}", prefix, fit_label(label, title_max))
-        } else {
-            fit_label(label, max_chars.max(1))
-        };
-        renderer.push_overlay_glyph_px_str(tx.round(), ty, &s, label_fg);
-    }
-
     /// Paint the settings form (§3.5) as a centered glass panel over a full-screen
     /// scrim, returning the interaction events for the caller to apply. Static (no
     /// `&self`) so it composes with the live `&mut Renderer` borrow held in
@@ -853,5 +451,160 @@ impl App {
                 w.request_redraw();
             }
         }
+    }
+
+    /// Paint the confirm-close modal: a centered frosted glass card asking the user
+    /// to confirm closing when a process is still running in the tab/pane. Returns
+    /// the interaction result so the caller can decide whether to proceed, cancel,
+    /// or wait for a button click.
+    ///
+    /// Layout:
+    ///   ┌─────────────────────────────────────┐
+    ///   │  A process is still running.        │
+    ///   │  Close this tab anyway?             │
+    ///   │                                     │
+    ///   │       [Cancel]      [Close]         │
+    ///   └─────────────────────────────────────┘
+    ///
+    /// The "Close" button uses the danger color; "Cancel" is the neutral surface.
+    /// Clicking outside the card is treated as Cancel. Static (no `&self`) so it
+    /// composes with the caller's live `&mut Renderer` borrow.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn paint_confirm_close(
+        renderer: &mut Renderer,
+        surface: (f32, f32),
+        cell_w: f32,
+        cell_h: f32,
+        mouse: (f32, f32),
+        mouse_down: bool,
+        click: bool,
+        gui_pressed: &mut Option<gui::WidgetId>,
+        gui_anims: &mut std::collections::HashMap<gui::WidgetId, gui::Anim>,
+    ) -> ConfirmCloseResult {
+        let (sw, sh) = surface;
+
+        // Full-screen dimming scrim.
+        renderer.push_overlay_px(0.0, 0.0, sw, sh, [0.0, 0.0, 0.0, 0.45]);
+
+        // Card dimensions: wide enough for two lines + buttons.
+        let card_w = (cell_w * 38.0).clamp(280.0, sw * 0.9);
+        let card_h = cell_h * 7.0;
+        let card_x = ((sw - card_w) * 0.5).round();
+        let card_y = ((sh - card_h) * 0.5).round();
+        let radius = gui_radius(cell_h);
+
+        // Glass card background.
+        renderer.push_overlay_rrect_px(card_x, card_y, card_w, card_h, radius, gui::glass_float());
+        // Subtle border.
+        let border = {
+            let h = gui::hairline();
+            [h[0], h[1], h[2], h[3] * 1.5]
+        };
+        renderer.push_overlay_rrect_px(
+            card_x - 0.5,
+            card_y - 0.5,
+            card_w + 1.0,
+            card_h + 1.0,
+            radius + 0.5,
+            border,
+        );
+        // Repaint inside to restore the card surface (border is painted over).
+        renderer.push_overlay_rrect_px(card_x, card_y, card_w, card_h, radius, gui::glass_float());
+
+        // Body text: two lines.
+        let line1 = "A process is still running.";
+        let line2 = "Close this tab anyway?";
+        let tx = (card_x + cell_w).round();
+        let ty1 = (card_y + cell_h).round();
+        let ty2 = (ty1 + cell_h * 1.5).round();
+        renderer.push_overlay_glyph_px_str(tx, ty1, line1, gui::fg());
+        renderer.push_overlay_glyph_px_str(tx, ty2, line2, gui::fg_dim());
+
+        // Button row: Cancel (left) and Close/danger (right), bottom of card.
+        let btn_w = (cell_w * 8.0).round();
+        let btn_h = (cell_h * 1.6).round();
+        let btn_pad = cell_w;
+        let btn_y = (card_y + card_h - btn_h - cell_h * 0.75).round();
+
+        // Cancel button (left-of-center).
+        let cancel_id = gui::id("confirm_close/cancel");
+        let cancel_x = (card_x + card_w * 0.5 - btn_w - btn_pad * 0.5).round();
+        let cancel_r = gui::Rect::new(cancel_x, btn_y, btn_w, btn_h);
+        let cancel_hover = gui::hit(cancel_r, mouse.0, mouse.1);
+        let cancel_held = cancel_hover && *gui_pressed == Some(cancel_id) && mouse_down;
+        let cancel_bg = gui::state_fill(
+            gui::glass_raised(),
+            if cancel_hover { 0.7 } else { 0.0 },
+            cancel_held,
+        );
+        renderer.push_overlay_rrect_px(
+            cancel_r.x, cancel_r.y, cancel_r.w, cancel_r.h, radius, cancel_bg,
+        );
+        let cancel_label = "Cancel";
+        let lw = cancel_label.chars().count() as f32 * cell_w;
+        let ltx = (cancel_r.x + (cancel_r.w - lw) * 0.5).round();
+        let lty = (cancel_r.center_y() - cell_h * 0.5).round();
+        renderer.push_overlay_glyph_px_str(ltx, lty, cancel_label, gui::fg());
+
+        // Close (danger) button (right-of-center).
+        let close_id = gui::id("confirm_close/close");
+        let close_x = (card_x + card_w * 0.5 + btn_pad * 0.5).round();
+        let close_r = gui::Rect::new(close_x, btn_y, btn_w, btn_h);
+        let close_hover = gui::hit(close_r, mouse.0, mouse.1);
+        let close_held = close_hover && *gui_pressed == Some(close_id) && mouse_down;
+        let danger = color::danger();
+        let close_bg_base = [danger[0], danger[1], danger[2], 0.85];
+        let close_bg = gui::state_fill(
+            close_bg_base,
+            if close_hover { 0.7 } else { 0.0 },
+            close_held,
+        );
+        renderer
+            .push_overlay_rrect_px(close_r.x, close_r.y, close_r.w, close_r.h, radius, close_bg);
+        let close_label = "Close";
+        let clw = close_label.chars().count() as f32 * cell_w;
+        let cltx = (close_r.x + (close_r.w - clw) * 0.5).round();
+        let clty = (close_r.center_y() - cell_h * 0.5).round();
+        // Danger button uses contrasting text.
+        let dluma = 0.2126 * danger[0] + 0.7152 * danger[1] + 0.0722 * danger[2];
+        let close_fg = if dluma > 0.4 {
+            [0.06, 0.06, 0.07, 1.0]
+        } else {
+            [0.97, 0.97, 0.98, 1.0]
+        };
+        renderer.push_overlay_glyph_px_str(cltx, clty, close_label, close_fg);
+
+        // Track press latching.
+        if mouse_down {
+            if cancel_hover && gui_pressed.is_none() {
+                *gui_pressed = Some(cancel_id);
+            } else if close_hover && gui_pressed.is_none() {
+                *gui_pressed = Some(close_id);
+            }
+        }
+
+        // Settle anims (no per-button animation needed; just suppress the entry).
+        let _ = gui_anims;
+
+        // Resolve a click.
+        if click {
+            let pressed_id = *gui_pressed;
+            if pressed_id == Some(cancel_id) && cancel_hover {
+                return ConfirmCloseResult::Cancel;
+            }
+            if pressed_id == Some(close_id) && close_hover {
+                return ConfirmCloseResult::Confirm;
+            }
+            // Click outside the card: treat as Cancel.
+            if !gui::hit(
+                gui::Rect::new(card_x, card_y, card_w, card_h),
+                mouse.0,
+                mouse.1,
+            ) {
+                return ConfirmCloseResult::Cancel;
+            }
+        }
+
+        ConfirmCloseResult::Pending
     }
 }

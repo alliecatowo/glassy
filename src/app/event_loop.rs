@@ -234,6 +234,19 @@ impl ApplicationHandler<UserEvent> for App {
                 self.new_tab(event_loop);
             }
         }
+        // Headless: inject a toast notification at startup so the toast overlay
+        // can be captured (GLASSY_TOAST=1 shows a default message; any non-empty
+        // value uses the value as the message text).
+        if let Ok(msg) = std::env::var("GLASSY_TOAST") {
+            let text = if msg.trim().is_empty() {
+                "Test toast notification".to_string()
+            } else {
+                msg
+            };
+            self.push_toast(text);
+            self.force_full_redraw = true;
+        }
+
         // Headless: split the active tab at startup to capture the multi-pane path.
         //   v = one vertical (left|right) split, h = one horizontal (top/bottom),
         //   grid = both (a 2x2 quad).
@@ -279,227 +292,9 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
-        match event {
-            UserEvent::Title(id, title) => {
-                // The focused pane drives the chip/window title. Non-focused panes
-                // of the active tab have their title stored in `others_titles` for
-                // the pane title-bar headers (Wave 3). After a split the focused
-                // leaf id != active_id, so resolve via active_focused_id().
-                if id == self.active_focused_id() {
-                    // Also keep the focused pane's title in others_titles so the
-                    // header painter can look up any pane id uniformly.
-                    if let Some(g) = self.panes.as_mut() {
-                        g.others_titles.insert(id, title.clone());
-                    }
-                    self.active_title = title;
-                    self.update_window_title();
-                } else if let Some(g) = self.panes.as_mut()
-                    && g.others.contains_key(&id)
-                {
-                    // Non-focused pane of the active tab.
-                    g.others_titles.insert(id, title);
-                } else if let Some(s) = self.background.iter_mut().find(|s| s.id == id) {
-                    // Parked tab (single-pane or its focused pane).
-                    s.title = title.clone();
-                    // Also store in background tab's pane group if it's multi-pane.
-                    if let Some(g) = s.panes.as_mut() {
-                        g.others_titles.insert(id, title);
-                    }
-                }
-            }
-            UserEvent::ChildExit(id) => {
-                self.handle_child_exit(id, event_loop);
-                return;
-            }
-            UserEvent::Bell(id) => {
-                // Ring for any pane of the active tab (the visible one).
-                if self.id_in_active_tab(id) {
-                    self.trigger_bell();
-                }
-            }
-            // A background tab produced output: its terminal state updated
-            // silently; no redraw needed until it becomes active.
-            UserEvent::Wakeup(id) => {
-                // (Re)arm this session's busy window: a wakeup means it just emitted
-                // output, so its chip spins until BUSY_LINGER elapses with no more.
-                // about_to_wait advances the spinner and clears the deadline (and
-                // keeps a finite wakeup scheduled) exactly like the bell flash.
-                let busy = Instant::now() + BUSY_LINGER;
-                // Output from a NON-focused pane of the ACTIVE tab is visible, so
-                // mark the active tab busy and repaint just like the focused pane.
-                if id != self.active_id && self.id_in_active_tab(id) {
-                    self.active_busy_until = Some(busy);
-                    self.mark_dirty(event_loop);
-                    return;
-                }
-                if id != self.active_id {
-                    // A background tab produced output (in any of its panes): flag
-                    // its chip for the activity dot. Only repaint on the false->true
-                    // edge so a busy background tab doesn't spam redraws.
-                    let owner = self
-                        .tab_pos_of_pane(id)
-                        .and_then(|p| self.tab_order.get(p).copied());
-                    if let Some(owner) = owner
-                        && let Some(s) = self.background.iter_mut().find(|s| s.id == owner)
-                    {
-                        let was_busy = s.busy_until.is_some_and(|t| Instant::now() < t);
-                        s.busy_until = Some(busy);
-                        if !s.activity || !was_busy {
-                            s.activity = true;
-                            self.mark_dirty(event_loop);
-                        }
-                    }
-                    return;
-                }
-                self.active_busy_until = Some(busy);
-            }
-            UserEvent::PtyWrite(id, text) => {
-                // Route the VT reply back to the exact pane that produced it (any
-                // tab, any split pane); not a visual change, so no repaint.
-                let bytes = text.into_bytes();
-                if let Some(pty) = self.pty_by_id(id) {
-                    pty.write(bytes);
-                }
-                return;
-            }
-            UserEvent::Cwd(id, path) => {
-                // OSC 7: record the reporting pane's cwd so new tabs/splits inherit
-                // it. Only a tab's FOCUSED pane drives the inherited cwd (mirrors
-                // the title handling); not a visual change, so no repaint.
-                if self.id_in_active_tab(id) {
-                    if id == self.active_focused_id() {
-                        self.active_cwd = Some(path);
-                    } else {
-                        // A non-focused active-tab pane reports its own cwd: the
-                        // focused pane's stays the tab's inherited cwd, but we still
-                        // record the per-pane cwd for session persistence.
-                        self.active_pane_cwds.insert(id, path);
-                    }
-                } else {
-                    // A pane of a parked tab. The focused pane (id == tab id) drives
-                    // last_cwd; a non-focused pane records into pane_cwds.
-                    for s in self.background.iter_mut() {
-                        if s.id == id {
-                            s.last_cwd = Some(path);
-                            break;
-                        }
-                        if s.panes.as_ref().is_some_and(|g| g.others.contains_key(&id)) {
-                            s.pane_cwds.insert(id, path);
-                            break;
-                        }
-                    }
-                }
-                return;
-            }
-            UserEvent::ClipboardStore(_id, _ty, mut text) => {
-                // OSC 52 copy: write to the OS clipboard on the UI thread (arboard
-                // must not run on the PTY thread). arboard exposes only the standard
-                // clipboard, so a Selection store also lands there. Not visual.
-                // Cap the payload (~1 MiB) so a hostile / runaway program can't push
-                // the clipboard to an unbounded size; truncate on a char boundary.
-                const OSC52_MAX: usize = 1 << 20;
-                if text.len() > OSC52_MAX {
-                    let mut end = OSC52_MAX;
-                    while end > 0 && !text.is_char_boundary(end) {
-                        end -= 1;
-                    }
-                    text.truncate(end);
-                    log::debug!("OSC 52 store truncated to {end} bytes");
-                }
-                if let Some(cb) = self.clipboard()
-                    && let Err(e) = cb.set_text(text)
-                {
-                    log::debug!("OSC 52 clipboard store failed: {e}");
-                }
-                return;
-            }
-            UserEvent::ClipboardLoad(id, _ty, formatter) => {
-                // OSC 52 read: read the clipboard, format the reply, and write it
-                // back to the requesting pane over the PtyWrite path. Not visual.
-                let text = self.clipboard().and_then(|cb| match cb.get_text() {
-                    Ok(t) => Some(t),
-                    Err(e) => {
-                        log::debug!("OSC 52 clipboard load failed: {e}");
-                        None
-                    }
-                });
-                if let Some(text) = text
-                    && let Some(pty) = self.pty_by_id(id)
-                {
-                    pty.write(formatter.0(&text).into_bytes());
-                }
-                return;
-            }
-            UserEvent::SemanticMark(_id, _mark) => {
-                // OSC 133 semantic mark: the PromptTracker on the Pty already
-                // recorded the row offset for 'A' marks. No redraw needed; this
-                // event is a notification hook for future UI use (e.g. prompt-count
-                // in the status bar or Shift+Up/Down keybind wiring in app/input.rs).
-                return;
-            }
-            UserEvent::Notification(_id, text) => {
-                // OSC 9 / OSC 777: fire a desktop notification when the window is
-                // not focused so background jobs can alert the user. When the window
-                // is focused the shell's own output is visible, so skip to avoid
-                // spurious notifications from noisy programs.
-                if !self.focused {
-                    fire_desktop_notification("glassy", &text);
-                }
-                return;
-            }
-            UserEvent::ConfigReload => {
-                // Config file changed; reload from disk and apply live-reloadable settings.
-                match crate::config::Settings::resolve(std::iter::empty()) {
-                    Ok(Some(settings)) => {
-                        self.apply_config_reload(&settings.config);
-                    }
-                    Ok(None) => {
-                        log::debug!("config reload: --help/--version");
-                    }
-                    Err(e) => {
-                        log::warn!("config reload failed: {e}");
-                    }
-                }
-                return;
-            }
-            UserEvent::ModifyOtherKeys(id, level) => {
-                // xterm modifyOtherKeys level changed by the running application
-                // (CSI > 4 ; N m intercepted in the PTY loop). Update the field so
-                // subsequent encode_key calls emit the correct encoding for modified
-                // printable keys. Only the active focused pane's level applies
-                // (keystrokes route to self.pty, whose id is active_focused_id()).
-                if id == self.active_focused_id() {
-                    self.modify_other_keys = level;
-                }
-                return;
-            }
-            UserEvent::Progress(id, state) => {
-                // OSC 9;4 progress report: update the active session's indicator.
-                // Non-active sessions' progress is ignored (only the focused session
-                // renders a progress bar). On Remove, clear the indicator. Resolve
-                // the focused pane via active_focused_id() (split-aware).
-                if id == self.active_focused_id() {
-                    self.active_progress = match state {
-                        crate::image::ProgressState::Remove => None,
-                        other => Some(other),
-                    };
-                }
-                // Progress changes are visual — mark dirty so the status bar repaints.
-            }
-            UserEvent::TextBlinkPresent(id) => {
-                // SGR 5/6 (text blink) detected in the byte stream of the active
-                // session. Arm the text-blink timer so `about_to_wait` drives phase
-                // flips and periodic redraws (like the cursor-blink timer). Only the
-                // active focused pane can have its blinking cells visible on screen.
-                if id == self.active_focused_id() && !self.text_blink_active {
-                    self.text_blink_active = true;
-                    self.text_blink_on = true;
-                    self.text_blink_at = Instant::now() + BLINK_INTERVAL;
-                }
-                // Already active or not our session: still mark dirty for the redraw.
-            }
-        }
-        self.mark_dirty(event_loop);
+        // Dispatch to the extracted handler in user_event.rs (keeps this file
+        // under the 700-line limit while preserving the trait impl here).
+        user_event::dispatch(self, event_loop, event);
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
@@ -769,6 +564,14 @@ impl ApplicationHandler<UserEvent> for App {
             self.dirty = true;
         }
 
+        // Toast notifications: include their next deadline in the wakeup schedule
+        // so fade animations keep ticking even when nothing else is dirty.
+        let toast_deadline = crate::app::toast::next_deadline(&self.toasts);
+        if toast_deadline.is_some_and(|deadline| now >= deadline) {
+            // A toast phase transition happened; force a repaint.
+            self.dirty = true;
+        }
+
         if !self.dirty {
             // Idle: stay parked on `Wait` (0% CPU) unless a blink flip, a flash
             // boundary, or a spinner frame is pending — then wake at the earliest.
@@ -776,12 +579,31 @@ impl ApplicationHandler<UserEvent> for App {
             if gui_active {
                 event_loop.set_control_flow(ControlFlow::Poll);
             } else {
-                match self.next_wake(blink_active, flash_active, spin_active) {
+                let wake = [
+                    self.next_wake(blink_active, flash_active, spin_active),
+                    toast_deadline,
+                ]
+                .into_iter()
+                .flatten()
+                .min();
+                match wake {
                     Some(at) => event_loop.set_control_flow(ControlFlow::WaitUntil(at)),
                     None => event_loop.set_control_flow(ControlFlow::Wait),
                 }
             }
             return;
+        }
+
+        // Deferred confirm-close execution: the render path sets this flag when the
+        // "Close" button is clicked; we execute here where ActiveEventLoop is available.
+        if self.pending_confirm_execute {
+            self.pending_confirm_execute = false;
+            let pending = self.confirm_close.take();
+            match pending {
+                Some(ConfirmClose::ActiveTab) => self.close_active_tab(event_loop),
+                Some(ConfirmClose::ActivePane) => self.close_pane(event_loop),
+                None => {}
+            }
         }
 
         if now >= self.next_frame {
