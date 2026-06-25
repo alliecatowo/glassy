@@ -578,20 +578,36 @@ pub(super) fn discover_font_producers(requested: Option<&str>) -> Vec<CandidateP
         }));
     }
 
-    // 2b. macOS: scan ~/Library/Fonts and /Library/Fonts for curated Nerd Font families.
+    // 2b. macOS: prefer any installed Nerd Font monospace, discovered by property
+    //     (family name contains "nerd font" + monospaced) rather than a hardcoded
+    //     family list. This gives icon/powerline coverage in the primary font when
+    //     the user has any Nerd Font installed, without naming specific fonts.
     #[cfg(target_os = "macos")]
-    for family in CURATED_FAMILIES_MACOS {
-        let cache_clone = macos_cache.clone();
-        producers.push(Box::new(move || {
-            let path = find_macos_font_file(family, &cache_clone)?;
-            let bytes = read_font(&path)?;
-            Some(FontCandidate {
-                bytes,
-                path: Some(path.clone()),
-                source_label: format!("{family} ({})", path.display()),
-            })
-        }));
-    }
+    producers.push(Box::new(move || {
+        let path = find_macos_nerd_font()?;
+        let bytes = read_font(&path)?;
+        Some(FontCandidate {
+            bytes,
+            path: Some(path.clone()),
+            source_label: format!("nerd font ({})", path.display()),
+        })
+    }));
+
+    // 2c. macOS: the OS default monospace, resolved live via CoreText
+    //     (kCTFontUserFixedPitchFontType). No hardcoded paths — this is whatever
+    //     the system designates (SF Mono / Menlo). Any glyph the primary font
+    //     lacks (icons, emoji, CJK) is resolved per-glyph by the CoreText cascade
+    //     in shape.rs, so this primary need not cover everything.
+    #[cfg(target_os = "macos")]
+    producers.push(Box::new(|| {
+        let path = coretext_monospace_path()?;
+        let bytes = read_font(&path)?;
+        Some(FontCandidate {
+            bytes,
+            path: Some(path.clone()),
+            source_label: format!("coretext system monospace ({})", path.display()),
+        })
+    }));
 
     // 3. Generic monospace via fontconfig; always a real monospace face.
     #[cfg(target_os = "linux")]
@@ -751,14 +767,10 @@ fn fc_match_monospace_cached(cache: &std::collections::HashMap<String, String>) 
     if path.is_empty() { None } else { Some(path) }
 }
 
-/// Known monospace font locations, probed in order as a last resort.
+/// macOS resolves its monospace primary live via CoreText (see
+/// `coretext_monospace_path`), so there are no hardcoded probe paths here.
 #[cfg(target_os = "macos")]
-const PROBE_PATHS: &[&str] = &[
-    "/System/Library/Fonts/SFNSMono.ttf",
-    "/System/Library/Fonts/Menlo.ttc",
-    "/System/Library/Fonts/Monaco.ttf",
-    "/Library/Fonts/Menlo.ttc",
-];
+const PROBE_PATHS: &[&str] = &[];
 
 #[cfg(not(target_os = "macos"))]
 const PROBE_PATHS: &[&str] = &[
@@ -766,32 +778,6 @@ const PROBE_PATHS: &[&str] = &[
     "/usr/share/fonts/dejavu-sans-mono-fonts/DejaVuSansMono.ttf",
     "/usr/share/fonts/TTF/DejaVuSansMono.ttf",
     "/usr/share/fonts/liberation/LiberationMono-Regular.ttf",
-];
-
-/// Nerd Font family name prefixes to search for in macOS font directories.
-/// Listed in priority order; discovery stops at the first one found.
-/// The "Mono" suffix variants (single-cell-width icons) are preferred for
-/// terminal use, so each family lists its Mono variant first.
-#[cfg(target_os = "macos")]
-const CURATED_FAMILIES_MACOS: &[&str] = &[
-    "FiraCodeNerdFontMono",
-    "FiraCodeNerdFont",
-    "JetBrainsMonoNerdFontMono",
-    "JetBrainsMonoNerdFont",
-    "IntoneMonoNerdFontMono",
-    "IntoneMonoNerdFont",
-    "HackNerdFontMono",
-    "HackNerdFont",
-    "MesloLGSNerdFontMono",
-    "MesloLGSNerdFont",
-    "CascadiaCodeNerdFontMono",
-    "CascadiaCodeNerdFont",
-    "IosevkaNerdFontMono",
-    "IosevkaNerdFont",
-    "SourceCodeProNerdFontMono",
-    "SourceCodeProNerdFont",
-    "UbuntuMonoNerdFontMono",
-    "UbuntuMonoNerdFont",
 ];
 
 /// Path to the macOS font-discovery cache (mirrors the Linux fc-cache).
@@ -868,6 +854,73 @@ fn macos_font_dirs() -> Vec<PathBuf> {
     dirs.push(PathBuf::from("/Library/Fonts"));
     dirs.push(PathBuf::from("/System/Library/Fonts"));
     dirs
+}
+
+/// Find any installed Nerd Font monospace by *property* — the normalized file
+/// stem contains "nerdfont" — rather than matching specific family names. The
+/// "Mono" variant (single-cell icons) and the Regular weight are preferred so a
+/// terminal gets even-width icons. Returns the first match, or `None` if no Nerd
+/// Font is installed (discovery then falls through to the system monospace).
+#[cfg(target_os = "macos")]
+fn find_macos_nerd_font() -> Option<PathBuf> {
+    let dirs = macos_font_dirs();
+    // Two passes: first require the "mono" + "regular" variant, then accept any
+    // Nerd Font face. Each pass scans user dirs before system dirs.
+    for (want_mono, want_regular) in [(true, true), (true, false), (false, false)] {
+        for dir in &dirs {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let fname = entry.file_name();
+                let fname_str = fname.to_string_lossy();
+                let ext = fname_str.rsplit('.').next().map(|e| e.to_ascii_lowercase());
+                if !matches!(ext.as_deref(), Some("ttf" | "otf" | "ttc")) {
+                    continue;
+                }
+                let stem = fname_str
+                    .rsplit_once('.')
+                    .map(|(s, _)| s)
+                    .unwrap_or(&fname_str);
+                let n = stem.replace(' ', "").to_lowercase();
+                if !n.contains("nerdfont") {
+                    continue;
+                }
+                if want_mono && !n.contains("nerdfontmono") {
+                    continue;
+                }
+                if want_regular && !n.contains("regular") {
+                    continue;
+                }
+                // Skip explicit non-regular weights/styles on the regular passes.
+                if want_regular
+                    && (n.contains("bold")
+                        || n.contains("italic")
+                        || n.contains("light")
+                        || n.contains("thin"))
+                {
+                    continue;
+                }
+                log::debug!("glassy: macos nerd font: {}", entry.path().display());
+                return Some(entry.path());
+            }
+        }
+    }
+    None
+}
+
+/// Resolve the OS default monospace font's file path via CoreText
+/// (`kCTFontUserFixedPitchFontType` — whatever the system designates, e.g. SF
+/// Mono or Menlo). No hardcoded paths: CoreText reports the live system choice.
+#[cfg(target_os = "macos")]
+fn coretext_monospace_path() -> Option<PathBuf> {
+    use core_foundation::url::CFURL;
+    use core_text::font::{kCTFontUserFixedPitchFontType, new_ui_font_for_language};
+
+    let font = new_ui_font_for_language(kCTFontUserFixedPitchFontType, 14.0, None);
+    let url: CFURL = font.url()?;
+    // CFURL → filesystem path. `to_path()` yields a PathBuf for file:// URLs.
+    url.to_path()
 }
 
 /// Search macOS font directories for a font file matching `family`, checking
