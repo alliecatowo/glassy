@@ -838,6 +838,41 @@ impl App {
             );
         }
 
+        // In-app toast notifications: painted above the terminal chrome but below
+        // any modal (settings/help). Toasts are transient overlays that do not block
+        // interaction. They are only painted when there are live toasts.
+        {
+            let tbh = tab_bar_h(renderer.cell_metrics().height);
+            let still_alive = crate::app::toast::paint_toasts(renderer, &mut self.toasts, tbh);
+            if still_alive {
+                // Schedule another frame so the fade animations tick.
+                self.dirty = true;
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+            }
+        }
+
+        // Confirm-close modal: a simple "Close tab? A process is still running"
+        // dialog drawn above everything else when a close was intercepted.
+        let confirm_result = if self.confirm_close.is_some() {
+            let (sw, sh) = renderer.surface_size();
+            let m = renderer.cell_metrics();
+            Some(Self::paint_confirm_close(
+                renderer,
+                (sw as f32, sh as f32),
+                m.width,
+                m.height,
+                (self.mouse_px.0 as f32, self.mouse_px.1 as f32),
+                self.held_button == Some(0),
+                self.gui_click_edge,
+                &mut self.gui_pressed,
+                &mut self.gui_anims,
+            ))
+        } else {
+            None
+        };
+
         // Record the state this frame drew from, so the next frame can repaint only
         // what changed (the cursor's old/new row, selection, scroll position).
         self.prev_cursor = cur_cursor_cell;
@@ -897,5 +932,39 @@ impl App {
         // only; the actual invocation happens in the MouseInput handler via
         // `menu_hit_test` (which now uses pixel coordinates matching the drawn panel).
         let _ = menu_clicked_action;
+
+        // Apply confirm-close modal result (renderer borrow has ended here).
+        if let Some(result) = confirm_result {
+            use chrome::ConfirmCloseResult::*;
+            match result {
+                Confirm => {
+                    // User confirmed: actually perform the close.
+                    let pending = self.confirm_close.take();
+                    self.force_full_redraw = true;
+                    // We need an event_loop reference to close; since we can't
+                    // get it from here, queue it as a deferred action. For now
+                    // we set a flag that the next event will pick up.
+                    // NOTE: This is handled by a deferred field read in event_loop.rs.
+                    // See `pending_confirm_close` logic.
+                    match pending {
+                        Some(ConfirmClose::ActiveTab) => {
+                            // We can't call event_loop here; use a flag.
+                            self.confirm_close = Some(ConfirmClose::ActiveTab);
+                            self.pending_confirm_execute = true;
+                        }
+                        Some(ConfirmClose::ActivePane) => {
+                            self.confirm_close = Some(ConfirmClose::ActivePane);
+                            self.pending_confirm_execute = true;
+                        }
+                        None => {}
+                    }
+                }
+                Cancel => {
+                    self.confirm_close = None;
+                    self.force_full_redraw = true;
+                }
+                Pending => {}
+            }
+        }
     }
 }

@@ -302,6 +302,71 @@ impl App {
         }
     }
 
+    /// Copy the current selection to the X11/Wayland PRIMARY selection (Linux
+    /// only). A no-op if the selection is empty or arboard's primary clipboard
+    /// is unavailable. Designed to be called immediately after `copy_selection`
+    /// so both the standard and PRIMARY clipboards are set simultaneously.
+    ///
+    /// Uses arboard's `SetExtLinux` trait with `LinuxClipboardKind::Primary`,
+    /// which works on both X11 and Wayland (when the compositor supports it).
+    #[cfg(target_os = "linux")]
+    pub(crate) fn copy_selection_to_primary(&mut self) {
+        let text = match self.pty.as_ref() {
+            Some(pty) => pty.term.lock().selection_to_string(),
+            None => None,
+        };
+        let Some(text) = text else { return };
+        if text.is_empty() {
+            return;
+        }
+        // Use arboard's SetExtLinux trait to target the PRIMARY selection.
+        // PRIMARY is a best-effort convenience; log and swallow errors.
+        use arboard::{LinuxClipboardKind, SetExtLinux};
+        if let Some(cb) = self.clipboard()
+            && let Err(e) = cb.set().clipboard(LinuxClipboardKind::Primary).text(text)
+        {
+            log::debug!("PRIMARY clipboard set failed: {e}");
+        }
+    }
+
+    /// Paste from the X11/Wayland PRIMARY selection (Linux). Falls back to the
+    /// standard clipboard when PRIMARY is empty or unavailable. This implements
+    /// the standard X11/terminal middle-click-paste behaviour.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn paste_primary_or_clipboard(&mut self) {
+        // Try PRIMARY first via arboard's GetExtLinux trait.
+        use arboard::{GetExtLinux, LinuxClipboardKind};
+        let primary_text: Option<String> = if let Some(cb) = self.clipboard() {
+            cb.get()
+                .clipboard(LinuxClipboardKind::Primary)
+                .text()
+                .ok()
+                .filter(|t| !t.is_empty())
+        } else {
+            None
+        };
+        if let Some(text) = primary_text {
+            // Paste PRIMARY text directly.
+            let bracketed = self.term_mode().contains(TermMode::BRACKETED_PASTE);
+            if let Some(pty) = self.pty.as_ref() {
+                pty.term
+                    .lock()
+                    .scroll_display(alacritty_terminal::grid::Scroll::Bottom);
+                pty.paste(&text, bracketed);
+            }
+        } else {
+            // PRIMARY unavailable: fall back to standard clipboard.
+            self.paste_clipboard();
+        }
+    }
+
+    /// Queue an in-app toast notification. The toast fades in, stays ~4 s, then
+    /// fades out.  This is the sole entry point; toast rendering happens in the
+    /// render path via `toast::paint_toasts`.
+    pub(crate) fn push_toast(&mut self, message: impl Into<String>) {
+        crate::app::toast::push(&mut self.toasts, message);
+    }
+
     /// Lazily open the OS clipboard. Returns `None` if it is unavailable.
     pub(crate) fn clipboard(&mut self) -> Option<&mut arboard::Clipboard> {
         if self.clipboard.is_none() {

@@ -327,7 +327,7 @@ impl App {
         use KeyAction::*;
         match action {
             NewTab => self.new_tab(event_loop),
-            ClosePane => self.close_pane(event_loop),
+            ClosePane => self.try_close_pane(event_loop),
             NextTab => self.cycle_tab(1, event_loop),
             PrevTab => self.cycle_tab(-1, event_loop),
             SplitVertical => self.split_pane(pane::Dir::Vertical, event_loop),

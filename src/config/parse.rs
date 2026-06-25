@@ -41,6 +41,7 @@ pub(super) struct RawConfig {
     pub font_features: Option<Vec<String>>,
     pub cwd: Option<String>,
     pub restore_session: Option<bool>,
+    pub copy_on_select: Option<bool>,
     pub color_fg: Option<String>,
     pub color_bg: Option<String>,
     pub color_cursor: Option<String>,
@@ -130,6 +131,7 @@ impl RawConfig {
             font_features: self.font_features.unwrap_or_default(),
             initial_cwd: self.cwd.filter(|s| !s.is_empty()).map(PathBuf::from),
             restore_session: self.restore_session.unwrap_or(false),
+            copy_on_select: self.copy_on_select.unwrap_or(false),
             keymap: build_keymap(default_keymap(), &self.keybinding_overrides),
         };
 
@@ -458,6 +460,9 @@ pub(super) fn apply_kv(key: &str, value: &str, raw: &mut RawConfig) -> Result<()
         }
         "restore_session" => {
             raw.restore_session = Some(parse_bool(value, "restore_session")?);
+        }
+        "copy_on_select" => {
+            raw.copy_on_select = Some(parse_bool(value, "copy_on_select")?);
         }
         "color.fg" => {
             parse_hex_color(value)?;

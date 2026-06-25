@@ -46,7 +46,7 @@ impl App {
                 self.help_open = true;
                 self.mark_dirty(event_loop);
             }
-            MenuAction::CloseTab => self.close_active_tab(event_loop),
+            MenuAction::CloseTab => self.try_close_active_tab(event_loop),
         }
     }
 
@@ -302,7 +302,19 @@ impl App {
                     self.dragging_tab = Some(self.active_pos());
                 }
             }
-            Some(StripItem::TabClose(pos)) => self.close_tab(pos, event_loop),
+            Some(StripItem::TabClose(pos)) => {
+                // Guard the active tab close with a running-child check; closing
+                // a background tab is always immediate (we can't easily check its
+                // /proc state without activating it).
+                let is_active = self.tab_order.get(pos) == Some(&self.active_id);
+                if is_active && self.has_running_child() {
+                    self.confirm_close = Some(ConfirmClose::ActiveTab);
+                    self.force_full_redraw = true;
+                    self.mark_dirty(event_loop);
+                } else {
+                    self.close_tab(pos, event_loop);
+                }
+            }
             Some(StripItem::NewTab) => self.new_tab(event_loop),
             Some(StripItem::Help) => {
                 let opening = !self.help_open;
