@@ -80,11 +80,14 @@ pub struct Text {
     /// when the user did not request any features. Built once at load time from
     /// the config's `font_features` list; re-applied on every `build_attrs` call.
     font_features: FontFeatures,
-    /// Family name of the emoji font in the database, used to force ZWJ clusters
-    /// into a single font run. Shaping 🏳️‍⚧️ across two fonts (JetBrains for ⚧,
-    /// Color Emoji for 🏳) drops the ZWJ ligature; using the emoji font for the
-    /// whole cluster lets the GSUB lookup resolve it.
+    /// Family name of the emoji font in the database, used on Linux/non-macOS to
+    /// force ZWJ clusters into a single font run. On macOS the CoreText path handles
+    /// ZWJ, so this field is unused there (but kept for cross-platform parity).
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     emoji_family: Option<String>,
+    /// Physical pixel size of the loaded font. Used by the CoreText ZWJ path on
+    /// macOS to render at the correct size without threading font_px through callers.
+    font_px: f32,
 }
 
 /// Build shaping attributes for the given style against the resolved family,
@@ -238,6 +241,7 @@ impl Text {
             family,
             font_features: parse_font_features(font_features),
             emoji_family,
+            font_px,
         };
 
         let cell = text.measure_cell(font_px, line_height);
@@ -378,25 +382,58 @@ impl Text {
         bold: bool,
         italic: bool,
     ) -> Vec<RasterizedGlyph> {
-        // ZWJ clusters (compound emoji like 🏳️‍⚧️) must be shaped entirely by the
-        // emoji font. If we shape with the primary monospace font, component glyphs
-        // that happen to exist in it (e.g. ⚧ in Nerd Font) cause the shaper to
-        // split the run, silently dropping the ZWJ ligature. Force the emoji family
-        // for any cluster that contains a ZWJ or an emoji code point.
-        let needs_emoji = cluster.contains('\u{200D}')
-            || cluster.chars().any(|c| {
-                let cp = c as u32;
-                (0x1F300..=0x1FAFF).contains(&cp)   // misc + supplemental emoji
-                    || (0x2600..=0x27BF).contains(&cp) // misc symbols / dingbats
-            });
-        if needs_emoji && let Some(ref ef) = self.emoji_family.clone() {
-            return self.build_glyphs_with_family(cluster, ef, bold, italic);
+        // Variation-selector-only clusters (e.g. ▶ + U+FE0F): for characters that
+        // are NOT inherently emoji (< U+1F000), VS-16 requests emoji presentation but
+        // terminal TUI apps (Claude Code, etc.) expect text rendering in the current
+        // fg color. Strip the VS so ▶️ renders as ▶ via the terminal font, not as a
+        // colored Apple Color Emoji square. Characters ≥ U+1F000 are inherently emoji
+        // and keep their VS for correct Apple Color Emoji rendering.
+        if !cluster.contains('\u{200D}') {
+            let base_cp = cluster.chars().next().map(|c| c as u32).unwrap_or(0);
+            let is_inherent_emoji = base_cp >= 0x1F000;
+            if !is_inherent_emoji {
+                let stripped: String = cluster
+                    .chars()
+                    .filter(|&c| c != '\u{FE0F}' && c != '\u{FE0E}')
+                    .collect();
+                if !stripped.is_empty() && stripped != cluster {
+                    return self.build_glyphs(&stripped, bold, italic);
+                }
+            }
+        }
+
+        // ZWJ compound emoji (🏳️‍⚧️, 👨‍👩‍👧 etc.): rustybuzz doesn't resolve Apple
+        // Color Emoji's GSUB ZWJ lookup chain. On macOS, use CoreText — the same
+        // native shaper ghostty uses — which resolves ZWJ correctly.
+        #[cfg(target_os = "macos")]
+        if cluster.contains('\u{200D}')
+            && let Some(g) = render_zwj_coretext(cluster, self.font_px)
+        {
+            return vec![g];
+        }
+
+        // On Linux/non-macOS: force the emoji font family so component glyphs in the
+        // primary Nerd Font (e.g. ⚧ U+26A7) don't split the ZWJ shaping run.
+        // On macOS this is handled by the CoreText path above; forcing the font here
+        // would change the glyph placement vs the working coverage-fallback path and
+        // cause simple emoji to appear raised.
+        #[cfg(not(target_os = "macos"))]
+        {
+            let needs_emoji = cluster.contains('\u{200D}')
+                || cluster.chars().any(|c| {
+                    let cp = c as u32;
+                    (0x1F300..=0x1FAFF).contains(&cp) || (0x2600..=0x27BF).contains(&cp)
+                });
+            if needs_emoji && let Some(ref ef) = self.emoji_family.clone() {
+                return self.build_glyphs_with_family(cluster, ef, bold, italic);
+            }
         }
         self.build_glyphs(cluster, bold, italic)
     }
 
-    /// Shape using an explicit family name rather than the primary font. Used for
-    /// ZWJ emoji clusters that must stay in a single font run.
+    /// Shape using an explicit family name rather than the primary font. Used on
+    /// Linux/non-macOS to keep ZWJ clusters in a single font run.
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     fn build_glyphs_with_family(
         &mut self,
         text: &str,
@@ -607,4 +644,96 @@ impl Text {
         // "fi" has 2 input characters; a liga font collapses them into 1 glyph.
         glyph_count < 2
     }
+}
+
+/// Render a ZWJ compound emoji cluster using CoreText + Apple Color Emoji.
+///
+/// rustybuzz (cosmic-text's shaper) doesn't apply Apple Color Emoji's GSUB ZWJ
+/// lookup chain, so 🏳️‍⚧️ and similar sequences render as broken separate glyphs.
+/// CoreText is the native macOS shaper (same as ghostty) and resolves ZWJ correctly.
+///
+/// Returns straight RGBA8 pixel data matching the atlas's `Rgba8Unorm` format.
+#[cfg(target_os = "macos")]
+fn render_zwj_coretext(cluster: &str, font_px: f32) -> Option<RasterizedGlyph> {
+    use core_foundation::attributed_string::CFMutableAttributedString;
+    use core_foundation::base::{CFRange, TCFType};
+    use core_foundation::string::CFString;
+    use core_graphics::base::{kCGBitmapByteOrder32Host, kCGImageAlphaPremultipliedFirst};
+    use core_graphics::color_space::CGColorSpace;
+    use core_graphics::context::CGContext;
+    use core_text::line::CTLine;
+    use core_text::string_attributes::kCTFontAttributeName;
+
+    let font = core_text::font::new_from_name("Apple Color Emoji", font_px as f64).ok()?;
+
+    let cf_str = CFString::new(cluster);
+    let mut attr = CFMutableAttributedString::new();
+    // replace_str inserts text into the empty mutable attributed string.
+    attr.replace_str(&cf_str, CFRange::init(0, 0));
+    // Range in UTF-16 units (CFString char_len() returns UTF-16 length, correct for emoji).
+    let full = CFRange::init(0, cf_str.char_len());
+    // SAFETY: kCTFontAttributeName is an extern "C" static from CoreText — the
+    // documented way to name the font attribute in CFAttributedString.
+    unsafe {
+        attr.set_attribute(full, kCTFontAttributeName, &font);
+    }
+
+    let line = CTLine::new_with_attributed_string(attr.as_concrete_TypeRef());
+
+    // Measure inked bounds against a 1×1 probe context (bounds don't depend on size).
+    let rgb = CGColorSpace::create_device_rgb();
+    let bitmap_info = kCGBitmapByteOrder32Host | kCGImageAlphaPremultipliedFirst;
+    let probe = CGContext::create_bitmap_context(None, 1, 1, 8, 4, &rgb, bitmap_info);
+    let bounds = line.get_image_bounds(&probe);
+
+    let w = bounds.size.width.ceil() as usize;
+    let h = bounds.size.height.ceil() as usize;
+    if w == 0 || h == 0 {
+        return None;
+    }
+
+    let stride = w * 4;
+    let mut ctx = CGContext::create_bitmap_context(None, w, h, 8, stride, &rgb, bitmap_info);
+
+    // Flip CTM so the backing buffer ends up top-left (row 0 = top), matching
+    // the atlas/RasterizedGlyph convention. Without this CoreGraphics origin is
+    // bottom-left.
+    ctx.translate(0.0, h as f64);
+    ctx.scale(1.0, -1.0);
+    ctx.set_should_antialias(true);
+
+    // Shift so the glyph's inked box starts at the buffer origin (bounds.origin can
+    // be negative — ink left of the pen / below the baseline).
+    ctx.set_text_position(-bounds.origin.x, -bounds.origin.y);
+    line.draw(&ctx);
+
+    // ctx.data() returns premultiplied BGRA (kCGBitmapByteOrder32Host +
+    // kCGImageAlphaPremultipliedFirst on little-endian). Convert to straight RGBA
+    // to match the swash color path and the atlas's Rgba8Unorm format.
+    let src = ctx.data();
+    let mut data = vec![0u8; w * h * 4];
+    for (dst, px) in data.chunks_exact_mut(4).zip(src.chunks_exact(4)) {
+        let (b, g, r, a) = (px[0], px[1], px[2], px[3]);
+        if a == 0 {
+            continue; // fully transparent — leave zeroed
+        }
+        // Un-premultiply: straight = round(premul * 255 / alpha).
+        let unpre = |c: u8| -> u8 { ((c as u16 * 255 + a as u16 / 2) / a as u16).min(255) as u8 };
+        dst[0] = unpre(r);
+        dst[1] = unpre(g);
+        dst[2] = unpre(b);
+        dst[3] = a;
+    }
+
+    Some(RasterizedGlyph {
+        width: w as u32,
+        height: h as u32,
+        left: bounds.origin.x.floor() as i32,
+        // top = distance from baseline to top of bitmap (positive = above baseline).
+        // CoreText origin.y = baseline → bottom of ink, so top = origin.y + h.
+        top: (bounds.origin.y + h as f64).round() as i32,
+        is_color: true,
+        data,
+        advance: 0.0,
+    })
 }

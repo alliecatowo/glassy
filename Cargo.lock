@@ -416,6 +416,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "core-text"
+version = "20.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c9d2790b5c08465d49f8dc05c8bcae9fea467855947db39b0f8145c091aaced5"
+dependencies = [
+ "core-foundation",
+ "core-graphics",
+ "foreign-types",
+ "libc",
+]
+
+[[package]]
 name = "core_maths"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -860,11 +872,17 @@ dependencies = [
  "anyhow",
  "arboard",
  "bytemuck",
+ "core-foundation",
+ "core-graphics",
+ "core-text",
  "cosmic-text",
  "env_logger",
  "log",
  "notify",
  "notify-rust",
+ "objc2 0.5.2",
+ "objc2-app-kit 0.2.2",
+ "objc2-foundation 0.2.2",
  "png",
  "polling",
  "pollster",

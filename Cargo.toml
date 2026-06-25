@@ -50,6 +50,17 @@ wgpu = { version = "29.0.3", default-features = false, features = ["vulkan", "wg
 [target.'cfg(target_os = "macos")'.dependencies]
 arboard = { version = "3.6.1", default-features = false }
 wgpu = { version = "29.0.3", default-features = false, features = ["metal", "wgsl", "std", "parking_lot"] }
+# CoreText for ZWJ compound emoji (🏳️‍⚧️ etc.) — rustybuzz doesn't apply Apple's
+# GSUB ZWJ lookup chain; CoreText does (same as ghostty). 20.1.0 is the version
+# that resolves against core-foundation 0.9 / core-graphics 0.23 that winit pins.
+# 22.x requires cf 0.10 / cg 0.25 and would duplicate both native crates.
+core-text = "20.1.0"
+core-foundation = "0.9.4"
+core-graphics = "0.23.2"
+# objc2 ecosystem for macOS dock icon — zero new transitive deps, already pulled by winit.
+objc2 = "0.5.2"
+objc2-foundation = "0.2.2"
+objc2-app-kit = { version = "0.2.2", features = ["NSApplication", "NSImage"] }
 
 # Windows: DX12 primary + Vulkan fallback for older drivers.
 [target.'cfg(target_os = "windows")'.dependencies]

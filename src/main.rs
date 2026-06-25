@@ -47,6 +47,11 @@ fn main() -> anyhow::Result<()> {
     // Install the active color theme before any rendering reads it.
     color::set_theme(settings.theme);
 
+    // Set the macOS dock + Cmd-Tab icon from the embedded .icns before the event
+    // loop starts so the icon is visible from the very first frame.
+    #[cfg(target_os = "macos")]
+    set_macos_app_icon();
+
     // Typed event loop so the PTY thread can wake us via EventLoopProxy<UserEvent>.
     let event_loop = EventLoop::<pty::UserEvent>::with_user_event().build()?;
     event_loop.set_control_flow(ControlFlow::Wait);
@@ -67,6 +72,26 @@ fn main() -> anyhow::Result<()> {
     event_loop.run_app(&mut app)?;
     ipc::cleanup();
     Ok(())
+}
+
+/// Set the macOS application icon (dock + Cmd-Tab switcher) from the bundled .icns.
+#[cfg(target_os = "macos")]
+fn set_macos_app_icon() {
+    use objc2::ClassType;
+    use objc2_app_kit::{NSApplication, NSImage};
+    use objc2_foundation::NSData;
+
+    let icon_bytes = include_bytes!("../assets/icons/glassy.icns");
+    unsafe {
+        objc2::rc::autoreleasepool(|_| {
+            let mtm = objc2_foundation::MainThreadMarker::new().unwrap();
+            let data = NSData::with_bytes(icon_bytes);
+            if let Some(image) = NSImage::initWithData(NSImage::alloc(), &data) {
+                let app = NSApplication::sharedApplication(mtm);
+                app.setApplicationIconImage(Some(&image));
+            }
+        });
+    }
 }
 
 /// Run the `toggle`/`show`/`hide` control subcommand as a client: signal the
