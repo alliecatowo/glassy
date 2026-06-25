@@ -200,7 +200,21 @@ impl App {
             let tab_id = focused_live;
 
             // The focused pane's pty is the Session::pty; the rest become `others`.
-            let focused_pty = ptys.remove(&focused_live).unwrap();
+            // `focused_live` is always a live key here (the layout was forced onto a
+            // present pane above, and the collapse branch takes a key straight from
+            // `ptys`), so the remove can't miss — but don't panic if that invariant
+            // ever breaks: skip this tab and shut down its spawned PTYs instead.
+            debug_assert!(
+                ptys.contains_key(&focused_live),
+                "focused_live {focused_live} must be a live pane id"
+            );
+            let Some(focused_pty) = ptys.remove(&focused_live) else {
+                log::warn!("session restore: focused pane {focused_live} had no PTY; skipping tab");
+                for (_, p) in ptys.drain() {
+                    p.shutdown();
+                }
+                continue;
+            };
             let focused_cwd = cwd_of.get(&focused_live).cloned();
             // Drop any survivor PTYs not in the (possibly collapsed) layout.
             if !all_spawned {

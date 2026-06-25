@@ -206,9 +206,21 @@ impl App {
         if let Some(old) = self.pty.take() {
             old.shutdown();
         }
-        // Bring the promoted pane's PTY in as the new focus.
-        if let Some(p) = g.others.remove(&new_focus) {
-            self.pty = Some(p);
+        // Bring the promoted pane's PTY in as the new focus. The newly-focused leaf
+        // is always one of the non-focused panes parked in `others`, so the remove
+        // must hit — guard it so a broken invariant degrades to "tab keeps its old
+        // focus pane" rather than silently leaving the tab with no live PTY.
+        debug_assert!(
+            g.others.contains_key(&new_focus),
+            "promoted pane {new_focus} must have a parked PTY in others"
+        );
+        match g.others.remove(&new_focus) {
+            Some(p) => self.pty = Some(p),
+            None => {
+                log::error!(
+                    "close_pane: promoted pane {new_focus} had no PTY; tab left without focus pane"
+                );
+            }
         }
         // If the user closed the pane whose id equals active_id (the tab's stable
         // identity — usually the original primary pane), that id now names a dead

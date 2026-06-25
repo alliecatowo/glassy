@@ -169,20 +169,42 @@ impl App {
     pub(crate) fn open_url(url: &str) {
         let allowed = if url.starts_with("http://") || url.starts_with("https://") {
             true
-        } else if let Some(path) = url.strip_prefix("file://") {
+        } else if let Some(raw_path) = url.strip_prefix("file://") {
             // file:// is permitted for genuine local links, but terminal output
-            // must not be able to hand xdg-open a path that launches arbitrary
-            // handlers or pokes pseudo-filesystems. Block .desktop launchers and
-            // the /proc, /dev, /sys trees outright.
-            let lower = path.to_ascii_lowercase();
-            !(lower.ends_with(".desktop")
-                || path.starts_with("/proc")
-                || path.starts_with("/dev")
-                || path.starts_with("/sys"))
+            // must not be able to hand the opener a path that launches arbitrary
+            // handlers or pokes pseudo-filesystems. The blocklist must run on the
+            // DECODED, normalized path — otherwise `%2e%2e`, `%2f`, or a
+            // percent-encoded `/proc` slips straight past a raw-string check.
+            file_url_path_allowed(raw_path)
         } else {
             false
         };
-        if allowed && let Err(e) = std::process::Command::new("xdg-open").arg(url).spawn() {
+        if !allowed {
+            log::warn!("refusing to open {url}: scheme/path not allowed");
+            return;
+        }
+        // Per-platform system opener. (The scheme/path allowlist above runs first.)
+        #[cfg(target_os = "macos")]
+        let mut cmd = {
+            let mut c = std::process::Command::new("open");
+            c.arg(url);
+            c
+        };
+        #[cfg(target_os = "windows")]
+        let mut cmd = {
+            // `start` is a cmd builtin; the empty "" is the window-title arg so a
+            // quoted URL isn't mistaken for the title.
+            let mut c = std::process::Command::new("cmd");
+            c.args(["/C", "start", "", url]);
+            c
+        };
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        let mut cmd = {
+            let mut c = std::process::Command::new("xdg-open");
+            c.arg(url);
+            c
+        };
+        if let Err(e) = cmd.spawn() {
             log::warn!("failed to open {url}: {e}");
         }
     }
@@ -500,6 +522,11 @@ impl App {
         // Reset per-session keyboard state: the activated session manages its own
         // modifyOtherKeys level independently via XTMODKEYS negotiation.
         self.modify_other_keys = ModifyOtherKeys::default();
+        // Disarm the text-blink timer: it tracks the *active* pane's SGR 5/6 cells,
+        // and the newly-activated tab may have none. Leaving it armed would wake the
+        // event loop every BLINK_INTERVAL forever (0%-idle violation). It re-arms on
+        // the next TextBlinkPresent from this session if its content actually blinks.
+        self.text_blink_active = false;
         self.reset_pointer_state();
         self.update_window_title();
         // A full repaint so the new tab's grid replaces the old one's persisted
@@ -634,4 +661,70 @@ impl App {
 
     /// Horizontal inner padding for the pane header text (px).
     pub(crate) const PANE_HEADER_PAD: f32 = 8.0;
+}
+
+/// Whether a `file://` URL's path (the part after the scheme, still possibly
+/// percent-encoded) is safe to hand to the system opener. Terminal output is
+/// untrusted, so we percent-decode and normalize FIRST, then reject `.desktop`
+/// launchers and the `/proc`, `/dev`, `/sys` pseudo-filesystems. Decoding before
+/// the check closes the `%2e%2e` / `%2f` / encoded-`/proc` bypass.
+fn file_url_path_allowed(raw_path: &str) -> bool {
+    // Drop a `?query`/`#fragment` so they can't smuggle in a blocked suffix and
+    // so the extension check sees the real trailing component.
+    let raw_path = raw_path.split(['?', '#']).next().unwrap_or(raw_path);
+    let decoded = decode_percent_lossy(raw_path);
+    // Normalize `..`/`.` segments so an encoded or literal `/foo/../proc` can't
+    // resolve into a blocked tree after the textual prefix check.
+    let normalized = normalize_path_segments(&decoded);
+    let lower = normalized.to_ascii_lowercase();
+    !(lower.ends_with(".desktop")
+        || lower == "/proc"
+        || lower.starts_with("/proc/")
+        || lower == "/dev"
+        || lower.starts_with("/dev/")
+        || lower == "/sys"
+        || lower.starts_with("/sys/"))
+}
+
+/// Percent-decode (`%XX` -> byte) into a `String`, lossily for non-UTF-8. Invalid
+/// escapes pass through literally. Used to canonicalize untrusted `file://` paths
+/// before the security blocklist so encoded separators can't hide blocked trees.
+fn decode_percent_lossy(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hi = (bytes[i + 1] as char).to_digit(16);
+            let lo = (bytes[i + 2] as char).to_digit(16);
+            if let (Some(hi), Some(lo)) = (hi, lo) {
+                out.push((hi * 16 + lo) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Collapse `.`/`..` segments in an absolute-style path textually (no filesystem
+/// access). A leading `/` is preserved; `..` pops the previous segment (never
+/// above root). This canonicalizes `/foo/../proc` to `/proc` so the blocklist
+/// can't be walked around with traversal segments.
+fn normalize_path_segments(path: &str) -> String {
+    let is_abs = path.starts_with('/');
+    let mut stack: Vec<&str> = Vec::new();
+    for seg in path.split('/') {
+        match seg {
+            "" | "." => continue,
+            ".." => {
+                stack.pop();
+            }
+            other => stack.push(other),
+        }
+    }
+    let joined = stack.join("/");
+    if is_abs { format!("/{joined}") } else { joined }
 }

@@ -237,12 +237,17 @@ pub(super) fn dispatch(
             // Non-active sessions' progress is ignored (only the focused session
             // renders a progress bar). On Remove, clear the indicator. Resolve
             // the focused pane via active_focused_id() (split-aware).
-            if id == app.active_focused_id() {
-                app.active_progress = match state {
-                    crate::image::ProgressState::Remove => None,
-                    other => Some(other),
-                };
+            if id != app.active_focused_id() {
+                // A background pane's progress isn't drawn anywhere, so updating it
+                // changes nothing on screen — return WITHOUT marking dirty to avoid
+                // spurious repaints (and event-loop wakeups) from busy background
+                // panes that emit OSC 9;4.
+                return;
             }
+            app.active_progress = match state {
+                crate::image::ProgressState::Remove => None,
+                other => Some(other),
+            };
             // Progress changes are visual — mark dirty so the status bar repaints.
         }
         UserEvent::TextBlinkPresent(id) => {
@@ -256,6 +261,20 @@ pub(super) fn dispatch(
                 app.text_blink_at = Instant::now() + BLINK_INTERVAL;
             }
             // Already active or not our session: still mark dirty for the redraw.
+        }
+        UserEvent::TextBlinkCleared(id) => {
+            // The active pane's screen was erased/reset, wiping any blinking cells.
+            // Disarm the timer so about_to_wait can return to ControlFlow::Wait
+            // (0% idle). A later TextBlinkPresent re-arms it if blink reappears.
+            // Only the active focused pane drives the visible timer.
+            if id == app.active_focused_id() && app.text_blink_active {
+                app.text_blink_active = false;
+            } else {
+                // Not the active pane (or already idle): nothing visual changed for
+                // the blink timer; skip the repaint this event would otherwise force.
+                return;
+            }
+            // Repaint so any now-solid (formerly mid-blink-off) cells show.
         }
     }
     app.mark_dirty(event_loop);

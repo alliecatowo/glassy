@@ -528,6 +528,12 @@ pub enum UserEvent {
     /// that have blink active toggle visibility. Sent at most once per read burst
     /// (the timer keeps firing until explicitly reset to idle).
     TextBlinkPresent(usize),
+    /// A full-screen erase (CSI 2J / 3J) or terminal reset (RIS, ESC c) was seen
+    /// in the PTY byte stream for the given session, wiping the cells that any
+    /// blinking text sat on. The UI thread disarms the text-blink timer for the
+    /// active pane so it stops waking the event loop; it re-arms on the next
+    /// `TextBlinkPresent` if the redrawn screen actually contains SGR 5/6 cells.
+    TextBlinkCleared(usize),
     /// The config file was modified; reload from disk.
     ConfigReload,
     /// The running application changed the xterm modifyOtherKeys level via

@@ -30,6 +30,11 @@ impl App {
         // otherwise close the whole tab (the original single-pane behaviour). After
         // a split the focused leaf id != active_id, so match active_focused_id().
         if id == self.active_id || id == self.active_focused_id() {
+            // The exiting pane's blinking content vanishes; disarm the text-blink
+            // timer so the event loop doesn't keep waking every BLINK_INTERVAL with
+            // nothing to blink (0%-idle violation). Re-arms on the next
+            // TextBlinkPresent if the surviving content actually blinks.
+            self.text_blink_active = false;
             if self.is_split() {
                 self.close_pane(event_loop);
             } else {

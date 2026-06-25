@@ -144,6 +144,20 @@ pub fn start_server(proxy: EventLoopProxy<UserEvent>) -> std::io::Result<bool> {
     }
 
     let listener = UnixListener::bind(&path)?;
+    // Lock the socket down to the owner (0600). In the `$XDG_RUNTIME_DIR` case the
+    // dir is already 0700, but the `/tmp` fallback (always, e.g. on macOS where
+    // `$XDG_RUNTIME_DIR` is unset) lives in a world-writable dir — without this any
+    // local user could connect and drive this instance's quake window. Done after
+    // bind because the file doesn't exist until then.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(e) = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)) {
+            // Non-fatal: log and continue (the socket still works; this only
+            // tightens access). A failure here shouldn't wedge the toggle feature.
+            log::warn!("ipc: could not chmod 0600 {}: {e}", path.display());
+        }
+    }
     log::info!("ipc: listening on {}", path.display());
 
     std::thread::Builder::new()

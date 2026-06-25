@@ -236,7 +236,12 @@ impl Renderer {
                 label: Some("uniform-bgl"),
                 entries: &[wgpu::BindGroupLayoutEntry {
                     binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX,
+                    // Visible to BOTH stages: the grid vertex shaders read
+                    // `u.screen` for px→NDC, and the CRT fragment shader
+                    // (`fs_crt`) reads `u.screen` for texel size / scanline /
+                    // aperture math. VERTEX-only here panics wgpu pipeline
+                    // validation when the CRT post pass is built.
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,

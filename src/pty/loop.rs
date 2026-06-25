@@ -188,7 +188,8 @@ pub fn run_loop(
                                 // Detect SGR 5/6 (text blink) in the byte stream.
                                 // alacritty_terminal silently ignores these attrs, so
                                 // we intercept here and arm the UI's text-blink timer.
-                                if scan::scan_has_blink_sgr(&bytes) {
+                                let has_blink_sgr = scan::scan_has_blink_sgr(&bytes);
+                                if has_blink_sgr {
                                     proxy.send_user(crate::pty::UserEvent::TextBlinkPresent(
                                         proxy.id,
                                     ));
@@ -222,6 +223,17 @@ pub fn run_loop(
                                 // Display events after this Vt run).
                                 if scan::clears_screen(&bytes) {
                                     images.lock().delete(0);
+                                    // The erase also wipes any SGR 5/6 blinking
+                                    // cells, so disarm the UI's text-blink timer —
+                                    // UNLESS this same burst also re-introduced blink
+                                    // (clear-then-reblink), in which case the
+                                    // TextBlinkPresent above already armed it and we
+                                    // must not cancel that.
+                                    if !has_blink_sgr {
+                                        proxy.send_user(crate::pty::UserEvent::TextBlinkCleared(
+                                            proxy.id,
+                                        ));
+                                    }
                                 }
                                 processor.advance(&mut *term, &bytes);
                                 did_process = true;
