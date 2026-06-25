@@ -35,6 +35,7 @@ use crate::renderer::{CursorOverlay, Decorations, LigatureCell, Renderer, Underl
 mod chrome;
 mod event_loop;
 mod helpers;
+mod ime;
 mod input;
 mod keys;
 mod mouse;
@@ -523,6 +524,13 @@ pub struct App {
     /// clicked. The actual close call is deferred to `about_to_wait` (where an
     /// `ActiveEventLoop` reference is available). Cleared after execution.
     pending_confirm_execute: bool,
+
+    // --- IME preedit (composition) -------------------------------------------
+    /// In-progress IME composition (CJK / dead-key input). `Some` exactly while
+    /// the IME is composing: the string is drawn as an underlined overlay at the
+    /// terminal cursor and displaces nothing in the grid until `Ime::Commit`
+    /// writes the finished text to the PTY. `None` when idle. See [`ime`].
+    preedit: Option<ime::Preedit>,
 }
 
 /// Pending close that is waiting for user confirmation.

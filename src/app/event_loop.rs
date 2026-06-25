@@ -173,6 +173,11 @@ impl ApplicationHandler<UserEvent> for App {
                 pty.write(bytes);
             }
         }
+        // Headless: seed an IME preedit (composition) overlay at startup so the
+        // underlined in-progress composition can be captured. The value is the
+        // composition string (defaults to a CJK sample). Re-asserted just before
+        // the capture render (winit's own IME init clears the early seed).
+        self.reassert_headless_preedit();
         // Headless: open an overlay at startup for capture verification.
         if std::env::var_os("GLASSY_HELP").is_some() {
             self.help_open = true;
@@ -346,18 +351,10 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 self.handle_keyboard(event, event_loop);
             }
-            WindowEvent::Ime(winit::event::Ime::Commit(text)) => {
-                // Committed IME text is input like any keystroke: reset the blink,
-                // drop the selection, snap to the prompt, and repaint even if the
-                // child stays quiet.
-                self.reset_blink();
-                self.clear_selection();
-                if let Some(pty) = &self.pty {
-                    pty.term.lock().scroll_display(Scroll::Bottom);
-                    pty.write(text.into_bytes());
-                }
-                self.mark_dirty(event_loop);
-            }
+            // CJK / dead-key composition. All four Ime sub-events are handled by
+            // the dedicated state machine in ime.rs (keeps this file additive and
+            // under the line limit).
+            WindowEvent::Ime(ime) => self.handle_ime(ime, event_loop),
             WindowEvent::CursorMoved { position, .. } => {
                 self.handle_cursor_moved(position, event_loop);
             }
@@ -432,6 +429,12 @@ impl ApplicationHandler<UserEvent> for App {
                 if self.search.is_some() {
                     self.recompute_search();
                 }
+                // Headless IME verification: winit emits its own Ime::Enabled +
+                // empty Ime::Preedit on window init, which clears the preedit the
+                // GLASSY_IME hook seeded in resumed(). Re-assert it here (right
+                // before the capture render) so the composition overlay is present
+                // in the captured frame, anchored at the now-settled cursor.
+                self.reassert_headless_preedit();
                 let split = self.is_split();
                 self.render();
                 if let (Some(renderer), Some(path)) =
