@@ -175,23 +175,28 @@ impl Renderer {
         // / latency tradeoffs of Mailbox/Immediate that are meaningless for a glyph app.
         let present_mode = wgpu::PresentMode::Fifo;
 
-        // Window translucency: prefer PreMultiplied so the surface's alpha is
-        // composited against the desktop. We emit premultiplied colors (RGB
-        // already scaled by alpha), which is exactly what PreMultiplied expects
-        // and also matches the foreground pass's premultiplied blending. If the
-        // compositor doesn't offer it (can't do translucency), fall back to its
-        // first mode and stay fully opaque.
-        let transparent = caps
-            .alpha_modes
-            .contains(&wgpu::CompositeAlphaMode::PreMultiplied);
-        let alpha_mode = if transparent {
-            wgpu::CompositeAlphaMode::PreMultiplied
-        } else {
-            caps.alpha_modes
-                .first()
-                .copied()
-                .unwrap_or(wgpu::CompositeAlphaMode::Auto)
-        };
+        // Window translucency: prefer PreMultiplied (Vulkan/Linux) where the
+        // surface stores premultiplied RGBA and the compositor blends it directly.
+        // Fall back to PostMultiplied (Metal/macOS) which uses straight alpha —
+        // the compositor premultiplies before blending, so we must NOT premultiply
+        // the RGB channels ourselves. Either mode produces a translucent window;
+        // only the premultiplication convention differs. If neither is available
+        // the compositor can't do translucency and we stay fully opaque.
+        let (transparent, premultiplied_surface, alpha_mode) =
+            if caps.alpha_modes.contains(&wgpu::CompositeAlphaMode::PreMultiplied) {
+                (true, true, wgpu::CompositeAlphaMode::PreMultiplied)
+            } else if caps.alpha_modes.contains(&wgpu::CompositeAlphaMode::PostMultiplied) {
+                (true, false, wgpu::CompositeAlphaMode::PostMultiplied)
+            } else {
+                (
+                    false,
+                    false,
+                    caps.alpha_modes
+                        .first()
+                        .copied()
+                        .unwrap_or(wgpu::CompositeAlphaMode::Auto),
+                )
+            };
 
         // Surface stays unconfigured until `resize()`; start at 1x1 as a placeholder.
         let config = wgpu::SurfaceConfiguration {
@@ -642,6 +647,7 @@ impl Renderer {
             flash: None,
             opacity: opacity.clamp(0.0, 1.0),
             transparent,
+            premultiplied_surface,
             mp: MultiPane::default(),
             // gpu-fx: retain the shader module + uniform layout so the CRT post
             // pipeline can be built lazily (only when enabled). Both are clones

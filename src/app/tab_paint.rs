@@ -1,9 +1,68 @@
-//! Tab-bar painting: `paint_tab_bar`, `paint_tab_chip`, `paint_tab_label`.
+//! Tab-bar painting: `paint_tab_bar`, `paint_tab_chip`, `paint_tab_label`,
+//! `paint_floating_icons`.
 //! Extracted from chrome.rs to keep both files under 700 lines.
 
 use super::*;
 
 impl App {
+    /// Paint the three floating icon buttons (Help / Settings / Menu) when the
+    /// full tab bar is hidden. No bar background — just a subtle pill behind the
+    /// group and the icon glyphs at the top-right corner of the window.
+    pub(crate) fn paint_floating_icons(
+        renderer: &mut Renderer,
+        hovered: Option<StripItem>,
+        held: Option<StripItem>,
+        focused: bool,
+    ) {
+        let m = renderer.cell_metrics();
+        let (sw, _sh) = renderer.surface_size();
+        let bar_h = tab_bar_h(m.height);
+        let segs = floating_icon_segs(sw as f32, bar_h);
+
+        let fdim = if focused { 1.0 } else { 0.7 };
+        let mul = |c: [f32; 4]| [c[0] * fdim, c[1] * fdim, c[2] * fdim, c[3]];
+        let fg = mul(gui::fg());
+        let fg_dim = mul(gui::fg_dim());
+        let surface = mul(gui::glass_raised());
+        let radius = gui_radius(m.height);
+
+        // Subtle pill backdrop behind the icon group.
+        if let (Some(first), Some(last)) = (segs.first(), segs.last()) {
+            let pill_pad = 4.0;
+            let px = first.rect.x - pill_pad;
+            let py = (first.rect.y - pill_pad * 0.5).max(0.0);
+            let pw = last.rect.x + last.rect.w - first.rect.x + pill_pad * 2.0;
+            let ph = CTRL_BTN + pill_pad;
+            renderer.push_overlay_rrect_px(
+                px, py, pw, ph,
+                radius,
+                [surface[0], surface[1], surface[2], surface[3] * 0.55],
+            );
+        }
+
+        let press_fill = |base: [f32; 4]| [base[0] * 0.85, base[1] * 0.85, base[2] * 0.85, base[3]];
+
+        for seg in &segs {
+            let r = seg.rect;
+            let is_hover = hovered == Some(seg.item);
+            let is_held = held == Some(seg.item);
+            let glyph = match seg.item {
+                StripItem::Help => '?',
+                StripItem::Settings => '\u{F013}',
+                _ => '\u{2261}',
+            };
+            if is_held {
+                renderer.push_overlay_rrect_px(r.x, r.y, r.w, r.h, radius, press_fill(surface));
+            } else if is_hover {
+                renderer.push_overlay_rrect_px(r.x, r.y, r.w, r.h, radius, gui::state_fill(surface, 0.7, false));
+            }
+            let cfg = if is_hover || is_held { fg } else { fg_dim };
+            let gx = r.x + (r.w - m.width) * 0.5;
+            let gy = r.center_y() - m.height * 0.5;
+            renderer.push_overlay_glyph_px(gx.round(), gy.round(), glyph, cfg);
+        }
+    }
+
     /// Paint the real GUI tab bar (§3.1) into the pixel band `[0, tab_bar_h)`. The
     /// ACTIVE tab is an E2 raised chip whose top corners are rounded and whose body
     /// is flush to the bar bottom, with a 3px connector quad that overpaints the

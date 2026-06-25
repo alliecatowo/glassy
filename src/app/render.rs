@@ -808,9 +808,10 @@ impl App {
         // before any modal so a modal scrim dims it too. Rebuilt only when its
         // inputs changed; otherwise the cached overlay is replayed.
         if !tab_strip_visible {
-            // Strip hidden (single tab in Auto, or Never): clear any cached overlay
-            // so nothing paints into the (now reclaimed) top band.
+            // Strip hidden (single tab in Auto, or Never): paint only the three
+            // floating icon buttons so Help/Settings/Menu remain reachable.
             renderer.begin_tab_overlay();
+            Self::paint_floating_icons(renderer, tab_hovered, tab_held, tab_focused);
             renderer.commit_tab_overlay();
         } else if tab_bar_rebuild {
             renderer.begin_tab_overlay();

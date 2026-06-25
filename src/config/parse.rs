@@ -287,7 +287,7 @@ fn config_path() -> Option<PathBuf> {
     #[cfg(target_os = "macos")]
     {
         let home = std::env::var_os("HOME")?;
-        return Some(PathBuf::from(home).join("Library/Application Support/glassy/glassy.conf"));
+        Some(PathBuf::from(home).join("Library/Application Support/glassy/glassy.conf"))
     }
 
     #[cfg(not(target_os = "macos"))]

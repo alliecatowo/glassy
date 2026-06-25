@@ -231,18 +231,25 @@ impl Renderer {
         }
     }
 
-    /// Apply the window opacity to a cell-background color and premultiply it.
-    /// Backgrounds become translucent (alpha = `self.opacity`) so the desktop shows
-    /// through; the RGB is premultiplied to match the PreMultiplied surface and
-    /// the foreground pass's premultiplied blending. A no-op (and fully opaque)
-    /// when the compositor can't do translucency.
+    /// Apply the window opacity to a cell-background color.
+    ///
+    /// For `PreMultiplied` surfaces (Vulkan/Linux) RGB is scaled by alpha so the
+    /// compositor blends `src_rgb + dst * (1 - src_alpha)` directly.
+    /// For `PostMultiplied` surfaces (Metal/macOS) the compositor premultiplies
+    /// internally, so we output straight alpha `[R, G, B, opacity]` — premultiplying
+    /// the RGB here would cause the compositor to double-multiply them.
+    /// A no-op (fully opaque) when the compositor can't composite alpha at all.
     pub(crate) fn glass_bg(&self, color: [f32; 4]) -> [f32; 4] {
         let color = self.apply_flash(color);
         if !self.transparent {
             return color;
         }
         let a = color[3] * self.opacity;
-        [color[0] * a, color[1] * a, color[2] * a, a]
+        if self.premultiplied_surface {
+            [color[0] * a, color[1] * a, color[2] * a, a]
+        } else {
+            [color[0], color[1], color[2], a]
+        }
     }
 
     /// Blend the active visual-bell flash (straight RGBA over) onto a straight

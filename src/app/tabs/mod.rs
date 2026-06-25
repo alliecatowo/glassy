@@ -238,11 +238,14 @@ impl App {
         let Some(r) = self.renderer.as_ref() else {
             return Vec::new();
         };
-        if !self.tab_bar_visible() {
-            return Vec::new();
-        }
         let m = r.cell_metrics();
         let (sw, _sh) = r.surface_size();
+        let bar_h = tab_bar_h(m.height);
+        if !self.tab_bar_visible() {
+            // Bar hidden: still return the icon button segments so clicks on
+            // the floating Help/Settings/Menu buttons are correctly hit-tested.
+            return floating_icon_segs(sw as f32, bar_h);
+        }
         let descs = self.tab_descs();
         let refs: Vec<(&str, bool, bool)> =
             descs.iter().map(|(t, a, b)| (t.as_str(), *a, *b)).collect();
@@ -250,7 +253,7 @@ impl App {
         strip_layout_ex(
             &refs,
             sw as f32,
-            tab_bar_h(m.height),
+            bar_h,
             m.width,
             tag_reserve,
             self.active_pos(),

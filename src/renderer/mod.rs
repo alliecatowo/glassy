@@ -286,7 +286,7 @@ fn collect_rasters(glyphs: &[crate::text::RasterizedGlyph]) -> Vec<Raster> {
 /// The window padding (grid inset) for a given cell height, in physical pixels.
 /// Scales with the cell so a larger font keeps proportional breathing room.
 fn pad_for(cell_height: f32) -> f32 {
-    (cell_height * 0.35).round().max(4.0)
+    (cell_height * 0.5).round().max(6.0)
 }
 
 pub struct Renderer {
@@ -480,6 +480,12 @@ pub struct Renderer {
     /// window). When false we keep backgrounds fully opaque so a compositor that
     /// can't do translucency doesn't darken the window via premultiplied RGB.
     transparent: bool,
+
+    /// Whether the surface uses premultiplied alpha (`PreMultiplied` mode, used
+    /// on Vulkan/Linux). When false the surface uses straight alpha (`PostMultiplied`
+    /// mode, used on Metal/macOS): `glass_bg` must NOT premultiply the RGB
+    /// channels in that case or the compositor will double-multiply them.
+    premultiplied_surface: bool,
 
     /// Multi-pane (split) render path. Empty/idle on the single-grid fast path;
     /// populated only between [`Renderer::begin_multi_frame`] and

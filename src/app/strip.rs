@@ -144,10 +144,12 @@ pub(crate) fn strip_layout_ex(
         push_new_tab(&mut segs, next_x, ctrl_y, right_start);
     } else {
         let n = tabs.len();
-        // Equal-width chips, but CLAMPED: shrink stops at TAB_MIN_W instead of
-        // squeezing to nothing. The `+` button gets its own slot after the tabs.
+        // Equal-width chips that grow to fill the available band. Shrink stops at
+        // TAB_MIN_W (no infinite squeeze); the strip scrolls when the active tab
+        // would otherwise be out of view. No upper cap so two tabs fill the whole
+        // bar naturally.
         let tab_band = (avail - plus_w).max(0.0);
-        let per = ((tab_band + TAB_GAP) / n as f32 - TAB_GAP).min(TAB_MAX_W);
+        let per = (tab_band + TAB_GAP) / n as f32 - TAB_GAP;
         let tw = per.max(TAB_MIN_W);
         // Total width all chips want at the clamped width.
         let total = tw * n as f32 + TAB_GAP * (n as f32 - 1.0);
@@ -223,6 +225,26 @@ pub(crate) fn tab_tag_reserve(tab_count: usize, cell_w: f32) -> f32 {
     let digits = tab_count.to_string().len();
     let chars = digits + 6;
     (chars as f32 * cell_w).round()
+}
+
+/// Pixel layout for just the three floating icon buttons (Help / Settings / Menu)
+/// used when the full tab bar is hidden. Reuses the same right-aligned positions
+/// as the full bar so hit-testing and painting share one coordinate source.
+pub(crate) fn floating_icon_segs(bar_w: f32, bar_h: f32) -> Vec<StripSeg> {
+    let right_btns = [StripItem::Help, StripItem::Settings, StripItem::Menu];
+    let right_w = CTRL_BTN * right_btns.len() as f32;
+    let ctrl_y = ((bar_h - CTRL_BTN) * 0.5).round().max(0.0);
+    let mut segs = Vec::with_capacity(right_btns.len());
+    let mut rx = bar_w - right_w - TAB_GAP;
+    for item in right_btns {
+        segs.push(StripSeg {
+            item,
+            label: String::new(),
+            rect: gui::Rect::new(rx, ctrl_y, CTRL_BTN, CTRL_BTN),
+        });
+        rx += CTRL_BTN;
+    }
+    segs
 }
 
 /// Push the `+` new-tab button at `x` if it fits left of `limit`.

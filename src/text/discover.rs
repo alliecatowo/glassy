@@ -167,7 +167,9 @@ pub(super) fn build_font_system(
     // Enrich the database with fallback faces (best-effort; failures are skipped).
     #[cfg(target_os = "linux")]
     load_fallback_fonts(&mut db, primary_path.as_deref(), &fc_cache);
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    load_fallback_fonts_macos(&mut db, primary_path.as_deref());
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     let _ = primary_path;
 
     let font_system = cosmic_text::FontSystem::new_with_locale_and_db("en-US".to_string(), db);
@@ -511,7 +513,22 @@ pub(super) fn discover_font_producers(requested: Option<&str>) -> Vec<CandidateP
             }));
         }
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    if let Some(name) = requested {
+        let name = name.trim().to_string();
+        if !name.is_empty() {
+            producers.push(Box::new(move || {
+                let path = find_macos_font_file(&name)?;
+                let bytes = read_font(&path)?;
+                Some(FontCandidate {
+                    bytes,
+                    path: Some(path),
+                    source_label: format!("font_family {name} (macos)"),
+                })
+            }));
+        }
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     let _ = requested;
 
     // 2. A curated list of good monospace families, each resolved to a concrete
@@ -531,6 +548,20 @@ pub(super) fn discover_font_producers(requested: Option<&str>) -> Vec<CandidateP
                 bytes,
                 path: Some(PathBuf::from(&path)),
                 source_label: format!("{family} ({path})"),
+            })
+        }));
+    }
+
+    // 2b. macOS: scan ~/Library/Fonts and /Library/Fonts for curated Nerd Font families.
+    #[cfg(target_os = "macos")]
+    for family in CURATED_FAMILIES_MACOS {
+        producers.push(Box::new(move || {
+            let path = find_macos_font_file(family)?;
+            let bytes = read_font(&path)?;
+            Some(FontCandidate {
+                bytes,
+                path: Some(path.clone()),
+                source_label: format!("{family} ({})", path.display()),
             })
         }));
     }
@@ -709,3 +740,137 @@ const PROBE_PATHS: &[&str] = &[
     "/usr/share/fonts/TTF/DejaVuSansMono.ttf",
     "/usr/share/fonts/liberation/LiberationMono-Regular.ttf",
 ];
+
+/// Nerd Font family name prefixes to search for in macOS font directories.
+/// Listed in priority order; discovery stops at the first one found.
+/// The "Mono" suffix variants (single-cell-width icons) are preferred for
+/// terminal use, so each family lists its Mono variant first.
+#[cfg(target_os = "macos")]
+const CURATED_FAMILIES_MACOS: &[&str] = &[
+    "FiraCodeNerdFontMono",
+    "FiraCodeNerdFont",
+    "JetBrainsMonoNerdFontMono",
+    "JetBrainsMonoNerdFont",
+    "IntoneMonoNerdFontMono",
+    "IntoneMonoNerdFont",
+    "HackNerdFontMono",
+    "HackNerdFont",
+    "MesloLGSNerdFontMono",
+    "MesloLGSNerdFont",
+    "CascadiaCodeNerdFontMono",
+    "CascadiaCodeNerdFont",
+    "IosevkaNerdFontMono",
+    "IosevkaNerdFont",
+    "SourceCodeProNerdFontMono",
+    "SourceCodeProNerdFont",
+    "UbuntuMonoNerdFontMono",
+    "UbuntuMonoNerdFont",
+];
+
+/// Font directories to search on macOS, in priority order.
+#[cfg(target_os = "macos")]
+fn macos_font_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(home) = std::env::var_os("HOME") {
+        dirs.push(PathBuf::from(home).join("Library/Fonts"));
+    }
+    dirs.push(PathBuf::from("/Library/Fonts"));
+    dirs.push(PathBuf::from("/System/Library/Fonts"));
+    dirs
+}
+
+/// Search macOS font directories for a font file matching `family`.
+///
+/// If `family` is an absolute path to an existing file it is returned as-is.
+/// Otherwise each font directory is scanned for TTF/OTF/TTC files whose stem
+/// (normalized: spaces removed, lowercased) starts with the normalized family
+/// name. Two passes are made: the first requires "regular" in the stem so we
+/// pick up a Regular-weight face; the second accepts any weight as a fallback.
+#[cfg(target_os = "macos")]
+fn find_macos_font_file(family: &str) -> Option<PathBuf> {
+    let as_path = Path::new(family);
+    if as_path.is_file() {
+        return Some(as_path.to_path_buf());
+    }
+    let needle = family.replace(' ', "").to_lowercase();
+    let dirs = macos_font_dirs();
+    for prefer_regular in [true, false] {
+        for dir in &dirs {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let fname = entry.file_name();
+                let fname_str = fname.to_string_lossy();
+                let ext = fname_str.rsplit('.').next().map(|e| e.to_ascii_lowercase());
+                if !matches!(ext.as_deref(), Some("ttf" | "otf" | "ttc")) {
+                    continue;
+                }
+                let stem = fname_str
+                    .rsplit_once('.')
+                    .map(|(s, _)| s)
+                    .unwrap_or(&fname_str);
+                let normalized = stem.replace(' ', "").to_lowercase();
+                if !normalized.starts_with(&needle) {
+                    continue;
+                }
+                if prefer_regular {
+                    let has_weight_suffix = normalized.contains("bold")
+                        || normalized.contains("italic")
+                        || normalized.contains("light")
+                        || normalized.contains("medium")
+                        || normalized.contains("extrabold")
+                        || normalized.contains("extralight")
+                        || normalized.contains("semibold")
+                        || normalized.contains("thin");
+                    if has_weight_suffix && !normalized.contains("regular") {
+                        continue;
+                    }
+                }
+                log::debug!(
+                    "glassy: macos found font for '{}': {}",
+                    family,
+                    entry.path().display()
+                );
+                return Some(entry.path());
+            }
+        }
+    }
+    None
+}
+
+/// Load fallback fonts into `db` on macOS: Apple Color Emoji and Apple Symbols.
+/// These cover emoji and miscellaneous symbol code points that the primary
+/// monospace font likely lacks.
+#[cfg(target_os = "macos")]
+fn load_fallback_fonts_macos(db: &mut fontdb::Database, primary_path: Option<&Path>) {
+    let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    if let Some(p) = primary_path {
+        seen.insert(p.to_path_buf());
+    }
+    for path in [
+        "/System/Library/Fonts/Apple Color Emoji.ttc",
+        "/System/Library/Fonts/Apple Symbols.ttf",
+        "/System/Library/Fonts/Symbol.ttf",
+    ] {
+        let p = Path::new(path);
+        if seen.insert(p.to_path_buf()) {
+            load_font_file_macos(db, p);
+        }
+    }
+}
+
+/// Load a single font file into `db` on macOS.
+#[cfg(target_os = "macos")]
+fn load_font_file_macos(db: &mut fontdb::Database, path: &Path) -> bool {
+    match db.load_font_file(path) {
+        Ok(()) => {
+            log::debug!("glassy: loaded fallback font: {}", path.display());
+            true
+        }
+        Err(err) => {
+            log::debug!("glassy: skipping font {}: {err}", path.display());
+            false
+        }
+    }
+}
