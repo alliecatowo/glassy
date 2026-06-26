@@ -154,9 +154,13 @@ jobs:
           # cargo-generate-rpm puts the rpm in target/generate-rpm/
           find target/generate-rpm -name '*.rpm' -exec cp {} dist/ \;
           # Source tarball (used by AUR / Homebrew sha256 verification).
-          tar -czf dist/${{ env.BIN }}-${{ steps.meta.outputs.version }}-src.tar.gz \
+          # Write OUTSIDE the tree, then move in — archiving `.` into `dist/`
+          # self-includes the growing tarball ("file changed as we read it" -> exit 1).
+          tar -czf "${RUNNER_TEMP:-/tmp}/${{ env.BIN }}-src.tar.gz" \
             --transform "s|^\.|${BIN}-${{ steps.meta.outputs.version }}|" \
-            --exclude='./.git' --exclude='./target' .
+            --exclude='./.git' --exclude='./target' --exclude='./dist' .
+          mv "${RUNNER_TEMP:-/tmp}/${{ env.BIN }}-src.tar.gz" \
+            dist/${{ env.BIN }}-${{ steps.meta.outputs.version }}-src.tar.gz
 
       - name: Generate SHA256SUMS
         working-directory: dist
