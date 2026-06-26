@@ -1,0 +1,15 @@
+<!doctype html><meta charset=utf-8><title>glassy package repos</title>
+<style>body{font:16px/1.6 system-ui,sans-serif;max-width:640px;margin:3rem auto;padding:0 1rem;background:#1a1b26;color:#c0caf5}code{background:#24283b;padding:.15em .4em;border-radius:4px}a{color:#7aa2f7}h1{font-weight:700}</style>
+<h1>glassy 🦄 — package repositories</h1>
+<p>GPU-accelerated terminal. Source: <a href="https://github.com/alliecatowo/glassy">github.com/alliecatowo/glassy</a></p>
+<h2>Fedora / RHEL (dnf)</h2>
+<pre><code>sudo dnf config-manager --add-repo https://alliecatowo.github.io/glassy/rpm/glassy.repo
+sudo dnf install glassy</code></pre>
+<h2>Debian / Ubuntu (apt)</h2>
+<pre><code>sudo install -d -m 0755 /etc/apt/keyrings
+curl -fsSL https://alliecatowo.github.io/glassy/deb/glassy-archive-keyring.asc | sudo tee /etc/apt/keyrings/glassy.asc >/dev/null
+echo "deb [signed-by=/etc/apt/keyrings/glassy.asc] https://alliecatowo.github.io/glassy/deb stable main" | sudo tee /etc/apt/sources.list.d/glassy.list >/dev/null
+sudo apt update && sudo apt install glassy</code></pre>
+<h2>macOS / Linux (Homebrew)</h2>
+<pre><code>brew tap alliecatowo/glassy https://github.com/alliecatowo/glassy
+brew install glassy</code></pre>
