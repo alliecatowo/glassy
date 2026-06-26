@@ -111,6 +111,10 @@ pub fn run_loop(
     // typed from the grid between this point and the cursor. `None` between a `C`
     // and the next `B` (no command being typed). See `super::cmdzone`.
     let mut cmd_start: Option<super::cmdzone::CmdStart> = None;
+    // The command text captured at the last `133;C`, kept until the matching
+    // `133;D` so the command-finish desktop notification can name the command
+    // that finished. Cleared when `D` consumes it (or overwritten by the next C).
+    let mut last_command: Option<String> = None;
     // ---- End command-zone capture -----------------------------------------------
 
     'main: loop {
@@ -328,6 +332,10 @@ pub fn run_loop(
                                                 start,
                                                 end,
                                             ) {
+                                                // Remember the command text so the
+                                                // matching `D` can name it in the
+                                                // finish notification.
+                                                last_command = Some(cmd.clone());
                                                 proxy.send_user(crate::pty::UserEvent::CommandRun(
                                                     proxy.id, cmd,
                                                 ));
@@ -335,8 +343,27 @@ pub fn run_loop(
                                         }
                                     }
                                     'D' => {
-                                        if let Ok(mut p) = prompts.lock() {
+                                        // Record the finish + read back the just-
+                                        // closed block's duration so the UI can fire
+                                        // a desktop notification for a long command
+                                        // that finished while unfocused.
+                                        let duration = if let Ok(mut p) = prompts.lock() {
                                             p.command_finished(row, exit, Instant::now());
+                                            p.last_finished().and_then(|b| b.duration())
+                                        } else {
+                                            None
+                                        };
+                                        if let Some(d) = duration {
+                                            proxy.send_user(
+                                                crate::pty::UserEvent::CommandFinished {
+                                                    id: proxy.id,
+                                                    command: last_command.take(),
+                                                    exit,
+                                                    duration: d,
+                                                },
+                                            );
+                                        } else {
+                                            last_command = None;
                                         }
                                     }
                                     _ => {}
@@ -345,11 +372,11 @@ pub fn run_loop(
                                     proxy.id, mark, exit,
                                 ));
                             }
-                            crate::image::TapEvent::Notification(text) => {
-                                // OSC 9 / OSC 777: forward to the UI thread so it can
-                                // fire a native desktop notification when unfocused.
-                                proxy
-                                    .send_user(crate::pty::UserEvent::Notification(proxy.id, text));
+                            crate::image::TapEvent::Notify(spec) => {
+                                // OSC 9 / OSC 777: forward the structured spec to the
+                                // UI thread so it can fire a rich native notification
+                                // when unfocused (icon/sound/urgency/actions).
+                                proxy.send_user(crate::pty::UserEvent::Notify(proxy.id, spec));
                             }
                             crate::image::TapEvent::Progress(state) => {
                                 // OSC 9;4: progress report — forward to the UI thread

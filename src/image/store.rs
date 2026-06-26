@@ -211,9 +211,10 @@ pub enum TapEvent {
     /// duration) for command-block grouping + jump-to-prompt navigation.
     SemanticMark(char, Option<i32>),
     /// OSC 9 (iTerm2 / ConEmu style) or OSC 777 (terminal-notifier style) desktop
-    /// notification request from the running shell. The payload is the notification
-    /// body text. The original OSC bytes are still passed through to the VT parser.
-    Notification(String),
+    /// notification request from the running shell. The payload is a structured
+    /// [`NotifySpec`] (title/body/icon/sound/urgency/actions) parsed from the
+    /// sequence. The original OSC bytes are still passed through to the VT parser.
+    Notify(super::NotifySpec),
     /// OSC 9;4 progress report. Forwarded to the UI thread so it can render a
     /// subtle progress indicator in the status bar and/or tab chip. The original
     /// OSC bytes are still passed through to the VT parser unchanged.
@@ -458,7 +459,7 @@ impl StreamTap {
     /// - OSC 7: cwd (returns a [`TapEvent::Cwd`])
     /// - OSC 9;4: progress report (returns a [`TapEvent::Progress`])
     /// - OSC 9 / OSC 777: desktop notification request (returns a
-    ///   [`TapEvent::Notification`])
+    ///   [`TapEvent::Notify`])
     /// - OSC 133: shell-integration semantic mark (returns a
     ///   [`TapEvent::SemanticMark`])
     ///
@@ -493,13 +494,15 @@ impl StreamTap {
         if let Some(ev) = parse_osc9_progress(&osc) {
             return Some(ev);
         }
-        // OSC 9 — iTerm2 / ConEmu desktop notification: `9;<message>`
-        if let Some(ev) = parse_osc9_notification(&osc) {
-            return Some(ev);
+        // OSC 9 — iTerm2 / ConEmu desktop notification: `9;<message>` (plus the
+        // glassy rich `key=value;…;body` prefix). Parsed into a structured spec.
+        if let Some(spec) = super::parse_osc9(&osc) {
+            return Some(TapEvent::Notify(spec));
         }
-        // OSC 777 — terminal-notifier / Kitty desktop notification: `777;notify;<title>;<body>`
-        if let Some(ev) = parse_osc777_notification(&osc) {
-            return Some(ev);
+        // OSC 777 — terminal-notifier / Kitty desktop notification:
+        // `777;notify;<title>;<body>[;key=value…]`.
+        if let Some(spec) = super::parse_osc777(&osc) {
+            return Some(TapEvent::Notify(spec));
         }
         // OSC 1337 — glassy inline-preview request: `1337;Peek=<path>`.
         if let Some(ev) = parse_osc1337_peek(&osc) {
@@ -535,19 +538,6 @@ pub(crate) fn parse_osc7_cwd(body: &[u8]) -> Option<std::path::PathBuf> {
     Some(std::path::PathBuf::from(path))
 }
 
-/// Parse an OSC 9 body (`9;<message>`) into a desktop notification body. OSC 9
-/// is the iTerm2 / ConEmu desktop-notification format: `ESC ] 9 ; <text> ST`.
-/// Returns a [`TapEvent::Notification`] with the message text, or `None` if the
-/// body is not an OSC 9 notification.
-pub(crate) fn parse_osc9_notification(body: &[u8]) -> Option<TapEvent> {
-    let body = std::str::from_utf8(body).ok()?;
-    let msg = body.strip_prefix("9;")?;
-    if msg.is_empty() {
-        return None;
-    }
-    Some(TapEvent::Notification(msg.to_string()))
-}
-
 /// Parse an OSC 9;4 progress body (`9;4;<state>;<pct>`) into a
 /// [`TapEvent::Progress`]. The format is from the ConEmu / Windows Terminal
 /// progress-bar protocol: state 0=remove, 1=set progress (pct 0-100), 2=error,
@@ -572,27 +562,6 @@ pub(crate) fn parse_osc9_progress(body: &[u8]) -> Option<TapEvent> {
         _ => return None,
     };
     Some(TapEvent::Progress(progress))
-}
-
-/// Parse an OSC 777 body (`777;notify;<title>;<body>`) into a desktop
-/// notification body. This is the terminal-notifier / some Kitty variant format.
-/// We concatenate title + body (separated by " — ") when both are non-empty, or
-/// use whichever is present. Returns `None` if the body is not OSC 777.
-pub(crate) fn parse_osc777_notification(body: &[u8]) -> Option<TapEvent> {
-    let body = std::str::from_utf8(body).ok()?;
-    // Expected: `777;notify;<title>;<message>`
-    let rest = body.strip_prefix("777;notify;")?;
-    // Split on the first ';' to separate title from body.
-    let text = match rest.split_once(';') {
-        Some((title, msg)) if !title.is_empty() && !msg.is_empty() => {
-            format!("{title} — {msg}")
-        }
-        Some((title, "")) if !title.is_empty() => title.to_string(),
-        Some(("", msg)) if !msg.is_empty() => msg.to_string(),
-        None if !rest.is_empty() => rest.to_string(),
-        _ => return None,
-    };
-    Some(TapEvent::Notification(text))
 }
 
 /// Parse an OSC 1337 File= body (iTerm2 inline image protocol) into a decoded

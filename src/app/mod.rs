@@ -53,6 +53,7 @@ mod pane_ops;
 mod panes;
 pub(crate) mod peek;
 mod quake;
+mod remote;
 mod render;
 mod script;
 mod search;
@@ -272,6 +273,20 @@ pub struct Config {
     /// axes are stored but currently ignored (logged at debug level) because
     /// cosmic-text 0.19 does not expose them in `Attrs`.
     pub font_variations: Vec<String>,
+    /// Fire a desktop notification when an OSC 133-tracked command finishes after
+    /// running longer than [`notify_command_threshold_ms`](Self::notify_command_threshold_ms)
+    /// while the window is unfocused. Requires shell integration (OSC 133 marks).
+    /// Default true. Config key `notify_command_finish`.
+    pub notify_command_finish: bool,
+    /// Minimum command duration (milliseconds) that triggers the command-finish
+    /// notification. Commands faster than this never notify (avoids spamming for
+    /// quick `ls`/`cd`). Default 10000 (10 s). Config key
+    /// `notify_command_threshold_ms`.
+    pub notify_command_threshold_ms: u64,
+    /// Allow command output to be collapsed (folded) under its OSC 133 prompt.
+    /// Gates the `ToggleFold` action + fold caret. Default true (a no-op until a
+    /// shell-integration script emits OSC 133). Config key `command_fold`.
+    pub command_fold: bool,
 }
 
 /// Configurable segments for the status bar (config key `status_bar_segments`).

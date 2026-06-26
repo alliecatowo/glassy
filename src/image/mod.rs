@@ -16,9 +16,11 @@ use std::collections::HashMap;
 
 use alacritty_terminal::sync::FairMutex;
 
+mod notify;
 mod parser;
 mod store;
 
+pub use notify::*;
 pub use parser::*;
 pub use store::*;
 
@@ -361,7 +363,7 @@ mod tests {
                 TapEvent::Delete(_) => "delete",
                 TapEvent::Cwd(_) => "cwd",
                 TapEvent::SemanticMark(_, _) => "mark",
-                TapEvent::Notification(_) => "notification",
+                TapEvent::Notify(_) => "notification",
                 TapEvent::Progress(_) => "progress",
                 TapEvent::Peek(_) => "peek",
             })
@@ -658,10 +660,10 @@ mod tests {
     // OSC 9 / OSC 777 / OSC 133 shell-integration tests
     // -----------------------------------------------------------------------
 
-    /// Helper: extract the first Notification body, if any.
+    /// Helper: extract the first Notify body, if any.
     fn first_notification(events: &[TapEvent]) -> Option<String> {
         events.iter().find_map(|e| match e {
-            TapEvent::Notification(s) => Some(s.clone()),
+            TapEvent::Notify(s) => Some(s.toast_text()),
             _ => None,
         })
     }
@@ -687,36 +689,25 @@ mod tests {
 
     #[test]
     fn osc9_notification_parsed() {
-        // `parse_osc9_notification` should extract the body after "9;".
-        use super::store::parse_osc9_notification;
-        let ev = parse_osc9_notification(b"9;build finished").expect("parsed");
-        match ev {
-            TapEvent::Notification(s) => assert_eq!(s, "build finished"),
-            _ => panic!("expected Notification"),
-        }
+        // `parse_osc9` should extract the body after "9;".
+        let spec = super::parse_osc9(b"9;build finished").expect("parsed");
+        assert_eq!(spec.body, "build finished");
         // Empty body is rejected.
-        assert!(parse_osc9_notification(b"9;").is_none());
+        assert!(super::parse_osc9(b"9;").is_none());
         // Wrong OSC code is rejected.
-        assert!(parse_osc9_notification(b"0;something").is_none());
+        assert!(super::parse_osc9(b"0;something").is_none());
     }
 
     #[test]
     fn osc777_notification_parsed() {
-        use super::store::parse_osc777_notification;
         // Full form: title + body.
-        let ev = parse_osc777_notification(b"777;notify;My App;Task done").expect("parsed");
-        match ev {
-            TapEvent::Notification(s) => assert_eq!(s, "My App \u{2014} Task done"),
-            _ => panic!("expected Notification"),
-        }
+        let spec = super::parse_osc777(b"777;notify;My App;Task done").expect("parsed");
+        assert_eq!(spec.toast_text(), "My App \u{2014} Task done");
         // Body only (empty title).
-        let ev = parse_osc777_notification(b"777;notify;;Just body").expect("parsed");
-        match ev {
-            TapEvent::Notification(s) => assert_eq!(s, "Just body"),
-            _ => panic!("expected Notification"),
-        }
+        let spec = super::parse_osc777(b"777;notify;;Just body").expect("parsed");
+        assert_eq!(spec.toast_text(), "Just body");
         // Wrong prefix rejected.
-        assert!(parse_osc777_notification(b"9;hello").is_none());
+        assert!(super::parse_osc777(b"9;hello").is_none());
     }
 
     #[test]
@@ -943,18 +934,13 @@ mod tests {
     #[test]
     fn osc9_4_not_confused_with_osc9_notification() {
         // OSC 9;4;1;50 must not be parsed as a notification.
-        use super::store::{parse_osc9_notification, parse_osc9_progress};
+        use super::store::parse_osc9_progress;
         // Progress check must match.
         assert!(parse_osc9_progress(b"9;4;1;50").is_some());
-        // Notification check: "9;4;1;50" starts with "9;" but NOT with "9;4;".
-        // parse_osc9_notification requires the body after "9;" to be non-empty text.
-        // But parse_osc9_progress takes priority in finish_osc, so verify they don't
-        // collide: the notification parser would parse body as "4;1;50" which looks
-        // like a valid notification. The ordering in finish_osc ensures 9;4;... is
-        // always handled as progress.
-        let notif = parse_osc9_notification(b"9;4;1;50");
-        // We DON'T assert it's None here — the ordering in finish_osc is what matters.
-        // This just documents the relationship.
+        // The notification parser would parse the body as "4;1;50" (a valid plain
+        // notification), but parse_osc9_progress takes priority in finish_osc, so
+        // 9;4;... is always handled as progress. This documents the relationship.
+        let notif = super::parse_osc9(b"9;4;1;50");
         let _ = notif;
         assert!(parse_osc9_progress(b"9;4;1;50").is_some());
         // A plain notification ("9;build ok") must NOT be parsed as progress.

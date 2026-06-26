@@ -181,15 +181,25 @@ pub(super) fn dispatch(
             }
             return;
         }
-        UserEvent::Notification(_id, text) => {
-            // OSC 9 / OSC 777: fire a desktop notification when the window is
-            // not focused so background jobs can alert the user. Also show an
-            // in-app toast so the user sees it even when focused.
+        UserEvent::Notify(_id, spec) => {
+            // OSC 9 / OSC 777: fire a rich desktop notification (icon/sound/
+            // urgency/actions) when the window is not focused so background jobs
+            // can alert the user. Also show an in-app toast so the user sees it
+            // even when focused.
             if !app.focused {
-                fire_desktop_notification("glassy", &text);
+                fire_notification(&spec);
             }
             // Always show an in-app toast for OSC 9/777 notifications.
-            app.push_toast(text);
+            app.push_toast(spec.toast_text());
+        }
+        UserEvent::Control(req) => {
+            // Kitty-style remote control over the IPC socket (`glassy @ <cmd>`):
+            // apply it to the running window and reply to the waiting client.
+            let dirty = app.apply_control(&req, event_loop);
+            if dirty {
+                app.mark_dirty(event_loop);
+            }
+            return;
         }
         UserEvent::ConfigReload => {
             // Config file changed; reload from disk and apply live-reloadable settings.
@@ -239,6 +249,21 @@ pub(super) fn dispatch(
             // history ring for the command palette (any pane's commands are
             // useful history). Not a visual change, so no repaint.
             app.record_command_history(cmd);
+            return;
+        }
+        UserEvent::CommandFinished {
+            id,
+            command,
+            exit,
+            duration,
+        } => {
+            // A tracked command finished. Fire a desktop notification when it ran
+            // long enough AND the window is unfocused, so a long background
+            // build/test alerts the user when it's done. The `id` is the session
+            // that finished it (logged for diagnostics); the notification itself
+            // is window-level. Not a visual change, so no repaint.
+            log::debug!("command finished in session {id}: {duration:?} exit={exit:?}");
+            app.notify_command_finished(command, exit, duration);
             return;
         }
         UserEvent::Progress(id, state) => {

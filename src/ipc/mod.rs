@@ -20,10 +20,21 @@
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
+use std::time::Duration;
 
 use winit::event_loop::EventLoopProxy;
 
 use crate::pty::UserEvent;
+
+pub mod control;
+
+use control::{ControlReply, ControlRequest};
+
+/// How long the server listener waits for the UI thread to apply a control
+/// request and reply before giving up (so a busy/locked UI never wedges the
+/// client connection thread forever). Generous — the UI applies on its next
+/// `user_event` turn, which is essentially immediate.
+const CONTROL_REPLY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// A control command delivered over the IPC socket (or the in-app keybind). Kept
 /// tiny and `Copy` so it can ride inside [`UserEvent`] without allocation.
@@ -117,6 +128,61 @@ pub fn send_command(cmd: IpcCommand) -> std::io::Result<bool> {
     }
 }
 
+/// CLIENT: send a kitty-style remote-control request line (`@ <verb> …`) to the
+/// running instance and read its single-line reply. Returns the parsed
+/// [`ControlReply`], or `Ok(None)` if no instance is listening (so the caller can
+/// print a hint), or an I/O error.
+///
+/// The request line is written verbatim (the running instance parses it); the
+/// reply is read back as one line and parsed into `OK …` / `ERR …`.
+pub fn send_control(request_line: &str) -> std::io::Result<Option<ControlReply>> {
+    let Some(path) = socket_path() else {
+        return Ok(None);
+    };
+    let mut stream = match UnixStream::connect(&path) {
+        Ok(s) => s,
+        Err(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
+            ) =>
+        {
+            return Ok(None);
+        }
+        Err(e) => return Err(e),
+    };
+    // Mark the line as control by prefixing `@` if the caller didn't (the server
+    // routes any line that isn't a bare toggle/show/hide verb to the control
+    // parser anyway, but the explicit prefix keeps the wire self-describing).
+    let line = request_line.trim();
+    let wire = if line.starts_with('@') {
+        line.to_string()
+    } else {
+        format!("@ {line}")
+    };
+    stream.write_all(wire.as_bytes())?;
+    stream.write_all(b"\n")?;
+    stream.flush()?;
+    // Read the single reply line.
+    let mut reader = BufReader::new(stream);
+    let mut reply = String::new();
+    reader.read_line(&mut reply)?;
+    let reply = reply.trim();
+    if let Some(rest) = reply.strip_prefix("OK ") {
+        Ok(Some(ControlReply::Ok(rest.to_string())))
+    } else if reply == "OK" {
+        Ok(Some(ControlReply::Ok(String::new())))
+    } else if let Some(rest) = reply.strip_prefix("ERR ") {
+        Ok(Some(ControlReply::Err(rest.to_string())))
+    } else if reply.is_empty() {
+        Ok(Some(ControlReply::Err(
+            "no reply from instance".to_string(),
+        )))
+    } else {
+        Ok(Some(ControlReply::Err(reply.to_string())))
+    }
+}
+
 /// SERVER: bind the single-instance socket and spawn a listener thread that turns
 /// each received verb into a [`UserEvent::Ipc`] delivered to the winit loop.
 ///
@@ -178,22 +244,54 @@ pub fn start_server(proxy: EventLoopProxy<UserEvent>) -> std::io::Result<bool> {
 }
 
 /// Read one command line from a client connection and forward it to the loop.
-fn handle_client(stream: UnixStream, proxy: &EventLoopProxy<UserEvent>) {
-    let mut reader = BufReader::new(stream);
+///
+/// A line that is a bare `toggle`/`show`/`hide` verb drives the quake window
+/// ([`UserEvent::Ipc`], no reply). Anything else — including the explicit `@ …`
+/// / `msg …` forms — is a kitty-style remote-control request: it is parsed,
+/// dispatched as a [`UserEvent::Control`] carrying a one-shot reply channel, and
+/// the UI thread's [`ControlReply`] is written back to the client.
+fn handle_client(mut stream: UnixStream, proxy: &EventLoopProxy<UserEvent>) {
     let mut line = String::new();
-    match reader.read_line(&mut line) {
-        Ok(0) => {} // client closed without sending
-        Ok(_) => {
-            if let Some(cmd) = IpcCommand::parse(&line) {
-                if let Err(e) = proxy.send_event(UserEvent::Ipc(cmd)) {
-                    log::debug!("ipc: failed to forward {cmd:?}: {e}");
-                }
-            } else {
-                log::debug!("ipc: unknown command {:?}", line.trim());
+    {
+        let mut reader = BufReader::new(&mut stream);
+        match reader.read_line(&mut line) {
+            Ok(0) => return, // client closed without sending
+            Ok(_) => {}
+            Err(e) => {
+                log::debug!("ipc: read error: {e}");
+                return;
             }
         }
-        Err(e) => log::debug!("ipc: read error: {e}"),
     }
+    let trimmed = line.trim();
+
+    // Bare window verb (no reply expected by the client).
+    let is_control = trimmed.starts_with('@') || trimmed.starts_with("msg ") || trimmed == "msg";
+    if !is_control && let Some(cmd) = IpcCommand::parse(trimmed) {
+        if let Err(e) = proxy.send_event(UserEvent::Ipc(cmd)) {
+            log::debug!("ipc: failed to forward {cmd:?}: {e}");
+        }
+        return;
+    }
+
+    // Remote-control request: parse, dispatch, and write the reply back.
+    let reply = match control::parse_request(trimmed) {
+        Ok(command) => {
+            let (req, rx) = ControlRequest::new(command);
+            if proxy.send_event(UserEvent::Control(req)).is_err() {
+                ControlReply::Err("instance is shutting down".to_string())
+            } else {
+                match rx.recv_timeout(CONTROL_REPLY_TIMEOUT) {
+                    Ok(r) => r,
+                    Err(_) => ControlReply::Err("timed out waiting for instance".to_string()),
+                }
+            }
+        }
+        Err(msg) => ControlReply::Err(msg),
+    };
+    let _ = stream.write_all(reply.to_wire().as_bytes());
+    let _ = stream.write_all(b"\n");
+    let _ = stream.flush();
 }
 
 /// Unlink the single-instance socket file on a clean exit so the next launch binds

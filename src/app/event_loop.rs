@@ -406,6 +406,27 @@ impl ApplicationHandler<UserEvent> for App {
             self.push_toast(text);
             self.force_full_redraw = true;
         }
+        // Headless: apply one or more remote-control requests at startup so the
+        // `glassy @ <cmd>` surface can be exercised without a second process +
+        // socket round-trip. GLASSY_REMOTE holds `;`-separated request lines
+        // (e.g. "open-tab;split horizontal;send-text echo hi\\n;ls"); each is
+        // parsed + applied via the same `apply_control` path the IPC listener
+        // uses, and the reply is surfaced as a toast so it is capturable.
+        if let Ok(spec) = std::env::var("GLASSY_REMOTE") {
+            for line in spec.split(';').map(str::trim).filter(|l| !l.is_empty()) {
+                match crate::ipc::control::parse_request(line) {
+                    Ok(command) => {
+                        let (req, rx) = crate::ipc::control::ControlRequest::new(command);
+                        self.apply_control(&req, event_loop);
+                        if let Ok(reply) = rx.try_recv() {
+                            self.push_toast(reply.to_wire());
+                        }
+                    }
+                    Err(e) => self.push_toast(format!("remote parse error: {e}")),
+                }
+            }
+            self.force_full_redraw = true;
+        }
 
         // Headless: open hints mode at startup so the labelled-overlay can be
         // captured (GLASSY_HINTS=1). Scans the visible grid for URLs/paths/SHAs/IPs

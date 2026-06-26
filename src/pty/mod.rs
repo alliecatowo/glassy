@@ -518,9 +518,16 @@ pub enum UserEvent {
     /// [`PromptTracker`] and forwards this event so the UI can repaint the
     /// command-block badges and update jump-to-prompt state.
     SemanticMark(usize, char, Option<i32>),
-    /// OSC 9 or OSC 777 desktop notification from the shell. Forwarded to the UI
-    /// thread so it can fire a native notification when the window is unfocused.
-    Notification(usize, String),
+    /// OSC 9 or OSC 777 desktop notification from the shell. Carries a structured
+    /// [`crate::image::NotifySpec`] (title/body/icon/sound/urgency/actions).
+    /// Forwarded to the UI thread so it can fire a rich native notification when
+    /// the window is unfocused (and always show an in-app toast).
+    Notify(usize, crate::image::NotifySpec),
+    /// A remote-control request arrived over the IPC socket (`glassy @ <cmd>` /
+    /// `glassy msg …`): open a tab, split, send text, set theme, list, etc. The
+    /// UI thread applies it and replies over the one-shot `reply` channel. See
+    /// [`crate::ipc::control`]. Carries no session id (window-level command).
+    Control(crate::ipc::control::ControlRequest),
     /// OSC 9;4 progress report from the running application. The UI thread stores
     /// the latest state per-session and renders a subtle progress indicator.
     Progress(usize, crate::image::ProgressState),
@@ -567,6 +574,18 @@ pub enum UserEvent {
     /// the variant is still matched everywhere, so it is `dead_code` off-macOS.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     MenuAction(crate::config::KeyAction),
+    /// An OSC 133-tracked command FINISHED (a `D` mark closed its block) in the
+    /// session `usize`. Carries the (best-effort) command text, the exit code, and
+    /// how long it ran. The UI thread fires a desktop notification when the
+    /// command ran longer than the configured threshold while the window was
+    /// unfocused — so a long background build/test alerts the user when it's done.
+    /// See `config.notify_command_*`.
+    CommandFinished {
+        id: usize,
+        command: Option<String>,
+        exit: Option<i32>,
+        duration: Duration,
+    },
 }
 
 /// Wraps the `ClipboardLoad` reply-builder closure so `UserEvent` can keep its
