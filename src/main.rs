@@ -62,12 +62,22 @@ fn main() -> anyhow::Result<()> {
         Err(e) => log::warn!("ipc: failed to start control server: {e}"),
     }
 
+    // Clone a proxy for the macOS menu bar before `proxy` is moved into the app.
+    #[cfg(target_os = "macos")]
+    let menu_proxy = proxy.clone();
+
     let mut app = app::App::new(proxy, settings.config);
 
     // Set dock + Cmd-Tab icon after EventLoop::build() so winit has already
     // initialised NSApplication — our call then updates the existing singleton.
     #[cfg(target_os = "macos")]
     set_macos_app_icon();
+
+    // Install the global macOS menu bar (glassy/File/Edit/View/Window) wired to
+    // glassy's key actions via the event-loop proxy. Done after NSApplication
+    // exists; menu clicks post `UserEvent::MenuAction` back into the loop.
+    #[cfg(target_os = "macos")]
+    app::mac_menu::install_menu_bar(menu_proxy);
 
     event_loop.run_app(&mut app)?;
     ipc::cleanup();

@@ -61,10 +61,17 @@ wgpu = { version = "29.0.3", default-features = false, features = ["metal", "wgs
 core-text = "20.1.0"
 core-foundation = "0.9.4"
 core-graphics = "0.23.2"
-# objc2 ecosystem for macOS dock icon — zero new transitive deps, already pulled by winit.
+# objc2 ecosystem for macOS dock icon + global NSMenu bar — zero new transitive
+# deps, already pulled by winit.
 objc2 = "0.5.2"
-objc2-foundation = "0.2.2"
-objc2-app-kit = { version = "0.2.2", features = ["NSApplication", "NSImage"] }
+objc2-foundation = { version = "0.2.2", features = ["NSString"] }
+objc2-app-kit = { version = "0.2.2", features = [
+    "NSApplication",
+    "NSImage",
+    "NSMenu",
+    "NSMenuItem",
+    "NSResponder",
+] }
 
 # Windows: DX12 primary + Vulkan fallback for older drivers.
 [target.'cfg(target_os = "windows")'.dependencies]

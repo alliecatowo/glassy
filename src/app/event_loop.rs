@@ -329,6 +329,14 @@ impl ApplicationHandler<UserEvent> for App {
                 self.new_tab(event_loop);
             }
         }
+        // Headless: arm the modifier-HOLD numbered tab overlay so the number
+        // badges can be captured without holding ⌘/Ctrl. Seeds the hold start far
+        // enough in the past to be already past the dwell.
+        if std::env::var_os("GLASSY_TAB_NUMBERS").is_some() {
+            self.mod_hold_since =
+                Some(Instant::now() - super::modhold::MOD_HOLD_DWELL - Duration::from_millis(1));
+            self.force_full_redraw = true;
+        }
         // Headless: inject a fake foreground process name on every open tab so the
         // process-aware tab label + window title can be captured without launching
         // a real child. Value = the comm to show (e.g. "vim"); empty falls back to
@@ -553,6 +561,10 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::ModifiersChanged(mods) => {
                 self.mods = mods.state();
+                // Arm/disarm the modifier-hold numbered tab overlay (⌘-hold on
+                // macOS / Ctrl-hold elsewhere). Idle-safe: only schedules a single
+                // dwell wake; cleared on release or any non-modifier key.
+                self.update_mod_hold(event_loop);
             }
             WindowEvent::KeyboardInput {
                 event,
@@ -671,6 +683,14 @@ impl ApplicationHandler<UserEvent> for App {
                 // before the capture render) so the composition overlay is present
                 // in the captured frame, anchored at the now-settled cursor.
                 self.reassert_headless_preedit();
+                // Headless tab-number overlay: winit's initial empty
+                // ModifiersChanged clears the GLASSY_TAB_NUMBERS-armed hold, so
+                // re-arm it (past the dwell) right before the capture render.
+                if std::env::var_os("GLASSY_TAB_NUMBERS").is_some() {
+                    self.mod_hold_since = Some(
+                        Instant::now() - super::modhold::MOD_HOLD_DWELL - Duration::from_millis(1),
+                    );
+                }
                 let split = self.is_split();
                 self.render();
                 if let (Some(renderer), Some(path)) =
@@ -841,6 +861,17 @@ impl ApplicationHandler<UserEvent> for App {
             self.dirty = true;
         }
 
+        // Modifier-hold numbered tab overlay: while armed-but-not-yet-shown we
+        // wake at the dwell deadline to paint the badges once. `mod_hold_deadline`
+        // returns None the moment it becomes visible, so this is a single finite
+        // wake; idle returns to `Wait`.
+        let mod_hold_deadline = self.mod_hold_deadline();
+        if self.mod_hold_since.is_some() && mod_hold_deadline.is_none() {
+            // Just crossed the dwell: the overlay is now visible — repaint it.
+            self.force_full_redraw = true;
+            self.dirty = true;
+        }
+
         if !self.dirty {
             // Idle: stay parked on `Wait` (0% CPU) unless a blink flip, a flash
             // boundary, or a spinner frame is pending — then wake at the earliest.
@@ -852,6 +883,7 @@ impl ApplicationHandler<UserEvent> for App {
                 let wake = [
                     self.next_wake(blink_active, flash_active, spin_active),
                     toast_deadline,
+                    mod_hold_deadline,
                 ]
                 .into_iter()
                 .flatten()

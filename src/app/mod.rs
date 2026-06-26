@@ -40,7 +40,11 @@ mod hints;
 mod ime;
 mod input;
 mod keys;
+mod keyseq;
+#[cfg(target_os = "macos")]
+pub(crate) mod mac_menu;
 mod minimap;
+mod modhold;
 mod mouse;
 mod multipane;
 mod palette;
@@ -212,6 +216,11 @@ pub struct Config {
     /// history source (captured from OSC 133 `B`..`C` zones). 0 disables capture.
     /// Default 200.
     pub command_history: usize,
+    /// Multi-key chord *sequences* ("leader" binds), e.g. `ctrl+a` then `n`.
+    /// Built from `[keybindings]` entries whose chord token contains a space
+    /// (`"ctrl+a n" = next_tab`). Empty by default. The keyboard handler tracks a
+    /// pending prefix and fires the bound action when the full sequence completes.
+    pub key_sequences: crate::config::SequenceMap,
 }
 
 /// The three user-facing default cursor shapes.
@@ -724,6 +733,22 @@ pub struct App {
     /// the most-recent unique paths win. Bounded by [`CWD_HISTORY_CAP`]. The
     /// command palette offers these to `cd` into.
     cwd_history: std::collections::VecDeque<std::path::PathBuf>,
+
+    // --- Leader / multi-key chord sequences ----------------------------------
+    /// Pending leader-sequence state: the chords typed so far that are a live
+    /// prefix of one or more `config.key_sequences` binds, plus the deadline
+    /// after which an incomplete sequence is abandoned. `None` when no leader is
+    /// armed (the common case — every standard chord path runs untouched). See
+    /// [`keyseq`].
+    key_seq_pending: Option<keyseq::PendingSeq>,
+
+    // --- Modifier-hold tab overlay (Cmd/Super-hold tab numbers) --------------
+    /// Instant the primary modifier (⌘ on macOS, Super elsewhere) began being
+    /// held with no other key pressed since. Drives the numbered tab-jump
+    /// overlay: after a short dwell, each tab chip shows its 1-based number so it
+    /// can be jumped to with modifier+digit. `None` when the modifier is up or a
+    /// non-modifier key was pressed during the hold (which cancels the overlay).
+    mod_hold_since: Option<Instant>,
 }
 
 /// Direction + progress of the quake window's slide animation.

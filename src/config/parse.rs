@@ -143,6 +143,10 @@ impl RawConfig {
         } else {
             DEFAULT_FONT_SIZE
         };
+        // Split the `[keybindings]` overrides into single-chord binds (merged onto
+        // the flat keymap) and multi-chord "leader" sequences (their own map).
+        let (single_binds, key_sequences) =
+            super::keymap::split_overrides(&self.keybinding_overrides);
         let config = Config {
             font_family: self.font_family,
             font_size,
@@ -168,10 +172,8 @@ impl RawConfig {
             initial_cwd: self.cwd.filter(|s| !s.is_empty()).map(PathBuf::from),
             restore_session: self.restore_session.unwrap_or(false),
             copy_on_select: self.copy_on_select.unwrap_or(false),
-            keymap: build_keymap(
-                default_keymap(Platform::current()),
-                &self.keybinding_overrides,
-            ),
+            keymap: build_keymap(default_keymap(Platform::current()), &single_binds),
+            key_sequences,
             cursor_style: parse_cursor_style_config(self.cursor_style.as_deref()),
             cursor_blink: self.cursor_blink.unwrap_or(false),
             wallpaper_theme: self

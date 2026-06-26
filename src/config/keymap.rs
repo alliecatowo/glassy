@@ -234,6 +234,15 @@ pub enum KeyAction {
     /// Temporarily maximize the focused split pane (hide the others); toggle
     /// again to restore the tiling. A no-op when the active tab is not split.
     ToggleZoom,
+    /// Move focus to the tiled pane to the LEFT of the focused one. A no-op when
+    /// the active tab is not split (the chord then falls through to the child).
+    FocusPaneLeft,
+    /// Move focus to the tiled pane to the RIGHT of the focused one.
+    FocusPaneRight,
+    /// Move focus to the tiled pane ABOVE the focused one.
+    FocusPaneUp,
+    /// Move focus to the tiled pane BELOW the focused one.
+    FocusPaneDown,
 }
 
 impl KeyAction {
@@ -274,6 +283,10 @@ impl KeyAction {
             ToggleMinimap => "Toggle minimap",
             QuakeToggle => "Toggle quake dropdown",
             ToggleZoom => "Zoom focused pane",
+            FocusPaneLeft => "Focus pane left",
+            FocusPaneRight => "Focus pane right",
+            FocusPaneUp => "Focus pane up",
+            FocusPaneDown => "Focus pane down",
         }
     }
 
@@ -284,7 +297,8 @@ impl KeyAction {
             NewTab | ClosePane | NextTab | PrevTab | GoToTab(_) | MoveTabLeft | MoveTabRight => {
                 "Tabs"
             }
-            SplitVertical | SplitHorizontal | BroadcastInput | ToggleZoom => "Split panes",
+            SplitVertical | SplitHorizontal | BroadcastInput | ToggleZoom | FocusPaneLeft
+            | FocusPaneRight | FocusPaneUp | FocusPaneDown => "Split panes",
             Copy | Paste => "Edit",
             ToggleFullscreen | ToggleMaximize | FontIncrease | FontDecrease | FontReset
             | ToggleStatusBar | ToggleMinimap | ScrollUp | ScrollDown | ScrollTop
@@ -333,6 +347,10 @@ pub(crate) fn parse_action(s: &str) -> Result<Option<KeyAction>> {
         "toggle_minimap" => ToggleMinimap,
         "quake_toggle" => QuakeToggle,
         "toggle_zoom" | "zoom" => ToggleZoom,
+        "focus_pane_left" => FocusPaneLeft,
+        "focus_pane_right" => FocusPaneRight,
+        "focus_pane_up" => FocusPaneUp,
+        "focus_pane_down" => FocusPaneDown,
         // go_to_tab_1 .. go_to_tab_9 select a tab by 1-based position.
         s if s.starts_with("go_to_tab_") => match s["go_to_tab_".len()..].parse::<u8>() {
             Ok(n @ 1..=9) => GoToTab(n),
@@ -345,6 +363,62 @@ pub(crate) fn parse_action(s: &str) -> Result<Option<KeyAction>> {
 /// The effective keymap: chord → action. Built in [`build_keymap`] by layering
 /// user overrides on top of the built-in defaults.
 pub type KeyMap = HashMap<Chord, KeyAction>;
+
+/// A multi-key chord *sequence* (a "leader" binding), e.g. `ctrl+a` then `n`.
+/// The map key is the full ordered list of chords; the first chord acts as the
+/// leader/prefix. Built from `[keybindings]` entries whose chord token contains a
+/// space (e.g. `"ctrl+a n" = next_tab`). Empty by default (no leader keys).
+pub type SequenceMap = HashMap<Vec<Chord>, KeyAction>;
+
+/// Parse a space-separated chord *sequence* like `"ctrl+a n"` into an ordered
+/// list of [`Chord`]s. Each whitespace-delimited token is parsed with
+/// [`parse_chord`]. Returns an error if any token is invalid or the sequence has
+/// fewer than two chords (a single chord belongs in the flat [`KeyMap`]).
+pub fn parse_sequence(s: &str) -> Result<Vec<Chord>> {
+    let chords: Result<Vec<Chord>> = s.split_whitespace().map(parse_chord).collect();
+    let chords = chords?;
+    if chords.len() < 2 {
+        bail!("a key sequence needs at least two chords (got '{s}')");
+    }
+    Ok(chords)
+}
+
+/// Split the user `[keybindings]` overrides into single-chord binds (the chord
+/// token has no internal whitespace) and multi-chord sequence binds (it does).
+/// The single-chord list keeps the original order for [`build_keymap`]; the
+/// sequence list is parsed into a [`SequenceMap`] by [`build_sequence_map`].
+/// Keeps the parser additive: one `[keybindings]` section now feeds both maps.
+pub(crate) fn split_overrides(
+    overrides: &[(String, String)],
+) -> (Vec<(String, String)>, SequenceMap) {
+    let mut singles: Vec<(String, String)> = Vec::new();
+    let mut sequences: SequenceMap = HashMap::new();
+    for (chord_str, action_str) in overrides {
+        if chord_str.split_whitespace().count() > 1 {
+            let seq = match parse_sequence(chord_str) {
+                Ok(s) => s,
+                Err(e) => {
+                    log::warn!("glassy: ignoring bad key-sequence '{chord_str}': {e}");
+                    continue;
+                }
+            };
+            match parse_action(action_str) {
+                Ok(Some(action)) => {
+                    sequences.insert(seq, action);
+                }
+                Ok(None) => {
+                    sequences.remove(&seq);
+                }
+                Err(e) => {
+                    log::warn!("glassy: ignoring bad key-sequence action '{action_str}': {e}");
+                }
+            }
+        } else {
+            singles.push((chord_str.clone(), action_str.clone()));
+        }
+    }
+    (singles, sequences)
+}
 
 /// The built-in default keybindings for `platform`. These are used as a base;
 /// user-supplied `[keybindings]` entries override or extend them.
@@ -426,6 +500,12 @@ fn pc_default_binds() -> &'static [(&'static str, KeyAction)] {
         ("ctrl+shift+pagedown", MoveTabRight),
         ("ctrl+shift+up", JumpPrevPrompt),
         ("ctrl+shift+down", JumpNextPrompt),
+        // Pane focus navigation: Ctrl+arrow moves between tiled panes on PC.
+        // No-op (falls through to the child) when the active tab is not split.
+        ("ctrl+left", FocusPaneLeft),
+        ("ctrl+right", FocusPaneRight),
+        ("ctrl+up", FocusPaneUp),
+        ("ctrl+down", FocusPaneDown),
         ("ctrl+1", GoToTab(1)),
         ("ctrl+2", GoToTab(2)),
         ("ctrl+3", GoToTab(3)),
@@ -464,6 +544,12 @@ fn mac_default_binds() -> &'static [(&'static str, KeyAction)] {
         ("cmd+shift+]", MoveTabRight),
         ("cmd+shift+up", JumpPrevPrompt),
         ("cmd+shift+down", JumpNextPrompt),
+        // Pane focus navigation: Cmd+arrow moves between tiled panes on macOS.
+        // No-op (falls through to the child) when the active tab is not split.
+        ("cmd+left", FocusPaneLeft),
+        ("cmd+right", FocusPaneRight),
+        ("cmd+up", FocusPaneUp),
+        ("cmd+down", FocusPaneDown),
         ("cmd+1", GoToTab(1)),
         ("cmd+2", GoToTab(2)),
         ("cmd+3", GoToTab(3)),
@@ -554,6 +640,52 @@ mod tests {
         assert_eq!(
             mac.get(&parse_chord("cmd+shift+enter").unwrap()),
             Some(&KeyAction::ToggleZoom)
+        );
+    }
+
+    #[test]
+    fn focus_pane_actions_round_trip() {
+        // Each direction parses from its config name and reports a description.
+        assert_eq!(
+            parse_action("focus_pane_left").unwrap(),
+            Some(KeyAction::FocusPaneLeft)
+        );
+        assert_eq!(
+            parse_action("focus_pane_right").unwrap(),
+            Some(KeyAction::FocusPaneRight)
+        );
+        assert_eq!(
+            parse_action("focus_pane_up").unwrap(),
+            Some(KeyAction::FocusPaneUp)
+        );
+        assert_eq!(
+            parse_action("focus_pane_down").unwrap(),
+            Some(KeyAction::FocusPaneDown)
+        );
+        assert_eq!(KeyAction::FocusPaneLeft.section(), "Split panes");
+        assert!(!KeyAction::FocusPaneDown.description().is_empty());
+    }
+
+    #[test]
+    fn focus_pane_has_platform_default_binds() {
+        // Ctrl+arrow (pc) and Cmd+arrow (mac) navigate panes out of the box.
+        let pc = default_keymap(Platform::Linux);
+        assert_eq!(
+            pc.get(&parse_chord("ctrl+left").unwrap()),
+            Some(&KeyAction::FocusPaneLeft)
+        );
+        assert_eq!(
+            pc.get(&parse_chord("ctrl+down").unwrap()),
+            Some(&KeyAction::FocusPaneDown)
+        );
+        let mac = default_keymap(Platform::Mac);
+        assert_eq!(
+            mac.get(&parse_chord("cmd+right").unwrap()),
+            Some(&KeyAction::FocusPaneRight)
+        );
+        assert_eq!(
+            mac.get(&parse_chord("cmd+up").unwrap()),
+            Some(&KeyAction::FocusPaneUp)
         );
     }
 

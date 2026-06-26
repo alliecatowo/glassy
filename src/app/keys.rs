@@ -126,6 +126,13 @@ impl App {
             state,
             repeat,
         };
+        // A pressed non-modifier key turns a bare modifier HOLD into a chord, so
+        // disarm the numbered tab overlay. (Bare modifier presses come through as
+        // `ModifiersChanged`, not here, so this only fires for real keys.) Done
+        // before any consume-and-return path so the overlay always clears.
+        if event.state.is_pressed() && !event.repeat {
+            self.cancel_mod_hold(event_loop);
+        }
         // Window-level shortcuts (fullscreen / maximize) are handled first,
         // before overlays, using the keymap so they can be rebound.
         // We consult the keymap for ToggleFullscreen and ToggleMaximize before
@@ -200,6 +207,19 @@ impl App {
         }
 
         // --------------------------------------------------------------------
+        // Leader / multi-key chord sequences: an armed prefix (or a chord that
+        // begins one and has no flat action) is handled here BEFORE the flat
+        // keymap dispatch and the child-encode path, so leader keys never leak
+        // to the PTY. A no-op (returns false) when no sequences are configured.
+        // --------------------------------------------------------------------
+        if event.state.is_pressed()
+            && let Some(chord) = chord_from_event(&event.logical_key, self.mods)
+            && self.handle_key_sequence(&chord, event_loop)
+        {
+            return;
+        }
+
+        // --------------------------------------------------------------------
         // Keymap dispatch: consult the user keymap (which includes defaults)
         // FIRST, before any hard-coded path below. This lets custom bindings
         // override every built-in chord.
@@ -221,7 +241,21 @@ impl App {
             // terminal apps when this instance isn't in quake mode — there it is a
             // no-op, so let the keypress fall through to the child instead.
             let inert_quake = action == KeyAction::QuakeToggle && self.quake.is_none();
-            if !inert_quake && (!is_scroll || !self.term_mode().contains(TermMode::ALT_SCREEN)) {
+            // Pane-focus chords (Cmd/Ctrl+arrow) are no-ops on a single-pane tab —
+            // there they MUST fall through so the arrow reaches the child (e.g.
+            // Ctrl+Left = word-jump in a shell). Only swallow them when split.
+            let is_focus_pane = matches!(
+                action,
+                KeyAction::FocusPaneLeft
+                    | KeyAction::FocusPaneRight
+                    | KeyAction::FocusPaneUp
+                    | KeyAction::FocusPaneDown
+            );
+            let inert_focus_pane = is_focus_pane && !self.is_split();
+            if !inert_quake
+                && !inert_focus_pane
+                && (!is_scroll || !self.term_mode().contains(TermMode::ALT_SCREEN))
+            {
                 self.run_key_action(action, event_loop);
                 return;
             }
@@ -508,6 +542,10 @@ impl App {
                 self.quake_apply(crate::ipc::IpcCommand::Toggle, event_loop);
             }
             ToggleZoom => self.toggle_zoom(event_loop),
+            FocusPaneLeft => self.focus_pane(pane::Move::Left, event_loop),
+            FocusPaneRight => self.focus_pane(pane::Move::Right, event_loop),
+            FocusPaneUp => self.focus_pane(pane::Move::Up, event_loop),
+            FocusPaneDown => self.focus_pane(pane::Move::Down, event_loop),
         }
     }
 

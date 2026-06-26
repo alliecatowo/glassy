@@ -121,6 +121,8 @@ impl App {
             preedit: None,
             cmd_history: std::collections::VecDeque::new(),
             cwd_history: std::collections::VecDeque::new(),
+            key_seq_pending: None,
+            mod_hold_since: None,
         }
     }
 
