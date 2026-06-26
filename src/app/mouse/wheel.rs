@@ -35,6 +35,25 @@ impl App {
             self.mark_dirty(event_loop);
             return;
         }
+        // Settings window owns the wheel while open: scroll the active section's
+        // right pane. The next `build_settings_sectioned` clamps the offset against
+        // the section's content height, so we only accumulate here.
+        if self.settings_open {
+            let line_px = self
+                .renderer
+                .as_ref()
+                .map(|r| r.cell_metrics().height)
+                .unwrap_or(20.0)
+                .max(1.0);
+            let dy = match delta {
+                MouseScrollDelta::LineDelta(_, y) => y * line_px * 3.0,
+                MouseScrollDelta::PixelDelta(p) => p.y as f32,
+            };
+            self.settings_section_scroll = (self.settings_section_scroll - dy).max(0.0);
+            self.force_full_redraw = true;
+            self.mark_dirty(event_loop);
+            return;
+        }
         // A touchpad gesture brackets its deltas with Started/Ended; reset
         // the accumulators and the one-switch-per-swipe latch at those
         // boundaries so each gesture is independent.

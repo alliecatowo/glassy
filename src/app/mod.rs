@@ -53,6 +53,7 @@ mod search;
 mod selection;
 mod settings;
 mod settings_fields;
+mod settings_themes;
 mod strip;
 mod tab_paint;
 mod tabs;
@@ -724,6 +725,27 @@ pub struct App {
     /// the most-recent unique paths win. Bounded by [`CWD_HISTORY_CAP`]. The
     /// command palette offers these to `cd` into.
     cwd_history: std::collections::VecDeque<std::path::PathBuf>,
+
+    // --- settings-themes stream: sectioned window + custom theme + profiles ---
+    /// Active left-sidebar section of the revamped settings window (index into
+    /// [`gui::SettingsSection::ALL`]).
+    settings_section: usize,
+    /// Vertical scroll offset (px) of the active settings section's right pane.
+    settings_section_scroll: f32,
+    /// The working custom-theme palette being edited in the Themes section: the
+    /// four specials (fg/bg/cursor/selection) followed by the 16 ANSI entries, all
+    /// as `Rgb`. Seeded from the active theme when settings open; mutated by the
+    /// hex editor; applied/saved on the editor's Apply / Save buttons.
+    settings_custom: [alacritty_terminal::vte::ansi::Rgb; 20],
+    /// Which custom-theme entry index is currently being edited (0..20), or
+    /// `usize::MAX` when no swatch is selected.
+    settings_custom_editing: usize,
+    /// Editable hex model + drag state for the selected custom-theme color.
+    settings_theme_hex: gui::TextEdit,
+    settings_theme_hex_ms: gui::TextInputMouse,
+    /// Cached runtime profile names (`[profile.*]` sections), refreshed when the
+    /// settings window opens. Empty when the config defines no profiles.
+    settings_profiles: Vec<String>,
 }
 
 /// Direction + progress of the quake window's slide animation.

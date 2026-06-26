@@ -248,7 +248,26 @@ impl ApplicationHandler<UserEvent> for App {
             self.force_full_redraw = true;
         }
         if std::env::var_os("GLASSY_SETTINGS").is_some() {
-            self.settings_open = true;
+            // Use the real open path so the sectioned window's custom-theme palette
+            // and profile list are seeded for capture. GLASSY_SETTINGS_SECTION picks
+            // the starting sidebar section (0=General .. 5=Advanced, or a name).
+            self.open_settings();
+            if let Ok(sec) = std::env::var("GLASSY_SETTINGS_SECTION") {
+                let idx = sec.parse::<usize>().ok().unwrap_or_else(|| {
+                    crate::gui::SettingsSection::ALL
+                        .iter()
+                        .position(|s| s.label().eq_ignore_ascii_case(sec.trim()))
+                        .unwrap_or(0)
+                });
+                self.settings_set_section(idx);
+            }
+            // Headless: pre-select a custom-theme color so the editor card is
+            // captured. GLASSY_SETTINGS_CUSTOM=<entry index 0..20>.
+            if let Ok(idx) = std::env::var("GLASSY_SETTINGS_CUSTOM")
+                && let Ok(i) = idx.parse::<usize>()
+            {
+                self.select_custom_color(i);
+            }
             self.force_full_redraw = true;
         }
         // Headless: open settings with the cursor-cfg fields visible so the

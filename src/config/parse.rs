@@ -365,6 +365,26 @@ pub(super) fn parse_config_file(text: &str, raw: &mut RawConfig) -> Result<()> {
     Ok(())
 }
 
+/// Extract the `[profile.NAME]` section names from raw config text, lower-cased and
+/// in first-seen order (the parser's `HashMap` doesn't preserve order, and the
+/// runtime switcher wants a stable list). Duplicates are de-duplicated.
+pub(super) fn profile_names_from_text(text: &str) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with('[') && line.ends_with(']') {
+            let inner = line[1..line.len() - 1].trim();
+            if let Some(profile_name) = inner.strip_prefix("profile.") {
+                let n = profile_name.trim().to_ascii_lowercase();
+                if !n.is_empty() && !names.contains(&n) {
+                    names.push(n);
+                }
+            }
+        }
+    }
+    names
+}
+
 /// Strip one layer of matching single or double quotes from `s`, if present.
 fn unquote(s: &str) -> &str {
     let bytes = s.as_bytes();
@@ -405,7 +425,23 @@ pub(super) fn apply_kv(key: &str, value: &str, raw: &mut RawConfig) -> Result<()
         }
         "theme" => {
             if !value.is_empty() {
-                raw.theme = Some(value.to_string());
+                // Split-theme syntax: `theme = light:X, dark:Y` turns on
+                // follow_system and pins the per-scheme themes. A bare name keeps
+                // the legacy single-theme behaviour. Either half may be omitted.
+                if let Some((light, dark)) = parse_split_theme(value) {
+                    raw.follow_system = Some(true);
+                    if let Some(l) = light {
+                        raw.theme_light = Some(l);
+                    }
+                    if let Some(d) = dark {
+                        raw.theme_dark = Some(d.clone());
+                        // Seed the active theme to the dark half so a first paint
+                        // before the OS scheme is known is sensible.
+                        raw.theme = Some(d);
+                    }
+                } else {
+                    raw.theme = Some(value.to_string());
+                }
             }
         }
         "opacity" => {
@@ -686,6 +722,40 @@ pub(super) fn parse_tab_bar_mode(value: Option<&str>) -> crate::app::TabBarMode 
         Some("never") => TabBarMode::Never,
         _ => TabBarMode::Auto,
     }
+}
+
+/// Parse the split-theme syntax `light:NAME, dark:NAME` (either half optional,
+/// order-independent, comma-separated). Returns `Some((light, dark))` only when at
+/// least one `light:`/`dark:` token is present; a bare theme name returns `None`
+/// so the caller falls back to the single-theme path. Whitespace around tokens and
+/// names is tolerated.
+pub(super) fn parse_split_theme(value: &str) -> Option<(Option<String>, Option<String>)> {
+    let mut light = None;
+    let mut dark = None;
+    let mut saw_tag = false;
+    for part in value.split(',') {
+        let part = part.trim();
+        if let Some(rest) = part
+            .strip_prefix("light:")
+            .or_else(|| part.strip_prefix("Light:"))
+        {
+            let n = rest.trim();
+            if !n.is_empty() {
+                light = Some(n.to_string());
+            }
+            saw_tag = true;
+        } else if let Some(rest) = part
+            .strip_prefix("dark:")
+            .or_else(|| part.strip_prefix("Dark:"))
+        {
+            let n = rest.trim();
+            if !n.is_empty() {
+                dark = Some(n.to_string());
+            }
+            saw_tag = true;
+        }
+    }
+    saw_tag.then_some((light, dark))
 }
 
 /// Split a `shell` value (a whitespace-separated program + args) into a `Shell`.
