@@ -170,6 +170,20 @@ impl App {
             .pty
             .as_ref()
             .and_then(|p| p.pane_info.git_branch.clone());
+        // Foreground process name (best-effort from PaneInfo).
+        let sb_fg_process: Option<String> = self
+            .pty
+            .as_ref()
+            .and_then(|p| p.pane_info.process_name(None).map(str::to_owned));
+        // Last command exit status from the OSC 133 block store (most recent block).
+        let sb_exit_status: Option<i32> = self.pty.as_ref().and_then(|p| {
+            p.prompts
+                .lock()
+                .ok()
+                .and_then(|g| g.blocks.iter().rev().find_map(|b| b.exit_code))
+        });
+        let sb_time_format = self.config.status_bar_time_format.clone();
+        let sb_segments = self.config.status_bar_segments.clone();
         let sb_progress = self.active_progress;
         let sb_broadcast = self.broadcast_input;
 
@@ -859,6 +873,10 @@ impl App {
                 sb_git_branch.as_deref(),
                 sb_progress,
                 sb_broadcast,
+                sb_fg_process.as_deref(),
+                &sb_time_format,
+                sb_exit_status,
+                sb_segments.as_deref(),
             );
         }
 

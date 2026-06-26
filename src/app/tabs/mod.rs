@@ -121,6 +121,7 @@ impl App {
             preedit: None,
             cmd_history: std::collections::VecDeque::new(),
             cwd_history: std::collections::VecDeque::new(),
+            opacity_before_toggle: None,
         }
     }
 

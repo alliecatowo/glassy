@@ -508,6 +508,16 @@ impl App {
                 self.quake_apply(crate::ipc::IpcCommand::Toggle, event_loop);
             }
             ToggleZoom => self.toggle_zoom(event_loop),
+            IncreaseOpacity => {
+                let o = (self.config.opacity + 0.05).clamp(0.0, 1.0);
+                self.apply_opacity(o, event_loop);
+            }
+            DecreaseOpacity => {
+                let o = (self.config.opacity - 0.05).clamp(0.0, 1.0);
+                self.apply_opacity(o, event_loop);
+            }
+            ToggleOpacity => self.toggle_opacity(event_loop),
+            SaveScrollback => self.save_scrollback_to_file(event_loop),
         }
     }
 

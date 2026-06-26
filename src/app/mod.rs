@@ -212,6 +212,48 @@ pub struct Config {
     /// history source (captured from OSC 133 `B`..`C` zones). 0 disables capture.
     /// Default 200.
     pub command_history: usize,
+    /// Which segments appear in the status bar, and in what order.
+    /// When `None` the bar shows its built-in default set (cwd, git branch, mode,
+    /// broadcast, selection, scroll, encoding). When `Some`, only the listed
+    /// segments are shown in the listed order.
+    pub status_bar_segments: Option<Vec<StatusBarSegment>>,
+    /// `strftime`-style format string for the `Time` status-bar segment. Defaults
+    /// to `"%H:%M"` (24-hour clock). Example: `"%I:%M %p"` for 12-hour.
+    pub status_bar_time_format: String,
+}
+
+/// Configurable segments for the status bar (config key `status_bar_segments`).
+/// The default set (when `status_bar_segments` is `None`) is:
+///   cwd, git_branch, mode, broadcast, selection, scroll, encoding.
+///
+/// Config string accepted by `apply_kv`: a comma- or space-separated list of
+/// segment names, e.g. `"cwd git_branch mode time encoding"`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+pub enum StatusBarSegment {
+    /// Last two path components of the current working directory.
+    Cwd,
+    /// Git branch name (best-effort, nf-pl glyph prefix).
+    GitBranch,
+    /// Foreground process name of the focused pane.
+    Process,
+    /// Clock; format controlled by `status_bar_time_format`.
+    Time,
+    /// `ALT` (alt-screen) / `MOUSE` (mouse-reporting) terminal-mode flag.
+    Mode,
+    /// `BCAST` broadcast-input indicator.
+    Broadcast,
+    /// Glyph count of the active text selection.
+    Selection,
+    /// `⇡N%` scroll-history position.
+    Scroll,
+    /// `UTF-8` encoding (always UTF-8 for now).
+    Encoding,
+    /// OSC 9;4 progress bar (thin 1-px bar at the very bottom of the status bar).
+    Progress,
+    /// Last exit status indicator (from OSC 133 command blocks).
+    ExitStatus,
+    /// Key-binding hint (shows the current mode's most useful bindings).
+    KeyHints,
 }
 
 /// The three user-facing default cursor shapes.
@@ -724,6 +766,12 @@ pub struct App {
     /// the most-recent unique paths win. Bounded by [`CWD_HISTORY_CAP`]. The
     /// command palette offers these to `cd` into.
     cwd_history: std::collections::VecDeque<std::path::PathBuf>,
+
+    // --- Opacity toggle -------------------------------------------------------
+    /// The opacity value before the last `ToggleOpacity` action that moved it
+    /// TO 1.0. Used to restore transparency on the next toggle. `None` until the
+    /// first toggle-to-opaque fires; initialised lazily from the config opacity.
+    opacity_before_toggle: Option<f32>,
 }
 
 /// Direction + progress of the quake window's slide animation.

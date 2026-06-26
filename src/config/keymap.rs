@@ -234,6 +234,14 @@ pub enum KeyAction {
     /// Temporarily maximize the focused split pane (hide the others); toggle
     /// again to restore the tiling. A no-op when the active tab is not split.
     ToggleZoom,
+    /// Increase window background opacity by 5%.
+    IncreaseOpacity,
+    /// Decrease window background opacity by 5%.
+    DecreaseOpacity,
+    /// Toggle between 1.0 (fully opaque) and the last non-opaque opacity.
+    ToggleOpacity,
+    /// Save the active pane's scrollback history to a temporary file and print its path.
+    SaveScrollback,
 }
 
 impl KeyAction {
@@ -274,6 +282,10 @@ impl KeyAction {
             ToggleMinimap => "Toggle minimap",
             QuakeToggle => "Toggle quake dropdown",
             ToggleZoom => "Zoom focused pane",
+            IncreaseOpacity => "Increase opacity",
+            DecreaseOpacity => "Decrease opacity",
+            ToggleOpacity => "Toggle opacity (transparent ↔ opaque)",
+            SaveScrollback => "Save scrollback to file",
         }
     }
 
@@ -288,8 +300,10 @@ impl KeyAction {
             Copy | Paste => "Edit",
             ToggleFullscreen | ToggleMaximize | FontIncrease | FontDecrease | FontReset
             | ToggleStatusBar | ToggleMinimap | ScrollUp | ScrollDown | ScrollTop
-            | ScrollBottom | JumpPrevPrompt | JumpNextPrompt | ToggleFold | QuakeToggle => "View",
+            | ScrollBottom | JumpPrevPrompt | JumpNextPrompt | ToggleFold | QuakeToggle
+            | IncreaseOpacity | DecreaseOpacity | ToggleOpacity => "View",
             Settings | Help | Search | CommandPalette | Hints => "App",
+            SaveScrollback => "Edit",
         }
     }
 }
@@ -333,6 +347,10 @@ pub(crate) fn parse_action(s: &str) -> Result<Option<KeyAction>> {
         "toggle_minimap" => ToggleMinimap,
         "quake_toggle" => QuakeToggle,
         "toggle_zoom" | "zoom" => ToggleZoom,
+        "increase_opacity" | "opacity_up" => IncreaseOpacity,
+        "decrease_opacity" | "opacity_down" => DecreaseOpacity,
+        "toggle_opacity" => ToggleOpacity,
+        "save_scrollback" | "scrollback_to_file" => SaveScrollback,
         // go_to_tab_1 .. go_to_tab_9 select a tab by 1-based position.
         s if s.starts_with("go_to_tab_") => match s["go_to_tab_".len()..].parse::<u8>() {
             Ok(n @ 1..=9) => GoToTab(n),
@@ -396,6 +414,10 @@ fn shared_default_binds() -> &'static [(&'static str, KeyAction)] {
         // (guake/yakuake) and is otherwise unbound. Only meaningful when
         // `quake = true`; in normal mode `quake_toggle` is a harmless no-op.
         ("f12", QuakeToggle),
+        // Opacity control: use Ctrl+Shift+] / Ctrl+Shift+[ to nudge transparency.
+        // ToggleOpacity has no default chord (it is in the command palette).
+        ("ctrl+shift+]", IncreaseOpacity),
+        ("ctrl+shift+[", DecreaseOpacity),
     ]
 }
 
