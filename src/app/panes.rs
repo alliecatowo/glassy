@@ -477,13 +477,16 @@ impl App {
         None
     }
 
-    /// Invoke the selected pane-menu action (0 = Split V, 1 = Split H, 2 = Close).
+    /// Invoke the selected pane-menu action. Indices follow [`App::PANE_MENU_ITEMS`]:
+    /// 0 = Split V, 1 = Split H, 2 = Zoom, 3 = Rotate, 4 = Equalize, 5 = Close.
     pub(crate) fn invoke_pane_menu_action(&mut self, idx: usize, event_loop: &ActiveEventLoop) {
         self.pane_menu_open = None;
         match idx {
             0 => self.split_pane(pane::Dir::Vertical, event_loop),
             1 => self.split_pane(pane::Dir::Horizontal, event_loop),
             2 => self.toggle_zoom(event_loop),
+            3 => self.rotate_panes(event_loop),
+            4 => self.equalize_panes(event_loop),
             _ => self.close_pane(event_loop),
         }
         self.mark_dirty(event_loop);

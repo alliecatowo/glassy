@@ -269,6 +269,75 @@ impl Node {
         }
     }
 
+    /// Swap the ids of leaves `a` and `b` in place, leaving the tree shape
+    /// (splits + ratios) untouched. Returns true when BOTH leaves were found.
+    /// Used by pane drag-rearrange to move a pane onto another's slot.
+    pub(super) fn swap_leaves(&mut self, a: usize, b: usize) -> bool {
+        if a == b {
+            return false;
+        }
+        let mut found_a = false;
+        let mut found_b = false;
+        self.swap_walk(a, b, &mut found_a, &mut found_b);
+        found_a && found_b
+    }
+
+    fn swap_walk(&mut self, a: usize, b: usize, found_a: &mut bool, found_b: &mut bool) {
+        match self {
+            Node::Leaf(l) => {
+                if *l == a {
+                    *l = b;
+                    *found_a = true;
+                } else if *l == b {
+                    *l = a;
+                    *found_b = true;
+                }
+            }
+            Node::Split { first, second, .. } => {
+                first.swap_walk(a, b, found_a, found_b);
+                second.swap_walk(a, b, found_a, found_b);
+            }
+        }
+    }
+
+    /// Rotate the split node addressed by `path`: swap its `first` and `second`
+    /// subtrees while KEEPING the ratio, so each child takes over the other's exact
+    /// slot geometry (the divider line does not move). Returns true when `path`
+    /// names a split. An empty `path` rotates the root.
+    pub(super) fn rotate_split(&mut self, path: &[bool]) -> bool {
+        let mut node = self;
+        for &go_second in path {
+            match node {
+                Node::Split { first, second, .. } => {
+                    node = if go_second { second } else { first };
+                }
+                Node::Leaf(_) => return false,
+            }
+        }
+        match node {
+            Node::Split { first, second, .. } => {
+                std::mem::swap(first, second);
+                true
+            }
+            Node::Leaf(_) => false,
+        }
+    }
+
+    /// Reset every split ratio in this subtree to 0.5 (even partition).
+    pub(super) fn equalize(&mut self) {
+        if let Node::Split {
+            ratio,
+            first,
+            second,
+            ..
+        } = self
+        {
+            *ratio = 0.5;
+            first.equalize();
+            second.equalize();
+        }
+    }
+
     pub(super) fn to_desc(&self, id_of: &impl Fn(usize) -> usize) -> NodeDesc {
         match self {
             Node::Leaf(l) => NodeDesc::Leaf(id_of(*l)),

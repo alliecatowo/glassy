@@ -260,6 +260,14 @@ impl App {
         self.force_full_redraw = true;
     }
 
+    /// Flip the dim-unfocused-pane-content setting. Forces a full redraw so every
+    /// pane is rebuilt with the new dim state (cached tiles carry a stale dim flag
+    /// otherwise). A no-op beyond the flag flip when the active tab isn't split.
+    pub(crate) fn toggle_dim_unfocused(&mut self) {
+        self.config.dim_unfocused = !self.config.dim_unfocused;
+        self.force_full_redraw = true;
+    }
+
     /// Tab-bar mode as a segmented index: 0 = Auto, 1 = Always, 2 = Never.
     pub(crate) fn tab_bar_mode_index(&self) -> usize {
         match self.config.show_tab_bar {

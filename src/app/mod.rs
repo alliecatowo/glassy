@@ -44,6 +44,7 @@ mod minimap;
 mod mouse;
 mod multipane;
 mod palette;
+mod pane_ops;
 mod panes;
 pub(crate) mod peek;
 mod quake;
@@ -212,6 +213,11 @@ pub struct Config {
     /// history source (captured from OSC 133 `B`..`C` zones). 0 disables capture.
     /// Default 200.
     pub command_history: usize,
+    /// Dim the CONTENT of unfocused panes in a split with a subtle dark overlay,
+    /// so the focused pane reads as foreground. Default true. Independent of
+    /// `pane_headers` (the header always dims its own text regardless). Toggle via
+    /// `dim_unfocused = false` in the config or the command palette.
+    pub dim_unfocused: bool,
 }
 
 /// The three user-facing default cursor shapes.
@@ -476,6 +482,16 @@ pub struct App {
     pane_menu_open: Option<usize>,
     /// Currently-highlighted row in the open pane menu (0-based, keyboard nav).
     pane_menu_sel: usize,
+    /// User-saved split layouts, keyed by name. Each value is the SHAPE (the split
+    /// tree, ratios, and leaf ids in session-relative DFS order) of a split at save
+    /// time; restoring re-applies that shape onto the live panes (same pane count)
+    /// via [`pane::Layout::reshape_from_desc`]. Empty until the first `save_layout`.
+    /// In-memory for the session (not persisted to disk in this iteration).
+    named_layouts: std::collections::HashMap<String, pane::LayoutDesc>,
+    /// While a pane header is being dragged to rearrange: the source pane id and the
+    /// pointer position at press, so a small drag threshold distinguishes a click
+    /// (focus) from a drag (rearrange). `None` when no header drag is in progress.
+    dragging_pane: Option<(usize, (f64, f64))>,
 
     // Mouse reporting state.
     /// Last known cursor cell (col, row), clamped to the grid.

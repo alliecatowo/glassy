@@ -34,6 +34,16 @@ pub(crate) enum PaletteCmd {
     ClosePane,
     ToggleBroadcastInput,
     ToggleZoom,
+    /// Rotate the focused pane with its split sibling (swap positions).
+    RotatePanes,
+    /// Reset all split ratios to an even 50/50 partition.
+    EqualizePanes,
+    /// Toggle dimming of unfocused pane content.
+    ToggleDimUnfocused,
+    /// Save the current split shape under a name (carried in the entry payload).
+    SaveLayout,
+    /// Restore a saved split shape by name (carried in the entry payload).
+    RestoreLayout,
     // --- Overlays ---
     OpenSettings,
     OpenHelp,
@@ -82,7 +92,8 @@ impl PaletteCmd {
         use PaletteCmd::*;
         match self {
             NewTab | CloseTab | NextTab | PrevTab => "Tab",
-            SplitVertical | SplitHorizontal | ClosePane | ToggleBroadcastInput | ToggleZoom => {
+            SplitVertical | SplitHorizontal | ClosePane | ToggleBroadcastInput | ToggleZoom
+            | RotatePanes | EqualizePanes | ToggleDimUnfocused | SaveLayout | RestoreLayout => {
                 "Pane"
             }
             OpenSettings | OpenHelp | OpenSearch => "View",
@@ -113,6 +124,11 @@ impl PaletteCmd {
             ClosePane => "Close pane".into(),
             ToggleBroadcastInput => "Toggle broadcast input (all panes)".into(),
             ToggleZoom => "Zoom / unzoom focused pane".into(),
+            RotatePanes => "Rotate panes (swap with sibling)".into(),
+            EqualizePanes => "Equalize splits (even sizes)".into(),
+            ToggleDimUnfocused => "Toggle dim unfocused panes".into(),
+            // Save/Restore labels are filled in by the registry from the payload.
+            SaveLayout | RestoreLayout => String::new(),
             OpenSettings => "Settings".into(),
             OpenHelp => "Help / keybindings".into(),
             OpenSearch => "Find in terminal".into(),
@@ -234,6 +250,9 @@ impl App {
             ClosePane,
             ToggleBroadcastInput,
             ToggleZoom,
+            RotatePanes,
+            EqualizePanes,
+            ToggleDimUnfocused,
             OpenSettings,
             OpenHelp,
             OpenSearch,
@@ -307,7 +326,41 @@ impl App {
                 payload: Some(dir.to_string_lossy().into_owned()),
             });
         }
+        // One restore row per saved layout (only meaningful while split). Saving is
+        // offered as a quick "Save layout: <auto-name>" row when the tab is split.
+        for name in self.saved_layout_names() {
+            let display = format!("Pane  Restore layout: {name}");
+            let haystack = display.to_lowercase();
+            entries.push(PaletteEntry {
+                cmd: RestoreLayout,
+                display,
+                haystack,
+                hint: None,
+                payload: Some(name),
+            });
+        }
+        if self.is_split() {
+            let name = self.next_layout_name();
+            let display = format!("Pane  Save layout: {name}");
+            let haystack = display.to_lowercase();
+            entries.push(PaletteEntry {
+                cmd: SaveLayout,
+                display,
+                haystack,
+                hint: None,
+                payload: Some(name),
+            });
+        }
         entries
+    }
+
+    /// A fresh default name for the "Save layout" palette row: `layout-1`,
+    /// `layout-2`, … skipping any already taken.
+    fn next_layout_name(&self) -> String {
+        (1..)
+            .map(|n| format!("layout-{n}"))
+            .find(|n| !self.named_layouts.contains_key(n))
+            .unwrap_or_else(|| "layout".to_string())
     }
 
     /// Open the command palette (or no-op if already open). Builds the registry,
@@ -491,6 +544,22 @@ impl App {
             ClosePane => self.close_pane(event_loop),
             ToggleBroadcastInput => self.toggle_broadcast_input(event_loop),
             ToggleZoom => self.toggle_zoom(event_loop),
+            RotatePanes => self.rotate_panes(event_loop),
+            EqualizePanes => self.equalize_panes(event_loop),
+            ToggleDimUnfocused => {
+                self.toggle_dim_unfocused();
+                self.mark_dirty(event_loop);
+            }
+            SaveLayout => {
+                if let Some(name) = payload {
+                    self.save_layout(&name);
+                }
+            }
+            RestoreLayout => {
+                if let Some(name) = payload {
+                    self.restore_layout(&name, event_loop);
+                }
+            }
             OpenSettings => {
                 self.open_settings();
                 // Palette rows are activated on a left RELEASE whose click edge /
@@ -634,6 +703,9 @@ mod tests {
             ClosePane,
             ToggleBroadcastInput,
             ToggleZoom,
+            RotatePanes,
+            EqualizePanes,
+            ToggleDimUnfocused,
             OpenSettings,
             OpenHelp,
             OpenSearch,

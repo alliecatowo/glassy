@@ -63,6 +63,8 @@ impl App {
             hovered_pane_header: None,
             pane_menu_open: None,
             pane_menu_sel: 0,
+            named_layouts: std::collections::HashMap::new(),
+            dragging_pane: None,
             mouse_cell: (0, 0),
             mouse_px: (0.0, 0.0),
             held_button: None,
@@ -323,6 +325,7 @@ impl App {
         self.hovered_link = None;
         self.last_click = None;
         self.dragging_tab = None;
+        self.dragging_pane = None;
         // Drop any gutter drag/hover (layout may have changed) and restore the
         // default OS cursor; the next CursorMoved re-arms feedback if warranted.
         if self.dragging_gutter.take().is_some() || self.hovered_gutter.take().is_some() {
@@ -662,6 +665,15 @@ impl App {
 
     /// Horizontal inner padding for the pane header text (px).
     pub(crate) const PANE_HEADER_PAD: f32 = 8.0;
+
+    /// Width (px) of the dotted drag-grip handle at the LEFT edge of each pane
+    /// header. Pressing inside it starts a pane drag-rearrange (drop onto another
+    /// pane to swap). Square-ish, matching the right-edge ⋮ button.
+    pub(crate) const PANE_GRIP_W: f32 = 22.0;
+
+    /// Pixel distance the pointer must travel from the press point before a pane
+    /// header drag is treated as a rearrange rather than a plain focus click.
+    pub(crate) const PANE_DRAG_THRESHOLD: f64 = 6.0;
 }
 
 /// Whether a `file://` URL's path (the part after the scheme, still possibly

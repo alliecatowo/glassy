@@ -234,6 +234,10 @@ pub enum KeyAction {
     /// Temporarily maximize the focused split pane (hide the others); toggle
     /// again to restore the tiling. A no-op when the active tab is not split.
     ToggleZoom,
+    /// Rotate the focused pane with its split sibling (swap their positions).
+    RotatePanes,
+    /// Reset every split ratio to an even 50/50 partition.
+    EqualizePanes,
 }
 
 impl KeyAction {
@@ -274,6 +278,8 @@ impl KeyAction {
             ToggleMinimap => "Toggle minimap",
             QuakeToggle => "Toggle quake dropdown",
             ToggleZoom => "Zoom focused pane",
+            RotatePanes => "Rotate panes",
+            EqualizePanes => "Equalize splits",
         }
     }
 
@@ -284,7 +290,8 @@ impl KeyAction {
             NewTab | ClosePane | NextTab | PrevTab | GoToTab(_) | MoveTabLeft | MoveTabRight => {
                 "Tabs"
             }
-            SplitVertical | SplitHorizontal | BroadcastInput | ToggleZoom => "Split panes",
+            SplitVertical | SplitHorizontal | BroadcastInput | ToggleZoom | RotatePanes
+            | EqualizePanes => "Split panes",
             Copy | Paste => "Edit",
             ToggleFullscreen | ToggleMaximize | FontIncrease | FontDecrease | FontReset
             | ToggleStatusBar | ToggleMinimap | ScrollUp | ScrollDown | ScrollTop
@@ -333,6 +340,8 @@ pub(crate) fn parse_action(s: &str) -> Result<Option<KeyAction>> {
         "toggle_minimap" => ToggleMinimap,
         "quake_toggle" => QuakeToggle,
         "toggle_zoom" | "zoom" => ToggleZoom,
+        "rotate_panes" | "rotate" => RotatePanes,
+        "equalize_panes" | "equalize" => EqualizePanes,
         // go_to_tab_1 .. go_to_tab_9 select a tab by 1-based position.
         s if s.starts_with("go_to_tab_") => match s["go_to_tab_".len()..].parse::<u8>() {
             Ok(n @ 1..=9) => GoToTab(n),
@@ -411,6 +420,8 @@ fn pc_default_binds() -> &'static [(&'static str, KeyAction)] {
         ("ctrl+shift+o", SplitHorizontal),
         ("ctrl+shift+i", BroadcastInput),
         ("ctrl+shift+enter", ToggleZoom),
+        ("ctrl+shift+r", RotatePanes),
+        ("ctrl+shift+x", EqualizePanes),
         ("ctrl+,", Settings),
         ("ctrl+shift+f", Search),
         ("ctrl+shift+p", CommandPalette),
@@ -450,6 +461,8 @@ fn mac_default_binds() -> &'static [(&'static str, KeyAction)] {
         ("cmd+d", SplitVertical),
         ("cmd+shift+d", SplitHorizontal),
         ("cmd+shift+enter", ToggleZoom),
+        ("cmd+shift+r", RotatePanes),
+        ("cmd+shift+x", EqualizePanes),
         ("cmd+,", Settings),
         ("cmd+f", Search),
         ("cmd+shift+p", CommandPalette),

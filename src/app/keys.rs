@@ -508,6 +508,8 @@ impl App {
                 self.quake_apply(crate::ipc::IpcCommand::Toggle, event_loop);
             }
             ToggleZoom => self.toggle_zoom(event_loop),
+            RotatePanes => self.rotate_panes(event_loop),
+            EqualizePanes => self.equalize_panes(event_loop),
         }
     }
 
