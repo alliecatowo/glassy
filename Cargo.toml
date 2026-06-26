@@ -1,6 +1,6 @@
 [package]
 name = "glassy"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 description = "A minimal, fast, GPU-accelerated terminal emulator written in Rust."
 license = "MIT"
@@ -120,7 +120,7 @@ priority = "optional"
 # Runtime shared libraries glassy links against. cargo-deb also auto-detects
 # some of these via dpkg-shlibdeps, but we pin the key ones explicitly so the
 # package is installable on a clean system.
-depends = "libc6, libxkbcommon0, libwayland-client0, libvulkan1, libfontconfig1, libgcc-s1"
+depends = "libc6, libxkbcommon0, libwayland-client0, libvulkan1, libfontconfig1, libgcc-s1, libdbus-1-3"
 assets = [
     ["target/release/glassy", "usr/bin/", "755"],
     ["assets/icons/glassy-16.png", "usr/share/icons/hicolor/16x16/apps/glassy.png", "644"],

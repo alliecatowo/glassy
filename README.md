@@ -159,7 +159,7 @@ sudo dnf install glassy
 sudo install -d -m 0755 /etc/apt/keyrings
 curl -fsSL https://alliecatowo.github.io/glassy/deb/glassy-archive-keyring.asc \
   | sudo tee /etc/apt/keyrings/glassy.asc > /dev/null
-echo "deb [signed-by=/etc/apt/keyrings/glassy.asc] https://alliecatowo.github.io/glassy/deb stable main" \
+echo "deb [signed-by=/etc/apt/keyrings/glassy.asc] https://alliecatowo.github.io/glassy/deb/ ./" \
   | sudo tee /etc/apt/sources.list.d/glassy.list > /dev/null
 sudo apt update && sudo apt install glassy
 ```
