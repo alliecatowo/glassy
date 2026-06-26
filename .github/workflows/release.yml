@@ -516,7 +516,9 @@ jobs:
           files: release/*
           fail_on_unmatched_files: false
           draft: false
-          prerelease: false
+          # Any tag with a pre-release identifier (e.g. v0.2.0-rc1) is marked as
+          # a GitHub pre-release (not "latest"); clean tags (v0.2.0) are full releases.
+          prerelease: ${{ contains(steps.meta.outputs.tag, '-') }}
 
   # -------------------------------------------------------------------------
   # Homebrew formula bump (this repo IS its own tap — Formula/glassy.rb).
