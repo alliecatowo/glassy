@@ -40,3 +40,24 @@ Description: A minimal, fast, GPU-accelerated terminal emulator written in Rust.
  reporting, selection, clipboard, scrollback, OSC 8 hyperlinks, tabs, window
  decorations, configurable cursor, translucency, and themeable config.
 
+Package: glassy
+Version: 0.2.1-1
+Architecture: amd64
+Maintainer: Allie <allisonemilycoleman@gmail.com>
+Installed-Size: 11789
+Depends: libc6, libdbus-1-3, libfontconfig1, libgcc-s1, libvulkan1, libwayland-client0, libxkbcommon0
+Filename: ./glassy_0.2.1_amd64.deb
+Size: 4322832
+MD5sum: ef176d258ae54d3410a5ff11b50e4cf2
+SHA1: 7ab0943153a8853fa0d289c8947af83158fb5f5e
+SHA256: 83ccd4d8b02d116005e39d43e23c957cc653711edc3ac8a6dc08982ffd0808c4
+Section: x11
+Priority: optional
+Homepage: https://github.com/alliecatowo/glassy
+Description: A minimal, fast, GPU-accelerated terminal emulator written in Rust.
+ glassy is a small, fast, GPU-accelerated terminal emulator written in Rust. It
+ draws the grid with an instanced wgpu renderer fed by a dynamic glyph atlas,
+ and supports 24-bit truecolor, color emoji, procedural box-drawing, mouse
+ reporting, selection, clipboard, scrollback, OSC 8 hyperlinks, tabs, window
+ decorations, configurable cursor, translucency, and themeable config.
+
