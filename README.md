@@ -169,18 +169,16 @@ Download `glassy-<version>-macos.dmg` from the [Releases page](https://github.co
 
 > macOS is a fully supported, CI-built target: every release ships a universal (Intel + Apple Silicon) `.app`/`.dmg`. Notarization is the only remaining polish item.
 
-**macOS / Linux — Homebrew**
+**macOS / Linux — Homebrew** — this repo is its own tap (no separate `homebrew-*` repo needed):
 
 ```sh
-brew tap alliecatowo/glassy
-brew install glassy
+brew tap alliecatowo/glassy https://github.com/alliecatowo/glassy
+brew install --HEAD glassy   # builds from latest main
 ```
 
-> The tap repo (`alliecatowo/homebrew-glassy`) must exist for this to resolve; until then, install straight from the formula in this repo:
->
-> ```sh
-> brew install --build-from-source ./packaging/homebrew/glassy.rb
-> ```
+> `--HEAD` builds from source against `main`. Once a tagged release is cut, the
+> versioned formula (`Formula/glassy.rb`, url+sha filled by the release workflow)
+> also supports a plain `brew install glassy`.
 
 **Flatpak** *(not yet on Flathub; local build from the manifest)*
 
