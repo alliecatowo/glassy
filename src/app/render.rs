@@ -109,6 +109,21 @@ impl App {
         let tab_pane_counts = self.tab_pane_counts();
         let tab_active_pos = self.active_pos();
         let tab_left_inset = self.chrome_left_inset();
+        // Modifier-HOLD numbered overlay: when the primary modifier has been held
+        // alone past the dwell, collect the visible tab chip rects + positions so
+        // the painter can stamp a number badge on each (drawn after the cached bar
+        // so it composites on top). Empty when the overlay is inactive.
+        let tab_hold_numbers: Vec<(gui::Rect, usize)> = if self.mod_overlay_active(Instant::now()) {
+            self.tab_layout()
+                .into_iter()
+                .filter_map(|s| match s.item {
+                    StripItem::Tab(i) => Some((s.rect, i)),
+                    _ => None,
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         // Tab-bar incremental decision (single-pane path): rebuild only when the
         // painter's inputs changed or a full redraw is forced (e.g. theme), else
         // replay the cached overlay instead of re-shaping every tab title glyph.
@@ -846,6 +861,12 @@ impl App {
         // renamed, on top of the (cached) tab bar so the caret/edits are live.
         if let Some((rect, buf, caret, sel)) = &rename_inputs {
             Self::paint_tab_rename(renderer, *rect, buf, *caret, *sel);
+        }
+
+        // Modifier-HOLD numbered tab overlay: stamped over the (cached) tab bar
+        // each frame the overlay is active, so it never invalidates the bar cache.
+        if tab_strip_visible && !tab_hold_numbers.is_empty() {
+            Self::paint_tab_hold_numbers(renderer, &tab_hold_numbers);
         }
 
         // Status bar (§3.4): E1 bar at the very bottom, always above the terminal

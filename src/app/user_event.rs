@@ -285,6 +285,13 @@ pub(super) fn dispatch(
             }
             // Repaint so any now-solid (formerly mid-blink-off) cells show.
         }
+        UserEvent::MenuAction(action) => {
+            // A macOS global menu-bar item was clicked: run it through the exact
+            // same dispatch as the equivalent keychord, so the menu and the
+            // keyboard can never diverge. `run_key_action` marks dirty itself.
+            app.run_key_action(action, event_loop);
+            return;
+        }
     }
     app.mark_dirty(event_loop);
 }

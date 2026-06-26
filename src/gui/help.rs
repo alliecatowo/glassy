@@ -392,6 +392,10 @@ const HELP_ACTION_ORDER: &[KeyAction] = &[
     KeyAction::SplitVertical,
     KeyAction::SplitHorizontal,
     KeyAction::BroadcastInput,
+    KeyAction::FocusPaneLeft,
+    KeyAction::FocusPaneRight,
+    KeyAction::FocusPaneUp,
+    KeyAction::FocusPaneDown,
     // Edit
     KeyAction::Copy,
     KeyAction::Paste,

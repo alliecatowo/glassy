@@ -76,10 +76,20 @@
 //! `scroll_up`, `scroll_down`, `scroll_top`, `scroll_bottom`,
 //! `jump_prev_prompt`, `jump_next_prompt` (OSC 133 prompt navigation),
 //! `move_tab_left`, `move_tab_right`, `go_to_tab_1` .. `go_to_tab_9`,
-//! `broadcast_input`, `hints`, `toggle_fold`, `toggle_minimap`, `quake_toggle`.
+//! `broadcast_input`, `hints`, `toggle_fold`, `toggle_minimap`, `quake_toggle`,
+//! `toggle_zoom`, `focus_pane_left`, `focus_pane_right`, `focus_pane_up`,
+//! `focus_pane_down` (move focus between tiled split panes).
 //!
 //! Default chords are platform-aware: macOS uses ⌘-based chords (⌘C/⌘V/⌘T/⌘W,
-//! ⌘1-9, ⌘, for settings, ⌘F for find); Linux/Windows use Ctrl / Ctrl+Shift.
+//! ⌘1-9, ⌘, for settings, ⌘F for find, ⌘arrow for pane focus); Linux/Windows use
+//! Ctrl / Ctrl+Shift (Ctrl+arrow for pane focus). Pane-focus chords fall through
+//! to the child on a single-pane tab. Holding the primary modifier (⌘ / Ctrl)
+//! alone briefly overlays each tab chip with its jump number.
+//!
+//! Multi-key chord *sequences* ("leader" binds) are written with a space between
+//! chords, e.g. `ctrl+a n = next_tab` (press Ctrl+A, then N). The first chord is
+//! the leader/prefix; it must not itself be a single-key bind. Sequences live in
+//! the same `[keybindings]` section.
 //!
 //! A `[keybindings]` entry overrides the built-in default for that action; to
 //! disable a built-in bind entirely, set the action to `none`.
@@ -112,7 +122,7 @@ pub mod theme_import;
 
 use anyhow::{Context, Result};
 
-pub use keymap::{Chord, KeyAction, KeyMap};
+pub use keymap::{Chord, KeyAction, KeyMap, SequenceMap};
 pub use parse::{path, save};
 pub use platform::Platform;
 
@@ -716,6 +726,46 @@ f11 = none\n\
         // ctrl+shift+n added.
         let new_chord = parse_chord("ctrl+shift+n").unwrap();
         assert_eq!(s.config.keymap.get(&new_chord), Some(&KeyAction::NewTab));
+    }
+
+    #[test]
+    fn keybindings_section_splits_single_and_sequence_binds() {
+        // A `[keybindings]` section with a normal chord AND a space-separated
+        // leader sequence: the single bind lands in the flat keymap and the
+        // sequence lands in `key_sequences` (and NOT in the flat keymap).
+        let text = "\
+[keybindings]\n\
+ctrl+shift+n = new_tab\n\
+ctrl+a n = next_tab\n\
+ctrl+a g g = scroll_top\n\
+";
+        let mut raw = RawConfig::default();
+        parse_config_file(text, &mut raw).unwrap();
+        let s = raw.into_settings().unwrap();
+        // Single bind in the flat map.
+        let n = parse_chord("ctrl+shift+n").unwrap();
+        assert_eq!(s.config.keymap.get(&n), Some(&KeyAction::NewTab));
+        // The two sequences are in key_sequences.
+        let seq_n = vec![parse_chord("ctrl+a").unwrap(), parse_chord("n").unwrap()];
+        assert_eq!(
+            s.config.key_sequences.get(&seq_n),
+            Some(&KeyAction::NextTab)
+        );
+        let seq_gg = vec![
+            parse_chord("ctrl+a").unwrap(),
+            parse_chord("g").unwrap(),
+            parse_chord("g").unwrap(),
+        ];
+        assert_eq!(
+            s.config.key_sequences.get(&seq_gg),
+            Some(&KeyAction::ScrollTop)
+        );
+        // The leader chord itself is NOT a flat bind.
+        assert!(
+            !s.config
+                .keymap
+                .contains_key(&parse_chord("ctrl+a").unwrap())
+        );
     }
 
     #[test]

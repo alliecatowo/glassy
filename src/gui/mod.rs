@@ -78,6 +78,9 @@ impl Rect {
     pub fn center_y(self) -> f32 {
         self.y + self.h * 0.5
     }
+    pub fn center_x(self) -> f32 {
+        self.x + self.w * 0.5
+    }
 }
 
 /// True when `(px, py)` lies inside `r` (left/top inclusive, right/bottom

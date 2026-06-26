@@ -554,6 +554,13 @@ pub enum UserEvent {
     /// per-app command-history ring so the command palette can offer it for
     /// re-run. See [`cmdzone`].
     CommandRun(usize, String),
+    /// A macOS global menu-bar item was selected. Carries the [`KeyAction`] the
+    /// menu item maps to (New Tab / Split / Copy / Paste / Settings / Quit etc.);
+    /// the UI thread runs it through the same `run_key_action` path as a keychord.
+    /// Window-level, no session id. Only emitted on macOS (see `app::mac_menu`);
+    /// the variant is still matched everywhere, so it is `dead_code` off-macOS.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    MenuAction(crate::config::KeyAction),
 }
 
 /// Wraps the `ClipboardLoad` reply-builder closure so `UserEvent` can keep its

@@ -128,6 +128,8 @@ impl App {
             settings_theme_hex: gui::TextEdit::default(),
             settings_theme_hex_ms: gui::TextInputMouse::default(),
             settings_profiles: Vec::new(),
+            key_seq_pending: None,
+            mod_hold_since: None,
         }
     }
 
