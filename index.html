@@ -3,7 +3,7 @@
 <h1>glassy 🦄 — package repositories</h1>
 <p>GPU-accelerated terminal. Source: <a href="https://github.com/alliecatowo/glassy">github.com/alliecatowo/glassy</a></p>
 <h2>Fedora / RHEL (dnf)</h2>
-<pre><code>sudo dnf config-manager --add-repo https://alliecatowo.github.io/glassy/rpm/glassy.repo
+<pre><code>sudo dnf config-manager addrepo --from-repofile=https://alliecatowo.github.io/glassy/rpm/glassy.repo
 sudo dnf install glassy</code></pre>
 <h2>Debian / Ubuntu (apt)</h2>
 <pre><code>sudo install -d -m 0755 /etc/apt/keyrings
