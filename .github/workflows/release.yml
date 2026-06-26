@@ -510,16 +510,35 @@ jobs:
           prerelease: false
 
   # -------------------------------------------------------------------------
-  # Homebrew tap update (best-effort; requires tap repo to exist)
+  # Homebrew formula bump (this repo IS its own tap — Formula/glassy.rb).
+  #
+  # After the release publishes, patch Formula/glassy.rb's CI sentinels with the
+  # real version + sha256 of the RELEASE-UPLOADED source tarball asset, then
+  # commit it straight back to the default branch with [skip ci]. That makes a
+  # plain `brew install glassy` (after `brew tap alliecatowo/glassy
+  # https://github.com/alliecatowo/glassy`) install the just-released version.
+  #
+  # The url in the formula points at the release asset
+  #   releases/download/v<ver>/glassy-<ver>-src.tar.gz
+  # which is EXACTLY the tarball whose sha256 we compute here — so url and sha
+  # always match (the old formula hashed this CI tarball but pointed url at
+  # GitHub's auto-archive tarball, a guaranteed mismatch; that's now fixed).
+  #
+  # No external tap repo or HOMEBREW_TAP_TOKEN is needed — the commit uses the
+  # workflow's built-in GITHUB_TOKEN (permissions: contents: write, set above).
   # -------------------------------------------------------------------------
   update-homebrew:
-    name: Update Homebrew tap
+    name: Update Homebrew formula
     needs: [resolve-version, publish]
     if: always() && needs.publish.result == 'success'
     runs-on: ubuntu-latest
-    continue-on-error: true  # skip if HOMEBREW_TAP_TOKEN not configured
+    continue-on-error: true  # never let a formula-bump hiccup fail the release
     steps:
+      # Check out the DEFAULT branch (not the tag) so the commit lands on main.
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
 
       - name: Download linux-x86_64 artifacts for sha256
         uses: actions/download-artifact@v4
@@ -536,41 +555,41 @@ jobs:
           echo "sha256=$SHA" >> "$GITHUB_OUTPUT"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
-      - name: Patch formula with real version + sha256
+      - name: Patch Formula/glassy.rb with real version + sha256
         run: |
           VERSION="${{ steps.sha.outputs.version }}"
           SHA="${{ steps.sha.outputs.sha256 }}"
-          sed -i \
-            -e "s|GLASSY_VERSION_PLAIN|${VERSION}|g" \
-            -e "s|GLASSY_VERSION|v${VERSION}|g" \
-            -e "s|GLASSY_SHA256|${SHA}|g" \
-            packaging/homebrew/glassy.rb
-
-      # =====================================================================
-      # OWNER ACTION REQUIRED — Homebrew tap auto-push is intentionally OFF.
-      #
-      # To enable `brew install alliecatowo/glassy/glassy`, the owner must:
-      #   1. Create the tap repo  alliecatowo/homebrew-glassy  on GitHub
-      #      (a plain public repo; the formula lives at Formula/glassy.rb).
-      #   2. Create a fine-grained PAT with `contents: write` on that repo and
-      #      store it as the  HOMEBREW_TAP_TOKEN  secret in THIS repo.
-      #   3. Uncomment the step below.
-      # Until then this job only patches the in-repo formula and prints it
-      # (the "Show patched formula" step) — it pushes nothing.
-      # =====================================================================
-      #
-      # - name: Open PR against homebrew-glassy tap
-      #   uses: peter-evans/create-pull-request@v6
-      #   with:
-      #     token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-      #     repository: alliecatowo/homebrew-glassy
-      #     path: tap
-      #     branch: bump/glassy-${{ steps.sha.outputs.version }}
-      #     title: "glassy ${{ steps.sha.outputs.version }}"
-      #     body: "Automated formula bump from release workflow."
+          # Order matters: replace the longer GLASSY_VERSION_PLAIN sentinel
+          # BEFORE GLASSY_VERSION (which is a prefix of it) so we don't corrupt
+          # the longer token. GLASSY_VERSION becomes the tag (v-prefixed).
+          for f in Formula/glassy.rb packaging/homebrew/glassy.rb; do
+            sed -i \
+              -e "s|GLASSY_VERSION_PLAIN|${VERSION}|g" \
+              -e "s|GLASSY_VERSION|v${VERSION}|g" \
+              -e "s|GLASSY_SHA256|${SHA}|g" \
+              "$f"
+          done
 
       - name: Show patched formula (debug)
-        run: cat packaging/homebrew/glassy.rb
+        run: cat Formula/glassy.rb
+
+      - name: Commit bumped formula back to the default branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # If the formula is unchanged (re-run on an already-bumped version),
+          # this is a no-op and we exit cleanly.
+          if git diff --quiet -- Formula/glassy.rb packaging/homebrew/glassy.rb; then
+            echo "Formula already up to date; nothing to commit."
+            exit 0
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/glassy.rb packaging/homebrew/glassy.rb
+          # [skip ci] keeps this commit from re-triggering the main-push release.
+          git commit -m "chore(release): bump Homebrew formula to ${{ steps.sha.outputs.version }} [skip ci]"
+          git push origin "HEAD:${{ github.event.repository.default_branch }}"
 
   # -------------------------------------------------------------------------
   # AUR update (best-effort)
@@ -639,3 +658,293 @@ jobs:
 
       - name: Show patched PKGBUILD (debug)
         run: cat packaging/aur/PKGBUILD
+
+  # ===========================================================================
+  # OWNER ACTIONS REQUIRED to make `dnf install` / `apt install` work
+  # (the two jobs below are no-ops until these are done — the release itself
+  # still succeeds without them):
+  #
+  #   1. Enable GitHub Pages for this repo, served from the `gh-pages` branch
+  #      (Settings → Pages → Source: "Deploy from a branch" → gh-pages / root).
+  #      The first successful run of these jobs creates the gh-pages branch.
+  #      Site URL must resolve to https://alliecatowo.github.io/glassy/.
+  #
+  #   2. Generate a dedicated signing GPG key (do NOT reuse a personal key):
+  #        gpg --quick-generate-key "glassy releases <allisonemilycoleman@gmail.com>" rsa4096 sign 5y
+  #        gpg --armor --export-secret-keys <KEYID> > glassy-signing.asc
+  #      Add two repo secrets (Settings → Secrets and variables → Actions):
+  #        RELEASE_GPG_PRIVATE_KEY = contents of glassy-signing.asc (ASCII-armored)
+  #        RELEASE_GPG_PASSPHRASE  = the key's passphrase (empty string if none)
+  #      Then DELETE glassy-signing.asc locally. The PUBLIC key is published to
+  #      Pages automatically by the jobs (rpm/RPM-GPG-KEY-glassy and
+  #      deb/glassy-archive-keyring.asc) so end users can verify signatures.
+  #
+  #   3. (Optional Fedora alternative) Copr: create an account at
+  #      https://copr.fedorainfracloud.org/, make a `glassy` project, and either
+  #      build there from this repo's spec or document `dnf copr enable
+  #      alliecatowo/glassy`. The Pages dnf repo below is the working default and
+  #      needs no Copr account.
+  #
+  # Both jobs ACCUMULATE: they fetch the existing gh-pages tree and add the new
+  # package without wiping prior releases (peaceiris keep_files: true).
+  # ===========================================================================
+
+  # -------------------------------------------------------------------------
+  # dnf (Fedora/RHEL/openSUSE) — self-hosted, GPG-signed yum/dnf repo on Pages.
+  # Reuses the .rpm already built by build-linux-x86_64; only needs the signing
+  # GPG key secret. No Copr account required.
+  # -------------------------------------------------------------------------
+  publish-dnf-repo:
+    name: Publish dnf repo (GitHub Pages)
+    needs: [resolve-version, publish]
+    if: always() && needs.publish.result == 'success' && needs.resolve-version.outputs.is_new == 'true'
+    runs-on: ubuntu-latest
+    continue-on-error: true  # no-op gracefully if the GPG secret is absent
+    permissions:
+      contents: write  # peaceiris pushes to gh-pages
+    steps:
+      - uses: actions/checkout@v4
+
+      # GitHub forbids `secrets.*` in a job-level `if`, so detect key presence
+      # here and gate every subsequent step on this output. Absent key => the
+      # job runs but does nothing (and continue-on-error keeps the release green).
+      - name: Check for signing key
+        id: guard
+        env:
+          GPG_KEY: ${{ secrets.RELEASE_GPG_PRIVATE_KEY }}
+        run: |
+          if [ -n "${GPG_KEY}" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::RELEASE_GPG_PRIVATE_KEY not set — skipping dnf repo publish."
+          fi
+
+      - name: Install repo tooling
+        if: steps.guard.outputs.enabled == 'true'
+        run: |
+          sudo apt-get update
+          # createrepo-c builds repodata; rpm provides `rpm --addsign` + `rpmsign`.
+          sudo apt-get install -y --no-install-recommends createrepo-c rpm gnupg
+
+      - name: Download linux-x86_64 artifact (.rpm)
+        if: steps.guard.outputs.enabled == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: linux-x86_64
+          path: artifacts/linux-x86_64
+
+      - name: Import signing key
+        if: steps.guard.outputs.enabled == 'true'
+        env:
+          GPG_KEY: ${{ secrets.RELEASE_GPG_PRIVATE_KEY }}
+          GPG_PASS: ${{ secrets.RELEASE_GPG_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          export GNUPGHOME="$RUNNER_TEMP/gnupg"
+          mkdir -p "$GNUPGHOME"; chmod 700 "$GNUPGHOME"
+          echo "GNUPGHOME=$GNUPGHOME" >> "$GITHUB_ENV"
+          # Enable the agent to hold a preset passphrase for non-interactive use.
+          printf 'allow-loopback-pinentry\nallow-preset-passphrase\n' > "$GNUPGHOME/gpg-agent.conf"
+          printf '%s' "$GPG_KEY" | gpg --batch --import
+          gpg-connect-agent reloadagent /bye || true
+          # Capture the signing key id + uid for rpm + the exported public key.
+          KEYID="$(gpg --list-secret-keys --with-colons | awk -F: '/^sec:/ {print $5; exit}')"
+          UID_NAME="$(gpg --list-secret-keys --with-colons | awk -F: '/^uid:/ {print $10; exit}')"
+          echo "GPG_KEYID=$KEYID"  >> "$GITHUB_ENV"
+          echo "GPG_UID=$UID_NAME" >> "$GITHUB_ENV"
+          # Preset the passphrase into the agent against the signing key's keygrip
+          # so rpm's default gpg sign command (which talks to the agent) never
+          # blocks on a pinentry prompt.
+          KEYGRIP="$(gpg --batch --with-keygrip --list-secret-keys --with-colons \
+            | awk -F: '/^grp:/ {print $10; exit}')"
+          if [ -n "${GPG_PASS}" ]; then
+            /usr/lib/gnupg/gpg-preset-passphrase --preset --passphrase "${GPG_PASS}" "${KEYGRIP}" \
+              || /usr/libexec/gpg-preset-passphrase --preset --passphrase "${GPG_PASS}" "${KEYGRIP}" \
+              || echo "::warning::gpg-preset-passphrase not found; relying on loopback below"
+          fi
+
+      - name: Sign the .rpm
+        if: steps.guard.outputs.enabled == 'true'
+        env:
+          GPG_PASS: ${{ secrets.RELEASE_GPG_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          RPM="$(find artifacts/linux-x86_64 -name '*.rpm' | head -n1)"
+          [ -n "$RPM" ] || { echo "::error::no .rpm found in artifact"; exit 1; }
+          echo "RPM_FILE=$RPM" >> "$GITHUB_ENV"
+          # Point rpm at our throwaway keyring; %_gpg_sign_cmd_extra_args feeds
+          # loopback so signing is non-interactive. Only pass --passphrase when a
+          # passphrase exists (an empty one would prompt); for a keyless key the
+          # preset/loopback agent handles it.
+          {
+            echo "%_signature gpg"
+            echo "%_gpg_name ${GPG_UID}"
+            echo "%_gpg_path ${GNUPGHOME}"
+            if [ -n "${GPG_PASS}" ]; then
+              echo "%_gpg_sign_cmd_extra_args --pinentry-mode loopback --passphrase ${GPG_PASS}"
+            else
+              echo "%_gpg_sign_cmd_extra_args --pinentry-mode loopback"
+            fi
+          } > "$HOME/.rpmmacros"
+          rpmsign --addsign "$RPM"
+          rpm -Kv "$RPM" || true  # informational; key not in rpmdb on this runner
+
+      - name: Build repo metadata (createrepo_c) into staging tree
+        if: steps.guard.outputs.enabled == 'true'
+        env:
+          GPG_PASS: ${{ secrets.RELEASE_GPG_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          # Stage ONLY the new files we add this run; peaceiris keep_files:true
+          # preserves the prior rpms already on Pages, and createrepo_c --update
+          # (run against the merged tree) would need the old files present, so we
+          # instead let peaceiris merge: we place the new rpm + freshly-built
+          # repodata that indexes the full set. To index the full set we first
+          # pull the existing rpms down (best-effort) so metadata is complete.
+          mkdir -p site/rpm
+          # Best-effort: fetch already-published rpms so repodata lists them too.
+          BASE="https://alliecatowo.github.io/glassy/rpm"
+          if curl -fsSL "$BASE/repodata/repomd.xml" -o /tmp/repomd.xml 2>/dev/null; then
+            echo "Existing repo found; pulling prior rpms for a complete index."
+            # Parse primary.xml location, fetch it, extract rpm hrefs.
+            PRIMARY="$(grep -oE 'repodata/[a-f0-9]+-primary\.xml\.gz' /tmp/repomd.xml | head -n1 || true)"
+            if [ -n "${PRIMARY:-}" ] && curl -fsSL "$BASE/$PRIMARY" -o /tmp/primary.xml.gz 2>/dev/null; then
+              gunzip -f /tmp/primary.xml.gz || true
+              # `|| true` so an empty/odd primary.xml doesn't trip pipefail. The
+              # location href is relative to the repo root, so $BASE/$href is the
+              # package URL.
+              (grep -oE 'href="[^"]+\.rpm"' /tmp/primary.xml || true) | sed -E 's/href="([^"]+)"/\1/' | while read -r href; do
+                fn="$(basename "$href")"
+                curl -fsSL "$BASE/$href" -o "site/rpm/$fn" 2>/dev/null || true
+              done
+            fi
+          else
+            echo "No existing repo; starting fresh."
+          fi
+          # Drop in the new rpm (overwrites same-version re-runs).
+          cp "$RPM_FILE" site/rpm/
+          # Build metadata over the complete set.
+          createrepo_c --update site/rpm
+          # GPG-sign repomd.xml (detached, armored) — what dnf's repo_gpgcheck verifies.
+          gpg --batch --yes --pinentry-mode loopback --passphrase-fd 3 \
+            --detach-sign --armor site/rpm/repodata/repomd.xml 3<<<"${GPG_PASS}"
+          # Publish the public key + a ready-to-use .repo file.
+          gpg --armor --export "${GPG_KEYID}" > site/rpm/RPM-GPG-KEY-glassy
+          cp packaging/glassy.repo site/rpm/glassy.repo
+
+      - name: Publish rpm/ to GitHub Pages (accumulate)
+        if: steps.guard.outputs.enabled == 'true'
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: site
+          keep_files: true   # never wipe deb/ or prior rpms
+          commit_message: "dnf repo: glassy ${{ needs.resolve-version.outputs.version }}"
+
+  # -------------------------------------------------------------------------
+  # apt (Debian/Ubuntu) — self-hosted, GPG-signed flat apt repo on Pages.
+  # Reuses the .deb built by build-linux-x86_64. Serialized AFTER the dnf job
+  # so the two don't race pushing to the same gh-pages branch.
+  # -------------------------------------------------------------------------
+  publish-apt-repo:
+    name: Publish apt repo (GitHub Pages)
+    needs: [resolve-version, publish, publish-dnf-repo]
+    if: always() && needs.publish.result == 'success' && needs.resolve-version.outputs.is_new == 'true'
+    runs-on: ubuntu-latest
+    continue-on-error: true  # no-op gracefully if the GPG secret is absent
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check for signing key
+        id: guard
+        env:
+          GPG_KEY: ${{ secrets.RELEASE_GPG_PRIVATE_KEY }}
+        run: |
+          if [ -n "${GPG_KEY}" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::RELEASE_GPG_PRIVATE_KEY not set — skipping apt repo publish."
+          fi
+
+      - name: Install repo tooling
+        if: steps.guard.outputs.enabled == 'true'
+        run: |
+          sudo apt-get update
+          # dpkg-dev provides dpkg-scanpackages; apt-utils provides apt-ftparchive.
+          sudo apt-get install -y --no-install-recommends dpkg-dev apt-utils gnupg
+
+      - name: Download linux-x86_64 artifact (.deb)
+        if: steps.guard.outputs.enabled == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: linux-x86_64
+          path: artifacts/linux-x86_64
+
+      - name: Import signing key
+        if: steps.guard.outputs.enabled == 'true'
+        env:
+          GPG_KEY: ${{ secrets.RELEASE_GPG_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          export GNUPGHOME="$RUNNER_TEMP/gnupg"
+          mkdir -p "$GNUPGHOME"; chmod 700 "$GNUPGHOME"
+          echo "GNUPGHOME=$GNUPGHOME" >> "$GITHUB_ENV"
+          printf '%s' "$GPG_KEY" | gpg --batch --import
+          KEYID="$(gpg --list-secret-keys --with-colons | awk -F: '/^sec:/ {print $5; exit}')"
+          echo "GPG_KEYID=$KEYID" >> "$GITHUB_ENV"
+          printf 'allow-loopback-pinentry\n' > "$GNUPGHOME/gpg-agent.conf"
+          gpg-connect-agent reloadagent /bye || true
+
+      - name: Build flat apt repo into staging tree
+        if: steps.guard.outputs.enabled == 'true'
+        env:
+          GPG_PASS: ${{ secrets.RELEASE_GPG_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          DEB="$(find artifacts/linux-x86_64 -name '*.deb' | head -n1)"
+          [ -n "$DEB" ] || { echo "::error::no .deb found in artifact"; exit 1; }
+          mkdir -p site/deb
+          # Best-effort: pull existing .debs so the new Packages index lists the
+          # whole set (flat repo; peaceiris keep_files keeps the files themselves).
+          BASE="https://alliecatowo.github.io/glassy/deb"
+          if curl -fsSL "$BASE/Packages" -o /tmp/old-Packages 2>/dev/null; then
+            # `|| true` so a Packages file with no entries doesn't trip pipefail.
+            (grep -E '^Filename:' /tmp/old-Packages || true) | awk '{print $2}' | while read -r rel; do
+              fn="$(basename "$rel")"
+              curl -fsSL "$BASE/$fn" -o "site/deb/$fn" 2>/dev/null || true
+            done
+          fi
+          cp "$DEB" site/deb/
+          cd site/deb
+          # Flat repo: Packages references files by basename (Filename: ./<deb>).
+          dpkg-scanpackages --multiversion . > Packages
+          gzip -kf Packages
+          # Release file with checksums of the Packages indices.
+          apt-ftparchive \
+            -o "APT::FTPArchive::Release::Origin=glassy" \
+            -o "APT::FTPArchive::Release::Label=glassy" \
+            -o "APT::FTPArchive::Release::Suite=stable" \
+            -o "APT::FTPArchive::Release::Codename=stable" \
+            -o "APT::FTPArchive::Release::Components=main" \
+            -o "APT::FTPArchive::Release::Architectures=amd64" \
+            release . > Release
+          # Sign Release -> InRelease (inline) + Release.gpg (detached).
+          gpg --batch --yes --pinentry-mode loopback --passphrase-fd 3 \
+            --clearsign -o InRelease Release 3<<<"${GPG_PASS}"
+          gpg --batch --yes --pinentry-mode loopback --passphrase-fd 3 \
+            -abs -o Release.gpg Release 3<<<"${GPG_PASS}"
+          # Export the public key for `signed-by=`.
+          gpg --armor --export "${GPG_KEYID}" > glassy-archive-keyring.asc
+
+      - name: Publish deb/ to GitHub Pages (accumulate)
+        if: steps.guard.outputs.enabled == 'true'
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: site
+          keep_files: true   # never wipe rpm/ or prior debs
+          commit_message: "apt repo: glassy ${{ needs.resolve-version.outputs.version }}"

@@ -1,22 +1,30 @@
 # Homebrew formula for glassy, a fast GPU-accelerated terminal emulator.
+# This repo is its own tap, so:
+#   brew tap alliecatowo/glassy https://github.com/alliecatowo/glassy
+#   brew install glassy          # latest tagged release
+#   brew install --HEAD glassy   # build from main
 #
-# To install from this formula directly (build from source):
-#   brew install --build-from-source ./packaging/homebrew/glassy.rb
-#
-# NOTE: the url/sha256/version fields below are CI-managed.  The release
-# workflow substitutes real values before opening a PR against a tap repo.
-# Do not edit those lines by hand.
+# NOTE: the url/sha256/version fields below are CI-managed. The release
+# workflow's update-homebrew job substitutes real values and commits this file
+# back to the default branch. Do not edit those lines by hand.
 class Glassy < Formula
   desc "Fast, minimal GPU-accelerated terminal emulator written in Rust"
   homepage "https://github.com/alliecatowo/glassy"
-  # CI fills these in via sed before the PR to the tap; keep the sentinel values.
-  url "https://github.com/alliecatowo/glassy/archive/refs/tags/GLASSY_VERSION.tar.gz"
+  # CI-managed: the release workflow's update-homebrew job substitutes these
+  # sentinels via sed and commits the result back to the default branch, so a
+  # plain `brew install glassy` (after `brew tap alliecatowo/glassy`) gets the
+  # latest tagged version. The url points at the RELEASE-UPLOADED source tarball
+  # asset (not GitHub's auto-generated archive tarball) so url and sha256 refer
+  # to the exact same bytes the workflow hashes — keep them in lockstep.
+  url "https://github.com/alliecatowo/glassy/releases/download/GLASSY_VERSION/glassy-GLASSY_VERSION_PLAIN-src.tar.gz"
   sha256 "GLASSY_SHA256"
   version "GLASSY_VERSION_PLAIN"
   license "MIT"
   head "https://github.com/alliecatowo/glassy.git", branch: "main"
 
   depends_on "rust" => :build
+  depends_on "pkg-config" => :build
+  depends_on "fontconfig"
 
   def install
     system "cargo", "install", *std_cargo_args

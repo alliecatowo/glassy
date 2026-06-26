@@ -10,7 +10,10 @@ class Glassy < Formula
   desc "Fast, minimal GPU-accelerated terminal emulator written in Rust"
   homepage "https://github.com/alliecatowo/glassy"
   # CI fills these in via sed before the PR to the tap; keep the sentinel values.
-  url "https://github.com/alliecatowo/glassy/archive/refs/tags/GLASSY_VERSION.tar.gz"
+  # url points at the release-uploaded source tarball asset so it matches the
+  # sha256 the workflow computes (the GitHub auto-archive tarball has a different
+  # hash). See Formula/glassy.rb (this repo's own tap) for the canonical copy.
+  url "https://github.com/alliecatowo/glassy/releases/download/GLASSY_VERSION/glassy-GLASSY_VERSION_PLAIN-src.tar.gz"
   sha256 "GLASSY_SHA256"
   version "GLASSY_VERSION_PLAIN"
   license "MIT"

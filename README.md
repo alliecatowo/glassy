@@ -138,20 +138,39 @@ Make sure `~/.local/bin` is on your `PATH`. The script prints a reminder if it i
 
 ### Package managers
 
-**Debian / Ubuntu — .deb**
+**Fedora / RHEL / openSUSE — dnf repo** *(GPG-signed; gets updates via `dnf upgrade`)*
 
 ```sh
-# Download the latest .deb from the GitHub Releases page, then:
-sudo dpkg -i glassy_*_amd64.deb
-sudo apt-get install -f   # fix any missing dependencies
+sudo dnf config-manager --add-repo https://alliecatowo.github.io/glassy/rpm/glassy.repo
+sudo dnf install glassy
 ```
 
-**Fedora / RHEL / openSUSE — .rpm**
+> On older dnf: `sudo dnf install 'dnf-command(config-manager)'` first. openSUSE:
+> `sudo zypper addrepo https://alliecatowo.github.io/glassy/rpm/glassy.repo && sudo zypper install glassy`.
+> _Copr alternative_ (once the project is mirrored there):
+> `sudo dnf copr enable alliecatowo/glassy && sudo dnf install glassy`.
+
+**Debian / Ubuntu — apt repo** *(GPG-signed; gets updates via `apt upgrade`)*
 
 ```sh
-# Download the latest .rpm from the GitHub Releases page, then:
-sudo dnf install glassy-*.rpm
-# or: sudo rpm -i glassy-*.rpm
+sudo install -d -m 0755 /etc/apt/keyrings
+curl -fsSL https://alliecatowo.github.io/glassy/deb/glassy-archive-keyring.asc \
+  | sudo tee /etc/apt/keyrings/glassy.asc > /dev/null
+echo "deb [signed-by=/etc/apt/keyrings/glassy.asc] https://alliecatowo.github.io/glassy/deb stable main" \
+  | sudo tee /etc/apt/sources.list.d/glassy.list > /dev/null
+sudo apt update && sudo apt install glassy
+```
+
+> A Launchpad PPA (`add-apt-repository ppa:alliecatowo/glassy`) is a possible
+> future alternative; the signed repo above is the working default.
+
+**Manual .deb / .rpm download** *(no repo; one-off install, no auto-updates)*
+
+```sh
+# Debian/Ubuntu — download glassy_*_amd64.deb from the Releases page, then:
+sudo dpkg -i glassy_*_amd64.deb && sudo apt-get install -f
+# Fedora/RHEL — download glassy-*.rpm from the Releases page, then:
+sudo dnf install ./glassy-*.rpm   # or: sudo rpm -i glassy-*.rpm
 ```
 
 **Arch Linux — AUR**
@@ -173,12 +192,14 @@ Download `glassy-<version>-macos.dmg` from the [Releases page](https://github.co
 
 ```sh
 brew tap alliecatowo/glassy https://github.com/alliecatowo/glassy
-brew install --HEAD glassy   # builds from latest main
+brew install glassy          # the latest tagged release (build from source)
+# or:
+brew install --HEAD glassy   # bleeding edge: build from latest main
 ```
 
-> `--HEAD` builds from source against `main`. Once a tagged release is cut, the
-> versioned formula (`Formula/glassy.rb`, url+sha filled by the release workflow)
-> also supports a plain `brew install glassy`.
+> `brew install glassy` uses `Formula/glassy.rb`, whose url + sha256 the release
+> workflow fills in (pointing at the release's source tarball asset) and commits
+> back on every tagged release. `--HEAD` ignores the version and builds `main`.
 
 **Flatpak** *(not yet on Flathub; local build from the manifest)*
 

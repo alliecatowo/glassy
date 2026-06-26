@@ -1,0 +1,18 @@
+# glassy — dnf/yum repository (self-hosted on GitHub Pages, GPG-signed).
+#
+# Install:
+#   sudo dnf config-manager --add-repo https://alliecatowo.github.io/glassy/rpm/glassy.repo
+#   sudo dnf install glassy
+#
+# The repo metadata (repomd.xml) and every .rpm are signed with the glassy
+# release key; repo_gpgcheck=1 below makes dnf verify the metadata signature and
+# gpgcheck=1 verifies each package. The public key is published alongside the
+# repo and fetched automatically on first use.
+[glassy]
+name=glassy
+baseurl=https://alliecatowo.github.io/glassy/rpm/
+enabled=1
+gpgcheck=1
+repo_gpgcheck=1
+gpgkey=https://alliecatowo.github.io/glassy/rpm/RPM-GPG-KEY-glassy
+type=rpm-md
