@@ -165,7 +165,10 @@ group = "User Interface/X Hardware Support"
 url = "https://github.com/alliecatowo/glassy"
 # Runtime shared-library requirements. rpm auto-detects some via rpmbuild
 # dependency generation, but we pin the key ones for clarity.
-requires = { libxkbcommon = "*", wayland-libs-client = "*", vulkan-loader = "*", alsa-lib = "*", fontconfig = "*" }
+# These are dlopen'd at runtime (not in the ELF's DT_NEEDED), so cargo-generate-rpm's
+# auto-detect misses them — declare them by SONAME, which is distro-agnostic
+# (Fedora/RHEL/openSUSE all Provide these) rather than by distro-specific package name.
+requires = { "libwayland-client.so.0()(64bit)" = "*", "libvulkan.so.1()(64bit)" = "*", "libxkbcommon.so.0()(64bit)" = "*", "libfontconfig.so.1()(64bit)" = "*" }
 
 [[package.metadata.generate-rpm.assets]]
 source = "target/release/glassy"
