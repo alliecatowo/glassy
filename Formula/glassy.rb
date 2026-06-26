@@ -16,9 +16,9 @@ class Glassy < Formula
   # latest tagged version. The url points at the RELEASE-UPLOADED source tarball
   # asset (not GitHub's auto-generated archive tarball) so url and sha256 refer
   # to the exact same bytes the workflow hashes — keep them in lockstep.
-  url "https://github.com/alliecatowo/glassy/releases/download/GLASSY_VERSION/glassy-GLASSY_VERSION_PLAIN-src.tar.gz"
-  sha256 "GLASSY_SHA256"
-  version "GLASSY_VERSION_PLAIN"
+  url "https://github.com/alliecatowo/glassy/releases/download/v0.2.0-rc2/glassy-0.2.0-rc2-src.tar.gz"
+  sha256 "971b314d888e172029b1f55213d02a23b4a4d045fea8254c460e2a0d4cf48970"
+  version "0.2.0-rc2"
   license "MIT"
   head "https://github.com/alliecatowo/glassy.git", branch: "main"
 

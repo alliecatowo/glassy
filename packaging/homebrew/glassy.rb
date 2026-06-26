@@ -13,9 +13,9 @@ class Glassy < Formula
   # url points at the release-uploaded source tarball asset so it matches the
   # sha256 the workflow computes (the GitHub auto-archive tarball has a different
   # hash). See Formula/glassy.rb (this repo's own tap) for the canonical copy.
-  url "https://github.com/alliecatowo/glassy/releases/download/GLASSY_VERSION/glassy-GLASSY_VERSION_PLAIN-src.tar.gz"
-  sha256 "GLASSY_SHA256"
-  version "GLASSY_VERSION_PLAIN"
+  url "https://github.com/alliecatowo/glassy/releases/download/v0.2.0-rc2/glassy-0.2.0-rc2-src.tar.gz"
+  sha256 "971b314d888e172029b1f55213d02a23b4a4d045fea8254c460e2a0d4cf48970"
+  version "0.2.0-rc2"
   license "MIT"
   head "https://github.com/alliecatowo/glassy.git", branch: "main"
 
