@@ -1,0 +1,42 @@
+-----BEGIN PGP SIGNED MESSAGE-----
+Hash: SHA512
+
+Architectures: amd64
+Codename: stable
+Components: main
+Date: Fri, 26 Jun 2026 02:58:36 +0000
+Label: glassy
+Origin: glassy
+Suite: stable
+MD5Sum:
+ 1687ce0d9b742b9e7fa1690d8e984a22              971 Packages
+ 13d6d0fc5c940b287ec14f52914dc3c7              642 Packages.gz
+ f9a5de645652c818e7ab4f18a0c8480d              136 Release
+SHA1:
+ 98d1aea22b6b6f1b9b7fbd9641655d06a70da409              971 Packages
+ 4b8956cb0521958e48cb4f1bed0746e039bebdd4              642 Packages.gz
+ 0109ace6507a0405ed5fead0151a2f620b456896              136 Release
+SHA256:
+ f74d76f1fc3488cd228a6ccfd37281be5999f572dcbcad9dcf570eb078d7fcc3              971 Packages
+ 0f2a63dc5cf5c7120233fbb5c649c4e821f9ad0417117bddeb7ca5f57c61d724              642 Packages.gz
+ 22e24c9df34952bc6ff0bb388b16c7a3fdf9f0796b43e399b002ca4d8d5d5fde              136 Release
+SHA512:
+ cbf40ea425306b0a11c9364ff10a56fd638b55ed6f476852f52a8c323a2bf6535148111196be4f50c49114bb5f70d83ec110653deeea932f5d54c84b269c4e0b              971 Packages
+ 7e3e3e6d4b0477a25205f972c50cdcca1a6c6da95bd830b13356fab7f0d828b471ee18007a236b121c90061e69b708f1eabc316234386b6dae9f25b0b08b503b              642 Packages.gz
+ 2c95599facebf416a394057a927d9aac38dcf3d1358dbafe20528be5acf4a93f078fc1fe30c5f7b5a5259eadb376c34821e1140f423c8330d789e899b8da85cc              136 Release
+-----BEGIN PGP SIGNATURE-----
+
+iQIzBAEBCgAdFiEE1pG34daHv+/Exa228s3Ua/tDOg4FAmo96twACgkQ8s3Ua/tD
+Og7JgQ/+MqdBPXiz5xioVpG/bxKS5O+LozNLxUizhjH1KTBHJDwVVzcwBk93ubX5
+tjC3rA9MArGGhLYcSP1KZA+Mte3ObVwXfOPWwKNgNJ9tj4pz0h8VtiqvCbR8iohf
+Sdwxf5Tu2xoDKWax1oIwwKQmtlVvYraHgGjHMzDSMJzNvv17q+71VCC0w8StUt0J
+n5h7UuoRcK2xzHiKi6Ix1R5yHjlWAXiKxpb5dEdket3bH3rEPXeK/gnurg2DrXxh
+iYzssHw19XVBV87wn3cr9X2kjXR4cACHDkbpN3zVpp731P/Db4jqz+DCCXXd6Qxs
+ydYA6Sa2HNB+8KnRPlhFHVUmL4VcLWYfdzg2y5vzVgrHEVvV7gEw/xzn7ZYs7kYx
+7l3dOBXOkdFR00EwY8uCIBvi1l1aA1XtXKfTIcxIvAnyaNtQIsg9npew7CV9I5He
+NfBhmlg97ZOCSmfMoRqqpF/9ZGKVeEgM4dHBNfFCX0Fj6GKaYRFdelxr4L5At3ex
+e2RxEQF+/8hjQRxxB1td2HyLnE2kPXSTFBXUyWd/KxB6yQHjA4FDQzloswVLVJuK
+83s8/HUMfECsDSMcwVq/umPS90zUhSNyPBtFeD8Ky7thzMM+B+qND/QK8y/NEhuz
+RPzIj7JB8vE3AHd8mCJ5Qfh04T4cixrWUaWAmyOoT46gCIVEHKE=
+=c105
+-----END PGP SIGNATURE-----
