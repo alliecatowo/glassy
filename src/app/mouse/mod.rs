@@ -80,6 +80,16 @@ impl App {
         let moved = cell != self.mouse_cell;
         self.mouse_cell = cell;
 
+        // Drag-rearrange a pane: while a pane grip is held, repaint on motion so the
+        // ghosted source + the drop-target tile under the pointer track live. The
+        // swap itself resolves on release (finish_pane_drag). Takes priority over
+        // selection/hover so a header drag never leaks into a text selection.
+        if self.dragging_pane.is_some() {
+            self.force_full_redraw = true;
+            self.mark_dirty(event_loop);
+            return;
+        }
+
         // Drag-to-reorder a tab: while a tab chip is held, move it under
         // the pointer's pixel position and lift it as a drag-ghost. Takes
         // priority over selection/hover; repaint on any motion so the ghost

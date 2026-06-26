@@ -37,20 +37,28 @@ impl Renderer {
     /// instance lists + draw order, skipping the expensive `push_pane` rebuild.
     /// The caller must have verified [`Renderer::has_cached_pane`] for `id`.
     pub fn reuse_pane(&mut self, id: usize) {
-        let Some(cached) = self.mp.cache.get(&id) else {
+        // Re-emit the cached instances (no clone): take the cache out of `self.mp`
+        // so we can read it while also pushing into `self.mp.bg/fg/panes`, then put
+        // it back. `dimmed` is read here so push_pane_dim can run after the extends.
+        let Some(cache) = self.mp.cache.remove(&id) else {
             return;
         };
         let bg_start = self.mp.bg.len() as u32;
         let fg_start = self.mp.fg.len() as u32;
-        self.mp.bg.extend_from_slice(&cached.bg);
-        self.mp.fg.extend_from_slice(&cached.fg);
+        self.mp.bg.extend_from_slice(&cache.bg);
+        self.mp.fg.extend_from_slice(&cache.fg);
         self.mp.panes.push(PaneDraw {
-            scissor: cached.scissor,
+            scissor: cache.scissor,
             bg_start,
             bg_end: self.mp.bg.len() as u32,
             fg_start,
             fg_end: self.mp.fg.len() as u32,
         });
+        // Re-emit the dim overlay for a cached dimmed pane (same as `end_pane`).
+        if cache.dimmed {
+            self.push_pane_dim(cache.scissor);
+        }
+        self.mp.cache.insert(id, cache);
         self.mp.reused_any = true;
     }
 
@@ -59,8 +67,25 @@ impl Renderer {
     /// and end up positioned at `rect`'s origin under a scissor clamped to `rect`.
     /// `focused` requests the subtle accent focus border (drawn by `end_pane`).
     /// The per-pane grid is sized large enough to hold the pane's rows via the
-    /// usual `begin_row`; oversized rows are clamped by the scissor.
+    /// usual `begin_row`; oversized rows are clamped by the scissor. Convenience
+    /// wrapper over [`Renderer::begin_pane_dimmed`] with `dimmed = false`.
+    #[allow(dead_code)]
     pub fn begin_pane(&mut self, id: usize, rect: crate::pane::Rect, focused: bool) {
+        self.begin_pane_dimmed(id, rect, focused, false);
+    }
+
+    /// Like [`Renderer::begin_pane`] but with an explicit `dimmed` flag: when set,
+    /// `end_pane` lays a subtle dark overlay quad over the pane's scissor rect after
+    /// its cell content, so an unfocused pane reads as recessed. The dim is recorded
+    /// as its own scissored draw after the pane's fg, so it darkens both the cell
+    /// backgrounds and the glyphs. Cached with the pane so reused frames stay dimmed.
+    pub fn begin_pane_dimmed(
+        &mut self,
+        id: usize,
+        rect: crate::pane::Rect,
+        focused: bool,
+        dimmed: bool,
+    ) {
         // Reset the shared scratch rows so this pane starts clean. The pane's
         // grid height is unknown here; `begin_row` grows `self.rows` on demand.
         self.rows.clear();
@@ -78,6 +103,7 @@ impl Renderer {
             origin: [rect.x as f32, rect.y as f32],
             scissor,
             focused,
+            dimmed,
         });
     }
 
@@ -98,6 +124,7 @@ impl Renderer {
         cached.bg.clear();
         cached.fg.clear();
         cached.scissor = build.scissor;
+        cached.dimmed = build.dimmed;
         for row in &self.rows {
             for b in &row.bg {
                 cached.bg.push(BgInstance {
@@ -150,11 +177,42 @@ impl Renderer {
             fg_start,
             fg_end: self.mp.fg.len() as u32,
         });
+        // Dim overlay: a subtle dark quad over the whole pane, recorded as its OWN
+        // scissored bg draw AFTER the pane's fg so it darkens cells + glyphs alike.
+        if build.dimmed {
+            self.push_pane_dim(build.scissor);
+        }
         self.mp.cache.insert(build.id, cached);
         // Leave `self.rows` cleared so the next pane (or a return to the
         // single-grid path via `resize_grid`) starts fresh.
         self.rows.clear();
         self.dirty_rows.clear();
+    }
+
+    /// The dim-overlay alpha laid over an unfocused pane's content (a near-black
+    /// quad). Kept low so the recessed tile stays legible.
+    pub(crate) const PANE_DIM_ALPHA: f32 = 0.10;
+
+    /// Record a single dark overlay quad spanning `scissor` as its own bg draw,
+    /// drawn (in pane order) immediately after the pane it dims so it composites
+    /// over that pane's glyphs. Scissored to the pane rect so it never bleeds.
+    fn push_pane_dim(&mut self, scissor: ScissorRect) {
+        if scissor.w == 0 || scissor.h == 0 {
+            return;
+        }
+        let bg_start = self.mp.bg.len() as u32;
+        self.mp.bg.push(BgInstance {
+            pos: [scissor.x as f32, scissor.y as f32],
+            size: [scissor.w as f32, scissor.h as f32],
+            color: [0.0, 0.0, 0.0, Self::PANE_DIM_ALPHA],
+        });
+        self.mp.panes.push(PaneDraw {
+            scissor,
+            bg_start,
+            bg_end: self.mp.bg.len() as u32,
+            fg_start: 0,
+            fg_end: 0,
+        });
     }
 
     /// Emit a thin 1px divider rectangle at surface-pixel rect `(x, y, w, h)` in

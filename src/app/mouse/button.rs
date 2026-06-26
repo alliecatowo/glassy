@@ -169,6 +169,14 @@ impl App {
         if !pressed {
             self.dragging_tab = None; // end any tab drag-reorder on release
             self.minimap_dragging = false; // end any minimap scrub on release
+            // End any pane drag-rearrange: swap if dropped on another pane (past the
+            // threshold). Consumes the release so it never starts a selection below.
+            if self.dragging_pane.is_some() {
+                self.finish_pane_drag(event_loop);
+                self.held_button = None;
+                self.mark_dirty(event_loop);
+                return;
+            }
             // End any gutter drag; re-evaluate the cursor for the spot we
             // released over (still a gutter -> resize arrow, else default).
             if self.dragging_gutter.take().is_some() {
@@ -289,6 +297,23 @@ impl App {
                 self.mark_dirty(event_loop);
             }
             self.held_button = None;
+            return;
+        }
+
+        // A left press on a pane header's drag-grip handle (left edge) ARMS a pane
+        // drag-rearrange: record the source pane + press position. The actual swap
+        // is resolved on release (finish_pane_drag) once the pointer has crossed
+        // the drag threshold; until then it falls through to focus the pane like a
+        // normal header click. Checked before the generic header click below.
+        if button == MouseButton::Left
+            && pressed
+            && let Some(src) = self.pane_grip_at(self.mouse_px.0, self.mouse_px.1)
+        {
+            self.dragging_pane = Some((src, self.mouse_px));
+            // Focus the gripped pane immediately (matches a header click); the swap
+            // (if any) happens on release. Keep held_button so the drag tracks.
+            self.focus_pane_at(self.mouse_px.0, self.mouse_px.1, event_loop);
+            self.mark_dirty(event_loop);
             return;
         }
 

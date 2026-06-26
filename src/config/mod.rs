@@ -28,6 +28,7 @@
 //! theme_dark  = tokyo-night            # theme used in system Dark mode
 //! status_bar  = false                  # show status bar at the bottom (default off)
 //! pane_headers= false                  # show per-pane title bars + accent rail in splits (default off)
+//! dim_unfocused = true                 # dim unfocused pane content in a split (default on)
 //! ligatures   = false                  # enable OpenType ligature shaping across cells (default off)
 //! font_features = ss01, calt=0         # OpenType feature tags to force on/off (comma or space separated)
 //! cwd         = /home/me/projects      # working directory for the first tab's shell
@@ -488,6 +489,19 @@ opacity = 0.80
         parse_config_file("pane_headers = on\n", &mut raw_on).unwrap();
         let settings_on = raw_on.into_settings().unwrap();
         assert!(settings_on.config.pane_headers);
+    }
+
+    #[test]
+    fn dim_unfocused_parses_and_defaults_on() {
+        // Default (unset) is ON — the focused pane should stand out by default.
+        let settings = RawConfig::default().into_settings().unwrap();
+        assert!(settings.config.dim_unfocused);
+        // Explicitly disabling works.
+        let mut raw_off = RawConfig::default();
+        parse_config_file("dim_unfocused = false\n", &mut raw_off).unwrap();
+        assert_eq!(raw_off.dim_unfocused, Some(false));
+        let settings_off = raw_off.into_settings().unwrap();
+        assert!(!settings_off.config.dim_unfocused);
     }
 
     #[test]

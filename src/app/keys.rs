@@ -546,6 +546,8 @@ impl App {
             FocusPaneRight => self.focus_pane(pane::Move::Right, event_loop),
             FocusPaneUp => self.focus_pane(pane::Move::Up, event_loop),
             FocusPaneDown => self.focus_pane(pane::Move::Down, event_loop),
+            RotatePanes => self.rotate_panes(event_loop),
+            EqualizePanes => self.equalize_panes(event_loop),
         }
     }
 

@@ -567,6 +567,10 @@ struct CachedPane {
     fg: Vec<FgInstance>,
     /// The pane's clamped scissor.
     scissor: ScissorRect,
+    /// Whether this pane is dimmed (an unfocused tile while `dim_unfocused` is on);
+    /// when true a subtle dark overlay quad is emitted over the pane after its
+    /// glyphs. Cached so a reused pane keeps its dim without a rebuild.
+    dimmed: bool,
 }
 
 /// A finished pane's draw record: the GPU scissor rectangle and the half-open
@@ -591,4 +595,8 @@ struct PaneBuild {
     scissor: ScissorRect,
     /// Whether to draw the accent focus border for this pane.
     focused: bool,
+    /// Whether to dim this pane's content with a subtle dark overlay quad (drawn
+    /// after the cells). Set for unfocused panes when `dim_unfocused` is on; the
+    /// dim is part of the cached pane so reused frames stay dimmed.
+    dimmed: bool,
 }

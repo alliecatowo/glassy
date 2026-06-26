@@ -439,6 +439,16 @@ impl ApplicationHandler<UserEvent> for App {
                 _ => {}
             }
         }
+        // Headless: split the active tab (vertical) with dim-unfocused forced on, so
+        // the dimmed-content path (subtle dark overlay over the non-focused tile)
+        // can be captured. Splits first if needed so there is something to dim.
+        if std::env::var_os("GLASSY_DIM").is_some() {
+            self.config.dim_unfocused = true;
+            if !self.is_split() {
+                self.split_pane(pane::Dir::Vertical, event_loop);
+            }
+            self.force_full_redraw = true;
+        }
         // Headless: split the active tab and zoom the focused pane at startup so
         // the pane-zoom path (focused pane maximized, others hidden, ZOOM badge)
         // can be captured. Splits first if needed so there is something to zoom.

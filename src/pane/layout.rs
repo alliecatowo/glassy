@@ -283,6 +283,69 @@ impl Layout {
         }
     }
 
+    /// Swap the positions of panes `a` and `b` (their leaf ids trade slots in the
+    /// tree; the partition shape is unchanged). Focus stays on the same id, which
+    /// now sits where the other pane was. Returns true when both leaves exist.
+    /// Used by pane drag-rearrange.
+    pub fn swap(&mut self, a: usize, b: usize) -> bool {
+        self.root.swap_leaves(a, b)
+    }
+
+    /// Rotate the split addressed by `path`: its two children trade places while
+    /// the ratio is kept, so each pane takes over the other's exact slot geometry
+    /// (the divider line does not move). With an empty path, rotates the root split.
+    /// Returns false if `path` is not a split.
+    pub fn rotate(&mut self, path: &[bool]) -> bool {
+        self.root.rotate_split(path)
+    }
+
+    /// Rotate the split that is the PARENT of the focused leaf (the innermost split
+    /// containing it), swapping the focused pane with its sibling subtree. A
+    /// convenience for a "rotate panes" action that needs no explicit path. Returns
+    /// false when the focused leaf is the sole pane (no parent split).
+    pub fn rotate_focused(&mut self) -> bool {
+        match self.parent_path_of(self.focused) {
+            Some(path) => self.rotate(&path),
+            None => false,
+        }
+    }
+
+    /// The path to the split node that is the direct parent of leaf `id` (i.e. the
+    /// path whose addressed node is a `Split` having `id` as a direct child).
+    /// `None` if `id` is the root leaf or not found.
+    pub fn parent_path_of(&self, id: usize) -> Option<Vec<bool>> {
+        let mut path = Vec::new();
+        Self::find_parent(&self.root, id, &mut path).then_some(path)
+    }
+
+    fn find_parent(node: &Node, id: usize, path: &mut Vec<bool>) -> bool {
+        let Node::Split { first, second, .. } = node else {
+            return false;
+        };
+        if matches!(**first, Node::Leaf(l) if l == id)
+            || matches!(**second, Node::Leaf(l) if l == id)
+        {
+            return true;
+        }
+        path.push(false);
+        if Self::find_parent(first, id, path) {
+            return true;
+        }
+        path.pop();
+        path.push(true);
+        if Self::find_parent(second, id, path) {
+            return true;
+        }
+        path.pop();
+        false
+    }
+
+    /// Reset every split ratio to 0.5, producing an even partition across the whole
+    /// tree. Focus and structure are untouched. Used by the "equalize splits" action.
+    pub fn equalize(&mut self) {
+        self.root.equalize();
+    }
+
     /// Serialize the tree into a flat [`LayoutDesc`] for session persistence. Leaf
     /// ids are remapped through `id_of`, which the caller uses to translate live
     /// pane ids into stable session-relative indices (and back on restore). The
@@ -292,6 +355,32 @@ impl Layout {
             root: self.root.to_desc(id_of),
             focused: id_of(self.focused),
         }
+    }
+
+    /// Re-apply a saved layout's SHAPE (split structure + ratios) onto the CURRENT
+    /// set of panes, without spawning or closing anything. The current leaf ids are
+    /// assigned, in depth-first order, to the saved descriptor's leaf slots (also in
+    /// DFS order). Returns false (leaving the layout untouched) when the leaf counts
+    /// differ — a saved 3-pane shape can't be applied to a live 2-pane tab. Focus is
+    /// re-pointed to the saved focused slot's now-live id. This is how a *named*
+    /// layout is restored against the live panes.
+    pub fn reshape_from_desc(&mut self, desc: &LayoutDesc) -> bool {
+        let live = self.leaves();
+        let saved = desc.leaves();
+        if live.len() != saved.len() {
+            return false;
+        }
+        // Map each saved (session-relative) leaf id to a live id by DFS position.
+        let pos_of = |sess: usize| saved.iter().position(|&s| s == sess).unwrap_or(0);
+        let from_sess = |sess: usize| live[pos_of(sess)];
+        self.root = Node::from_desc(&desc.root, &from_sess);
+        let focused = from_sess(desc.focused);
+        self.focused = if self.root.contains(focused) {
+            focused
+        } else {
+            self.root.first_leaf()
+        };
+        true
     }
 
     /// Rebuild a layout from a [`LayoutDesc`], remapping the stored leaf ids back

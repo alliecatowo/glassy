@@ -75,6 +75,7 @@ pub(super) struct RawConfig {
     pub quake_height: Option<f32>,
     pub quake_animation_ms: Option<u64>,
     pub command_history: Option<usize>,
+    pub dim_unfocused: Option<bool>,
 }
 
 impl RawConfig {
@@ -218,6 +219,7 @@ impl RawConfig {
             },
             quake_animation_ms: self.quake_animation_ms.unwrap_or(180).min(5_000),
             command_history: self.command_history.unwrap_or(DEFAULT_COMMAND_HISTORY),
+            dim_unfocused: self.dim_unfocused.unwrap_or(true),
         };
 
         Ok(super::Settings { config, theme })
@@ -554,6 +556,9 @@ pub(super) fn apply_kv(key: &str, value: &str, raw: &mut RawConfig) -> Result<()
         }
         "pane_headers" => {
             raw.pane_headers = Some(parse_bool(value, "pane_headers")?);
+        }
+        "dim_unfocused" => {
+            raw.dim_unfocused = Some(parse_bool(value, "dim_unfocused")?);
         }
         "word_separator" => {
             raw.word_separator = Some(value.to_string());
