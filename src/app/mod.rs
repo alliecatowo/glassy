@@ -58,6 +58,7 @@ mod tab_paint;
 mod tabs;
 pub(crate) mod toast;
 mod user_event;
+mod vi_mode;
 
 pub(crate) use helpers::*;
 pub(crate) use palette::PaletteState;
@@ -212,6 +213,11 @@ pub struct Config {
     /// history source (captured from OSC 133 `B`..`C` zones). 0 disables capture.
     /// Default 200.
     pub command_history: usize,
+    /// Also place a rich-text (HTML) flavor on the clipboard alongside the plain
+    /// text whenever a terminal selection is copied. Lets HTML-preferring apps
+    /// paste a monospace-preserving block; plain text remains the fidelity-correct
+    /// fallback. Default false. Opt in via `copy_html = true`.
+    pub copy_html: bool,
 }
 
 /// The three user-facing default cursor shapes.
@@ -724,6 +730,11 @@ pub struct App {
     /// the most-recent unique paths win. Bounded by [`CWD_HISTORY_CAP`]. The
     /// command palette offers these to `cd` into.
     cwd_history: std::collections::VecDeque<std::path::PathBuf>,
+    /// Keyboard copy-mode ("vi mode") state: whether it is active and the
+    /// in-flight visual-selection kind. The authoritative cursor + selection
+    /// live in the terminal (`Term::vi_mode_cursor` / `Term::selection`); this
+    /// only mirrors the on/off + visual-kind + pending-`g` bits. See [`vi_mode`].
+    vi: vi_mode::ViState,
 }
 
 /// Direction + progress of the quake window's slide animation.

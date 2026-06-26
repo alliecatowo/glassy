@@ -199,6 +199,21 @@ impl App {
             return;
         }
 
+        // Keyboard copy-mode ("vi mode") owns the keyboard while active: hjkl /
+        // word / line motions, `v`/`V`/Ctrl+v visual, `y` to yank, Esc/`q` to
+        // exit. Checked before the keymap dispatch so motion letters (`j`, `y`,
+        // …) are never stolen by a chord or forwarded to the child — EXCEPT the
+        // bound toggle chord itself, which we let fall through so its keymap
+        // action can exit the mode (and a user-rebound toggle still works).
+        if event.state.is_pressed() && self.vi.active {
+            let is_toggle_chord = chord_from_event(&event.logical_key, self.mods)
+                .and_then(|c| self.config.keymap.get(&c).copied())
+                == Some(KeyAction::ViMode);
+            if !is_toggle_chord && self.vi_handle_key(&event.logical_key, event_loop) {
+                return;
+            }
+        }
+
         // --------------------------------------------------------------------
         // Keymap dispatch: consult the user keymap (which includes defaults)
         // FIRST, before any hard-coded path below. This lets custom bindings
@@ -508,6 +523,7 @@ impl App {
                 self.quake_apply(crate::ipc::IpcCommand::Toggle, event_loop);
             }
             ToggleZoom => self.toggle_zoom(event_loop),
+            ViMode => self.vi_toggle(event_loop),
         }
     }
 
