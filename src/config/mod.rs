@@ -1173,4 +1173,107 @@ ctrl+a g g = scroll_top\n\
         assert_eq!(raw_dev.font_size, Some(14.0));
         assert_eq!(raw_present.font_size, Some(18.0));
     }
+
+    // -----------------------------------------------------------------------
+    // Status-bar segments config tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn status_bar_segments_none_by_default() {
+        let settings = RawConfig::default().into_settings().unwrap();
+        assert!(settings.config.status_bar_segments.is_none());
+    }
+
+    #[test]
+    fn status_bar_segments_parse_known_tokens() {
+        use crate::app::StatusBarSegment;
+        let mut raw = RawConfig::default();
+        parse_config_file(
+            "status_bar_segments = cwd, git_branch, mode, time, encoding\n",
+            &mut raw,
+        )
+        .unwrap();
+        let segs = raw.status_bar_segments.as_ref().expect("segments set");
+        assert_eq!(
+            segs,
+            &[
+                StatusBarSegment::Cwd,
+                StatusBarSegment::GitBranch,
+                StatusBarSegment::Mode,
+                StatusBarSegment::Time,
+                StatusBarSegment::Encoding,
+            ]
+        );
+    }
+
+    #[test]
+    fn status_bar_segments_space_separated() {
+        use crate::app::StatusBarSegment;
+        let mut raw = RawConfig::default();
+        parse_config_file("status_bar_segments = mode broadcast selection\n", &mut raw).unwrap();
+        let segs = raw.status_bar_segments.as_ref().expect("segments set");
+        assert_eq!(
+            segs,
+            &[
+                StatusBarSegment::Mode,
+                StatusBarSegment::Broadcast,
+                StatusBarSegment::Selection,
+            ]
+        );
+    }
+
+    #[test]
+    fn status_bar_segments_empty_clears() {
+        let mut raw = RawConfig::default();
+        parse_config_file("status_bar_segments = \n", &mut raw).unwrap();
+        assert!(raw.status_bar_segments.is_none());
+    }
+
+    #[test]
+    fn status_bar_time_format_default() {
+        let settings = RawConfig::default().into_settings().unwrap();
+        assert_eq!(settings.config.status_bar_time_format, "%H:%M");
+    }
+
+    #[test]
+    fn status_bar_time_format_custom() {
+        let mut raw = RawConfig::default();
+        parse_config_file("status_bar_time_format = %I:%M %p\n", &mut raw).unwrap();
+        let settings = raw.into_settings().unwrap();
+        assert_eq!(settings.config.status_bar_time_format, "%I:%M %p");
+    }
+
+    // -----------------------------------------------------------------------
+    // New KeyAction variants parse correctly
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn opacity_keybinding_actions_parse() {
+        use super::keymap::parse_action;
+        assert!(matches!(
+            parse_action("increase_opacity"),
+            Ok(Some(KeyAction::IncreaseOpacity))
+        ));
+        assert!(matches!(
+            parse_action("decrease_opacity"),
+            Ok(Some(KeyAction::DecreaseOpacity))
+        ));
+        assert!(matches!(
+            parse_action("toggle_opacity"),
+            Ok(Some(KeyAction::ToggleOpacity))
+        ));
+    }
+
+    #[test]
+    fn save_scrollback_action_parses() {
+        use super::keymap::parse_action;
+        assert!(matches!(
+            parse_action("save_scrollback"),
+            Ok(Some(KeyAction::SaveScrollback))
+        ));
+        assert!(matches!(
+            parse_action("scrollback_to_file"),
+            Ok(Some(KeyAction::SaveScrollback))
+        ));
+    }
 }

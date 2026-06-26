@@ -1,7 +1,97 @@
 //! Chrome painting: status bar, settings overlay, tab-rename editor,
 //! confirm-close modal. Tab-bar and chip painting are in tab_paint.rs.
 
+use crate::app::StatusBarSegment;
+
 use super::*;
+
+/// Format a [`std::time::SystemTime`] using a minimal `strftime`-style pattern.
+///
+/// Supported tokens (only the most common clock tokens):
+/// - `%H` — 24-hour hour (00–23)
+/// - `%I` — 12-hour hour (01–12)
+/// - `%M` — minute (00–59)
+/// - `%S` — second (00–59)
+/// - `%p` — AM/PM
+/// - `%%` — literal `%`
+///
+/// Anything else is passed through verbatim. Pure function for unit testing.
+fn format_time(t: std::time::SystemTime, fmt: &str) -> String {
+    // Convert to seconds-since-epoch and decompose to H:M:S.
+    let secs = t
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    // Days and within-day offset (UTC; no local-time conversion available without
+    // chrono/time, so we use UTC which is common for server/embedded terminals).
+    let day_secs = secs % 86_400;
+    let h = (day_secs / 3600) as u8;
+    let min = ((day_secs % 3600) / 60) as u8;
+    let sec = (day_secs % 60) as u8;
+    let h12 = match h % 12 {
+        0 => 12,
+        n => n,
+    };
+    let ampm = if h < 12 { "AM" } else { "PM" };
+
+    let mut out = String::with_capacity(fmt.len() + 4);
+    let mut chars = fmt.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '%' {
+            match chars.next() {
+                Some('H') => {
+                    out.push_str(&format!("{h:02}"));
+                }
+                Some('I') => {
+                    out.push_str(&format!("{h12:02}"));
+                }
+                Some('M') => {
+                    out.push_str(&format!("{min:02}"));
+                }
+                Some('S') => {
+                    out.push_str(&format!("{sec:02}"));
+                }
+                Some('p') => {
+                    out.push_str(ampm);
+                }
+                Some('%') => out.push('%'),
+                Some(other) => {
+                    out.push('%');
+                    out.push(other);
+                }
+                None => out.push('%'),
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod chrome_tests {
+    use super::*;
+
+    #[test]
+    fn format_time_hhmm() {
+        // noon UTC = 43200 s since epoch
+        let noon = std::time::UNIX_EPOCH + std::time::Duration::from_secs(43200);
+        assert_eq!(format_time(noon, "%H:%M"), "12:00");
+    }
+
+    #[test]
+    fn format_time_12h() {
+        let noon = std::time::UNIX_EPOCH + std::time::Duration::from_secs(43200);
+        assert_eq!(format_time(noon, "%I:%M %p"), "12:00 PM");
+    }
+
+    #[test]
+    fn format_time_midnight() {
+        let midnight = std::time::UNIX_EPOCH;
+        assert_eq!(format_time(midnight, "%H:%M"), "00:00");
+        assert_eq!(format_time(midnight, "%I:%M %p"), "12:00 AM");
+    }
+}
 
 /// Result returned from [`App::paint_confirm_close`] each frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -17,22 +107,21 @@ pub(crate) enum ConfirmCloseResult {
 impl App {
     // paint_tab_bar, paint_tab_chip, paint_tab_label live in tab_paint.rs.
 
-    /// Paint the Wave-4 status bar (§3.4): a `STATUS_BAR_H`-px E1 band at the
-    /// bottom of the window. Content is laid out as fixed-width right-aligned
-    /// segments so nothing jitters as values change:
+    /// Paint the status bar (§3.4): a `STATUS_BAR_H`-px E1 band at the bottom of
+    /// the window, with configurable segments in configurable order.
     ///
-    ///   `[mode]  …  [sel]  [scroll%]  [enc]`
+    /// The default segment set and order is:
+    ///   left: `[cwd] [git_branch]`
+    ///   right: `[mode] [broadcast] [selection] [scroll%] [encoding]`
     ///
-    /// **mode** = `ALT` when the focused pane is in alt-screen, `MOUSE` when mouse
-    /// reporting is active (from `TermMode`). Both can be absent at once (normal
-    /// screen, no mouse reporting). **scroll%** = `⇡NN%` when scrolled back into
-    /// history (`display_offset > 0`). **sel** = glyph count when there is an
-    /// active text selection. **enc** = `UTF-8` (always, for now). git/cwd slots
-    /// are reserved but hidden until a follow-up lands `/proc`-based data.
+    /// When `segments` is `Some`, only the listed segments are shown in the listed
+    /// order: "left" segments (Cwd, GitBranch, Process, Time, ExitStatus,
+    /// KeyHints) flow left-to-right; "right" segments (Mode, Broadcast, Selection,
+    /// Scroll, Encoding) flow right-to-left. The Progress segment is always a
+    /// decorative 1-px bar at the bottom edge.
     ///
     /// Associated fn (no `&self`) so it composes with the caller's `&mut Renderer`
     /// borrow; all data arrives as plain parameters.
-    #[allow(clippy::too_many_arguments)]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn paint_status_bar(
         renderer: &mut Renderer,
@@ -46,6 +135,10 @@ impl App {
         git_branch: Option<&str>,
         progress: Option<crate::image::ProgressState>,
         broadcast: bool,
+        fg_process: Option<&str>,
+        time_format: &str,
+        exit_status: Option<i32>,
+        segments: Option<&[StatusBarSegment]>,
     ) {
         let m = renderer.cell_metrics();
         let (sw, _sh) = renderer.surface_size();
@@ -73,136 +166,218 @@ impl App {
         // Glyph vertical centre within the bar.
         let ty = (bar_y + (bar_h - m.height) * 0.5).round();
 
-        // 2) Right-aligned fixed-width segments (right → left, each padded to a
-        //    fixed character count so a value change never shifts other segments).
-        //
-        //    Widths (in multiples of cell_w):
-        //      enc:    5 chars ("UTF-8") + 1 gap = 6 cw
-        //      scroll: 6 chars ("⇡100%") + 1 gap = 7 cw   (hidden when at bottom)
-        //      sel:    8 chars ("999 sel") + 1 gap = 9 cw  (hidden when no sel)
-        //      mode:   7 chars ("MOUSE  " or "ALT    ") + 1 gap = 8 cw (hidden when plain)
-        //
-        //    Right margin: 1 cw.
+        // Resolve the segment list: explicit config or built-in defaults.
+        const DEFAULT_SEGMENTS: &[StatusBarSegment] = &[
+            StatusBarSegment::Cwd,
+            StatusBarSegment::GitBranch,
+            StatusBarSegment::Mode,
+            StatusBarSegment::Broadcast,
+            StatusBarSegment::Selection,
+            StatusBarSegment::Scroll,
+            StatusBarSegment::Encoding,
+            StatusBarSegment::Progress,
+        ];
+        let seg_list: &[StatusBarSegment] = segments.unwrap_or(DEFAULT_SEGMENTS);
+
+        // Classify: right-side segments (drawn right-to-left), left-side (left-to-right), progress (bottom edge).
+        fn is_right_seg(s: &StatusBarSegment) -> bool {
+            matches!(
+                s,
+                StatusBarSegment::Mode
+                    | StatusBarSegment::Broadcast
+                    | StatusBarSegment::Selection
+                    | StatusBarSegment::Scroll
+                    | StatusBarSegment::Encoding
+            )
+        }
+        fn is_left_seg(s: &StatusBarSegment) -> bool {
+            matches!(
+                s,
+                StatusBarSegment::Cwd
+                    | StatusBarSegment::GitBranch
+                    | StatusBarSegment::Process
+                    | StatusBarSegment::Time
+                    | StatusBarSegment::ExitStatus
+                    | StatusBarSegment::KeyHints
+            )
+        }
+
         let right_margin = m.width;
         let mut rx = bar_w - right_margin;
 
-        // Encoding (always shown, right-aligned anchor).
-        {
-            let s = "UTF-8";
-            let w = renderer.text_width_px(s);
-            renderer.push_overlay_glyph_px_str((rx - w).round(), ty, s, fg_dim);
-            rx -= (6.0 * m.width).round(); // fixed 6-char slot
-        }
-
-        // Scroll percent — shown only when scrolled back into history.
-        if display_offset > 0 {
-            let pct = if history_size > 0 {
-                ((display_offset as f32 / history_size as f32) * 100.0).round() as u32
-            } else {
-                100
+        // 2) Right-aligned segments — each has a fixed-width slot to avoid jitter.
+        for seg in seg_list.iter().rev() {
+            if !is_right_seg(seg) {
+                continue;
             }
-            .min(100);
-            let s = format!("⇡{pct:>3}%");
-            let w = renderer.text_width_px(&s);
-            renderer.push_overlay_glyph_px_str((rx - w).round(), ty, &s, accent);
-        }
-        rx -= (7.0 * m.width).round(); // fixed 7-char slot (even when hidden)
-
-        // Selection glyph count — shown only when a selection is active.
-        if sel_len > 0 {
-            let s = format!("{sel_len} sel");
-            let w = renderer.text_width_px(&s);
-            renderer.push_overlay_glyph_px_str((rx - w).round(), ty, &s, fg_dim);
-        }
-        rx -= (9.0 * m.width).round(); // fixed 9-char slot
-
-        // Mode flags (ALT / MOUSE) — shown only when non-standard.
-        {
-            let alt = term_mode.contains(TermMode::ALT_SCREEN);
-            let mouse = term_mode.intersects(TermMode::MOUSE_MODE);
-            if alt || mouse {
-                let tag = if alt { "ALT" } else { "MOUSE" };
-                let w = renderer.text_width_px(tag);
-                renderer.push_overlay_glyph_px_str((rx - w).round(), ty, tag, fg);
+            match seg {
+                StatusBarSegment::Encoding => {
+                    let s = "UTF-8";
+                    let w = renderer.text_width_px(s);
+                    renderer.push_overlay_glyph_px_str((rx - w).round(), ty, s, fg_dim);
+                    rx -= (6.0 * m.width).round(); // fixed 6-char slot
+                }
+                StatusBarSegment::Scroll => {
+                    if display_offset > 0 {
+                        let pct = if history_size > 0 {
+                            ((display_offset as f32 / history_size as f32) * 100.0).round() as u32
+                        } else {
+                            100
+                        }
+                        .min(100);
+                        let s = format!("⇡{pct:>3}%");
+                        let w = renderer.text_width_px(&s);
+                        renderer.push_overlay_glyph_px_str((rx - w).round(), ty, &s, accent);
+                    }
+                    rx -= (7.0 * m.width).round();
+                }
+                StatusBarSegment::Selection => {
+                    if sel_len > 0 {
+                        let s = format!("{sel_len} sel");
+                        let w = renderer.text_width_px(&s);
+                        renderer.push_overlay_glyph_px_str((rx - w).round(), ty, &s, fg_dim);
+                    }
+                    rx -= (9.0 * m.width).round();
+                }
+                StatusBarSegment::Mode => {
+                    let alt = term_mode.contains(TermMode::ALT_SCREEN);
+                    let mouse = term_mode.intersects(TermMode::MOUSE_MODE);
+                    if alt || mouse {
+                        let tag = if alt { "ALT" } else { "MOUSE" };
+                        let w = renderer.text_width_px(tag);
+                        renderer.push_overlay_glyph_px_str((rx - w).round(), ty, tag, fg);
+                    }
+                    rx -= (8.0 * m.width).round();
+                }
+                StatusBarSegment::Broadcast => {
+                    if broadcast {
+                        let tag = "BCAST";
+                        let w = renderer.text_width_px(tag);
+                        renderer.push_overlay_glyph_px_str(
+                            (rx - w).round(),
+                            ty,
+                            tag,
+                            mul(color::danger()),
+                        );
+                    }
+                    rx -= (6.0 * m.width).round();
+                }
+                _ => {}
             }
-            rx -= (8.0 * m.width).round(); // fixed 8-char slot (even when hidden)
         }
+        let _ = rx;
 
-        // Broadcast-input indicator — shown only while broadcast input is on, so
-        // the user always sees that keystrokes fan out to every pane. Drawn in
-        // the danger accent (it changes where input lands, so make it loud) in a
-        // fixed 6-char slot left of the mode flags.
-        {
-            if broadcast {
-                let tag = "BCAST";
-                let w = renderer.text_width_px(tag);
-                renderer.push_overlay_glyph_px_str((rx - w).round(), ty, tag, mul(color::danger()));
-            }
-            rx -= (6.0 * m.width).round(); // fixed 6-char slot (even when hidden)
-        }
-        let _ = rx; // git/cwd slots reserved here for future waves
-
-        // 3) Left section: cwd (basename) and git branch. These fill the reserved
-        //    left slots that were previously empty ("git/cwd slots reserved here").
+        // 3) Left-side segments (left-to-right).
         {
             let left_margin = m.width;
             let mut lx = left_margin;
 
-            // cwd: last path component, or "~" for $HOME, or full path if short.
-            if let Some(path) = cwd {
-                let cwd_str: String = if path.as_os_str().is_empty() {
-                    "~".to_string()
-                } else {
-                    // Show last two components for context (e.g. "glassy/src").
-                    let components: Vec<_> = path.components().collect();
-                    let n = components.len();
-                    if n >= 2 {
-                        format!(
-                            "{}/{}",
-                            components[n - 2].as_os_str().to_string_lossy(),
-                            components[n - 1].as_os_str().to_string_lossy()
-                        )
-                    } else if n == 1 {
-                        components[0].as_os_str().to_string_lossy().to_string()
-                    } else {
-                        "~".to_string()
+            for seg in seg_list.iter() {
+                if !is_left_seg(seg) {
+                    continue;
+                }
+                match seg {
+                    StatusBarSegment::Cwd => {
+                        if let Some(path) = cwd {
+                            let cwd_str: String = if path.as_os_str().is_empty() {
+                                "~".to_string()
+                            } else {
+                                let components: Vec<_> = path.components().collect();
+                                let n = components.len();
+                                if n >= 2 {
+                                    format!(
+                                        "{}/{}",
+                                        components[n - 2].as_os_str().to_string_lossy(),
+                                        components[n - 1].as_os_str().to_string_lossy()
+                                    )
+                                } else if n == 1 {
+                                    components[0].as_os_str().to_string_lossy().to_string()
+                                } else {
+                                    "~".to_string()
+                                }
+                            };
+                            let w = renderer.text_width_px(&cwd_str);
+                            renderer.push_overlay_glyph_px_str(lx.round(), ty, &cwd_str, fg_dim);
+                            lx += w + m.width;
+                        }
                     }
-                };
-                let w = renderer.text_width_px(&cwd_str);
-                renderer.push_overlay_glyph_px_str(lx.round(), ty, &cwd_str, fg_dim);
-                lx += w + m.width;
-
-                // Git branch (if in a repo): " branch_name" in accent.
-                if let Some(branch) = git_branch {
-                    let branch_str = format!("\u{E0A0} {branch}"); // nf-pl-branch glyph
-                    let w = renderer.text_width_px(&branch_str);
-                    renderer.push_overlay_glyph_px_str(lx.round(), ty, &branch_str, accent);
-                    lx += w;
+                    StatusBarSegment::GitBranch => {
+                        if let Some(branch) = git_branch {
+                            let branch_str = format!("\u{E0A0} {branch}");
+                            let w = renderer.text_width_px(&branch_str);
+                            renderer.push_overlay_glyph_px_str(lx.round(), ty, &branch_str, accent);
+                            lx += w + m.width;
+                        }
+                    }
+                    StatusBarSegment::Process => {
+                        if let Some(proc_name) = fg_process {
+                            let w = renderer.text_width_px(proc_name);
+                            renderer.push_overlay_glyph_px_str(lx.round(), ty, proc_name, fg);
+                            lx += w + m.width;
+                        }
+                    }
+                    StatusBarSegment::Time => {
+                        // Format the current local time using the configured format string.
+                        let now = std::time::SystemTime::now();
+                        let time_str = format_time(now, time_format);
+                        let w = renderer.text_width_px(&time_str);
+                        renderer.push_overlay_glyph_px_str(lx.round(), ty, &time_str, fg_dim);
+                        lx += w + m.width;
+                    }
+                    StatusBarSegment::ExitStatus => {
+                        if let Some(code) = exit_status {
+                            let s = if code == 0 {
+                                "\u{2713}".to_string() // ✓
+                            } else {
+                                format!("\u{2717}{code}") // ✗N
+                            };
+                            let color = if code == 0 {
+                                fg_dim
+                            } else {
+                                mul(color::danger())
+                            };
+                            let w = renderer.text_width_px(&s);
+                            renderer.push_overlay_glyph_px_str(lx.round(), ty, &s, color);
+                            lx += w + m.width;
+                        }
+                    }
+                    StatusBarSegment::KeyHints => {
+                        // Show a brief set of key hints relevant to the current mode.
+                        let hints = if term_mode.contains(TermMode::ALT_SCREEN) {
+                            "F1:help  q:quit"
+                        } else {
+                            "F1:help  Ctrl+P:palette"
+                        };
+                        let w = renderer.text_width_px(hints);
+                        renderer.push_overlay_glyph_px_str(lx.round(), ty, hints, fg_dim);
+                        lx += w + m.width;
+                    }
+                    _ => {}
                 }
             }
             let _ = lx;
         }
 
-        // 4) OSC 9;4 progress indicator: a thin filled bar at the very bottom of
-        //    the status bar (1px tall) spanning a fraction of the bar width, colored
-        //    by state (accent = active, red = error, dim = indeterminate). Subtle and
-        //    non-intrusive — it sits inside the status bar's existing pixel budget.
-        if let Some(prog) = progress {
-            use crate::image::ProgressState;
-            let bar_bottom = bar_y + bar_h - 1.0; // 1px at the very bottom
-            let (pct, color) = match prog {
-                ProgressState::Set(p) => (p as f32 / 100.0, accent),
-                ProgressState::Error(p) => (p as f32 / 100.0, mul(color::danger())),
-                ProgressState::Indeterminate => (1.0, fg_dim),
-                ProgressState::Remove => (0.0, fg_dim),
-            };
-            if pct > 0.0 {
-                let prog_w = (bar_w * pct).max(2.0);
-                renderer.push_overlay_px(0.0, bar_bottom, prog_w, 1.0, color);
+        // 4) Progress bar (1-px bottom edge): always rendered when the segment is in
+        //    the list and a progress state is active.
+        if seg_list.contains(&StatusBarSegment::Progress) {
+            if let Some(prog) = progress {
+                use crate::image::ProgressState;
+                let bar_bottom = bar_y + bar_h - 1.0;
+                let (pct, color) = match prog {
+                    ProgressState::Set(p) => (p as f32 / 100.0, accent),
+                    ProgressState::Error(p) => (p as f32 / 100.0, mul(color::danger())),
+                    ProgressState::Indeterminate => (1.0, fg_dim),
+                    ProgressState::Remove => (0.0, fg_dim),
+                };
+                if pct > 0.0 {
+                    let prog_w = (bar_w * pct).max(2.0);
+                    renderer.push_overlay_px(0.0, bar_bottom, prog_w, 1.0, color);
+                }
             }
         }
 
-        // 5) Left margin: a small decorative separator mark.
+        // 5) Left margin decorative rail.
         renderer.push_overlay_px(0.0, bar_y, 1.0, bar_h, mul(gui::rail()));
     }
 

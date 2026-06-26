@@ -79,6 +79,8 @@ pub(super) struct RawConfig {
     /// Also place a rich-text (HTML) flavor on the clipboard alongside the plain
     /// text on copy, so apps that prefer HTML get a monospace-preserving paste.
     pub copy_html: Option<bool>,
+    pub status_bar_segments: Option<Vec<crate::app::StatusBarSegment>>,
+    pub status_bar_time_format: Option<String>,
 }
 
 impl RawConfig {
@@ -224,6 +226,10 @@ impl RawConfig {
             command_history: self.command_history.unwrap_or(DEFAULT_COMMAND_HISTORY),
             dim_unfocused: self.dim_unfocused.unwrap_or(true),
             copy_html: self.copy_html.unwrap_or(false),
+            status_bar_segments: self.status_bar_segments,
+            status_bar_time_format: self
+                .status_bar_time_format
+                .unwrap_or_else(|| "%H:%M".to_string()),
         };
 
         Ok(super::Settings { config, theme })
@@ -722,6 +728,44 @@ pub(super) fn apply_kv(key: &str, value: &str, raw: &mut RawConfig) -> Result<()
         "wallpaper_theme" => {
             if !value.is_empty() {
                 raw.wallpaper_theme = Some(value.to_string());
+            }
+        }
+        "status_bar_segments" => {
+            use crate::app::StatusBarSegment;
+            if value.is_empty() {
+                raw.status_bar_segments = None;
+            } else {
+                let segs: Vec<StatusBarSegment> = value
+                    .split([',', ' '])
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .filter_map(|s| match s.to_ascii_lowercase().as_str() {
+                        "cwd" => Some(StatusBarSegment::Cwd),
+                        "git_branch" | "git" => Some(StatusBarSegment::GitBranch),
+                        "process" | "fg_process" => Some(StatusBarSegment::Process),
+                        "time" | "clock" => Some(StatusBarSegment::Time),
+                        "mode" => Some(StatusBarSegment::Mode),
+                        "broadcast" | "bcast" => Some(StatusBarSegment::Broadcast),
+                        "selection" | "sel" => Some(StatusBarSegment::Selection),
+                        "scroll" => Some(StatusBarSegment::Scroll),
+                        "encoding" | "enc" => Some(StatusBarSegment::Encoding),
+                        "progress" => Some(StatusBarSegment::Progress),
+                        "exit_status" | "exit" => Some(StatusBarSegment::ExitStatus),
+                        "key_hints" | "hints" => Some(StatusBarSegment::KeyHints),
+                        other => {
+                            log::warn!(
+                                "glassy: ignoring unknown status_bar_segments entry '{other}'"
+                            );
+                            None
+                        }
+                    })
+                    .collect();
+                raw.status_bar_segments = Some(segs);
+            }
+        }
+        "status_bar_time_format" => {
+            if !value.is_empty() {
+                raw.status_bar_time_format = Some(value.to_string());
             }
         }
         other => {

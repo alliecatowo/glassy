@@ -14,6 +14,7 @@ use history::{compact_home, shell_quote};
 mod fuzzy;
 mod history;
 mod paint;
+pub(crate) mod save_scrollback;
 
 /// One palette command: a stable identifier the App maps to a concrete effect,
 /// plus the display metadata (category + label) the registry builds it with.
@@ -76,6 +77,40 @@ pub(crate) enum PaletteCmd {
     SetTheme(usize),
     /// Generate a theme from the configured `wallpaper_theme` image path and apply it live.
     GenerateThemeFromWallpaper,
+    // --- Opacity ---
+    /// Increase window background opacity by 5%.
+    IncreaseOpacity,
+    /// Decrease window background opacity by 5%.
+    DecreaseOpacity,
+    /// Set opacity to the exact value 0..<n>/20 (stored as integer tenths×2 for
+    /// lossless round-trip; 0=0.0, 20=1.0). Payload string carries the percentage.
+    SetOpacity(u8),
+    /// Toggle between the current opacity and 1.0 (fully opaque). Useful as a
+    /// quick "make it readable / restore transparency" action.
+    ToggleOpacity,
+    // --- GPU effects ---
+    /// Toggle the CRT/glow/scanline post-process (config `crt_effect`).
+    ToggleCrtEffect,
+    /// Toggle the cursor-trail smooth-glide effect (config `cursor_trail`).
+    ToggleCursorTrail,
+    // --- Toggle settings not yet in the palette ---
+    /// Toggle cursor blink (config `cursor_blink`).
+    ToggleCursorBlink,
+    /// Toggle the "follow system light/dark" theme mode (config `follow_system`).
+    ToggleFollowSystem,
+    /// Toggle OpenType ligature shaping (config `ligatures`).
+    ToggleLigatures,
+    /// Toggle session restore on launch (config `restore_session`).
+    ToggleRestoreSession,
+    /// Toggle copy-on-select / PRIMARY selection (config `copy_on_select`).
+    ToggleCopyOnSelect,
+    /// Toggle OSC 133 command-block badges + fold affordance (config
+    /// `command_badges`).
+    ToggleCommandBadges,
+    // --- Scrollback ---
+    /// Write the current pane's full scrollback (terminal text, no ANSI) to a
+    /// file chosen via a temp path, then echo the path so the user can open it.
+    SaveScrollbackToFile,
     // --- Dynamic history sources (payload carried by the PaletteEntry) ---
     /// Re-run a command from history: paste its text into the focused pane and
     /// submit it (append a newline). The command string lives in
@@ -108,6 +143,11 @@ impl PaletteCmd {
             | BellAudible | ScrollbackIncrease | ScrollbackDecrease => "Setting",
             ToggleFold => "View",
             NextTheme | PrevTheme | SetTheme(_) | GenerateThemeFromWallpaper => "Theme",
+            IncreaseOpacity | DecreaseOpacity | SetOpacity(_) | ToggleOpacity => "Opacity",
+            ToggleCrtEffect | ToggleCursorTrail => "Effects",
+            ToggleCursorBlink | ToggleFollowSystem | ToggleLigatures | ToggleRestoreSession
+            | ToggleCopyOnSelect | ToggleCommandBadges => "Setting",
+            SaveScrollbackToFile => "Edit",
             RunCommand => "History",
             CdTo => "Cwd",
             SwitchProfile => "Profile",
@@ -157,6 +197,19 @@ impl PaletteCmd {
             ToggleFold => "Fold/unfold command output".into(),
             SetTheme(_) => String::new(),
             GenerateThemeFromWallpaper => "Generate theme from wallpaper image".into(),
+            IncreaseOpacity => "Increase opacity (+5%)".into(),
+            DecreaseOpacity => "Decrease opacity (−5%)".into(),
+            SetOpacity(v) => format!("Set opacity {}%", v * 5),
+            ToggleOpacity => "Toggle opacity (current ↔ 100%)".into(),
+            ToggleCrtEffect => "Toggle CRT/glow/scanline effect".into(),
+            ToggleCursorTrail => "Toggle cursor trail (smooth glide)".into(),
+            ToggleCursorBlink => "Toggle cursor blink".into(),
+            ToggleFollowSystem => "Toggle follow system light/dark theme".into(),
+            ToggleLigatures => "Toggle ligature shaping".into(),
+            ToggleRestoreSession => "Toggle restore session on launch".into(),
+            ToggleCopyOnSelect => "Toggle copy-on-select".into(),
+            ToggleCommandBadges => "Toggle command badges (OSC 133)".into(),
+            SaveScrollbackToFile => "Save scrollback to file".into(),
             // History/cwd/profile labels are filled in by the registry from the payload.
             RunCommand | CdTo | SwitchProfile => String::new(),
         }
@@ -187,6 +240,8 @@ impl PaletteCmd {
             ToggleStatusBar => Some("Ctrl+Shift+B"),
             ToggleFold => Some("Ctrl+Shift+Z"),
             ToggleMinimap => Some("Ctrl+Shift+M"),
+            IncreaseOpacity => Some("Ctrl+Shift+]"),
+            DecreaseOpacity => Some("Ctrl+Shift+["),
             _ => None,
         }
     }
@@ -279,7 +334,29 @@ impl App {
             NextTheme,
             PrevTheme,
             GenerateThemeFromWallpaper,
+            // Opacity
+            IncreaseOpacity,
+            DecreaseOpacity,
+            ToggleOpacity,
+            // Effects
+            ToggleCrtEffect,
+            ToggleCursorTrail,
+            // Remaining settings toggles
+            ToggleCursorBlink,
+            ToggleFollowSystem,
+            ToggleLigatures,
+            ToggleRestoreSession,
+            ToggleCopyOnSelect,
+            ToggleCommandBadges,
+            // Scrollback
+            SaveScrollbackToFile,
         ];
+        // Opacity presets: 5 steps at 25 / 50 / 75 / 90 / 100%.
+        // The step value maps to opacity as `v * 5 / 100` (v is stored as
+        // "5% units": 5 → 25%, 10 → 50%, 15 → 75%, 18 → 90%, 20 → 100%).
+        for v in [5u8, 10, 15, 18, 20] {
+            cmds.push(SetOpacity(v));
+        }
         // Only surface the quake toggle when the instance is actually in quake mode.
         if self.config.quake {
             cmds.push(ToggleQuake);
@@ -685,6 +762,77 @@ impl App {
             GenerateThemeFromWallpaper => {
                 self.generate_theme_from_wallpaper(event_loop);
             }
+            // --- Opacity ---
+            IncreaseOpacity => {
+                let o = (self.config.opacity + 0.05).clamp(0.0, 1.0);
+                self.apply_opacity(o, event_loop);
+            }
+            DecreaseOpacity => {
+                let o = (self.config.opacity - 0.05).clamp(0.0, 1.0);
+                self.apply_opacity(o, event_loop);
+            }
+            SetOpacity(v) => {
+                let o = (v as f32 * 5.0 / 100.0).clamp(0.0, 1.0);
+                self.apply_opacity(o, event_loop);
+            }
+            ToggleOpacity => {
+                // Toggle between 1.0 and the last non-1.0 opacity.
+                self.toggle_opacity(event_loop);
+            }
+            // --- Effects ---
+            ToggleCrtEffect => {
+                self.toggle_crt_effect();
+                self.mark_dirty(event_loop);
+            }
+            ToggleCursorTrail => {
+                self.toggle_cursor_trail();
+                self.mark_dirty(event_loop);
+            }
+            // --- Additional setting toggles ---
+            ToggleCursorBlink => {
+                self.config.cursor_blink = !self.config.cursor_blink;
+                self.settings_saved = false;
+                self.force_full_redraw = true;
+                self.mark_dirty(event_loop);
+            }
+            ToggleFollowSystem => {
+                self.config.follow_system = !self.config.follow_system;
+                self.settings_saved = false;
+                self.force_full_redraw = true;
+                self.mark_dirty(event_loop);
+            }
+            ToggleLigatures => {
+                self.config.ligatures = !self.config.ligatures;
+                if let Some(r) = self.renderer.as_mut() {
+                    r.set_ligatures(self.config.ligatures);
+                }
+                self.settings_saved = false;
+                self.force_full_redraw = true;
+                self.mark_dirty(event_loop);
+            }
+            ToggleRestoreSession => {
+                self.config.restore_session = !self.config.restore_session;
+                self.session_dirty = true;
+                self.settings_saved = false;
+                self.force_full_redraw = true;
+                self.mark_dirty(event_loop);
+            }
+            ToggleCopyOnSelect => {
+                self.config.copy_on_select = !self.config.copy_on_select;
+                self.settings_saved = false;
+                self.force_full_redraw = true;
+                self.mark_dirty(event_loop);
+            }
+            ToggleCommandBadges => {
+                self.config.command_badges = !self.config.command_badges;
+                self.settings_saved = false;
+                self.force_full_redraw = true;
+                self.mark_dirty(event_loop);
+            }
+            // --- Scrollback ---
+            SaveScrollbackToFile => {
+                self.save_scrollback_to_file(event_loop);
+            }
         }
     }
 
@@ -751,6 +899,18 @@ mod tests {
             NextTheme,
             PrevTheme,
             GenerateThemeFromWallpaper,
+            IncreaseOpacity,
+            DecreaseOpacity,
+            ToggleOpacity,
+            ToggleCrtEffect,
+            ToggleCursorTrail,
+            ToggleCursorBlink,
+            ToggleFollowSystem,
+            ToggleLigatures,
+            ToggleRestoreSession,
+            ToggleCopyOnSelect,
+            ToggleCommandBadges,
+            SaveScrollbackToFile,
         ];
         for cmd in cmds {
             assert!(

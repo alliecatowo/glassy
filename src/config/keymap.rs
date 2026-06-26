@@ -251,6 +251,14 @@ pub enum KeyAction {
     /// selecting + copying text without a mouse (hjkl/word/line motions, `v`/`V`
     /// visual, `y` to yank, Esc to exit).
     ViMode,
+    /// Increase window background opacity by 5%.
+    IncreaseOpacity,
+    /// Decrease window background opacity by 5%.
+    DecreaseOpacity,
+    /// Toggle between 1.0 (fully opaque) and the last non-opaque opacity.
+    ToggleOpacity,
+    /// Save the active pane's scrollback history to a temporary file and print its path.
+    SaveScrollback,
 }
 
 impl KeyAction {
@@ -298,6 +306,10 @@ impl KeyAction {
             RotatePanes => "Rotate panes",
             EqualizePanes => "Equalize splits",
             ViMode => "Copy mode (keyboard selection)",
+            IncreaseOpacity => "Increase opacity",
+            DecreaseOpacity => "Decrease opacity",
+            ToggleOpacity => "Toggle opacity (transparent ↔ opaque)",
+            SaveScrollback => "Save scrollback to file",
         }
     }
 
@@ -315,8 +327,10 @@ impl KeyAction {
             Copy | Paste | ViMode => "Edit",
             ToggleFullscreen | ToggleMaximize | FontIncrease | FontDecrease | FontReset
             | ToggleStatusBar | ToggleMinimap | ScrollUp | ScrollDown | ScrollTop
-            | ScrollBottom | JumpPrevPrompt | JumpNextPrompt | ToggleFold | QuakeToggle => "View",
+            | ScrollBottom | JumpPrevPrompt | JumpNextPrompt | ToggleFold | QuakeToggle
+            | IncreaseOpacity | DecreaseOpacity | ToggleOpacity => "View",
             Settings | Help | Search | CommandPalette | Hints => "App",
+            SaveScrollback => "Edit",
         }
     }
 }
@@ -367,6 +381,10 @@ pub(crate) fn parse_action(s: &str) -> Result<Option<KeyAction>> {
         "rotate_panes" | "rotate" => RotatePanes,
         "equalize_panes" | "equalize" => EqualizePanes,
         "vi_mode" | "copy_mode" => ViMode,
+        "increase_opacity" | "opacity_up" => IncreaseOpacity,
+        "decrease_opacity" | "opacity_down" => DecreaseOpacity,
+        "toggle_opacity" => ToggleOpacity,
+        "save_scrollback" | "scrollback_to_file" => SaveScrollback,
         // go_to_tab_1 .. go_to_tab_9 select a tab by 1-based position.
         s if s.starts_with("go_to_tab_") => match s["go_to_tab_".len()..].parse::<u8>() {
             Ok(n @ 1..=9) => GoToTab(n),
@@ -488,6 +506,10 @@ fn shared_default_binds() -> &'static [(&'static str, KeyAction)] {
         // (guake/yakuake) and is otherwise unbound. Only meaningful when
         // `quake = true`; in normal mode `quake_toggle` is a harmless no-op.
         ("f12", QuakeToggle),
+        // Opacity control: use Ctrl+Shift+] / Ctrl+Shift+[ to nudge transparency.
+        // ToggleOpacity has no default chord (it is in the command palette).
+        ("ctrl+shift+]", IncreaseOpacity),
+        ("ctrl+shift+[", DecreaseOpacity),
     ]
 }
 

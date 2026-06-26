@@ -134,6 +134,7 @@ impl App {
             key_seq_pending: None,
             mod_hold_since: None,
             vi: Default::default(),
+            opacity_before_toggle: None,
         }
     }
 
