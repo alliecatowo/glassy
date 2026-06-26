@@ -563,31 +563,77 @@ impl App {
                 crate::color::set_theme(theme);
             }
         }
+
+        // Command-finish notification + folding settings: plain flags/values,
+        // applied immediately (not a visual change, so no redraw needed).
+        self.config.notify_command_finish = new_config.notify_command_finish;
+        self.config.notify_command_threshold_ms = new_config.notify_command_threshold_ms;
+        if new_config.command_fold != self.config.command_fold {
+            self.config.command_fold = new_config.command_fold;
+            // If folding was just turned off, clear any active folds so the view
+            // reverts to fully-expanded output.
+            if !self.config.command_fold && self.fold_state.any() {
+                self.fold_state = command_blocks::FoldState::default();
+                self.dirty = true;
+                self.force_full_redraw = true;
+            }
+        }
     }
 }
 
-/// Fire a desktop notification with `app_name` as the summary prefix and `body`
-/// as the message. Called on the UI thread when an OSC 9 / OSC 777 notification
-/// arrives and the window is unfocused.
+/// Fire a rich desktop notification from a [`NotifySpec`](crate::image::NotifySpec):
+/// title/body plus the optional icon, sound, urgency, and action buttons. Called
+/// on the UI thread when an OSC 9 / OSC 777 notification arrives and the window
+/// is unfocused, or for the command-finish alert.
 ///
-/// Uses a detached thread so the D-Bus round-trip never blocks the UI loop.
-/// Errors are logged at debug level (a missing notification daemon is a
-/// non-fatal, common desktop configuration).
-pub(super) fn fire_desktop_notification(app_name: &str, body: &str) {
-    use notify_rust::Notification;
-    let summary = app_name.to_string();
-    let body = body.to_string();
+/// Uses a detached thread so the D-Bus round-trip (and, when actions are present,
+/// the blocking wait for the user's button press) never stalls the UI loop. An
+/// empty title defaults to "glassy". Errors are logged at debug level (a missing
+/// notification daemon is a non-fatal, common desktop configuration).
+pub(super) fn fire_notification(spec: &crate::image::NotifySpec) {
+    use notify_rust::{Notification, Timeout, Urgency};
+    let spec = spec.clone();
     std::thread::Builder::new()
         .name("glassy-notify".to_string())
         .spawn(move || {
-            let result = Notification::new()
-                .summary(&summary)
-                .body(&body)
+            let summary = if spec.title.is_empty() {
+                "glassy".to_string()
+            } else {
+                spec.title.clone()
+            };
+            let mut n = Notification::new();
+            n.summary(&summary)
+                .body(&spec.body)
                 .appname("glassy")
-                .timeout(notify_rust::Timeout::Milliseconds(5000))
-                .show();
-            if let Err(e) = result {
-                log::debug!("desktop notification failed: {e}");
+                .timeout(Timeout::Milliseconds(5000))
+                .urgency(match spec.urgency {
+                    crate::image::NotifyUrgency::Low => Urgency::Low,
+                    crate::image::NotifyUrgency::Normal => Urgency::Normal,
+                    crate::image::NotifyUrgency::Critical => Urgency::Critical,
+                });
+            if let Some(icon) = &spec.icon {
+                n.icon(icon);
+            }
+            if let Some(sound) = &spec.sound {
+                n.sound_name(sound);
+            }
+            for (id, label) in &spec.actions {
+                n.action(id, label);
+            }
+            match n.show() {
+                Ok(handle) => {
+                    // If the notification carries action buttons, block this
+                    // (detached) thread waiting for the user to click one and log
+                    // which fired. A future enhancement can route the chosen
+                    // action back into the app (e.g. focus a tab); for now we
+                    // surface the buttons + record the choice.
+                    if !spec.actions.is_empty() {
+                        handle.wait_for_action(|action| {
+                            log::debug!("notification action invoked: {action}");
+                        });
+                    }
+                }
+                Err(e) => log::debug!("desktop notification failed: {e}"),
             }
         })
         .ok(); // ignore thread-spawn failure (extremely unlikely)
@@ -630,6 +676,79 @@ pub(crate) fn read_git_branch(cwd: &std::path::Path) -> Option<String> {
 pub(super) const PROC_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
 
 impl App {
+    /// Fire a desktop notification for a finished OSC 133-tracked command when it
+    /// ran long enough AND the window is unfocused. A no-op when the feature is
+    /// disabled (`notify_command_finish = false`) or the command was faster than
+    /// the configured threshold — so quick commands never spam, and a focused
+    /// user (who can already see the result) is never interrupted.
+    ///
+    /// The notification's urgency reflects the exit status: a non-zero exit is
+    /// `Critical` (a build/test failed); success is `Normal`. The body names the
+    /// command (truncated) and its duration.
+    pub(crate) fn notify_command_finished(
+        &self,
+        command: Option<String>,
+        exit: Option<i32>,
+        duration: std::time::Duration,
+    ) {
+        if !self.config.notify_command_finish || self.focused {
+            return;
+        }
+        let threshold = std::time::Duration::from_millis(self.config.notify_command_threshold_ms);
+        // A zero threshold means "always notify" (duration is never < ZERO);
+        // otherwise the command must have run at least `threshold`.
+        if duration < threshold {
+            return;
+        }
+        let ok = exit.map(|c| c == 0).unwrap_or(true);
+        let dur = crate::app::command_blocks::format_duration(duration);
+        // Truncate the command for the body so a giant one-liner stays readable.
+        let cmd = command.unwrap_or_default();
+        let cmd_short: String = if cmd.chars().count() > 80 {
+            let mut s: String = cmd.chars().take(77).collect();
+            s.push('…');
+            s
+        } else {
+            cmd
+        };
+        let (title, body) = if ok {
+            (
+                "Command finished".to_string(),
+                if cmd_short.is_empty() {
+                    format!("Done in {dur}")
+                } else {
+                    format!("{cmd_short}\nDone in {dur}")
+                },
+            )
+        } else {
+            let code = exit.map(|c| format!(" (exit {c})")).unwrap_or_default();
+            (
+                "Command failed".to_string(),
+                if cmd_short.is_empty() {
+                    format!("Failed{code} after {dur}")
+                } else {
+                    format!("{cmd_short}\nFailed{code} after {dur}")
+                },
+            )
+        };
+        let spec = crate::image::NotifySpec {
+            title,
+            body,
+            icon: Some(if ok {
+                "dialog-information".to_string()
+            } else {
+                "dialog-error".to_string()
+            }),
+            urgency: if ok {
+                crate::image::NotifyUrgency::Normal
+            } else {
+                crate::image::NotifyUrgency::Critical
+            },
+            ..crate::image::NotifySpec::default()
+        };
+        fire_notification(&spec);
+    }
+
     /// Refresh the cached `/proc` pane info for a single PTY when the cache is
     /// stale (older than `PROC_REFRESH_INTERVAL`). Called on pane focus and in
     /// `about_to_wait` for the periodic background poll. Cheap: skipped if the

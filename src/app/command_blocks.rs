@@ -258,8 +258,12 @@ impl App {
 
     /// Toggle the fold state of the command block currently in view. Bound to the
     /// `ToggleFold` key action and the command palette. No-op when there is no
-    /// finished, foldable block in view.
+    /// finished, foldable block in view, or when output folding is disabled via
+    /// the `command_fold` config key.
     pub(crate) fn toggle_command_fold(&mut self, event_loop: &ActiveEventLoop) {
+        if !self.config.command_fold {
+            return;
+        }
         if let Some(prompt_row) = self.foldable_block_at_view() {
             self.fold_state.toggle(prompt_row);
             self.force_full_redraw = true;

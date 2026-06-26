@@ -18,6 +18,11 @@ const DEFAULT_SCROLLBACK: usize = 10_000;
 /// history source (OSC 133 `B`..`C` capture). 0 disables it.
 const DEFAULT_COMMAND_HISTORY: usize = 200;
 
+/// Default minimum command duration (ms) that triggers a command-finish desktop
+/// notification when the window is unfocused. 10 s avoids spamming for quick
+/// commands while still catching long builds/tests.
+const DEFAULT_NOTIFY_COMMAND_THRESHOLD_MS: u64 = 10_000;
+
 /// Accumulated raw configuration before validation/finalization. Every field is
 /// optional so the file and CLI layers can each set a subset.
 #[derive(Default)]
@@ -72,6 +77,9 @@ pub(super) struct RawConfig {
     pub quake_height: Option<f32>,
     pub quake_animation_ms: Option<u64>,
     pub command_history: Option<usize>,
+    pub notify_command_finish: Option<bool>,
+    pub notify_command_threshold_ms: Option<u64>,
+    pub command_fold: Option<bool>,
 }
 
 impl RawConfig {
@@ -200,6 +208,11 @@ impl RawConfig {
             },
             quake_animation_ms: self.quake_animation_ms.unwrap_or(180).min(5_000),
             command_history: self.command_history.unwrap_or(DEFAULT_COMMAND_HISTORY),
+            notify_command_finish: self.notify_command_finish.unwrap_or(true),
+            notify_command_threshold_ms: self
+                .notify_command_threshold_ms
+                .unwrap_or(DEFAULT_NOTIFY_COMMAND_THRESHOLD_MS),
+            command_fold: self.command_fold.unwrap_or(true),
         };
 
         Ok(super::Settings { config, theme })
@@ -475,6 +488,18 @@ pub(super) fn apply_kv(key: &str, value: &str, raw: &mut RawConfig) -> Result<()
                 .parse()
                 .with_context(|| format!("command_history: invalid integer '{value}'"))?;
             raw.command_history = Some(n.clamp(0, 10_000));
+        }
+        "notify_command_finish" => {
+            raw.notify_command_finish = Some(parse_bool(value, "notify_command_finish")?);
+        }
+        "notify_command_threshold_ms" => {
+            let ms: u64 = value.parse().with_context(|| {
+                format!("notify_command_threshold_ms: invalid integer '{value}'")
+            })?;
+            raw.notify_command_threshold_ms = Some(ms.min(86_400_000)); // cap at 24h
+        }
+        "command_fold" => {
+            raw.command_fold = Some(parse_bool(value, "command_fold")?);
         }
         "bell_visual" => {
             raw.bell_visual = Some(parse_bool(value, "bell_visual")?);
