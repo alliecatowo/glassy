@@ -167,15 +167,20 @@ yay -S glassy-bin
 
 Download `glassy-<version>-macos.dmg` from the [Releases page](https://github.com/alliecatowo/glassy/releases), open it, drag **glassy.app** to Applications. macOS may show a security warning on first launch — right-click the app and choose Open to bypass it (the binary is not yet notarized).
 
-> **Note:** the macOS build is pending Wayland/Linux-only dep work. Track progress in [GitHub Issues](https://github.com/alliecatowo/glassy/issues).
+> macOS is a fully supported, CI-built target: every release ships a universal (Intel + Apple Silicon) `.app`/`.dmg`. Notarization is the only remaining polish item.
 
-**macOS — Homebrew** *(tap pending)*
+**macOS / Linux — Homebrew**
 
 ```sh
-# Once the tap is live:
 brew tap alliecatowo/glassy
 brew install glassy
 ```
+
+> The tap repo (`alliecatowo/homebrew-glassy`) must exist for this to resolve; until then, install straight from the formula in this repo:
+>
+> ```sh
+> brew install --build-from-source ./packaging/homebrew/glassy.rb
+> ```
 
 **Flatpak** *(not yet on Flathub; local build from the manifest)*
 

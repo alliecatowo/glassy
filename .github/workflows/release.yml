@@ -1,15 +1,22 @@
 name: Release
 
-# Triggered by a version tag push (e.g. git tag v0.2.0 && git push --tags).
-# Do NOT modify ci.yml — the test matrix lives there.
+# Triggers (Do NOT modify ci.yml — the test matrix lives there):
+#   * push of a version tag (e.g. git tag v0.2.0 && git push --tags) — the
+#     classic explicit release.
+#   * push to main — the merge-to-main release path. The version is read from
+#     Cargo.toml and a release is cut ONLY if one for that version does not
+#     already exist (the resolve-version job below computes `is_new`), so
+#     re-merges / unrelated main pushes are no-ops.
+#   * manual dispatch — validate the macOS/Windows build jobs on demand
+#     (e.g. `gh workflow run release.yml --ref develop`) without cutting a
+#     release; on a non-tag ref the version falls back to Cargo.toml and the
+#     publish step is gated on `is_new`.
 on:
   push:
     tags:
       - "v*"
-  # Manual trigger — used to validate the macOS/Windows build jobs on demand
-  # (e.g. `gh workflow run release.yml --ref develop`) without cutting a real
-  # version tag. On a non-tag ref the version falls back to the Cargo.toml
-  # value, and the publish/release step is skipped (it is tag-gated).
+    branches:
+      - main
   workflow_dispatch:
 
 env:
@@ -27,22 +34,81 @@ permissions:
 # ---------------------------------------------------------------------------
 jobs:
   # -------------------------------------------------------------------------
+  # Resolve the version + whether it is new — the single source of truth all
+  # other jobs read. On a tag push the version comes from the tag; otherwise
+  # (main push / manual dispatch) it comes from Cargo.toml. `is_new` is false
+  # when a Git tag OR a GitHub Release already exists for that version, so a
+  # re-merge to main or an unrelated push never re-publishes the same release.
+  # -------------------------------------------------------------------------
+  resolve-version:
+    name: Resolve version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      tag: ${{ steps.v.outputs.tag }}
+      is_new: ${{ steps.v.outputs.is_new }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute version, tag, and is_new
+        id: v
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            # Explicit tag push: the tag is authoritative.
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            # main push / manual dispatch: read the crate version from Cargo.toml.
+            # The first `version = "..."` line is the [package] one (it precedes
+            # any dependency tables), so head -n1 is safe and needs no toml parser.
+            VERSION="$(grep -m1 '^version = ' Cargo.toml | sed -E 's/version = "(.*)"/\1/')"
+          fi
+          if [[ -z "${VERSION}" ]]; then
+            echo "::error::could not resolve version" >&2
+            exit 1
+          fi
+          TAG="v${VERSION}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+          # Determine novelty: skip publishing if either a tag or a release for
+          # this version already exists. (A tag push that hasn't been released yet
+          # is still "new"; a re-run on an already-released version is not.)
+          IS_NEW=true
+          if git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; then
+            # The tag exists on the remote. It's only "not new" if a Release was
+            # also already published for it (a freshly-pushed tag with no release
+            # should still publish).
+            if gh release view "${TAG}" >/dev/null 2>&1; then
+              IS_NEW=false
+            fi
+          fi
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            IS_NEW=false
+          fi
+          echo "is_new=${IS_NEW}" >> "$GITHUB_OUTPUT"
+          echo "Resolved version=${VERSION} tag=${TAG} is_new=${IS_NEW}"
+
+  # -------------------------------------------------------------------------
   # Linux x86_64 (required)
   # -------------------------------------------------------------------------
   build-linux-x86_64:
     name: Build — Linux x86_64
+    needs: [resolve-version]
     runs-on: ubuntu-latest
     outputs:
-      version: ${{ steps.meta.outputs.version }}
+      version: ${{ needs.resolve-version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
 
       - name: Extract version
         id: meta
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
+          VERSION="${{ needs.resolve-version.outputs.version }}"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "tag=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+          echo "tag=${{ needs.resolve-version.outputs.tag }}" >> "$GITHUB_OUTPUT"
 
       - name: Install system dependencies
         run: |
@@ -101,6 +167,7 @@ jobs:
   # -------------------------------------------------------------------------
   build-linux-aarch64:
     name: Build — Linux aarch64
+    needs: [resolve-version]
     runs-on: ubuntu-latest
     continue-on-error: true  # aarch64 cross not yet validated; flip to false once green
     steps:
@@ -108,7 +175,7 @@ jobs:
 
       - name: Extract version
         id: meta
-        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+        run: echo "version=${{ needs.resolve-version.outputs.version }}" >> "$GITHUB_OUTPUT"
 
       - name: Install cross
         run: cargo install cross --locked
@@ -149,13 +216,18 @@ jobs:
   # -------------------------------------------------------------------------
   build-macos:
     name: Build — macOS (.app + .dmg)
+    needs: [resolve-version]
     runs-on: macos-latest
+    # macOS CI is green, so this is a required job (no continue-on-error): the
+    # universal .app/.dmg ship as first-class release assets. If a future macOS
+    # runner image regresses this, re-add `continue-on-error: true` here and the
+    # publish job will still go out with the Linux assets.
     steps:
       - uses: actions/checkout@v4
 
       - name: Extract version
         id: meta
-        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+        run: echo "version=${{ needs.resolve-version.outputs.version }}" >> "$GITHUB_OUTPUT"
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -373,9 +445,13 @@ jobs:
   # -------------------------------------------------------------------------
   publish:
     name: Publish GitHub Release
-    needs: [build-linux-x86_64, build-macos]
-    # Publish if Linux x86_64 succeeded; allow optional jobs to fail.
-    if: always() && needs.build-linux-x86_64.result == 'success'
+    needs: [resolve-version, build-linux-x86_64, build-macos]
+    # Publish only when (a) Linux x86_64 built, and (b) this version is NEW —
+    # i.e. no tag/release already exists for it. The is_new guard is what makes
+    # the main-push trigger safe: a re-merge or an unrelated push to main where
+    # Cargo.toml's version was already released becomes a no-op here. Optional
+    # build jobs (aarch64/windows) may fail without blocking the release.
+    if: always() && needs.build-linux-x86_64.result == 'success' && needs.resolve-version.outputs.is_new == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -383,9 +459,9 @@ jobs:
       - name: Extract version
         id: meta
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
+          VERSION="${{ needs.resolve-version.outputs.version }}"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "tag=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+          echo "tag=${{ needs.resolve-version.outputs.tag }}" >> "$GITHUB_OUTPUT"
 
       # Download all successfully-uploaded artifacts (pattern '*' catches
       # linux-x86_64, and any of linux-aarch64 / macos / windows that passed).
@@ -438,7 +514,7 @@ jobs:
   # -------------------------------------------------------------------------
   update-homebrew:
     name: Update Homebrew tap
-    needs: [publish]
+    needs: [resolve-version, publish]
     if: always() && needs.publish.result == 'success'
     runs-on: ubuntu-latest
     continue-on-error: true  # skip if HOMEBREW_TAP_TOKEN not configured
@@ -454,7 +530,7 @@ jobs:
       - name: Compute source tarball sha256
         id: sha
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
+          VERSION="${{ needs.resolve-version.outputs.version }}"
           SRC_FILE="artifacts/linux-x86_64/${{ env.BIN }}-${VERSION}-src.tar.gz"
           SHA=$(sha256sum "$SRC_FILE" | awk '{print $1}')
           echo "sha256=$SHA" >> "$GITHUB_OUTPUT"
@@ -470,9 +546,18 @@ jobs:
             -e "s|GLASSY_SHA256|${SHA}|g" \
             packaging/homebrew/glassy.rb
 
-      # TODO: configure a tap repo and push the patched formula there via
-      # a PR. Requires a Personal Access Token stored as HOMEBREW_TAP_TOKEN.
-      # Uncomment when the tap is set up:
+      # =====================================================================
+      # OWNER ACTION REQUIRED — Homebrew tap auto-push is intentionally OFF.
+      #
+      # To enable `brew install alliecatowo/glassy/glassy`, the owner must:
+      #   1. Create the tap repo  alliecatowo/homebrew-glassy  on GitHub
+      #      (a plain public repo; the formula lives at Formula/glassy.rb).
+      #   2. Create a fine-grained PAT with `contents: write` on that repo and
+      #      store it as the  HOMEBREW_TAP_TOKEN  secret in THIS repo.
+      #   3. Uncomment the step below.
+      # Until then this job only patches the in-repo formula and prints it
+      # (the "Show patched formula" step) — it pushes nothing.
+      # =====================================================================
       #
       # - name: Open PR against homebrew-glassy tap
       #   uses: peter-evans/create-pull-request@v6
@@ -492,7 +577,7 @@ jobs:
   # -------------------------------------------------------------------------
   update-aur:
     name: Update AUR package
-    needs: [publish]
+    needs: [resolve-version, publish]
     if: always() && needs.publish.result == 'success'
     runs-on: ubuntu-latest
     continue-on-error: true  # AUR SSH key may not be configured
@@ -508,7 +593,7 @@ jobs:
       - name: Compute checksums
         id: sha
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
+          VERSION="${{ needs.resolve-version.outputs.version }}"
           SRC_FILE="artifacts/linux-x86_64/${{ env.BIN }}-${VERSION}-src.tar.gz"
           BIN_FILE="artifacts/linux-x86_64/${{ env.BIN }}-x86_64-linux"
           SRC_SHA=$(sha256sum "$SRC_FILE" | awk '{print $1}')

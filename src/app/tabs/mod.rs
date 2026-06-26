@@ -729,3 +729,69 @@ fn normalize_path_segments(path: &str) -> String {
     let joined = stack.join("/");
     if is_abs { format!("/{joined}") } else { joined }
 }
+
+#[cfg(test)]
+mod url_tests {
+    use super::{decode_percent_lossy, file_url_path_allowed, normalize_path_segments};
+
+    #[test]
+    fn allows_ordinary_local_files() {
+        assert!(file_url_path_allowed("/home/alice/notes.txt"));
+        assert!(file_url_path_allowed("/home/alice/My%20Code/main.rs"));
+        assert!(file_url_path_allowed("/tmp/report.pdf"));
+    }
+
+    #[test]
+    fn blocks_pseudo_filesystems_and_desktop_launchers() {
+        assert!(!file_url_path_allowed("/proc/self/mem"));
+        assert!(!file_url_path_allowed("/dev/sda"));
+        assert!(!file_url_path_allowed("/sys/kernel"));
+        assert!(!file_url_path_allowed("/home/alice/evil.desktop"));
+        assert!(!file_url_path_allowed("/home/alice/Evil.DESKTOP")); // case-insensitive
+    }
+
+    #[test]
+    fn percent_encoded_bypass_is_closed() {
+        // The whole point of the fix: encoded separators / dots must not slip a
+        // blocked tree past the blocklist. Each of these decodes to a /proc path.
+        assert!(!file_url_path_allowed("/%70roc/self/mem")); // %70 == 'p'
+        assert!(!file_url_path_allowed("%2Fproc/self/mem")); // leading %2F == '/'
+        assert!(!file_url_path_allowed("/proc%2Fself")); // encoded inner slash
+        // Encoded .desktop suffix.
+        assert!(!file_url_path_allowed("/home/alice/evil%2Edesktop"));
+    }
+
+    #[test]
+    fn dot_dot_traversal_into_blocked_tree_is_closed() {
+        // A path that textually starts safe but resolves into /proc must be caught.
+        assert!(!file_url_path_allowed("/home/alice/../../proc/self/mem"));
+        assert!(!file_url_path_allowed("/var/../proc"));
+        // Encoded `..` (%2e%2e) combined with traversal.
+        assert!(!file_url_path_allowed("/home/%2e%2e/%2e%2e/proc/cpuinfo"));
+    }
+
+    #[test]
+    fn query_and_fragment_are_stripped_before_check() {
+        // A blocked path can't be hidden behind a ? or # (and a benign one with a
+        // fragment still passes).
+        assert!(file_url_path_allowed("/home/alice/doc.txt?x=1#frag"));
+        assert!(!file_url_path_allowed("/proc/self#frag"));
+    }
+
+    #[test]
+    fn decode_percent_lossy_basics() {
+        assert_eq!(decode_percent_lossy("a%20b"), "a b");
+        assert_eq!(decode_percent_lossy("%2Fproc"), "/proc");
+        // A malformed trailing escape is passed through literally, not dropped.
+        assert_eq!(decode_percent_lossy("end%2"), "end%2");
+        assert_eq!(decode_percent_lossy("nopercent"), "nopercent");
+    }
+
+    #[test]
+    fn normalize_collapses_dot_segments() {
+        assert_eq!(normalize_path_segments("/a/b/../c"), "/a/c");
+        assert_eq!(normalize_path_segments("/a/./b"), "/a/b");
+        assert_eq!(normalize_path_segments("/a/../../b"), "/b"); // can't pop past root
+        assert_eq!(normalize_path_segments("/proc/../proc"), "/proc");
+    }
+}
