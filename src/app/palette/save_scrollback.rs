@@ -176,8 +176,6 @@ fn write_to_path(path: &std::path::Path, text: &str) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn scrollback_path_is_in_tmp() {
         let ts = 1234567890u128;

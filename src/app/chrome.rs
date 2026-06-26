@@ -360,20 +360,20 @@ impl App {
 
         // 4) Progress bar (1-px bottom edge): always rendered when the segment is in
         //    the list and a progress state is active.
-        if seg_list.contains(&StatusBarSegment::Progress) {
-            if let Some(prog) = progress {
-                use crate::image::ProgressState;
-                let bar_bottom = bar_y + bar_h - 1.0;
-                let (pct, color) = match prog {
-                    ProgressState::Set(p) => (p as f32 / 100.0, accent),
-                    ProgressState::Error(p) => (p as f32 / 100.0, mul(color::danger())),
-                    ProgressState::Indeterminate => (1.0, fg_dim),
-                    ProgressState::Remove => (0.0, fg_dim),
-                };
-                if pct > 0.0 {
-                    let prog_w = (bar_w * pct).max(2.0);
-                    renderer.push_overlay_px(0.0, bar_bottom, prog_w, 1.0, color);
-                }
+        if seg_list.contains(&StatusBarSegment::Progress)
+            && let Some(prog) = progress
+        {
+            use crate::image::ProgressState;
+            let bar_bottom = bar_y + bar_h - 1.0;
+            let (pct, color) = match prog {
+                ProgressState::Set(p) => (p as f32 / 100.0, accent),
+                ProgressState::Error(p) => (p as f32 / 100.0, mul(color::danger())),
+                ProgressState::Indeterminate => (1.0, fg_dim),
+                ProgressState::Remove => (0.0, fg_dim),
+            };
+            if pct > 0.0 {
+                let prog_w = (bar_w * pct).max(2.0);
+                renderer.push_overlay_px(0.0, bar_bottom, prog_w, 1.0, color);
             }
         }
 
