@@ -408,6 +408,11 @@ impl ApplicationHandler<UserEvent> for App {
             self.force_full_redraw = true;
         }
 
+        // Headless: enter keyboard copy-mode ("vi mode") at startup with a visual
+        // selection so the keyboard cursor + range can be captured (GLASSY_VIMODE
+        // =1 → charwise; =line / =block pick the other visual kinds).
+        self.maybe_headless_vimode(event_loop);
+
         // Headless: enable the scrollback minimap strip and seed enough scrollback
         // that the downsampled overview has content to draw. GLASSY_MINIMAP=1
         // turns it on; the seq fills the buffer with coloured lines so the strip

@@ -43,6 +43,8 @@
 //! quake       = false                  # quake/dropdown mode: borderless slide-down window
 //! quake_height = 0.5                   # fraction of the monitor height (0.1..1.0)
 //! quake_animation_ms = 180             # slide duration in ms (0 = instant)
+//! copy_on_select = false               # copy a selection to the clipboard as soon as it is made
+//! copy_html   = false                  # also place a rich-text (HTML) flavor on the clipboard on copy
 //! ```
 //!
 //! Quake / dropdown mode (see `docs/quake-mode.md`): with `quake = true` glassy
@@ -80,7 +82,8 @@
 //! `move_tab_left`, `move_tab_right`, `go_to_tab_1` .. `go_to_tab_9`,
 //! `broadcast_input`, `hints`, `toggle_fold`, `toggle_minimap`, `quake_toggle`,
 //! `toggle_zoom`, `focus_pane_left`, `focus_pane_right`, `focus_pane_up`,
-//! `focus_pane_down` (move focus between tiled split panes).
+//! `focus_pane_down` (move focus between tiled split panes), `rotate_panes`,
+//! `equalize_panes`, `vi_mode` (keyboard copy-mode; default `Ctrl+Shift+Space`).
 //!
 //! Default chords are platform-aware: macOS uses ⌘-based chords (⌘C/⌘V/⌘T/⌘W,
 //! ⌘1-9, ⌘, for settings, ⌘F for find, ⌘arrow for pane focus); Linux/Windows use

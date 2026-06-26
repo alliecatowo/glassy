@@ -133,6 +133,7 @@ impl App {
             settings_profiles: Vec::new(),
             key_seq_pending: None,
             mod_hold_since: None,
+            vi: Default::default(),
         }
     }
 

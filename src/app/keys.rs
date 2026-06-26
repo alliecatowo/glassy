@@ -206,6 +206,21 @@ impl App {
             return;
         }
 
+        // Keyboard copy-mode ("vi mode") owns the keyboard while active: hjkl /
+        // word / line motions, `v`/`V`/Ctrl+v visual, `y` to yank, Esc/`q` to
+        // exit. Checked before the keymap dispatch so motion letters (`j`, `y`,
+        // …) are never stolen by a chord or forwarded to the child — EXCEPT the
+        // bound toggle chord itself, which we let fall through so its keymap
+        // action can exit the mode (and a user-rebound toggle still works).
+        if event.state.is_pressed() && self.vi.active {
+            let is_toggle_chord = chord_from_event(&event.logical_key, self.mods)
+                .and_then(|c| self.config.keymap.get(&c).copied())
+                == Some(KeyAction::ViMode);
+            if !is_toggle_chord && self.vi_handle_key(&event.logical_key, event_loop) {
+                return;
+            }
+        }
+
         // --------------------------------------------------------------------
         // Leader / multi-key chord sequences: an armed prefix (or a chord that
         // begins one and has no flat action) is handled here BEFORE the flat
@@ -548,6 +563,7 @@ impl App {
             FocusPaneDown => self.focus_pane(pane::Move::Down, event_loop),
             RotatePanes => self.rotate_panes(event_loop),
             EqualizePanes => self.equalize_panes(event_loop),
+            ViMode => self.vi_toggle(event_loop),
         }
     }
 

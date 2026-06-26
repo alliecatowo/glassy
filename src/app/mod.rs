@@ -65,6 +65,7 @@ mod tab_paint;
 mod tabs;
 pub(crate) mod toast;
 mod user_event;
+mod vi_mode;
 
 pub(crate) use helpers::*;
 pub(crate) use palette::PaletteState;
@@ -237,6 +238,11 @@ pub struct Config {
     /// `pane_headers` (the header always dims its own text regardless). Toggle via
     /// `dim_unfocused = false` in the config or the command palette.
     pub dim_unfocused: bool,
+    /// Also place a rich-text (HTML) flavor on the clipboard alongside the plain
+    /// text whenever a terminal selection is copied. Lets HTML-preferring apps
+    /// paste a monospace-preserving block; plain text remains the fidelity-correct
+    /// fallback. Default false. Opt in via `copy_html = true`.
+    pub copy_html: bool,
 }
 
 /// The three user-facing default cursor shapes.
@@ -803,6 +809,11 @@ pub struct App {
     /// can be jumped to with modifier+digit. `None` when the modifier is up or a
     /// non-modifier key was pressed during the hold (which cancels the overlay).
     mod_hold_since: Option<Instant>,
+    /// Keyboard copy-mode ("vi mode") state: whether it is active and the
+    /// in-flight visual-selection kind. The authoritative cursor + selection
+    /// live in the terminal (`Term::vi_mode_cursor` / `Term::selection`); this
+    /// only mirrors the on/off + visual-kind + pending-`g` bits. See [`vi_mode`].
+    vi: vi_mode::ViState,
 }
 
 /// Direction + progress of the quake window's slide animation.

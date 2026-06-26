@@ -247,6 +247,10 @@ pub enum KeyAction {
     RotatePanes,
     /// Reset every split ratio to an even 50/50 partition.
     EqualizePanes,
+    /// Toggle keyboard copy-mode ("vi mode"): a keyboard-driven cursor for
+    /// selecting + copying text without a mouse (hjkl/word/line motions, `v`/`V`
+    /// visual, `y` to yank, Esc to exit).
+    ViMode,
 }
 
 impl KeyAction {
@@ -293,6 +297,7 @@ impl KeyAction {
             FocusPaneDown => "Focus pane down",
             RotatePanes => "Rotate panes",
             EqualizePanes => "Equalize splits",
+            ViMode => "Copy mode (keyboard selection)",
         }
     }
 
@@ -307,7 +312,7 @@ impl KeyAction {
             | FocusPaneRight | FocusPaneUp | FocusPaneDown | RotatePanes | EqualizePanes => {
                 "Split panes"
             }
-            Copy | Paste => "Edit",
+            Copy | Paste | ViMode => "Edit",
             ToggleFullscreen | ToggleMaximize | FontIncrease | FontDecrease | FontReset
             | ToggleStatusBar | ToggleMinimap | ScrollUp | ScrollDown | ScrollTop
             | ScrollBottom | JumpPrevPrompt | JumpNextPrompt | ToggleFold | QuakeToggle => "View",
@@ -361,6 +366,7 @@ pub(crate) fn parse_action(s: &str) -> Result<Option<KeyAction>> {
         "focus_pane_down" => FocusPaneDown,
         "rotate_panes" | "rotate" => RotatePanes,
         "equalize_panes" | "equalize" => EqualizePanes,
+        "vi_mode" | "copy_mode" => ViMode,
         // go_to_tab_1 .. go_to_tab_9 select a tab by 1-based position.
         s if s.starts_with("go_to_tab_") => match s["go_to_tab_".len()..].parse::<u8>() {
             Ok(n @ 1..=9) => GoToTab(n),
@@ -476,6 +482,8 @@ fn shared_default_binds() -> &'static [(&'static str, KeyAction)] {
         ("ctrl+shift+h", Hints),
         ("ctrl+shift+z", ToggleFold),
         ("ctrl+shift+m", ToggleMinimap),
+        // Keyboard copy-mode ("vi mode"): keyboard-only select + copy.
+        ("ctrl+shift+space", ViMode),
         // Quake/dropdown toggle. F12 is the de-facto dropdown-terminal key
         // (guake/yakuake) and is otherwise unbound. Only meaningful when
         // `quake = true`; in normal mode `quake_toggle` is a harmless no-op.
@@ -701,6 +709,35 @@ mod tests {
             mac.get(&parse_chord("cmd+up").unwrap()),
             Some(&KeyAction::FocusPaneUp)
         );
+    }
+
+    #[test]
+    fn vi_mode_action_round_trips() {
+        // The copy-mode action parses from both config names and reports a
+        // description + section like every other action.
+        assert_eq!(parse_action("vi_mode").unwrap(), Some(KeyAction::ViMode));
+        assert_eq!(parse_action("copy_mode").unwrap(), Some(KeyAction::ViMode));
+        assert!(!KeyAction::ViMode.description().is_empty());
+        assert_eq!(KeyAction::ViMode.section(), "Edit");
+    }
+
+    #[test]
+    fn vi_mode_has_default_binding() {
+        // Ctrl+Shift+Space toggles copy-mode out of the box on every platform.
+        for p in [Platform::Linux, Platform::Mac, Platform::Windows] {
+            let map = default_keymap(p);
+            let chord = parse_chord("ctrl+shift+space").unwrap();
+            assert_eq!(map.get(&chord), Some(&KeyAction::ViMode), "platform {p:?}");
+        }
+    }
+
+    #[test]
+    fn vi_mode_binding_can_be_disabled() {
+        let map = build_keymap(
+            default_keymap(Platform::Linux),
+            &[("ctrl+shift+space".into(), "none".into())],
+        );
+        assert!(!map.values().any(|&a| a == KeyAction::ViMode));
     }
 
     #[test]

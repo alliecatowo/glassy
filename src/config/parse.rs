@@ -76,6 +76,9 @@ pub(super) struct RawConfig {
     pub quake_animation_ms: Option<u64>,
     pub command_history: Option<usize>,
     pub dim_unfocused: Option<bool>,
+    /// Also place a rich-text (HTML) flavor on the clipboard alongside the plain
+    /// text on copy, so apps that prefer HTML get a monospace-preserving paste.
+    pub copy_html: Option<bool>,
 }
 
 impl RawConfig {
@@ -220,6 +223,7 @@ impl RawConfig {
             quake_animation_ms: self.quake_animation_ms.unwrap_or(180).min(5_000),
             command_history: self.command_history.unwrap_or(DEFAULT_COMMAND_HISTORY),
             dim_unfocused: self.dim_unfocused.unwrap_or(true),
+            copy_html: self.copy_html.unwrap_or(false),
         };
 
         Ok(super::Settings { config, theme })
@@ -595,6 +599,9 @@ pub(super) fn apply_kv(key: &str, value: &str, raw: &mut RawConfig) -> Result<()
         }
         "copy_on_select" => {
             raw.copy_on_select = Some(parse_bool(value, "copy_on_select")?);
+        }
+        "copy_html" => {
+            raw.copy_html = Some(parse_bool(value, "copy_html")?);
         }
         "cursor_trail" => {
             raw.cursor_trail = Some(parse_bool(value, "cursor_trail")?);

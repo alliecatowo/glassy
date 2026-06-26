@@ -402,6 +402,7 @@ const HELP_ACTION_ORDER: &[KeyAction] = &[
     // Edit
     KeyAction::Copy,
     KeyAction::Paste,
+    KeyAction::ViMode,
     // View
     KeyAction::FontIncrease,
     KeyAction::FontDecrease,

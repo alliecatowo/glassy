@@ -321,6 +321,14 @@ impl App {
     }
 
     /// Copy the current selection to the OS clipboard.
+    ///
+    /// The plain text comes from alacritty_terminal's `selection_to_string`,
+    /// which already (1) trims trailing padding per row via `line_length`,
+    /// (2) joins soft-wrapped (`WRAPLINE`) rows into one logical line while
+    /// keeping genuine line-feeds, and (3) renders a `Block` selection one row
+    /// per line. When `copy_html` is enabled we additionally place a rich-text
+    /// (HTML) flavor alongside the plain text so HTML-preferring apps paste a
+    /// monospace-preserving block.
     pub(crate) fn copy_selection(&mut self) {
         let text = match self.pty.as_ref() {
             Some(pty) => pty.term.lock().selection_to_string(),
@@ -330,11 +338,17 @@ impl App {
         if text.is_empty() {
             return;
         }
+        let want_html = self.config.copy_html;
         let cb = self.clipboard();
-        if let Some(cb) = cb
-            && let Err(e) = cb.set_text(text)
-        {
-            log::debug!("clipboard copy failed: {e}");
+        if let Some(cb) = cb {
+            if want_html {
+                let html = selection_to_html(&text);
+                if let Err(e) = cb.set_html(html, Some(text)) {
+                    log::debug!("clipboard HTML copy failed: {e}");
+                }
+            } else if let Err(e) = cb.set_text(text) {
+                log::debug!("clipboard copy failed: {e}");
+            }
         }
     }
 
@@ -643,5 +657,53 @@ impl App {
             (mouse.1.to_bits()).hash(&mut h);
         }
         h.finish()
+    }
+}
+
+/// Wrap fidelity-correct plain selection text in an HTML rich-text flavor. The
+/// text is HTML-escaped and placed in a monospace `<pre>` so the receiving app
+/// preserves alignment (wraps/trims are already resolved upstream by
+/// `selection_to_string`). This is the optional `copy_html` flavor; the plain
+/// text is always set as the fallback so non-HTML targets are unaffected.
+pub(crate) fn selection_to_html(text: &str) -> String {
+    let mut body = String::with_capacity(text.len() + 16);
+    for ch in text.chars() {
+        match ch {
+            '&' => body.push_str("&amp;"),
+            '<' => body.push_str("&lt;"),
+            '>' => body.push_str("&gt;"),
+            _ => body.push(ch),
+        }
+    }
+    format!("<pre style=\"font-family:monospace;white-space:pre\">{body}</pre>")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::selection_to_html;
+
+    #[test]
+    fn html_escapes_special_chars() {
+        let html = selection_to_html("a < b && c > d");
+        assert!(html.contains("a &lt; b &amp;&amp; c &gt; d"));
+        // Wrapped in a monospace pre so paste preserves alignment.
+        assert!(html.starts_with("<pre"));
+        assert!(html.ends_with("</pre>"));
+        assert!(html.contains("monospace"));
+    }
+
+    #[test]
+    fn html_preserves_newlines_and_text() {
+        // Genuine line-feeds from the plain text survive into the HTML body
+        // verbatim (the <pre> keeps them as line breaks on paste).
+        let html = selection_to_html("line1\nline2");
+        assert!(html.contains("line1\nline2"));
+    }
+
+    #[test]
+    fn html_plain_text_unchanged_when_no_specials() {
+        let html = selection_to_html("/usr/local/bin");
+        assert!(html.contains("/usr/local/bin"));
+        assert!(!html.contains("&amp;"));
     }
 }
