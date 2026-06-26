@@ -1,0 +1,706 @@
+//! Top-level constants, free helper functions, and type aliases used across
+//! the app submodules.
+
+use super::*;
+
+/// Lines of scrollback to move per wheel notch when reporting to a TUI or
+/// scrolling glassy's own scrollback buffer.
+pub(crate) const WHEEL_LINES: i32 = 3;
+
+/// Legacy cell-row count, retained only by the not-yet-pixelized modal/menu draw
+/// helpers (waves 5/6) for their full-screen sizing math. The terminal grid no
+/// longer reserves a cell row for the strip — it is inset in PIXELS by the GUI
+/// tab bar (`tab_bar_h`) via `Renderer::set_grid_origin_y`.
+pub(crate) const TAB_STRIP_ROWS: usize = 1;
+
+/// Tab-bar height in physical px, derived from the cell height so the chrome
+/// scales with the font (and DPI) exactly like the cell metrics. The bar holds a
+/// row of real tab shapes whose active member connects to the content surface.
+pub(crate) fn tab_bar_h(cell_h: f32) -> f32 {
+    (cell_h * 1.7).round().max(28.0)
+}
+
+/// Top-corner radius of a tab chip (px).
+pub(crate) const TAB_RADIUS: f32 = 5.0;
+/// Minimum / maximum tab width in px (multi-tab mode).
+pub(crate) const TAB_MIN_W: f32 = 120.0;
+pub(crate) const TAB_MAX_W: f32 = 220.0;
+/// Gap between adjacent tab chips (px).
+pub(crate) const TAB_GAP: f32 = 2.0;
+/// Horizontal inner padding of a tab chip (px).
+pub(crate) const TAB_PAD_X: f32 = 10.0;
+/// Close-button hit box inside a tab (px, square).
+pub(crate) const CLOSE_BOX: f32 = 16.0;
+/// Square icon-button size for +/#/?/* controls (px).
+pub(crate) const CTRL_BTN: f32 = 28.0;
+
+/// Corner radius for tab-bar icon buttons, derived from the cell height like the
+/// GUI metric scale so it tracks the font/DPI.
+pub(crate) fn gui_radius(cell_h: f32) -> f32 {
+    (cell_h * 0.28).round().clamp(4.0, 8.0)
+}
+
+/// Status-bar height in physical px. Fixed at 22 px (one cell-height equivalent
+/// at typical DPI). Drawn at the bottom of the window; `content_area()` and
+/// `grid_for()` subtract it so panes tile only between the tab bar and this bar.
+pub(crate) const STATUS_BAR_H: f32 = 22.0;
+
+/// What a wheel notch should do, given the terminal's current mode. Pure so it
+/// can be unit-tested without a window or PTY.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WheelAction {
+    /// Report the wheel to the application as a mouse event (button 64/65).
+    Report,
+    /// Emit arrow keys (alt-screen apps: pagers, vim, bat).
+    Arrows,
+    /// Scroll glassy's own scrollback buffer.
+    Scrollback,
+}
+
+/// Decide how the mouse wheel behaves for the given mode: applications that
+/// requested mouse reporting get wheel events; other alt-screen apps get arrow
+/// keys (xterm alternateScroll default); the normal screen scrolls scrollback.
+pub(crate) fn wheel_action(mode: TermMode) -> WheelAction {
+    if mode.intersects(TermMode::MOUSE_MODE) {
+        WheelAction::Report
+    } else if mode.contains(TermMode::ALT_SCREEN) {
+        WheelAction::Arrows
+    } else {
+        WheelAction::Scrollback
+    }
+}
+
+/// Pixel size to draw an inline image at, from the kitty `c=`/`r=` display
+/// request (`cols`/`rows`, 0 = unset), the image's native size, and the cell
+/// box. Both set -> exact cell box; one set -> scale the other preserving the
+/// image aspect ratio; neither -> native pixels. Pure for unit testing.
+pub(crate) fn image_dst_size(
+    cols: u32,
+    rows: u32,
+    img_w: u32,
+    img_h: u32,
+    cell_w: f32,
+    cell_h: f32,
+) -> (f32, f32) {
+    let aspect = if img_h > 0 {
+        img_w as f32 / img_h as f32
+    } else {
+        1.0
+    };
+    match (cols, rows) {
+        (0, 0) => (img_w as f32, img_h as f32),
+        (c, 0) => {
+            let w = c as f32 * cell_w;
+            (w, w / aspect)
+        }
+        (0, r) => {
+            let h = r as f32 * cell_h;
+            (h * aspect, h)
+        }
+        (c, r) => (c as f32 * cell_w, r as f32 * cell_h),
+    }
+}
+
+/// Trim a header/tab label to at most `max` chars, keeping the *tail* (the cwd or
+/// git-branch end is the informative part) with a leading ellipsis when cut.
+/// Empty input becomes "shell". Pure for unit testing.
+pub(crate) fn fit_label(t: &str, max: usize) -> String {
+    let t = t.trim();
+    let base = if t.is_empty() { "shell" } else { t };
+    let chars: Vec<char> = base.chars().collect();
+    if chars.len() <= max {
+        return base.to_string();
+    }
+    if max <= 1 {
+        return "…".to_string();
+    }
+    let tail: String = chars[chars.len() - (max - 1)..].iter().collect();
+    format!("…{tail}")
+}
+
+/// Reduce an OSC window title to printable ASCII only, so the native (CSD)
+/// titlebar font — which we do not control — can render every character it ever
+/// receives, making "tofu" boxes structurally impossible. Non-ASCII-graphic
+/// chars (CJK, emoji, Nerd-Font icons, dingbats, combining marks) are dropped;
+/// runs of whitespace collapse to a single space; an empty result falls back to
+/// "glassy". The full rich/Unicode title is rendered in OUR tab bar instead
+/// (through the glyph atlas, which renders all of them). Pure for unit testing.
+pub(crate) fn os_title(title: &str) -> String {
+    let mut out = String::with_capacity(title.len());
+    let mut last_space = false;
+    for c in title.chars() {
+        if c.is_ascii_graphic() {
+            out.push(c);
+            last_space = false;
+        } else if c == ' ' || c == '\t' {
+            if !last_space && !out.is_empty() {
+                out.push(' ');
+            }
+            last_space = true;
+        }
+        // everything else (non-ASCII, control) is dropped
+    }
+    let trimmed = out.trim_end();
+    if trimmed.is_empty() {
+        "glassy".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// An interactive item in the real GUI tab bar. Window controls (min/max/close)
+/// live in the native bar, not here. `Tab`/`TabClose` carry the tab's *stable
+/// position*.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+pub(crate) enum StripItem {
+    /// A tab chip body at stable display position `pos` (click = activate).
+    Tab(usize),
+    /// A tab's ✕ close affordance at stable position `pos`.
+    TabClose(usize),
+    NewTab,
+    Help,
+    Settings,
+    Menu,
+}
+
+/// One placed tab-bar item with its pixel rect. The label is carried for the tab
+/// body (it is what gets drawn / measured); control buttons carry an empty label.
+#[derive(Clone, Debug)]
+pub(crate) struct StripSeg {
+    pub(crate) item: StripItem,
+    pub(crate) label: String,
+    pub(crate) rect: gui::Rect,
+}
+
+/// The tab-bar item containing pixel point `(px, py)`, if any. Close boxes are
+/// tested before their parent tab body (they are pushed after, so iterate in
+/// reverse to let the smaller embedded box win). Pure for unit testing.
+pub(crate) fn strip_item_at(segs: &[StripSeg], px: f32, py: f32) -> Option<StripItem> {
+    segs.iter()
+        .rev()
+        .find(|s| gui::hit(s.rect, px, py))
+        .map(|s| s.item)
+}
+
+/// Move the element at index `from` to index `to`, shifting the rest. Used to
+/// reorder tabs by dragging. Pure for unit testing.
+pub(crate) fn move_in_order<T>(v: &mut Vec<T>, from: usize, to: usize) {
+    if from < v.len() && to < v.len() && from != to {
+        let item = v.remove(from);
+        v.insert(to, item);
+    }
+}
+
+/// Display path of the config file for the settings overlay.
+pub(crate) fn config_display_path() -> String {
+    crate::config::path()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "~/.config/glassy/glassy.conf".to_string())
+}
+
+/// Lighten an RGB color toward white by `amount`, keeping alpha. Used for the
+/// raised help-panel surface.
+/// Percent-encode a filesystem path for embedding in a `file://` URI. Keeps the
+/// unreserved set (RFC 3986) plus `/` (path separator) verbatim; everything else
+/// (spaces, `#`, `?`, non-ASCII bytes, …) is `%XX`-escaped so the URI can't be
+/// truncated or reinterpreted by the URL handler.
+pub(crate) fn percent_encode_path(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
+    for &b in path.as_bytes() {
+        let keep = b.is_ascii_alphanumeric() || matches!(b, b'/' | b'-' | b'_' | b'.' | b'~');
+        if keep {
+            out.push(b as char);
+        } else {
+            out.push('%');
+            out.push(
+                char::from_digit((b >> 4) as u32, 16)
+                    .unwrap()
+                    .to_ascii_uppercase(),
+            );
+            out.push(
+                char::from_digit((b & 0xf) as u32, 16)
+                    .unwrap()
+                    .to_ascii_uppercase(),
+            );
+        }
+    }
+    out
+}
+
+/// Actions available in the # hamburger dropdown and the right-click context
+/// menu. Kept as a single enum so the hit-test and keyboard dispatch share one
+/// definition across both menus.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum MenuAction {
+    Copy,
+    Paste,
+    SelectAll,
+    ClearScrollback,
+    Search,
+    SplitRight,
+    SplitDown,
+    NewTab,
+    Settings,
+    Help,
+    CloseTab,
+}
+
+impl MenuAction {
+    /// The fixed set shown by the ≡ hamburger dropdown. Settings (⚙) and Help (?)
+    /// are NOT listed here — they have dedicated quick-access strip icons, so
+    /// duplicating them in the hamburger would give two independent UI paths to the
+    /// same overlay. `PaneHeaders` is likewise omitted: it is a Settings-form (and
+    /// command-palette) toggle, not a top-level menu action. The right-click context
+    /// menu uses a separately-built `Vec<MenuAction>` (see `context_menu_items`).
+    pub(crate) const ALL: &'static [MenuAction] = &[MenuAction::NewTab, MenuAction::CloseTab];
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            MenuAction::Copy => "Copy",
+            MenuAction::Paste => "Paste",
+            MenuAction::SelectAll => "Select all",
+            MenuAction::ClearScrollback => "Clear scrollback",
+            MenuAction::Search => "Search",
+            MenuAction::SplitRight => "Split right",
+            MenuAction::SplitDown => "Split down",
+            MenuAction::NewTab => "New tab",
+            MenuAction::Settings => "Settings",
+            MenuAction::Help => "Help / keys",
+            MenuAction::CloseTab => "Close tab",
+        }
+    }
+
+    /// Left-column icon glyph for the real GUI menu (§3.6).
+    pub(crate) fn icon(self) -> char {
+        match self {
+            MenuAction::Copy => '◻',
+            MenuAction::Paste => '□',
+            MenuAction::SelectAll => '◼',
+            MenuAction::ClearScrollback => '~',
+            MenuAction::Search => '/',
+            MenuAction::SplitRight => '|',
+            MenuAction::SplitDown => '-',
+            MenuAction::NewTab => '+',
+            MenuAction::Settings => '*',
+            MenuAction::Help => '?',
+            MenuAction::CloseTab => '✕',
+        }
+    }
+
+    /// Right-aligned shortcut hint for the real GUI menu (§3.6). `None` for
+    /// actions that have no keybinding shown in the menu.
+    pub(crate) fn shortcut(self) -> Option<&'static str> {
+        match self {
+            MenuAction::Copy => Some("Ctrl+Shift+C"),
+            MenuAction::Paste => Some("Ctrl+Shift+V"),
+            MenuAction::SelectAll => Some("Ctrl+Shift+A"),
+            MenuAction::ClearScrollback => None,
+            MenuAction::Search => Some("Ctrl+Shift+F"),
+            MenuAction::SplitRight => Some("Ctrl+Shift+E"),
+            MenuAction::SplitDown => Some("Ctrl+Shift+O"),
+            MenuAction::NewTab => Some("Ctrl+Shift+T"),
+            MenuAction::Settings => Some("Ctrl+,"),
+            MenuAction::Help => Some("F1"),
+            MenuAction::CloseTab => Some("Ctrl+Shift+W"),
+        }
+    }
+
+    /// Visual group id used by [`actions_to_entries`] to place separators: a
+    /// separator is drawn between any two consecutive items whose groups differ.
+    /// 0 = clipboard, 1 = buffer/find, 2 = layout, 3 = app, 4 = destructive.
+    fn group(self) -> u8 {
+        match self {
+            MenuAction::Copy | MenuAction::Paste | MenuAction::SelectAll => 0,
+            MenuAction::ClearScrollback | MenuAction::Search => 1,
+            MenuAction::SplitRight | MenuAction::SplitDown | MenuAction::NewTab => 2,
+            MenuAction::Settings | MenuAction::Help => 3,
+            MenuAction::CloseTab => 4,
+        }
+    }
+}
+
+/// Build a `Vec<MenuEntry>` for the real GUI menu from a flat list of
+/// `MenuAction`s. A separator is inserted wherever two consecutive actions fall in
+/// different visual groups (see [`MenuAction::group`]) — e.g. between the clipboard
+/// and navigation groups in the context menu, or between NewTab (layout) and
+/// CloseTab (destructive) in the hamburger. Pure for testing.
+pub(crate) fn actions_to_entries(
+    actions: &[MenuAction],
+    has_selection: bool,
+) -> Vec<gui::MenuEntry<'static>> {
+    let mut v: Vec<gui::MenuEntry<'static>> = Vec::with_capacity(actions.len() + 4);
+    // Each action belongs to a visual group; a separator is drawn whenever the
+    // group changes between two consecutive items. Keeping the grouping on the
+    // action itself (rather than pairwise prev→cur rules) means new actions slot
+    // into the right group automatically in both the context menu and hamburger.
+    let mut prev_group: Option<u8> = None;
+    for &a in actions {
+        let group = a.group();
+        if prev_group.is_some_and(|g| g != group) {
+            v.push(gui::MenuEntry::Separator);
+        }
+        let enabled = match a {
+            MenuAction::Copy => has_selection,
+            _ => true,
+        };
+        v.push(gui::MenuEntry::Item {
+            icon: a.icon(),
+            label: a.label(),
+            hint: a.shortcut(),
+            enabled,
+        });
+        prev_group = Some(group);
+    }
+    v
+}
+
+/// Which mouse-button id to report for a pointer-motion event, or `None` to stay
+/// silent. `held` is the currently pressed button (0/1/2) or `None`. Mirrors
+/// xterm: any-motion mode (1003) reports even with no button (id 3); button-only
+/// motion (1002) reports just while a button is held; click-only (1000) never
+/// reports motion. Pure for unit testing.
+pub(crate) fn motion_button(mode: TermMode, held: Option<u8>) -> Option<u8> {
+    match held {
+        Some(b) if mode.contains(TermMode::MOUSE_DRAG) || mode.contains(TermMode::MOUSE_MOTION) => {
+            Some(b)
+        }
+        None if mode.contains(TermMode::MOUSE_MOTION) => Some(3),
+        _ => None,
+    }
+}
+
+/// Cursor blink half-period: the on/off phase length. ~530ms matches the de-facto
+/// terminal cadence (and the GTK/VTE default).
+pub(crate) const BLINK_INTERVAL: Duration = Duration::from_millis(530);
+
+/// Tab "busy" spinner. A session is BUSY while it is actively producing output;
+/// each PTY wakeup re-arms a `BUSY_LINGER` deadline, and the chip spins until that
+/// elapses with no further output (mirroring the bell-flash deadline). While any
+/// tab is busy we advance one `SPINNER_FRAMES` glyph every `SPINNER_INTERVAL` and
+/// schedule a finite wakeup for it; once nothing is busy we return to `Wait`.
+pub(crate) const SPINNER_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧'];
+pub(crate) const SPINNER_INTERVAL: Duration = Duration::from_millis(100);
+pub(crate) const BUSY_LINGER: Duration = Duration::from_millis(600);
+
+// --- Grapheme-cluster reconstruction across grid cells ----------------------
+// A user-perceived character (extended grapheme cluster) can span several grid
+// cells: a base emoji plus a ZWJ-joined emoji (flags, family, profession), a
+// skin-tone modifier, a regional-indicator flag pair, or a variation selector.
+// alacritty attaches zero-width code points to one cell but places *wide* joined
+// emoji and modifiers in their own cells, so we re-stitch them here before
+// shaping, otherwise compound emoji render as their separate components.
+
+pub(crate) fn is_zwj(c: char) -> bool {
+    c == '\u{200D}'
+}
+pub(crate) fn is_variation_selector(c: char) -> bool {
+    c == '\u{FE0E}' || c == '\u{FE0F}'
+}
+pub(crate) fn is_emoji_modifier(c: char) -> bool {
+    ('\u{1F3FB}'..='\u{1F3FF}').contains(&c)
+}
+pub(crate) fn is_regional_indicator(c: char) -> bool {
+    ('\u{1F1E6}'..='\u{1F1FF}').contains(&c)
+}
+
+/// Number of `cells` entries occupied by the cell unit at `start`: the cell plus
+/// a following wide-character spacer, if any.
+pub(crate) fn unit_len(cells: &[Indexed<&Cell>], start: usize) -> usize {
+    let wide = cells[start].cell.flags.contains(Flags::WIDE_CHAR);
+    let has_spacer = cells
+        .get(start + 1)
+        .is_some_and(|c| c.cell.flags.contains(Flags::WIDE_CHAR_SPACER));
+    if wide && has_spacer { 2 } else { 1 }
+}
+
+/// Reconstruct the extended grapheme cluster anchored at cell `start`, greedily
+/// merging following cells on the same `line` that continue it (trailing ZWJ joins
+/// anything; a leading emoji modifier / variation selector / second regional
+/// indicator also joins). Returns the code points to append after the base cell's
+/// char and the number of `cells` entries the whole cluster consumed (>= 1).
+pub(crate) fn build_grapheme(
+    cells: &[Indexed<&Cell>],
+    start: usize,
+    line: i32,
+) -> (Vec<char>, usize) {
+    let base = cells[start].cell;
+    let mut combiners: Vec<char> = base.zerowidth().unwrap_or(&[]).to_vec();
+    let mut consumed = unit_len(cells, start);
+    let base_regional = is_regional_indicator(base.c);
+    let mut paired_regional = false;
+
+    while let Some(next) = cells.get(start + consumed) {
+        if next.point.line.0 != line {
+            break;
+        }
+        let ncell = next.cell;
+        if ncell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+            break;
+        }
+        let last = combiners.last().copied().unwrap_or(base.c);
+        let joins = is_zwj(last)
+            || is_emoji_modifier(ncell.c)
+            || is_variation_selector(ncell.c)
+            || (base_regional && is_regional_indicator(ncell.c) && !paired_regional);
+        if !joins {
+            break;
+        }
+        if is_regional_indicator(ncell.c) {
+            paired_regional = true;
+        }
+        combiners.push(ncell.c);
+        combiners.extend_from_slice(ncell.zerowidth().unwrap_or(&[]));
+        consumed += unit_len(cells, start + consumed);
+    }
+    (combiners, consumed)
+}
+
+/// Physical-pixel step per Ctrl +/- font-size adjustment.
+pub(crate) const FONT_STEP_PX: f32 = 2.0;
+
+/// Apply live-reloadable config settings. Called when UserEvent::ConfigReload is
+/// received (config file was modified). Only opacity/bell_visual/status_bar/
+/// pane_headers/word_separator apply live; font changes require a full reload.
+impl App {
+    pub(crate) fn apply_config_reload(&mut self, new_config: &Config) {
+        // Opacity changes take effect immediately in the renderer.
+        if new_config.opacity != self.config.opacity {
+            self.config.opacity = new_config.opacity;
+            if let Some(r) = &mut self.renderer {
+                r.set_opacity(self.config.opacity);
+            }
+            self.dirty = true;
+        }
+
+        // Bell flags can be toggled without a reload.
+        if new_config.bell_visual != self.config.bell_visual {
+            self.config.bell_visual = new_config.bell_visual;
+        }
+        if new_config.bell_audible != self.config.bell_audible {
+            self.config.bell_audible = new_config.bell_audible;
+        }
+
+        // Status bar toggle: resize layout and force a full redraw.
+        // Note: we can't call handle_resize here since it needs the ActiveEventLoop,
+        // so we rely on the next window event to trigger a resize update naturally.
+        if new_config.status_bar != self.config.status_bar {
+            self.config.status_bar = new_config.status_bar;
+            self.dirty = true;
+            self.force_full_redraw = true;
+        }
+
+        // Pane headers toggle: affects split panes and forces a redraw.
+        if new_config.pane_headers != self.config.pane_headers {
+            self.config.pane_headers = new_config.pane_headers;
+            self.dirty = true;
+            self.force_full_redraw = true;
+        }
+
+        // Command-history capacity: update the cap and trim the existing ring if
+        // it shrank. Not a visual change (the palette rebuilds on next open).
+        if new_config.command_history != self.config.command_history {
+            self.config.command_history = new_config.command_history;
+            self.trim_command_history();
+        }
+
+        // Word separator for selection: update the config and push the merged
+        // semantic_escape_chars to all live PTYs so double-click word selection
+        // honours the new setting immediately without restarting.
+        if new_config.word_separator != self.config.word_separator {
+            self.config.word_separator = new_config.word_separator.clone();
+            let escape_chars = crate::pty::merge_word_separators(
+                alacritty_terminal::term::SEMANTIC_ESCAPE_CHARS,
+                &self.config.word_separator,
+            );
+            // Push to all PTYs: active pane, non-focused panes of the active
+            // tab, and every parked background tab.
+            let push = |pty: &crate::pty::Pty, escape: &str| {
+                use alacritty_terminal::term::Config as TermConfig;
+                let scrollback = pty.term.lock().grid().history_size();
+                let new_term_cfg = TermConfig {
+                    scrolling_history: scrollback,
+                    semantic_escape_chars: escape.to_owned(),
+                    ..TermConfig::default()
+                };
+                pty.term.lock().set_options(new_term_cfg);
+            };
+            if let Some(pty) = self.pty.as_ref() {
+                push(pty, &escape_chars);
+            }
+            if let Some(g) = self.panes.as_ref() {
+                for pty in g.others.values() {
+                    push(pty, &escape_chars);
+                }
+            }
+            for s in &self.background {
+                push(&s.pty, &escape_chars);
+                if let Some(g) = s.panes.as_ref() {
+                    for pty in g.others.values() {
+                        push(pty, &escape_chars);
+                    }
+                }
+            }
+        }
+
+        // Theme: hot-swap the global theme. If follow_system is on, also recompute
+        // the active theme based on the system preference.
+        if new_config.follow_system {
+            self.config.follow_system = new_config.follow_system;
+            self.config.theme_light = new_config.theme_light.clone();
+            self.config.theme_dark = new_config.theme_dark.clone();
+            if let Some(window) = &self.window
+                && self.apply_system_theme(window.theme())
+            {
+                self.force_full_redraw = true;
+                self.dirty = true;
+            }
+        } else if new_config.theme != self.config.theme {
+            self.config.theme = new_config.theme.clone();
+            self.force_full_redraw = true;
+            self.dirty = true;
+            // Theme is a global, so we need to notify the color module.
+            if let Some(theme) = crate::color::theme_by_name(&self.config.theme) {
+                crate::color::set_theme(theme);
+            }
+        }
+    }
+}
+
+/// Fire a desktop notification with `app_name` as the summary prefix and `body`
+/// as the message. Called on the UI thread when an OSC 9 / OSC 777 notification
+/// arrives and the window is unfocused.
+///
+/// Uses a detached thread so the D-Bus round-trip never blocks the UI loop.
+/// Errors are logged at debug level (a missing notification daemon is a
+/// non-fatal, common desktop configuration).
+pub(super) fn fire_desktop_notification(app_name: &str, body: &str) {
+    use notify_rust::Notification;
+    let summary = app_name.to_string();
+    let body = body.to_string();
+    std::thread::Builder::new()
+        .name("glassy-notify".to_string())
+        .spawn(move || {
+            let result = Notification::new()
+                .summary(&summary)
+                .body(&body)
+                .appname("glassy")
+                .timeout(notify_rust::Timeout::Milliseconds(5000))
+                .show();
+            if let Err(e) = result {
+                log::debug!("desktop notification failed: {e}");
+            }
+        })
+        .ok(); // ignore thread-spawn failure (extremely unlikely)
+}
+
+/// Read the git branch name for a directory by reading
+/// `.git/HEAD` relative to the closest ancestor that contains a `.git` entry.
+/// This is a pure filesystem read — no child process, no blocking I/O beyond
+/// a few small file reads — so it is safe to call from the UI thread at low
+/// frequency.
+///
+/// Returns `None` when the directory is not inside a git repository or the
+/// branch name cannot be determined.
+pub(crate) fn read_git_branch(cwd: &std::path::Path) -> Option<String> {
+    // Walk upward from cwd until we find a directory containing `.git`.
+    let mut dir = Some(cwd);
+    while let Some(d) = dir {
+        let git_head = d.join(".git/HEAD");
+        if git_head.exists() {
+            // Parse the HEAD file: `ref: refs/heads/<branch>` or a bare SHA.
+            if let Ok(content) = std::fs::read_to_string(&git_head) {
+                let trimmed = content.trim();
+                if let Some(branch) = trimmed.strip_prefix("ref: refs/heads/") {
+                    return Some(branch.to_string());
+                }
+                // Detached HEAD — show first 7 chars of the SHA.
+                if trimmed.len() >= 7 && trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
+                    return Some(format!(":{}", &trimmed[..7]));
+                }
+            }
+            return None;
+        }
+        dir = d.parent();
+    }
+    None
+}
+
+/// How often (minimum) to re-read `/proc` for pane info. 2 seconds is cheap
+/// enough to feel live but never blocks idle frames at 0% CPU.
+pub(super) const PROC_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+
+impl App {
+    /// Refresh the cached `/proc` pane info for a single PTY when the cache is
+    /// stale (older than `PROC_REFRESH_INTERVAL`). Called on pane focus and in
+    /// `about_to_wait` for the periodic background poll. Cheap: skipped if the
+    /// cache is fresh.
+    pub(crate) fn maybe_refresh_proc_info(pty: &mut crate::pty::Pty) {
+        let now = std::time::Instant::now();
+        if now.duration_since(pty.pane_info_at) >= PROC_REFRESH_INTERVAL {
+            pty.pane_info = crate::pty::PaneInfo::read(pty.shell_pid);
+            pty.pane_info_at = now;
+        }
+    }
+}
+
+/// Spawn a background thread to watch the config file for changes.
+/// Uses notify crate (debounced) to avoid spamming reloads during rapid edits.
+pub(super) fn spawn_config_watcher(
+    config_path: std::path::PathBuf,
+    proxy: winit::event_loop::EventLoopProxy<crate::pty::UserEvent>,
+) {
+    use notify::recommended_watcher;
+    use notify::{RecursiveMode, Result as NotifyResult, Watcher};
+    use std::sync::{Arc, Mutex};
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    thread::spawn(move || {
+        let last_reload = Arc::new(Mutex::new(Instant::now() - Duration::from_secs(10)));
+        let config_dir = config_path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."));
+        let config_filename = config_path.file_name().unwrap_or_default().to_owned();
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        let mut watcher = match recommended_watcher(move |res: NotifyResult<_>| {
+            let _ = tx.send(res);
+        }) {
+            Ok(w) => w,
+            Err(e) => {
+                log::warn!("failed to create config watcher: {e}");
+                return;
+            }
+        };
+
+        if let Err(e) = watcher.watch(config_dir, RecursiveMode::NonRecursive) {
+            log::warn!("failed to watch config dir {}: {e}", config_dir.display());
+            return;
+        }
+
+        for event_result in rx {
+            match event_result {
+                Ok(event) => {
+                    let is_config_change = event
+                        .paths
+                        .iter()
+                        .any(|p| p.file_name().is_some_and(|n| n == config_filename));
+                    if is_config_change {
+                        let now = Instant::now();
+                        let mut last = last_reload.lock().unwrap();
+                        if now.duration_since(*last) >= Duration::from_millis(500) {
+                            *last = now;
+                            drop(last);
+                            if let Err(e) = proxy.send_event(crate::pty::UserEvent::ConfigReload) {
+                                log::debug!("failed to send ConfigReload: {e}");
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    log::debug!("config watcher error: {e}");
+                }
+            }
+        }
+    });
+}

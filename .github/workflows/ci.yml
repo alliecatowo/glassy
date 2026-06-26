@@ -16,13 +16,20 @@ env:
 
 jobs:
   build:
-    name: build / lint / test (linux)
-    runs-on: ubuntu-latest
+    name: build / lint / test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Run every OS to completion so a failure on one doesn't mask the others
+      # (we need the macOS build result independently of Linux).
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install system dependencies
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
@@ -31,7 +38,13 @@ jobs:
             libvulkan-dev \
             libasound2-dev \
             libfontconfig-dev \
+            libdbus-1-dev \
             pkg-config
+
+      - name: Install system dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install pkg-config vulkan-headers
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable

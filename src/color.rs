@@ -9,7 +9,7 @@
 //! globally thereafter, so the hot `resolve` path and the cell-drawing code can
 //! reach it without threading a `&Theme` through every call.
 
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicPtr, Ordering};
 
 use alacritty_terminal::term::color::Colors;
 use alacritty_terminal::vte::ansi::{Color, NamedColor, Rgb};
@@ -32,7 +32,7 @@ const fn rgb(r: u8, g: u8, b: u8) -> Rgb {
 /// Tokyo Night: a deep, slightly cool near-black background, a soft lavender-gray
 /// foreground, a bright cyan cursor accent, and a cohesive saturated-but-soft
 /// ANSI palette. The default theme.
-const TOKYO_NIGHT: Theme = Theme {
+pub(crate) const TOKYO_NIGHT: Theme = Theme {
     fg: rgb(0xC0, 0xCA, 0xF5),
     bg: rgb(0x1A, 0x1B, 0x26),
     cursor: rgb(0x7D, 0xCF, 0xFF),
@@ -252,6 +252,64 @@ const ROSE_PINE: Theme = Theme {
     ],
 };
 
+/// Rosé Pine Dawn: the official LIGHT sibling of Rosé Pine — a warm, low-glare
+/// off-white base with the same muted-pastel accent family, darkened for legible
+/// contrast on a light surface. Special entries use Text (fg) / Base (bg); cursor
+/// follows the Highlight High tint per the published terminal palette.
+const ROSE_PINE_DAWN: Theme = Theme {
+    fg: rgb(0x57, 0x52, 0x79),           // Text
+    bg: rgb(0xFA, 0xF4, 0xED),           // Base
+    cursor: rgb(0x57, 0x52, 0x79),       // Text (dark on light)
+    selection_bg: rgb(0xDF, 0xDA, 0xD9), // Highlight Med
+    ansi16: [
+        rgb(0xF2, 0xE9, 0xE1), // 0  black         (Overlay, light)
+        rgb(0xB4, 0x63, 0x7A), // 1  red           (Love)
+        rgb(0x28, 0x69, 0x83), // 2  green         (Pine)
+        rgb(0xEA, 0x9D, 0x34), // 3  yellow        (Gold)
+        rgb(0x56, 0x94, 0x9F), // 4  blue          (Foam)
+        rgb(0x90, 0x7A, 0xA9), // 5  magenta       (Iris)
+        rgb(0xD7, 0x82, 0x7E), // 6  cyan          (Rose)
+        rgb(0x57, 0x52, 0x79), // 7  white         (Text)
+        rgb(0x9D, 0x96, 0xB8), // 8  bright black   (Subtle)
+        rgb(0xB4, 0x63, 0x7A), // 9  bright red     (Love)
+        rgb(0x28, 0x69, 0x83), // 10 bright green   (Pine)
+        rgb(0xEA, 0x9D, 0x34), // 11 bright yellow  (Gold)
+        rgb(0x56, 0x94, 0x9F), // 12 bright blue    (Foam)
+        rgb(0x90, 0x7A, 0xA9), // 13 bright magenta (Iris)
+        rgb(0xD7, 0x82, 0x7E), // 14 bright cyan    (Rose)
+        rgb(0x57, 0x52, 0x79), // 15 bright white   (Text)
+    ],
+};
+
+/// Catppuccin Latte: the LIGHT member of the Catppuccin family — a crisp, bright
+/// off-white base (Base) with Text body color and the published light terminal
+/// accents, darkened so reds/greens/blues stay readable on white. Cursor uses
+/// Rosewater per the published spec.
+const CATPPUCCIN_LATTE: Theme = Theme {
+    fg: rgb(0x4C, 0x4F, 0x69),     // Text
+    bg: rgb(0xEF, 0xF1, 0xF5),     // Base
+    cursor: rgb(0xDC, 0x8A, 0x78), // Rosewater
+    selection_bg: rgb(0xCC, 0xD0, 0xDA),
+    ansi16: [
+        rgb(0x5C, 0x5F, 0x77), // 0  black   (Subtext1)
+        rgb(0xD2, 0x0F, 0x39), // 1  red     (Red)
+        rgb(0x40, 0xA0, 0x2B), // 2  green   (Green)
+        rgb(0xDF, 0x8E, 0x1D), // 3  yellow  (Yellow)
+        rgb(0x1E, 0x66, 0xF5), // 4  blue    (Blue)
+        rgb(0xEA, 0x76, 0xCB), // 5  magenta (Pink)
+        rgb(0x17, 0x92, 0x99), // 6  cyan    (Teal)
+        rgb(0xAC, 0xB0, 0xBE), // 7  white   (Surface2)
+        rgb(0x6C, 0x6F, 0x85), // 8  bright black  (Subtext0)
+        rgb(0xD2, 0x0F, 0x39), // 9  bright red
+        rgb(0x40, 0xA0, 0x2B), // 10 bright green
+        rgb(0xDF, 0x8E, 0x1D), // 11 bright yellow
+        rgb(0x1E, 0x66, 0xF5), // 12 bright blue
+        rgb(0xEA, 0x76, 0xCB), // 13 bright magenta
+        rgb(0x17, 0x92, 0x99), // 14 bright cyan
+        rgb(0xBC, 0xC0, 0xCC), // 15 bright white (Surface1)
+    ],
+};
+
 /// Resolve a theme by (case-insensitive, separator-insensitive) name. Returns
 /// `None` for an unknown name so the caller can warn and keep the default.
 pub fn theme_by_name(name: &str) -> Option<Theme> {
@@ -269,22 +327,85 @@ pub fn theme_by_name(name: &str) -> Option<Theme> {
         "nord" => Some(NORD),
         "solarizeddark" | "solarized" => Some(SOLARIZED_DARK),
         "rosepine" | "rose" => Some(ROSE_PINE),
+        "rosepinedawn" | "dawn" => Some(ROSE_PINE_DAWN),
+        "catppuccinlatte" | "latte" => Some(CATPPUCCIN_LATTE),
         _ => None,
     }
 }
 
-/// The process-wide active theme, set once at startup. Reads before `set_theme`
-/// (there are none in practice) fall back to the default.
-static ACTIVE: OnceLock<Theme> = OnceLock::new();
+/// Canonical theme names in display order, for the settings overlay to cycle.
+pub const THEME_NAMES: &[&str] = &[
+    "tokyo-night",
+    "catppuccin-mocha",
+    "catppuccin-macchiato",
+    "gruvbox-dark",
+    "dracula",
+    "nord",
+    "solarized-dark",
+    "rose-pine",
+    "rose-pine-dawn",
+    "catppuccin-latte",
+];
 
-/// Install the active theme. Idempotent: only the first call wins (startup).
+/// Whether a named theme is a LIGHT theme (light background, dark text). Used to
+/// pick a sensible default when following the system color scheme. Unknown names
+/// are treated as dark (every original built-in is dark).
+#[allow(dead_code)]
+pub fn is_light(name: &str) -> bool {
+    matches!(canonical_name(name), "rose-pine-dawn" | "catppuccin-latte")
+}
+
+/// Map any accepted theme name/alias to its canonical [`THEME_NAMES`] entry,
+/// defaulting to `tokyo-night`. Lets the app store + cycle + save a stable name.
+pub fn canonical_name(input: &str) -> &'static str {
+    let key: String = input
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    match key.as_str() {
+        "catppuccinmocha" | "catppuccin" | "mocha" => "catppuccin-mocha",
+        "catppuccinmacchiato" | "macchiato" => "catppuccin-macchiato",
+        "gruvboxdark" | "gruvbox" => "gruvbox-dark",
+        "dracula" => "dracula",
+        "nord" => "nord",
+        "solarizeddark" | "solarized" => "solarized-dark",
+        "rosepine" | "rose" => "rose-pine",
+        "rosepinedawn" | "dawn" => "rose-pine-dawn",
+        "catppuccinlatte" | "latte" => "catppuccin-latte",
+        _ => "tokyo-night",
+    }
+}
+
+/// The process-wide active theme. An `AtomicPtr` to a leaked `Theme` so reads
+/// (per cell, on the UI thread) are a single relaxed load + deref — no lock —
+/// while `set_theme` can swap it live (settings overlay). Null means "default".
+static ACTIVE: AtomicPtr<Theme> = AtomicPtr::new(std::ptr::null_mut());
+
+/// Install the active theme. Safe to call repeatedly (startup + live changes).
+/// Frees the previous theme instead of leaking it.
 pub fn set_theme(theme: Theme) {
-    let _ = ACTIVE.set(theme);
+    let ptr = Box::into_raw(Box::new(theme));
+    let old_ptr = ACTIVE.swap(ptr, Ordering::AcqRel);
+    // Free the previous theme if it was set (not null and not the static defaults).
+    if !old_ptr.is_null() {
+        // SAFETY: `old_ptr` is a pointer produced by `Box::into_raw` in a prior
+        // `set_theme` call, so it is valid and safe to drop.
+        let _ = unsafe { Box::from_raw(old_ptr) };
+    }
 }
 
 /// The active theme, defaulting to Tokyo Night before `set_theme` is called.
 fn active() -> &'static Theme {
-    ACTIVE.get().unwrap_or(&TOKYO_NIGHT)
+    let ptr = ACTIVE.load(Ordering::Acquire);
+    if ptr.is_null() {
+        &TOKYO_NIGHT
+    } else {
+        // SAFETY: `ptr` is either null (handled above) or a pointer produced by
+        // `Box::into_raw` in `set_theme` and never freed, so it is valid for the
+        // life of the process.
+        unsafe { &*ptr }
+    }
 }
 
 /// Default background of the active theme.
@@ -300,6 +421,30 @@ pub fn default_fg() -> [f32; 4] {
 /// Selection-tint background of the active theme.
 pub fn selection_bg() -> [f32; 4] {
     to_f32(active().selection_bg)
+}
+
+/// The UI accent of the active theme, derived from its cursor color — the one
+/// entry every theme picks deliberately to "pop". Used by the inline toolbar
+/// (active chip fill, mark, new-tab `+`) so accents follow the theme instead of
+/// a hardcoded blue that clashes on Gruvbox / Solarized / etc.
+pub fn accent() -> [f32; 4] {
+    to_f32(active().cursor)
+}
+
+/// The UI danger color of the active theme, derived from ANSI red — used for
+/// destructive affordances (the hovered tab-close ✕) so "danger" reads as red
+/// in whatever red the theme actually uses.
+#[allow(dead_code)]
+pub fn danger() -> [f32; 4] {
+    to_f32(active().ansi16[1])
+}
+
+/// The UI success color of the active theme, derived from ANSI green — used for
+/// affirmative affordances (the command-block exit-0 badge ✓) so "success"
+/// reads as green in whatever green the theme actually uses.
+#[allow(dead_code)]
+pub fn success() -> [f32; 4] {
+    to_f32(active().ansi16[2])
 }
 
 /// Resolve a terminal `Color` (named / indexed / direct) to RGBA in [0, 1].
@@ -329,9 +474,55 @@ fn dim(rgb: Rgb) -> Rgb {
     }
 }
 
+/// Lighten a color by adding a linear amount to each channel, clamped to [0, 1].
+/// Used by GUI surfaces to create elevated hierarchy without changing the hue.
+pub fn lighten(c: [f32; 4], amount: f32) -> [f32; 4] {
+    [
+        (c[0] + amount).min(1.0),
+        (c[1] + amount).min(1.0),
+        (c[2] + amount).min(1.0),
+        c[3],
+    ]
+}
+
+/// Darken a color by multiplying each channel by a factor in [0, 1].
+/// Used by GUI surfaces for shadows and hover states.
+pub fn darken(c: [f32; 4], f: f32) -> [f32; 4] {
+    [c[0] * f, c[1] * f, c[2] * f, c[3]]
+}
+
+/// Compute the relative luminance of a color using the standard formula
+/// (0.299*R + 0.587*G + 0.114*B), used to determine whether to lighten or
+/// darken a surface for contrast on near-white/light backgrounds.
+pub fn luma(c: [f32; 4]) -> f32 {
+    0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2]
+}
+
 fn default_named(named: NamedColor) -> Rgb {
+    default_named_index(named as usize)
+}
+
+/// Resolve a raw color-query index to an `Rgb` from the active theme.
+///
+/// `alacritty_terminal`'s `Event::ColorRequest` carries a `usize` index that is
+/// either an 8-bit palette slot (`0..=255`, OSC 4) or a `NamedColor` discriminant
+/// (`256` Foreground / `257` Background / `258` Cursor, …; OSC 10/11/12). We
+/// mirror the same defaults the renderer draws with so a query answer matches the
+/// glyphs on screen. (The dynamic OSC-override palette isn't reachable from the
+/// `EventProxy`, so overridden entries report the theme default — the common,
+/// un-overridden case is exact.)
+pub fn query_index(index: usize) -> Rgb {
+    match index {
+        0..=255 => default_indexed(index as u8),
+        _ => default_named_index(index),
+    }
+}
+
+/// Theme default for a `NamedColor` discriminant given as a raw `usize`, sharing
+/// the mapping used by [`default_named`].
+fn default_named_index(index: usize) -> Rgb {
     let theme = active();
-    match named as usize {
+    match index {
         i @ 0..=15 => theme.ansi16[i],
         256 | 267 => theme.fg, // Foreground, BrightForeground
         257 => theme.bg,       // Background
@@ -364,6 +555,51 @@ fn default_indexed(idx: u8) -> Rgb {
             // 24-step grayscale ramp.
             let v = 8 + (idx - 232) * 10;
             Rgb { r: v, g: v, b: v }
+        }
+    }
+}
+
+#[cfg(test)]
+mod query_index_tests {
+    use super::*;
+    #[test]
+    fn named_and_palette_resolve_to_active_theme() {
+        let bg = query_index(257);
+        assert_eq!((bg.r, bg.g, bg.b), (0x1A, 0x1B, 0x26));
+        let fg = query_index(256);
+        assert_eq!((fg.r, fg.g, fg.b), (0xC0, 0xCA, 0xF5));
+        let cur = query_index(258);
+        assert_eq!((cur.r, cur.g, cur.b), (0x7D, 0xCF, 0xFF));
+        let red = query_index(1);
+        assert_eq!((red.r, red.g, red.b), (0xF7, 0x76, 0x8E));
+        let cube = query_index(196); // pure red in 6x6x6 cube
+        assert_eq!((cube.r, cube.g, cube.b), (255, 0, 0));
+    }
+
+    #[test]
+    fn light_themes_are_light_and_named() {
+        // Both light themes resolve and are flagged light; every dark built-in is
+        // flagged dark.
+        for name in ["rose-pine-dawn", "dawn", "catppuccin-latte", "latte"] {
+            assert!(theme_by_name(name).is_some(), "{name} should resolve");
+            assert!(is_light(name), "{name} should be light");
+        }
+        for name in THEME_NAMES.iter().filter(|n| !is_light(n)) {
+            let t = theme_by_name(name).expect("theme resolves");
+            // A dark theme's background should be darker than its foreground.
+            let lum = |c: Rgb| c.r as u32 + c.g as u32 + c.b as u32;
+            assert!(lum(t.bg) < lum(t.fg), "{name} bg should be darker than fg");
+        }
+        // A light theme's background is brighter than its foreground.
+        let dawn = theme_by_name("rose-pine-dawn").unwrap();
+        let lum = |c: Rgb| c.r as u32 + c.g as u32 + c.b as u32;
+        assert!(lum(dawn.bg) > lum(dawn.fg));
+        // Every THEME_NAMES entry resolves (catches typos / missing arms).
+        for name in THEME_NAMES {
+            assert!(
+                theme_by_name(name).is_some(),
+                "{name} in THEME_NAMES resolves"
+            );
         }
     }
 }

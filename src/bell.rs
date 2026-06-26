@@ -10,13 +10,15 @@
 //! missing or broken audio device never panics — it is logged at debug level and
 //! the bell is silently dropped.
 
-/// How long the visual-bell flash stays up before the window restores. ~80ms is
+/// How long the visual-bell flash stays up before the window restores. ~70ms is
 /// long enough to register as a blink without being distracting.
-pub const FLASH_MS: u64 = 80;
+pub const FLASH_MS: u64 = 70;
 
-/// Visual-bell flash overlay strength: a low-alpha tint blended over the whole
-/// window toward the foreground color. Restrained on purpose.
-pub const FLASH_ALPHA: f32 = 0.18;
+/// Visual-bell flash overlay: a soft, low-alpha accent tint blended over the
+/// whole window. A stark white full-screen flash is jarring when the shell rings
+/// the bell on every failed tab-completion or pager scroll limit, so this is a
+/// muted blue at low strength — noticeable but easy on the eyes.
+pub const FLASH_COLOR: [f32; 4] = [0.45, 0.68, 1.0, 0.10];
 
 /// Plays a short, soft beep on demand. Holds the audio output device open lazily
 /// (first ring) so repeated bells don't re-acquire it, and so its absence never

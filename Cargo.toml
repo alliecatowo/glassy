@@ -1,20 +1,32 @@
 [package]
 name = "glassy"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 
 [dependencies]
+polling = "3.11"
+png = "0.17"
 alacritty_terminal = "0.26.0"
 anyhow = "1.0.102"
-arboard = "3.6.1"
+# arboard is split per target so macOS/Windows builds don't pull in Wayland/X11
+# system libraries that are absent on those platforms (primary macOS build blocker).
+# default-features=false drops the `image` crate (png/tiff/jpeg/ICC decoders) we
+# never use — glassy only calls set_text/get_text.
 bytemuck = { version = "1.25.0", features = ["derive"] }
 cosmic-text = "0.19.0"
-env_logger = "0.11.10"
+# default-features off drops regex + jiff + anstream (colored/timestamped output
+# and regex RUST_LOG filters) — module-path level filtering still works.
+env_logger = { version = "0.11.10", default-features = false }
 log = "0.4.32"
+notify = "6.1"
 pollster = "0.4.0"
-rustix = "1.1.4"
-wgpu = "29.0.3"
+rustix = { version = "1.1.4", features = ["system"] }
 winit = "0.30.13"
+# wgpu is NOT listed here — see per-platform sections below. Default features
+# compile ALL backends (Metal + Vulkan + DX12 + OpenGL + WebGPU) into the binary
+# even though each platform only ever uses one. We split it per-target to compile
+# only the native backend, trimming ~2-4 MB from the binary and shaving 20-40 ms
+# off startup backend-detection overhead.
 
 # Audible bell. Optional + off by default: the audio backend (cpal/alsa) needs
 # system audio dev libraries to build, so we keep the dependency behind a feature
@@ -22,6 +34,43 @@ winit = "0.30.13"
 # the audible bell is a no-op (logged once). `bell_audible` still parses from the
 # config regardless; it only takes effect in a `--features bell-audio` build.
 rodio = { version = "0.22.2", default-features = false, features = ["playback"], optional = true }
+
+# Desktop notifications (OSC 9 / OSC 777 shell-integration). default-features=false
+# drops the optional zbus/dbus system dependency on Linux; the `d` feature enables
+# the D-Bus backend (correct for desktop Linux). On other platforms the crate's
+# native backend is always used regardless of this feature flag.
+notify-rust = { version = "4", default-features = false, features = ["d"] }
+
+# Linux: Vulkan backend + Wayland clipboard.
+[target.'cfg(target_os = "linux")'.dependencies]
+arboard = { version = "3.6.1", default-features = false, features = ["wayland-data-control"] }
+wgpu = { version = "29.0.3", default-features = false, features = ["vulkan", "wgsl", "std", "parking_lot"] }
+
+# macOS: Metal backend only — no Vulkan/DX12/OpenGL/WebGPU needed.
+[target.'cfg(target_os = "macos")'.dependencies]
+arboard = { version = "3.6.1", default-features = false }
+wgpu = { version = "29.0.3", default-features = false, features = ["metal", "wgsl", "std", "parking_lot"] }
+# CoreText for ZWJ compound emoji (🏳️‍⚧️ etc.) — rustybuzz doesn't apply Apple's
+# GSUB ZWJ lookup chain; CoreText does (same as ghostty). 20.1.0 is the version
+# that resolves against core-foundation 0.9 / core-graphics 0.23 that winit pins.
+# 22.x requires cf 0.10 / cg 0.25 and would duplicate both native crates.
+core-text = "20.1.0"
+core-foundation = "0.9.4"
+core-graphics = "0.23.2"
+# objc2 ecosystem for macOS dock icon — zero new transitive deps, already pulled by winit.
+objc2 = "0.5.2"
+objc2-foundation = "0.2.2"
+objc2-app-kit = { version = "0.2.2", features = ["NSApplication", "NSImage"] }
+
+# Windows: DX12 primary + Vulkan fallback for older drivers.
+[target.'cfg(target_os = "windows")'.dependencies]
+arboard = { version = "3.6.1", default-features = false }
+wgpu = { version = "29.0.3", default-features = false, features = ["dx12", "vulkan", "wgsl", "std", "parking_lot"] }
+
+# Everything else (BSD, etc.): GLES fallback so the build doesn't fail.
+[target.'cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))'.dependencies]
+arboard = { version = "3.6.1", default-features = false }
+wgpu = { version = "29.0.3", default-features = false, features = ["gles", "wgsl", "std", "parking_lot"] }
 
 [features]
 # Compile in the audible-bell backend. Requires audio dev libs (e.g. alsa-lib-devel
@@ -67,7 +116,7 @@ priority = "optional"
 # Runtime shared libraries glassy links against. cargo-deb also auto-detects
 # some of these via dpkg-shlibdeps, but we pin the key ones explicitly so the
 # package is installable on a clean system.
-depends = "libc6, libxkbcommon0, libwayland-client0, libvulkan1, libasound2, libfontconfig1, libgcc-s1"
+depends = "libc6, libxkbcommon0, libwayland-client0, libvulkan1, libfontconfig1, libgcc-s1"
 assets = [
     ["target/release/glassy", "usr/bin/", "755"],
     ["assets/icons/glassy-16.png", "usr/share/icons/hicolor/16x16/apps/glassy.png", "644"],
@@ -79,4 +128,92 @@ assets = [
     ["assets/icons/glassy-512.png", "usr/share/icons/hicolor/512x512/apps/glassy.png", "644"],
     ["extra/glassy.desktop", "usr/share/applications/glassy.desktop", "644"],
     ["extra/glassy.1", "usr/share/man/man1/glassy.1", "644"],
+    ["terminfo/glassy.terminfo", "usr/share/doc/glassy/terminfo/glassy.terminfo", "644"],
 ]
+# Post-install script to compile and install terminfo.
+scripts = { postinst = "packaging/scripts/postinst.sh" }
+
+# ---------------------------------------------------------------------------
+# RPM packaging (cargo-generate-rpm).
+#
+# This metadata is inert for normal `cargo build`; it only takes effect when
+# building a .rpm with `cargo generate-rpm` (install it first:
+# `cargo install cargo-generate-rpm`).  The release binary must be built
+# first: `cargo build --release`.
+#
+# Usage:
+#   cargo build --release
+#   cargo generate-rpm
+#   # -> target/generate-rpm/glassy-*.rpm
+# ---------------------------------------------------------------------------
+[package.metadata.generate-rpm]
+name = "glassy"
+summary = "Fast, minimal GPU-accelerated terminal emulator written in Rust"
+description = """\
+glassy is a small, fast, GPU-accelerated terminal emulator written in Rust. \
+It draws the grid with an instanced wgpu renderer fed by a dynamic glyph atlas, \
+and supports 24-bit truecolor, color emoji, procedural box-drawing, mouse \
+reporting, selection, clipboard, scrollback, OSC 8 hyperlinks, tabs, window \
+decorations, configurable cursor, translucency, and themeable config."""
+license = "MIT"
+group = "User Interface/X Hardware Support"
+url = "https://github.com/alliecatowo/glassy"
+# Runtime shared-library requirements. rpm auto-detects some via rpmbuild
+# dependency generation, but we pin the key ones for clarity.
+requires = { libxkbcommon = "*", wayland-libs-client = "*", vulkan-loader = "*", alsa-lib = "*", fontconfig = "*" }
+
+[[package.metadata.generate-rpm.assets]]
+source = "target/release/glassy"
+dest = "/usr/bin/glassy"
+mode = "755"
+doc = false
+
+[[package.metadata.generate-rpm.assets]]
+source = "extra/glassy.desktop"
+dest = "/usr/share/applications/glassy.desktop"
+mode = "644"
+
+[[package.metadata.generate-rpm.assets]]
+source = "extra/glassy.1"
+dest = "/usr/share/man/man1/glassy.1"
+mode = "644"
+
+[[package.metadata.generate-rpm.assets]]
+source = "assets/icons/glassy-16.png"
+dest = "/usr/share/icons/hicolor/16x16/apps/glassy.png"
+mode = "644"
+
+[[package.metadata.generate-rpm.assets]]
+source = "assets/icons/glassy-32.png"
+dest = "/usr/share/icons/hicolor/32x32/apps/glassy.png"
+mode = "644"
+
+[[package.metadata.generate-rpm.assets]]
+source = "assets/icons/glassy-48.png"
+dest = "/usr/share/icons/hicolor/48x48/apps/glassy.png"
+mode = "644"
+
+[[package.metadata.generate-rpm.assets]]
+source = "assets/icons/glassy-64.png"
+dest = "/usr/share/icons/hicolor/64x64/apps/glassy.png"
+mode = "644"
+
+[[package.metadata.generate-rpm.assets]]
+source = "assets/icons/glassy-128.png"
+dest = "/usr/share/icons/hicolor/128x128/apps/glassy.png"
+mode = "644"
+
+[[package.metadata.generate-rpm.assets]]
+source = "assets/icons/glassy-256.png"
+dest = "/usr/share/icons/hicolor/256x256/apps/glassy.png"
+mode = "644"
+
+[[package.metadata.generate-rpm.assets]]
+source = "assets/icons/glassy-512.png"
+dest = "/usr/share/icons/hicolor/512x512/apps/glassy.png"
+mode = "644"
+
+[[package.metadata.generate-rpm.assets]]
+source = "LICENSE"
+dest = "/usr/share/licenses/glassy/LICENSE"
+mode = "644"

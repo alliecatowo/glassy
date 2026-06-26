@@ -1,23 +1,114 @@
 name: Release
 
+# Triggers (Do NOT modify ci.yml — the test matrix lives there):
+#   * push of a version tag (e.g. git tag v0.2.0 && git push --tags) — the
+#     classic explicit release.
+#   * push to main — the merge-to-main release path. The version is read from
+#     Cargo.toml and a release is cut ONLY if one for that version does not
+#     already exist (the resolve-version job below computes `is_new`), so
+#     re-merges / unrelated main pushes are no-ops.
+#   * manual dispatch — validate the macOS/Windows build jobs on demand
+#     (e.g. `gh workflow run release.yml --ref develop`) without cutting a
+#     release; on a non-tag ref the version falls back to Cargo.toml and the
+#     publish step is gated on `is_new`.
 on:
   push:
     tags:
       - "v*"
+    branches:
+      - main
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
+  # Shared binary name.
+  BIN: glassy
 
 permissions:
   contents: write
 
+# ---------------------------------------------------------------------------
+# Build matrix — Linux x86_64 is required; aarch64 cross-compiled via
+# cross. macOS and Windows jobs are scaffolded but set continue-on-error
+# because those build targets are not yet verified green.
+# ---------------------------------------------------------------------------
 jobs:
-  release:
-    name: build & publish (x86_64-linux)
+  # -------------------------------------------------------------------------
+  # Resolve the version + whether it is new — the single source of truth all
+  # other jobs read. On a tag push the version comes from the tag; otherwise
+  # (main push / manual dispatch) it comes from Cargo.toml. `is_new` is false
+  # when a Git tag OR a GitHub Release already exists for that version, so a
+  # re-merge to main or an unrelated push never re-publishes the same release.
+  # -------------------------------------------------------------------------
+  resolve-version:
+    name: Resolve version
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      tag: ${{ steps.v.outputs.tag }}
+      is_new: ${{ steps.v.outputs.is_new }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+
+      - name: Compute version, tag, and is_new
+        id: v
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            # Explicit tag push: the tag is authoritative.
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            # main push / manual dispatch: read the crate version from Cargo.toml.
+            # The first `version = "..."` line is the [package] one (it precedes
+            # any dependency tables), so head -n1 is safe and needs no toml parser.
+            VERSION="$(grep -m1 '^version = ' Cargo.toml | sed -E 's/version = "(.*)"/\1/')"
+          fi
+          if [[ -z "${VERSION}" ]]; then
+            echo "::error::could not resolve version" >&2
+            exit 1
+          fi
+          TAG="v${VERSION}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+          # Determine novelty: skip publishing if either a tag or a release for
+          # this version already exists. (A tag push that hasn't been released yet
+          # is still "new"; a re-run on an already-released version is not.)
+          IS_NEW=true
+          if git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; then
+            # The tag exists on the remote. It's only "not new" if a Release was
+            # also already published for it (a freshly-pushed tag with no release
+            # should still publish).
+            if gh release view "${TAG}" >/dev/null 2>&1; then
+              IS_NEW=false
+            fi
+          fi
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            IS_NEW=false
+          fi
+          echo "is_new=${IS_NEW}" >> "$GITHUB_OUTPUT"
+          echo "Resolved version=${VERSION} tag=${TAG} is_new=${IS_NEW}"
+
+  # -------------------------------------------------------------------------
+  # Linux x86_64 (required)
+  # -------------------------------------------------------------------------
+  build-linux-x86_64:
+    name: Build — Linux x86_64
+    needs: [resolve-version]
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ needs.resolve-version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract version
+        id: meta
+        run: |
+          VERSION="${{ needs.resolve-version.outputs.version }}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=${{ needs.resolve-version.outputs.tag }}" >> "$GITHUB_OUTPUT"
 
       - name: Install system dependencies
         run: |
@@ -28,32 +119,832 @@ jobs:
             libvulkan-dev \
             libasound2-dev \
             libfontconfig-dev \
+            libdbus-1-dev \
             pkg-config
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache cargo artifacts
-        uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2
 
       - name: Install cargo-deb
-        run: cargo install cargo-deb
+        run: cargo install cargo-deb --locked
 
-      - name: Build release
-        run: cargo build --release --verbose
+      - name: Install cargo-generate-rpm
+        run: cargo install cargo-generate-rpm --locked
 
-      - name: Strip and stage binary
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Build .deb
+        run: cargo deb --no-build --output target/debian/${{ env.BIN }}_${{ steps.meta.outputs.version }}_amd64.deb
+
+      - name: Build .rpm
+        run: cargo generate-rpm
+
+      - name: Stage artifacts
         run: |
-          strip target/release/glassy
-          cp target/release/glassy glassy-x86_64-linux
+          mkdir -p dist
+          cp target/release/${{ env.BIN }}          dist/${{ env.BIN }}-x86_64-linux
+          cp target/debian/${{ env.BIN }}_${{ steps.meta.outputs.version }}_amd64.deb dist/
+          # cargo-generate-rpm puts the rpm in target/generate-rpm/
+          find target/generate-rpm -name '*.rpm' -exec cp {} dist/ \;
+          # Source tarball (used by AUR / Homebrew sha256 verification).
+          tar -czf dist/${{ env.BIN }}-${{ steps.meta.outputs.version }}-src.tar.gz \
+            --transform "s|^\.|${BIN}-${{ steps.meta.outputs.version }}|" \
+            --exclude='./.git' --exclude='./target' .
 
-      - name: Build .deb package
-        run: cargo deb --no-build --output target/debian/glassy_amd64.deb
+      - name: Generate SHA256SUMS
+        working-directory: dist
+        run: sha256sum * > SHA256SUMS
 
-      - name: Publish release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-x86_64
+          path: dist/
+
+  # -------------------------------------------------------------------------
+  # Linux aarch64 (cross-compiled; best-effort)
+  # -------------------------------------------------------------------------
+  build-linux-aarch64:
+    name: Build — Linux aarch64
+    needs: [resolve-version]
+    runs-on: ubuntu-latest
+    continue-on-error: true  # aarch64 cross not yet validated; flip to false once green
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract version
+        id: meta
+        run: echo "version=${{ needs.resolve-version.outputs.version }}" >> "$GITHUB_OUTPUT"
+
+      - name: Install cross
+        run: cargo install cross --locked
+
+      - name: Install system dependencies (host tools only)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends pkg-config
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-gnu
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Cross-build aarch64
+        run: cross build --release --locked --target aarch64-unknown-linux-gnu
+
+      - name: Stage artifact
+        run: |
+          mkdir -p dist
+          cp target/aarch64-unknown-linux-gnu/release/${{ env.BIN }} \
+             dist/${{ env.BIN }}-aarch64-linux
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-aarch64
+          path: dist/
+
+  # -------------------------------------------------------------------------
+  # macOS — universal .app bundle + .dmg (first-class artifact)
+  #
+  # Builds x86_64 + aarch64-apple-darwin universal binary with arboard
+  # target-gated to exclude Wayland/X11 dependencies. Produces .app bundle
+  # with Info.plist + .icns icon, then creates drag-to-Applications .dmg.
+  # Optional code signing supported via APPLE_CERTIFICATE + APPLE_IDENTITY
+  # secrets. Notarization not yet configured.
+  # -------------------------------------------------------------------------
+  build-macos:
+    name: Build — macOS (.app + .dmg)
+    needs: [resolve-version]
+    runs-on: macos-latest
+    # macOS CI is green, so this is a required job (no continue-on-error): the
+    # universal .app/.dmg ship as first-class release assets. If a future macOS
+    # runner image regresses this, re-add `continue-on-error: true` here and the
+    # publish job will still go out with the Linux assets.
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract version
+        id: meta
+        run: echo "version=${{ needs.resolve-version.outputs.version }}" >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin,aarch64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+
+      # macOS build deps via Homebrew.
+      # fontconfig + pkg-config are needed by cosmic-text's fontdb.
+      # No Wayland/X11/ALSA equivalents needed on macOS.
+      - name: Install macOS build dependencies
+        run: |
+          brew install pkg-config fontconfig create-dmg
+
+      - name: Build x86_64
+        run: cargo build --release --locked --target x86_64-apple-darwin
+
+      - name: Build aarch64 (Apple Silicon)
+        run: cargo build --release --locked --target aarch64-apple-darwin
+
+      - name: Create universal binary with lipo
+        run: |
+          mkdir -p dist
+          lipo -create -output dist/${{ env.BIN }}-macos-universal \
+            target/x86_64-apple-darwin/release/${{ env.BIN }} \
+            target/aarch64-apple-darwin/release/${{ env.BIN }}
+
+      # Build a proper .icns from the PNG assets (iconutil needs an
+      # iconset directory with exact filenames).
+      - name: Build .icns icon
+        run: |
+          ICONSET=dist/glassy.iconset
+          mkdir -p "$ICONSET"
+          # iconutil requires these exact filenames.
+          cp assets/icons/glassy-16.png   "$ICONSET/icon_16x16.png"
+          cp assets/icons/glassy-32.png   "$ICONSET/icon_16x16@2x.png"
+          cp assets/icons/glassy-32.png   "$ICONSET/icon_32x32.png"
+          cp assets/icons/glassy-64.png   "$ICONSET/icon_32x32@2x.png"
+          cp assets/icons/glassy-128.png  "$ICONSET/icon_128x128.png"
+          cp assets/icons/glassy-256.png  "$ICONSET/icon_128x128@2x.png"
+          cp assets/icons/glassy-256.png  "$ICONSET/icon_256x256.png"
+          cp assets/icons/glassy-512.png  "$ICONSET/icon_256x256@2x.png"
+          cp assets/icons/glassy-512.png  "$ICONSET/icon_512x512.png"
+          # @2x 512 requires a 1024px source; use 512 as a stand-in until
+          # a 1024px asset is added to assets/icons/.
+          cp assets/icons/glassy-512.png  "$ICONSET/icon_512x512@2x.png"
+          iconutil -c icns -o dist/glassy.icns "$ICONSET"
+          rm -rf "$ICONSET"
+
+      # Assemble glassy.app following the macOS bundle layout.
+      # The Info.plist declares the app as a Terminal Emulator so
+      # Finder and Launchpad display it correctly.
+      - name: Bundle glassy.app
+        run: |
+          VERSION="${{ steps.meta.outputs.version }}"
+          APP=dist/glassy.app
+          CONTENTS="$APP/Contents"
+          MACOS="$CONTENTS/MacOS"
+          RESOURCES="$CONTENTS/Resources"
+
+          mkdir -p "$MACOS" "$RESOURCES"
+
+          # Binary.
+          cp dist/${{ env.BIN }}-macos-universal "$MACOS/glassy"
+          chmod 755 "$MACOS/glassy"
+
+          # Icon.
+          cp dist/glassy.icns "$RESOURCES/glassy.icns"
+
+          # Info.plist.
+          cat > "$CONTENTS/Info.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+            "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleIdentifier</key>
+            <string>io.github.alliecatowo.glassy</string>
+            <key>CFBundleName</key>
+            <string>glassy</string>
+            <key>CFBundleDisplayName</key>
+            <string>glassy</string>
+            <key>CFBundleExecutable</key>
+            <string>glassy</string>
+            <key>CFBundleIconFile</key>
+            <string>glassy</string>
+            <key>CFBundleVersion</key>
+            <string>${VERSION}</string>
+            <key>CFBundleShortVersionString</key>
+            <string>${VERSION}</string>
+            <key>CFBundlePackageType</key>
+            <string>APPL</string>
+            <key>CFBundleSignature</key>
+            <string>????</string>
+            <key>LSApplicationCategoryType</key>
+            <string>public.app-category.utilities</string>
+            <key>LSMinimumSystemVersion</key>
+            <string>11.0</string>
+            <key>NSHighResolutionCapable</key>
+            <true/>
+            <key>NSSupportsAutomaticGraphicsSwitching</key>
+            <true/>
+          </dict>
+          </plist>
+          PLIST
+
+          # PkgInfo (optional but conventional).
+          printf 'APPL????' > "$CONTENTS/PkgInfo"
+
+      # create-dmg produces a drag-to-Applications installer image.
+      # The volume name and window geometry follow macOS conventions.
+      - name: Create .dmg installer
+        run: |
+          VERSION="${{ steps.meta.outputs.version }}"
+          DMG="dist/glassy-${VERSION}-macos.dmg"
+
+          create-dmg \
+            --volname "glassy ${VERSION}" \
+            --volicon dist/glassy.icns \
+            --window-pos 200 120 \
+            --window-size 600 400 \
+            --icon-size 100 \
+            --icon "glassy.app" 175 190 \
+            --hide-extension "glassy.app" \
+            --app-drop-link 425 190 \
+            --no-internet-enable \
+            "$DMG" \
+            dist/glassy.app
+
+          echo "dmg=$DMG" >> "$GITHUB_OUTPUT"
+        id: dmg
+
+      # Sign the .dmg if credentials are available.
+      # Set APPLE_CERTIFICATE (base64 .p12) + APPLE_CERTIFICATE_PASSWORD
+      # + APPLE_IDENTITY ("Developer ID Application: ...") secrets to
+      # enable signing; the step is skipped if they are absent.
+      - name: Sign .dmg (if credentials present)
+        if: ${{ env.APPLE_CERTIFICATE != '' }}
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_IDENTITY: ${{ secrets.APPLE_IDENTITY }}
+        run: |
+          VERSION="${{ steps.meta.outputs.version }}"
+          DMG="dist/glassy-${VERSION}-macos.dmg"
+          # Import certificate into a temporary keychain.
+          KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain"
+          KEYCHAIN_PASS="$(openssl rand -base64 32)"
+          security create-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN_PATH"
+          echo "$APPLE_CERTIFICATE" | base64 --decode -o "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" \
+            -k "$KEYCHAIN_PATH" -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign
+          security list-keychains -d user -s "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple: \
+            -s -k "$KEYCHAIN_PASS" "$KEYCHAIN_PATH"
+          # Sign and verify.
+          codesign --force --deep --sign "$APPLE_IDENTITY" "$DMG"
+          codesign --verify --deep --strict "$DMG"
+          # TODO: add notarization via xcrun notarytool once Team ID /
+          # Apple ID secrets (APPLE_TEAM_ID, APPLE_ID, APPLE_APP_PASSWORD)
+          # are configured.
+
+      - name: Stage macOS artifacts
+        run: |
+          VERSION="${{ steps.meta.outputs.version }}"
+          # Keep the bare universal binary alongside the .dmg for users
+          # who prefer to install manually.
+          cp dist/${{ env.BIN }}-macos-universal dist/${{ env.BIN }}-macos-universal-bare
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: |
+            dist/glassy-*-macos.dmg
+            dist/${{ env.BIN }}-macos-universal-bare
+
+  # -------------------------------------------------------------------------
+  # Windows (scaffolded; TODO: not yet green)
+  # -------------------------------------------------------------------------
+  build-windows:
+    name: Build — Windows (TODO)
+    runs-on: windows-latest
+    continue-on-error: true  # TODO: Windows build not yet verified; enable once deps resolved
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # TODO: install Windows build deps (Vulkan SDK, fontconfig-windows, etc.).
+      - name: Build release
+        run: cargo build --release --locked
+
+      - name: Stage artifact
+        run: |
+          New-Item -ItemType Directory -Force dist
+          Copy-Item target\release\${{ env.BIN }}.exe dist\${{ env.BIN }}-x86_64-windows.exe
+        shell: pwsh
+
+      # TODO: create NSIS / WiX installer.
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: dist/
+
+  # -------------------------------------------------------------------------
+  # Publish GitHub Release — runs after all builds; includes macOS now
+  # that build-macos is no longer best-effort. Linux x86_64 is required;
+  # macos, linux-aarch64, and windows are optional (if they passed).
+  # -------------------------------------------------------------------------
+  publish:
+    name: Publish GitHub Release
+    needs: [resolve-version, build-linux-x86_64, build-macos]
+    # Publish only when (a) Linux x86_64 built, and (b) this version is NEW —
+    # i.e. no tag/release already exists for it. The is_new guard is what makes
+    # the main-push trigger safe: a re-merge or an unrelated push to main where
+    # Cargo.toml's version was already released becomes a no-op here. Optional
+    # build jobs (aarch64/windows) may fail without blocking the release.
+    if: always() && needs.build-linux-x86_64.result == 'success' && needs.resolve-version.outputs.is_new == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract version
+        id: meta
+        run: |
+          VERSION="${{ needs.resolve-version.outputs.version }}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=${{ needs.resolve-version.outputs.tag }}" >> "$GITHUB_OUTPUT"
+
+      # Download all successfully-uploaded artifacts (pattern '*' catches
+      # linux-x86_64, and any of linux-aarch64 / macos / windows that passed).
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Merge artifacts + regenerate SHA256SUMS
+        run: |
+          mkdir -p release
+          # Flatten all artifact subdirs into release/, skipping directories.
+          find artifacts -type f ! -name 'SHA256SUMS' -exec cp {} release/ \;
+          cd release
+          sha256sum * > SHA256SUMS
+
+      - name: Create / update GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            glassy-x86_64-linux
-            target/debian/glassy_amd64.deb
-          fail_on_unmatched_files: true
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: glassy ${{ steps.meta.outputs.tag }}
+          body: |
+            ## glassy ${{ steps.meta.outputs.tag }}
+
+            ### Install
+
+            ```sh
+            curl -fsSL https://raw.githubusercontent.com/alliecatowo/glassy/main/scripts/install.sh | bash
+            ```
+
+            Or pick a package below:
+
+            | Platform | Package |
+            |----------|---------|
+            | Debian/Ubuntu | `glassy_${{ steps.meta.outputs.version }}_amd64.deb` |
+            | Fedora/RHEL/openSUSE | `glassy-${{ steps.meta.outputs.version }}-*.rpm` |
+            | Linux x86_64 (binary) | `glassy-x86_64-linux` |
+            | Linux aarch64 (binary) | `glassy-aarch64-linux` _(if green)_ |
+            | macOS (drag-to-Applications .dmg) | `glassy-${{ steps.meta.outputs.version }}-macos.dmg` _(if green)_ |
+            | macOS (bare universal binary) | `glassy-macos-universal-bare` _(if green)_ |
+            | Windows | `glassy-x86_64-windows.exe` _(if green)_ |
+
+            Verify any download against `SHA256SUMS`.
+          files: release/*
+          fail_on_unmatched_files: false
+          draft: false
+          prerelease: false
+
+  # -------------------------------------------------------------------------
+  # Homebrew formula bump (this repo IS its own tap — Formula/glassy.rb).
+  #
+  # After the release publishes, patch Formula/glassy.rb's CI sentinels with the
+  # real version + sha256 of the RELEASE-UPLOADED source tarball asset, then
+  # commit it straight back to the default branch with [skip ci]. That makes a
+  # plain `brew install glassy` (after `brew tap alliecatowo/glassy
+  # https://github.com/alliecatowo/glassy`) install the just-released version.
+  #
+  # The url in the formula points at the release asset
+  #   releases/download/v<ver>/glassy-<ver>-src.tar.gz
+  # which is EXACTLY the tarball whose sha256 we compute here — so url and sha
+  # always match (the old formula hashed this CI tarball but pointed url at
+  # GitHub's auto-archive tarball, a guaranteed mismatch; that's now fixed).
+  #
+  # No external tap repo or HOMEBREW_TAP_TOKEN is needed — the commit uses the
+  # workflow's built-in GITHUB_TOKEN (permissions: contents: write, set above).
+  # -------------------------------------------------------------------------
+  update-homebrew:
+    name: Update Homebrew formula
+    needs: [resolve-version, publish]
+    if: always() && needs.publish.result == 'success'
+    runs-on: ubuntu-latest
+    continue-on-error: true  # never let a formula-bump hiccup fail the release
+    steps:
+      # Check out the DEFAULT branch (not the tag) so the commit lands on main.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+
+      - name: Download linux-x86_64 artifacts for sha256
+        uses: actions/download-artifact@v4
+        with:
+          name: linux-x86_64
+          path: artifacts/linux-x86_64
+
+      - name: Compute source tarball sha256
+        id: sha
+        run: |
+          VERSION="${{ needs.resolve-version.outputs.version }}"
+          SRC_FILE="artifacts/linux-x86_64/${{ env.BIN }}-${VERSION}-src.tar.gz"
+          SHA=$(sha256sum "$SRC_FILE" | awk '{print $1}')
+          echo "sha256=$SHA" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Patch Formula/glassy.rb with real version + sha256
+        run: |
+          VERSION="${{ steps.sha.outputs.version }}"
+          SHA="${{ steps.sha.outputs.sha256 }}"
+          # Order matters: replace the longer GLASSY_VERSION_PLAIN sentinel
+          # BEFORE GLASSY_VERSION (which is a prefix of it) so we don't corrupt
+          # the longer token. GLASSY_VERSION becomes the tag (v-prefixed).
+          for f in Formula/glassy.rb packaging/homebrew/glassy.rb; do
+            sed -i \
+              -e "s|GLASSY_VERSION_PLAIN|${VERSION}|g" \
+              -e "s|GLASSY_VERSION|v${VERSION}|g" \
+              -e "s|GLASSY_SHA256|${SHA}|g" \
+              "$f"
+          done
+
+      - name: Show patched formula (debug)
+        run: cat Formula/glassy.rb
+
+      - name: Commit bumped formula back to the default branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # If the formula is unchanged (re-run on an already-bumped version),
+          # this is a no-op and we exit cleanly.
+          if git diff --quiet -- Formula/glassy.rb packaging/homebrew/glassy.rb; then
+            echo "Formula already up to date; nothing to commit."
+            exit 0
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/glassy.rb packaging/homebrew/glassy.rb
+          # [skip ci] keeps this commit from re-triggering the main-push release.
+          git commit -m "chore(release): bump Homebrew formula to ${{ steps.sha.outputs.version }} [skip ci]"
+          git push origin "HEAD:${{ github.event.repository.default_branch }}"
+
+  # -------------------------------------------------------------------------
+  # AUR update (best-effort)
+  # -------------------------------------------------------------------------
+  update-aur:
+    name: Update AUR package
+    needs: [resolve-version, publish]
+    if: always() && needs.publish.result == 'success'
+    runs-on: ubuntu-latest
+    continue-on-error: true  # AUR SSH key may not be configured
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download linux-x86_64 artifacts for sha256
+        uses: actions/download-artifact@v4
+        with:
+          name: linux-x86_64
+          path: artifacts/linux-x86_64
+
+      - name: Compute checksums
+        id: sha
+        run: |
+          VERSION="${{ needs.resolve-version.outputs.version }}"
+          SRC_FILE="artifacts/linux-x86_64/${{ env.BIN }}-${VERSION}-src.tar.gz"
+          BIN_FILE="artifacts/linux-x86_64/${{ env.BIN }}-x86_64-linux"
+          SRC_SHA=$(sha256sum "$SRC_FILE" | awk '{print $1}')
+          BIN_SHA=$(sha256sum "$BIN_FILE" | awk '{print $1}')
+          echo "src_sha=$SRC_SHA" >> "$GITHUB_OUTPUT"
+          echo "bin_sha=$BIN_SHA" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Patch PKGBUILD + .SRCINFO with real checksums
+        run: |
+          VERSION="${{ steps.sha.outputs.version }}"
+          SRC_SHA="${{ steps.sha.outputs.src_sha }}"
+          BIN_SHA="${{ steps.sha.outputs.bin_sha }}"
+
+          # Source PKGBUILD.
+          sed -i \
+            -e "s/^pkgver=.*/pkgver=${VERSION}/" \
+            -e "s/sha256sums=('SKIP')/sha256sums=('${SRC_SHA}')/" \
+            packaging/aur/PKGBUILD
+
+          # .SRCINFO.
+          sed -i \
+            -e "s/^\tpkgver = .*/\tpkgver = ${VERSION}/" \
+            -e "s/sha256sums = SKIP/sha256sums = ${SRC_SHA}/" \
+            packaging/aur/.SRCINFO
+
+          # -bin PKGBUILD.
+          sed -i \
+            -e "s/^pkgver=.*/pkgver=${VERSION}/" \
+            -e "s/sha256sums=('SKIP'/sha256sums=('${BIN_SHA}'/" \
+            -e "s/'SKIP')$/'${SRC_SHA}')/" \
+            packaging/aur/PKGBUILD-bin
+
+      # TODO: push to AUR via SSH. Requires AUR_SSH_PRIVATE_KEY secret.
+      # Uncomment when the AUR package is registered:
+      #
+      # - name: Push PKGBUILD to AUR
+      #   uses: nicholasgasior/action-aur-publish@v1
+      #   with:
+      #     aur_package_name: glassy
+      #     aur_ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+      #     pkgbuild_dir: packaging/aur
+
+      - name: Show patched PKGBUILD (debug)
+        run: cat packaging/aur/PKGBUILD
+
+  # ===========================================================================
+  # OWNER ACTIONS REQUIRED to make `dnf install` / `apt install` work
+  # (the two jobs below are no-ops until these are done — the release itself
+  # still succeeds without them):
+  #
+  #   1. Enable GitHub Pages for this repo, served from the `gh-pages` branch
+  #      (Settings → Pages → Source: "Deploy from a branch" → gh-pages / root).
+  #      The first successful run of these jobs creates the gh-pages branch.
+  #      Site URL must resolve to https://alliecatowo.github.io/glassy/.
+  #
+  #   2. Generate a dedicated signing GPG key (do NOT reuse a personal key):
+  #        gpg --quick-generate-key "glassy releases <allisonemilycoleman@gmail.com>" rsa4096 sign 5y
+  #        gpg --armor --export-secret-keys <KEYID> > glassy-signing.asc
+  #      Add two repo secrets (Settings → Secrets and variables → Actions):
+  #        RELEASE_GPG_PRIVATE_KEY = contents of glassy-signing.asc (ASCII-armored)
+  #        RELEASE_GPG_PASSPHRASE  = the key's passphrase (empty string if none)
+  #      Then DELETE glassy-signing.asc locally. The PUBLIC key is published to
+  #      Pages automatically by the jobs (rpm/RPM-GPG-KEY-glassy and
+  #      deb/glassy-archive-keyring.asc) so end users can verify signatures.
+  #
+  #   3. (Optional Fedora alternative) Copr: create an account at
+  #      https://copr.fedorainfracloud.org/, make a `glassy` project, and either
+  #      build there from this repo's spec or document `dnf copr enable
+  #      alliecatowo/glassy`. The Pages dnf repo below is the working default and
+  #      needs no Copr account.
+  #
+  # Both jobs ACCUMULATE: they fetch the existing gh-pages tree and add the new
+  # package without wiping prior releases (peaceiris keep_files: true).
+  # ===========================================================================
+
+  # -------------------------------------------------------------------------
+  # dnf (Fedora/RHEL/openSUSE) — self-hosted, GPG-signed yum/dnf repo on Pages.
+  # Reuses the .rpm already built by build-linux-x86_64; only needs the signing
+  # GPG key secret. No Copr account required.
+  # -------------------------------------------------------------------------
+  publish-dnf-repo:
+    name: Publish dnf repo (GitHub Pages)
+    needs: [resolve-version, publish]
+    if: always() && needs.publish.result == 'success' && needs.resolve-version.outputs.is_new == 'true'
+    runs-on: ubuntu-latest
+    continue-on-error: true  # no-op gracefully if the GPG secret is absent
+    permissions:
+      contents: write  # peaceiris pushes to gh-pages
+    steps:
+      - uses: actions/checkout@v4
+
+      # GitHub forbids `secrets.*` in a job-level `if`, so detect key presence
+      # here and gate every subsequent step on this output. Absent key => the
+      # job runs but does nothing (and continue-on-error keeps the release green).
+      - name: Check for signing key
+        id: guard
+        env:
+          GPG_KEY: ${{ secrets.RELEASE_GPG_PRIVATE_KEY }}
+        run: |
+          if [ -n "${GPG_KEY}" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::RELEASE_GPG_PRIVATE_KEY not set — skipping dnf repo publish."
+          fi
+
+      - name: Install repo tooling
+        if: steps.guard.outputs.enabled == 'true'
+        run: |
+          sudo apt-get update
+          # createrepo-c builds repodata; rpm provides `rpm --addsign` + `rpmsign`.
+          sudo apt-get install -y --no-install-recommends createrepo-c rpm gnupg
+
+      - name: Download linux-x86_64 artifact (.rpm)
+        if: steps.guard.outputs.enabled == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: linux-x86_64
+          path: artifacts/linux-x86_64
+
+      - name: Import signing key
+        if: steps.guard.outputs.enabled == 'true'
+        env:
+          GPG_KEY: ${{ secrets.RELEASE_GPG_PRIVATE_KEY }}
+          GPG_PASS: ${{ secrets.RELEASE_GPG_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          export GNUPGHOME="$RUNNER_TEMP/gnupg"
+          mkdir -p "$GNUPGHOME"; chmod 700 "$GNUPGHOME"
+          echo "GNUPGHOME=$GNUPGHOME" >> "$GITHUB_ENV"
+          # Enable the agent to hold a preset passphrase for non-interactive use.
+          printf 'allow-loopback-pinentry\nallow-preset-passphrase\n' > "$GNUPGHOME/gpg-agent.conf"
+          printf '%s' "$GPG_KEY" | gpg --batch --import
+          gpg-connect-agent reloadagent /bye || true
+          # Capture the signing key id + uid for rpm + the exported public key.
+          KEYID="$(gpg --list-secret-keys --with-colons | awk -F: '/^sec:/ {print $5; exit}')"
+          UID_NAME="$(gpg --list-secret-keys --with-colons | awk -F: '/^uid:/ {print $10; exit}')"
+          echo "GPG_KEYID=$KEYID"  >> "$GITHUB_ENV"
+          echo "GPG_UID=$UID_NAME" >> "$GITHUB_ENV"
+          # Preset the passphrase into the agent against the signing key's keygrip
+          # so rpm's default gpg sign command (which talks to the agent) never
+          # blocks on a pinentry prompt.
+          KEYGRIP="$(gpg --batch --with-keygrip --list-secret-keys --with-colons \
+            | awk -F: '/^grp:/ {print $10; exit}')"
+          if [ -n "${GPG_PASS}" ]; then
+            /usr/lib/gnupg/gpg-preset-passphrase --preset --passphrase "${GPG_PASS}" "${KEYGRIP}" \
+              || /usr/libexec/gpg-preset-passphrase --preset --passphrase "${GPG_PASS}" "${KEYGRIP}" \
+              || echo "::warning::gpg-preset-passphrase not found; relying on loopback below"
+          fi
+
+      - name: Sign the .rpm
+        if: steps.guard.outputs.enabled == 'true'
+        env:
+          GPG_PASS: ${{ secrets.RELEASE_GPG_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          RPM="$(find artifacts/linux-x86_64 -name '*.rpm' | head -n1)"
+          [ -n "$RPM" ] || { echo "::error::no .rpm found in artifact"; exit 1; }
+          echo "RPM_FILE=$RPM" >> "$GITHUB_ENV"
+          # Point rpm at our throwaway keyring; %_gpg_sign_cmd_extra_args feeds
+          # loopback so signing is non-interactive. Only pass --passphrase when a
+          # passphrase exists (an empty one would prompt); for a keyless key the
+          # preset/loopback agent handles it.
+          {
+            echo "%_signature gpg"
+            echo "%_gpg_name ${GPG_UID}"
+            echo "%_gpg_path ${GNUPGHOME}"
+            if [ -n "${GPG_PASS}" ]; then
+              echo "%_gpg_sign_cmd_extra_args --pinentry-mode loopback --passphrase ${GPG_PASS}"
+            else
+              echo "%_gpg_sign_cmd_extra_args --pinentry-mode loopback"
+            fi
+          } > "$HOME/.rpmmacros"
+          rpmsign --addsign "$RPM"
+          rpm -Kv "$RPM" || true  # informational; key not in rpmdb on this runner
+
+      - name: Build repo metadata (createrepo_c) into staging tree
+        if: steps.guard.outputs.enabled == 'true'
+        env:
+          GPG_PASS: ${{ secrets.RELEASE_GPG_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          # Stage ONLY the new files we add this run; peaceiris keep_files:true
+          # preserves the prior rpms already on Pages, and createrepo_c --update
+          # (run against the merged tree) would need the old files present, so we
+          # instead let peaceiris merge: we place the new rpm + freshly-built
+          # repodata that indexes the full set. To index the full set we first
+          # pull the existing rpms down (best-effort) so metadata is complete.
+          mkdir -p site/rpm
+          # Best-effort: fetch already-published rpms so repodata lists them too.
+          BASE="https://alliecatowo.github.io/glassy/rpm"
+          if curl -fsSL "$BASE/repodata/repomd.xml" -o /tmp/repomd.xml 2>/dev/null; then
+            echo "Existing repo found; pulling prior rpms for a complete index."
+            # Parse primary.xml location, fetch it, extract rpm hrefs.
+            PRIMARY="$(grep -oE 'repodata/[a-f0-9]+-primary\.xml\.gz' /tmp/repomd.xml | head -n1 || true)"
+            if [ -n "${PRIMARY:-}" ] && curl -fsSL "$BASE/$PRIMARY" -o /tmp/primary.xml.gz 2>/dev/null; then
+              gunzip -f /tmp/primary.xml.gz || true
+              # `|| true` so an empty/odd primary.xml doesn't trip pipefail. The
+              # location href is relative to the repo root, so $BASE/$href is the
+              # package URL.
+              (grep -oE 'href="[^"]+\.rpm"' /tmp/primary.xml || true) | sed -E 's/href="([^"]+)"/\1/' | while read -r href; do
+                fn="$(basename "$href")"
+                curl -fsSL "$BASE/$href" -o "site/rpm/$fn" 2>/dev/null || true
+              done
+            fi
+          else
+            echo "No existing repo; starting fresh."
+          fi
+          # Drop in the new rpm (overwrites same-version re-runs).
+          cp "$RPM_FILE" site/rpm/
+          # Build metadata over the complete set.
+          createrepo_c --update site/rpm
+          # GPG-sign repomd.xml (detached, armored) — what dnf's repo_gpgcheck verifies.
+          gpg --batch --yes --pinentry-mode loopback --passphrase-fd 3 \
+            --detach-sign --armor site/rpm/repodata/repomd.xml 3<<<"${GPG_PASS}"
+          # Publish the public key + a ready-to-use .repo file.
+          gpg --armor --export "${GPG_KEYID}" > site/rpm/RPM-GPG-KEY-glassy
+          cp packaging/glassy.repo site/rpm/glassy.repo
+
+      - name: Publish rpm/ to GitHub Pages (accumulate)
+        if: steps.guard.outputs.enabled == 'true'
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: site
+          keep_files: true   # never wipe deb/ or prior rpms
+          commit_message: "dnf repo: glassy ${{ needs.resolve-version.outputs.version }}"
+
+  # -------------------------------------------------------------------------
+  # apt (Debian/Ubuntu) — self-hosted, GPG-signed flat apt repo on Pages.
+  # Reuses the .deb built by build-linux-x86_64. Serialized AFTER the dnf job
+  # so the two don't race pushing to the same gh-pages branch.
+  # -------------------------------------------------------------------------
+  publish-apt-repo:
+    name: Publish apt repo (GitHub Pages)
+    needs: [resolve-version, publish, publish-dnf-repo]
+    if: always() && needs.publish.result == 'success' && needs.resolve-version.outputs.is_new == 'true'
+    runs-on: ubuntu-latest
+    continue-on-error: true  # no-op gracefully if the GPG secret is absent
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check for signing key
+        id: guard
+        env:
+          GPG_KEY: ${{ secrets.RELEASE_GPG_PRIVATE_KEY }}
+        run: |
+          if [ -n "${GPG_KEY}" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::RELEASE_GPG_PRIVATE_KEY not set — skipping apt repo publish."
+          fi
+
+      - name: Install repo tooling
+        if: steps.guard.outputs.enabled == 'true'
+        run: |
+          sudo apt-get update
+          # dpkg-dev provides dpkg-scanpackages; apt-utils provides apt-ftparchive.
+          sudo apt-get install -y --no-install-recommends dpkg-dev apt-utils gnupg
+
+      - name: Download linux-x86_64 artifact (.deb)
+        if: steps.guard.outputs.enabled == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: linux-x86_64
+          path: artifacts/linux-x86_64
+
+      - name: Import signing key
+        if: steps.guard.outputs.enabled == 'true'
+        env:
+          GPG_KEY: ${{ secrets.RELEASE_GPG_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          export GNUPGHOME="$RUNNER_TEMP/gnupg"
+          mkdir -p "$GNUPGHOME"; chmod 700 "$GNUPGHOME"
+          echo "GNUPGHOME=$GNUPGHOME" >> "$GITHUB_ENV"
+          printf '%s' "$GPG_KEY" | gpg --batch --import
+          KEYID="$(gpg --list-secret-keys --with-colons | awk -F: '/^sec:/ {print $5; exit}')"
+          echo "GPG_KEYID=$KEYID" >> "$GITHUB_ENV"
+          printf 'allow-loopback-pinentry\n' > "$GNUPGHOME/gpg-agent.conf"
+          gpg-connect-agent reloadagent /bye || true
+
+      - name: Build flat apt repo into staging tree
+        if: steps.guard.outputs.enabled == 'true'
+        env:
+          GPG_PASS: ${{ secrets.RELEASE_GPG_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          DEB="$(find artifacts/linux-x86_64 -name '*.deb' | head -n1)"
+          [ -n "$DEB" ] || { echo "::error::no .deb found in artifact"; exit 1; }
+          mkdir -p site/deb
+          # Best-effort: pull existing .debs so the new Packages index lists the
+          # whole set (flat repo; peaceiris keep_files keeps the files themselves).
+          BASE="https://alliecatowo.github.io/glassy/deb"
+          if curl -fsSL "$BASE/Packages" -o /tmp/old-Packages 2>/dev/null; then
+            # `|| true` so a Packages file with no entries doesn't trip pipefail.
+            (grep -E '^Filename:' /tmp/old-Packages || true) | awk '{print $2}' | while read -r rel; do
+              fn="$(basename "$rel")"
+              curl -fsSL "$BASE/$fn" -o "site/deb/$fn" 2>/dev/null || true
+            done
+          fi
+          cp "$DEB" site/deb/
+          cd site/deb
+          # Flat repo: Packages references files by basename (Filename: ./<deb>).
+          dpkg-scanpackages --multiversion . > Packages
+          gzip -kf Packages
+          # Release file with checksums of the Packages indices.
+          apt-ftparchive \
+            -o "APT::FTPArchive::Release::Origin=glassy" \
+            -o "APT::FTPArchive::Release::Label=glassy" \
+            -o "APT::FTPArchive::Release::Suite=stable" \
+            -o "APT::FTPArchive::Release::Codename=stable" \
+            -o "APT::FTPArchive::Release::Components=main" \
+            -o "APT::FTPArchive::Release::Architectures=amd64" \
+            release . > Release
+          # Sign Release -> InRelease (inline) + Release.gpg (detached).
+          gpg --batch --yes --pinentry-mode loopback --passphrase-fd 3 \
+            --clearsign -o InRelease Release 3<<<"${GPG_PASS}"
+          gpg --batch --yes --pinentry-mode loopback --passphrase-fd 3 \
+            -abs -o Release.gpg Release 3<<<"${GPG_PASS}"
+          # Export the public key for `signed-by=`.
+          gpg --armor --export "${GPG_KEYID}" > glassy-archive-keyring.asc
+
+      - name: Publish deb/ to GitHub Pages (accumulate)
+        if: steps.guard.outputs.enabled == 'true'
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: site
+          keep_files: true   # never wipe rpm/ or prior debs
+          commit_message: "apt repo: glassy ${{ needs.resolve-version.outputs.version }}"

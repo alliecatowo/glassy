@@ -2,3 +2,5 @@
 /assets/fonts/
 *.ppm
 .glassy-wf-*.js
+/target-mega/
+/target-*/

@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.alliecatowo.glassy</id>
+
+  <name>glassy</name>
+  <summary>Fast, minimal GPU-accelerated terminal emulator</summary>
+
+  <metadata_license>MIT</metadata_license>
+  <project_license>MIT</project_license>
+
+  <description>
+    <p>
+      glassy is a small, fast, GPU-accelerated terminal emulator written in Rust.
+      It draws the grid with an instanced wgpu renderer fed by a dynamic glyph
+      atlas, and supports 24-bit truecolor, color emoji, procedural box-drawing,
+      mouse reporting, selection, clipboard, scrollback, OSC 8 hyperlinks, tabs,
+      window decorations, configurable cursor, translucency, and themeable config.
+    </p>
+    <p>Features:</p>
+    <ul>
+      <li>GPU-accelerated rendering via wgpu</li>
+      <li>24-bit truecolor and color emoji</li>
+      <li>Tab strip with multiple terminal sessions</li>
+      <li>Wayland-native with X11 fallback</li>
+      <li>Live-switchable themes (Tokyo Night, Catppuccin, Gruvbox, Dracula, Nord…)</li>
+      <li>In-app settings overlay (Ctrl+,) and help (F1)</li>
+      <li>OSC 8 hyperlinks and kitty graphics protocol</li>
+    </ul>
+  </description>
+
+  <launchable type="desktop-id">io.github.alliecatowo.glassy.desktop</launchable>
+
+  <url type="homepage">https://github.com/alliecatowo/glassy</url>
+  <url type="bugtracker">https://github.com/alliecatowo/glassy/issues</url>
+
+  <developer id="io.github.alliecatowo">
+    <name>Allie</name>
+  </developer>
+
+  <provides>
+    <binary>glassy</binary>
+  </provides>
+
+  <releases>
+    <release version="0.1.0" date="2026-06-24">
+      <description>
+        <p>Initial release.</p>
+      </description>
+    </release>
+  </releases>
+
+  <content_rating type="oars-1.1"/>
+</component>
