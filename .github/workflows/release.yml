@@ -18,6 +18,11 @@ on:
     branches:
       - main
   workflow_dispatch:
+    inputs:
+      publish:
+        description: "Cut a real release (tag + GitHub Release + brew/dnf/apt). Leave OFF for a build-only test."
+        type: boolean
+        default: false
 
 env:
   CARGO_TERM_COLOR: always
@@ -451,7 +456,11 @@ jobs:
     # the main-push trigger safe: a re-merge or an unrelated push to main where
     # Cargo.toml's version was already released becomes a no-op here. Optional
     # build jobs (aarch64/windows) may fail without blocking the release.
-    if: always() && needs.build-linux-x86_64.result == 'success' && needs.resolve-version.outputs.is_new == 'true'
+    # A plain workflow_dispatch is a BUILD-ONLY TEST (publish=false default) and
+    # skips this job — which gates the whole publish chain (homebrew/aur/dnf/apt
+    # all `needs: publish`). Tag/main pushes always publish; a dispatch publishes
+    # only when explicitly requested with publish=true.
+    if: always() && needs.build-linux-x86_64.result == 'success' && needs.resolve-version.outputs.is_new == 'true' && (github.event_name != 'workflow_dispatch' || github.event.inputs.publish == 'true')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

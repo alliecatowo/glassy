@@ -1,0 +1,11 @@
+#!/bin/bash
+# Post-install maintainer script for the glassy .deb: compile + install the
+# terminfo database so TERM=glassy works system-wide. Runs after unpack.
+set -e
+
+# tic ships with ncurses-bin (an essential package).
+if command -v tic &> /dev/null; then
+    tic -x -o /usr/share/terminfo /usr/share/doc/glassy/terminfo/glassy.terminfo 2>/dev/null || true
+fi
+
+exit 0

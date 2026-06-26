@@ -2,6 +2,10 @@
 name = "glassy"
 version = "0.2.0"
 edition = "2024"
+description = "A minimal, fast, GPU-accelerated terminal emulator written in Rust."
+license = "MIT"
+homepage = "https://github.com/alliecatowo/glassy"
+repository = "https://github.com/alliecatowo/glassy"
 
 [dependencies]
 polling = "3.11"
@@ -130,8 +134,9 @@ assets = [
     ["extra/glassy.1", "usr/share/man/man1/glassy.1", "644"],
     ["terminfo/glassy.terminfo", "usr/share/doc/glassy/terminfo/glassy.terminfo", "644"],
 ]
-# Post-install script to compile and install terminfo.
-scripts = { postinst = "packaging/scripts/postinst.sh" }
+# Post-install maintainer scripts (directory; cargo-deb picks up `postinst`).
+# Compiles + installs the terminfo entry after unpack.
+maintainer-scripts = "packaging/deb/"
 
 # ---------------------------------------------------------------------------
 # RPM packaging (cargo-generate-rpm).
