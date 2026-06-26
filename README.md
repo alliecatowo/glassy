@@ -141,11 +141,14 @@ Make sure `~/.local/bin` is on your `PATH`. The script prints a reminder if it i
 **Fedora / RHEL / openSUSE — dnf repo** *(GPG-signed; gets updates via `dnf upgrade`)*
 
 ```sh
-sudo dnf config-manager --add-repo https://alliecatowo.github.io/glassy/rpm/glassy.repo
+# Fedora 41+ (dnf5):
+sudo dnf config-manager addrepo --from-repofile=https://alliecatowo.github.io/glassy/rpm/glassy.repo
+# Older dnf4 (Fedora ≤40 / RHEL): sudo dnf config-manager --add-repo https://alliecatowo.github.io/glassy/rpm/glassy.repo
+# Version-agnostic fallback: sudo curl -fsSL -o /etc/yum.repos.d/glassy.repo https://alliecatowo.github.io/glassy/rpm/glassy.repo
 sudo dnf install glassy
 ```
 
-> On older dnf: `sudo dnf install 'dnf-command(config-manager)'` first. openSUSE:
+> openSUSE:
 > `sudo zypper addrepo https://alliecatowo.github.io/glassy/rpm/glassy.repo && sudo zypper install glassy`.
 > _Copr alternative_ (once the project is mirrored there):
 > `sudo dnf copr enable alliecatowo/glassy && sudo dnf install glassy`.
