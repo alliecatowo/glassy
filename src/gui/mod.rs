@@ -390,6 +390,8 @@ pub enum SettingsDrop {
     ThemeLight,
     /// The system-Dark theme chooser list is open (Themes section).
     ThemeDark,
+    /// The window-effect chooser list is open (Appearance section).
+    Effect,
 }
 
 /// The live, read-only view of state the settings form draws from. The App
@@ -528,6 +530,8 @@ pub struct SettingsEvents {
     pub opacity: Option<f32>,
     /// New bell mode index if the segmented control changed.
     pub bell: Option<usize>,
+    /// The user toggled the window-effect dropdown header (App flips `open`).
+    pub window_effect_toggle: bool,
     /// The user toggled the theme dropdown header (App flips `open`).
     pub theme_toggle: bool,
     /// A theme row was picked (absolute index into `theme_names`).

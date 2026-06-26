@@ -656,8 +656,17 @@ impl App {
             self.set_tab_bar_mode_index(idx);
             changed = true;
         }
+        if ev.window_effect_toggle {
+            self.settings_drop = if self.settings_drop == gui::SettingsDrop::Effect {
+                gui::SettingsDrop::None
+            } else {
+                gui::SettingsDrop::Effect
+            };
+            changed = true;
+        }
         if let Some(idx) = ev.window_effect {
             self.set_window_effect_index(idx);
+            self.settings_drop = gui::SettingsDrop::None;
             changed = true;
         }
         if ev.follow_system_toggle {

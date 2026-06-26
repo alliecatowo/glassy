@@ -203,33 +203,31 @@ impl App {
             // Update the OS cursor icon on every cell move (cheap: winit deduplicates
             // repeated set_cursor calls on most backends). Rules:
             //   • Pointer  — over a hoverable link (Ctrl+click opens it)
-            //   • Default  — over the tab-strip chrome (arrow for UI affordances)
-            //   • Text     — over the terminal content area (I-beam for selection)
-            // This runs for both mouse-reporting and non-reporting modes so the
-            // cursor stays correct even when the app consumes mouse events.
+            //   • Default  — the normal arrow everywhere else (owner prefers the
+            //     arrow over the grid, not an I-beam). Gutter hover sets a resize
+            //     cursor separately.
             if let Some(window) = self.window.as_ref() {
                 use winit::window::CursorIcon;
+                let _ = over_tab_bar;
                 let icon = if self.hovered_link.is_some() {
                     CursorIcon::Pointer
-                } else if over_tab_bar {
-                    CursorIcon::Default
                 } else {
-                    CursorIcon::Text
+                    CursorIcon::Default
                 };
                 window.set_cursor(icon);
             }
         }
     }
 
-    /// Set (or restore) the OS cursor to match the terminal content area:
-    /// `Text` (I-beam) so text selection feels native. Called when leaving a
-    /// gutter (resize cursor) back into regular content.
+    /// Restore the OS cursor to the normal arrow over the content area (Pointer
+    /// over a link). Called when leaving a gutter (resize cursor) back into
+    /// regular content.
     pub(crate) fn apply_content_cursor(&self) {
         use winit::window::CursorIcon;
         let icon = if self.hovered_link.is_some() {
             CursorIcon::Pointer
         } else {
-            CursorIcon::Text
+            CursorIcon::Default
         };
         if let Some(window) = self.window.as_ref() {
             window.set_cursor(icon);

@@ -16,6 +16,18 @@ use super::*;
 /// The kind of control a settings row carries. The row builder pushes these into
 /// a flat list; the draw pass walks the list, culls off-screen rows, and emits the
 /// right widget for each.
+/// Full names for the window-effect dropdown (index order mirrors `WindowEffect::index`).
+const EFFECT_NAMES: &[&str] = &[
+    "Off",
+    "Frosted",
+    "Acrylic",
+    "CRT",
+    "Scanlines",
+    "Grain",
+    "Vignette",
+    "Bloom",
+];
+
 enum RowKind<'a> {
     /// A dim section heading + a hairline under it.
     Heading(&'a str),
@@ -326,6 +338,7 @@ impl<'r> Ui<'r> {
                     theme_index(v.theme_names, v.theme_dark),
                     Some(v.theme_swatches),
                 ),
+                SettingsDrop::Effect => (EFFECT_NAMES, v.window_effect_idx.min(7), None),
                 SettingsDrop::None => (&[], 0, None),
             };
             let pick = self.dropdown_popup(
@@ -342,6 +355,7 @@ impl<'r> Ui<'r> {
                     SettingsDrop::Font => ev.font_pick = Some(p),
                     SettingsDrop::ThemeLight => ev.theme_light_pick = Some(p),
                     SettingsDrop::ThemeDark => ev.theme_dark_pick = Some(p),
+                    SettingsDrop::Effect => ev.window_effect = Some(p),
                     SettingsDrop::None => {}
                 }
             }
@@ -626,15 +640,17 @@ fn build_section_rows<'a>(section: SettingsSection, v: &'a SettingsView<'a>) -> 
                 value: v.minimap,
             });
             // Unified window post-process effect (supersedes the legacy CRT
-            // toggle). Eight modes; abbreviated so the labels fit one segmented
-            // row. Index order mirrors `WindowEffect::index`.
-            rows.push(RowKind::Segmented {
+            // toggle). Eight modes — a dropdown, since a segmented row crams 8
+            // labels. Index order mirrors `WindowEffect::index`.
+            rows.push(RowKind::Dropdown {
                 id: "settings/window_effect",
                 label: "Effect",
-                options: &[
-                    "Off", "Frost", "Acryl", "CRT", "Scan", "Grain", "Vig", "Bloom",
-                ],
-                sel: v.window_effect_idx.min(7),
+                text: EFFECT_NAMES
+                    .get(v.window_effect_idx)
+                    .copied()
+                    .unwrap_or("Off"),
+                swatch: None,
+                which: SettingsDrop::Effect,
             });
         }
         SettingsSection::Themes => {
@@ -831,6 +847,7 @@ fn apply_dropdown_toggle(which: SettingsDrop, ev: &mut SettingsEvents) {
         SettingsDrop::Font => ev.font_toggle = true,
         SettingsDrop::ThemeLight => ev.theme_light_toggle = true,
         SettingsDrop::ThemeDark => ev.theme_dark_toggle = true,
+        SettingsDrop::Effect => ev.window_effect_toggle = true,
         SettingsDrop::None => {}
     }
 }
