@@ -103,6 +103,48 @@ pub fn scan_sync_2026(bytes: &[u8]) -> (u32, u32) {
     (begin, end)
 }
 
+/// Scan a VT byte run for DECSET/DECRST 1016 (SGR-Pixel mouse reporting).
+///
+/// Returns `Some(true)` if the run last enabled pixel reporting (`CSI ? 1016 h`),
+/// `Some(false)` if it last disabled it (`CSI ? 1016 l`), or `None` if neither
+/// appears. alacritty_terminal/vte do not model mode 1016, so glassy intercepts it
+/// here and tracks the state in `App::sgr_pixel_mouse`; `report_mouse` then encodes
+/// pixel coordinates instead of cell coordinates. The *last* 1016 toggle in the
+/// run wins (matching how a terminal applies them in order).
+pub fn scan_sgr_pixel_1016(bytes: &[u8]) -> Option<bool> {
+    let mut state: Option<bool> = None;
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != 0x1b {
+            i += 1;
+            continue;
+        }
+        if bytes.get(i + 1) == Some(&b'[') && bytes.get(i + 2) == Some(&b'?') {
+            let mut j = i + 3;
+            let mut num: u32 = 0;
+            while j < bytes.len() && bytes[j].is_ascii_digit() {
+                num = num * 10 + (bytes[j] - b'0') as u32;
+                j += 1;
+            }
+            // Tolerate sub-params (`?1016;1h`) before the final h/l.
+            while j < bytes.len() && (bytes[j] == b';' || bytes[j].is_ascii_digit()) {
+                j += 1;
+            }
+            if num == 1016 {
+                match bytes.get(j) {
+                    Some(&b'h') => state = Some(true),
+                    Some(&b'l') => state = Some(false),
+                    _ => {}
+                }
+            }
+            i = if j < bytes.len() { j + 1 } else { j };
+            continue;
+        }
+        i += 1;
+    }
+    state
+}
+
 /// Scan a VT byte run for SGR text-blink attributes (SGR 5 = slow, SGR 6 = rapid).
 ///
 /// Returns `true` if any `CSI 5 m` or `CSI 6 m` sequence (or compound SGRs
@@ -204,7 +246,33 @@ pub fn clears_screen(bytes: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{ModifyOtherKeys, scan_modify_other_keys, scan_sync_2026};
+    use super::{ModifyOtherKeys, scan_modify_other_keys, scan_sgr_pixel_1016, scan_sync_2026};
+
+    // ---- scan_sgr_pixel_1016 tests -------------------------------------------
+
+    #[test]
+    fn scan_1016_enable_and_disable() {
+        assert_eq!(scan_sgr_pixel_1016(b"\x1b[?1016h"), Some(true));
+        assert_eq!(scan_sgr_pixel_1016(b"\x1b[?1016l"), Some(false));
+    }
+
+    #[test]
+    fn scan_1016_last_toggle_wins() {
+        // Enable then disable in one run: the last one wins.
+        assert_eq!(scan_sgr_pixel_1016(b"\x1b[?1016h\x1b[?1016l"), Some(false));
+    }
+
+    #[test]
+    fn scan_1016_absent_is_none() {
+        assert_eq!(scan_sgr_pixel_1016(b"plain text"), None);
+        // A different private mode (SGR mouse 1006) is not 1016.
+        assert_eq!(scan_sgr_pixel_1016(b"\x1b[?1006h"), None);
+    }
+
+    #[test]
+    fn scan_1016_embedded_in_longer_run() {
+        assert_eq!(scan_sgr_pixel_1016(b"before\x1b[?1016hafter"), Some(true));
+    }
 
     // ---- scan_modify_other_keys tests ----------------------------------------
 

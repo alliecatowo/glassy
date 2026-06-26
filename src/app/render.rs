@@ -364,6 +364,19 @@ impl App {
         let selection = content.selection;
         let cursor_color = color::resolve(Color::Named(NamedColor::Cursor), colors);
 
+        // Snapshot SGR 53 overline coverage for this frame. alacritty_terminal has
+        // no overline flag, so the PTY loop records overlined cells (absolute
+        // `(row, col)`) in a side table; we look them up by the same absolute `row`
+        // the loop below computes. Cloned into a local so the lock is not held
+        // across the (long) cell loop; empty/cheap in the common no-overline case.
+        let overline_cells: std::collections::HashSet<(i32, usize)> = pty
+            .overline
+            .lock()
+            .ok()
+            .filter(|o| o.any())
+            .map(|o| o.snapshot())
+            .unwrap_or_default();
+
         // The cursor is suppressed only when Hidden, or mid-blink off-phase. It is
         // still drawn (as a hollow outline) when the window is unfocused. The block
         // shape inverts the cell beneath it; all other shapes are overlay rects.
@@ -571,6 +584,10 @@ impl App {
                 Decorations {
                     underline,
                     strikeout: cell.flags.contains(Flags::STRIKEOUT),
+                    // SGR 53 overline (tracked in the side table, keyed by the
+                    // absolute grid row + column this cell occupies).
+                    overline: !overline_cells.is_empty()
+                        && overline_cells.contains(&(row, col as usize)),
                     color,
                 }
             };
@@ -613,11 +630,21 @@ impl App {
             // squished into one cell.
             let wide = wide || consumed >= 2;
 
+            // Whether the (shown) cursor sits on this exact cell. A ligature run
+            // must not span the cursor cell: while editing, the character under the
+            // cursor has to render as its own glyph (not be swallowed into a wider
+            // ligature like `=>` → `⇒`), so the user sees and edits the real char.
+            // This holds for EVERY cursor shape (not just the inverting block):
+            // a beam/underline cursor over the middle of a ligature is just as
+            // misleading. Independent of fg/bg inversion, which only the block does.
+            let is_cursor_cell = cursor_shown && cur_cursor_cell == Some((col as usize, srow));
+
             // Determine whether this cell is eligible for ligature run accumulation.
             // A cell is ineligible if it has combiners, is wide, is hidden, is a
-            // space/null (blank), or falls in the box-drawing / block-element ranges
+            // space/null (blank), falls in the box-drawing / block-element ranges
             // (those take the procedural path in push_cell and must not be shaped as
-            // part of a text run).
+            // part of a text run), or carries the cursor (so it splits out as an
+            // individual glyph — see `is_cursor_cell`).
             let cp = ch as u32;
             let is_box_or_block = (0x2500..=0x259F).contains(&cp);
             let liga_eligible = use_liga
@@ -626,19 +653,18 @@ impl App {
                 && !wide
                 && ch != ' '
                 && ch != '\0'
-                && !is_box_or_block;
+                && !is_box_or_block
+                && !is_cursor_cell;
 
             if liga_eligible {
                 // Check if this cell is compatible with the current open run.
-                // A run break occurs on: row change, style change, or cursor
-                // inversion (cursor-inverted cells must not join a ligature because
-                // their fg/bg are swapped individually).
-                let is_cursor_cell = invert_block && row == cursor_row && col == cursor_col;
+                // A run break occurs on row change or style change. (The cursor cell
+                // itself is already excluded from `liga_eligible` above, so it never
+                // reaches here — it takes the individual `push_cell` path below.)
                 let run_continues = !run_cells.is_empty()
                     && run_row == srow
                     && run_bold == bold
-                    && run_italic == italic
-                    && !is_cursor_cell;
+                    && run_italic == italic;
 
                 if !run_continues {
                     // Flush any open run before starting a new one.

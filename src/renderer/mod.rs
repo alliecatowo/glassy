@@ -228,6 +228,11 @@ pub enum UnderlineStyle {
 pub struct Decorations {
     pub underline: UnderlineStyle,
     pub strikeout: bool,
+    /// SGR 53 overline: a stroke along the cell's TOP edge (mirrors the strikeout
+    /// stroke but at the top). SGR 55 clears it. alacritty_terminal's `Flags` has
+    /// no overline bit (and vte drops SGR 53/55), so glassy tracks overline in a
+    /// side table (`OverlineMap`) and sets this flag in the render path.
+    pub overline: bool,
     pub color: [f32; 4],
 }
 

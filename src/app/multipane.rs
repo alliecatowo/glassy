@@ -1057,6 +1057,16 @@ impl App {
         let selection = content.selection;
         let cursor_color = color::resolve(Color::Named(NamedColor::Cursor), colors);
 
+        // SGR 53 overline coverage for this pane (see the single-pane path in
+        // `render.rs`). Cloned out so the lock is not held across the cell loop.
+        let overline_cells: std::collections::HashSet<(i32, usize)> = pty
+            .overline
+            .lock()
+            .ok()
+            .filter(|o| o.any())
+            .map(|o| o.snapshot())
+            .unwrap_or_default();
+
         let cursor_shown = cursor.shape != CursorShape::Hidden;
         let cursor_row = cursor.point.line.0 + display_offset;
         let cursor_col = cursor.point.column.0 as i32;
@@ -1129,6 +1139,8 @@ impl App {
                 Decorations {
                     underline,
                     strikeout: cell.flags.contains(Flags::STRIKEOUT),
+                    overline: !overline_cells.is_empty()
+                        && overline_cells.contains(&(row, col as usize)),
                     color,
                 }
             };

@@ -294,7 +294,7 @@ impl Renderer {
     /// `CellMetrics`. Straight strokes are solid rectangles in the bg pass; the
     /// curly underline is a foreground decoration instance (procedural coverage).
     pub(crate) fn draw_decorations(&mut self, ox: f32, oy: f32, dec: Decorations) {
-        if dec.underline == UnderlineStyle::None && !dec.strikeout {
+        if dec.underline == UnderlineStyle::None && !dec.strikeout && !dec.overline {
             return;
         }
         let c = dec.color;
@@ -306,6 +306,14 @@ impl Renderer {
         if dec.strikeout {
             let y = (oy + self.metrics.strikeout_y).round();
             self.push_solid(x, y, w, th, c);
+        }
+
+        // SGR 53 overline: a stroke along the cell's TOP edge. Mirrors the
+        // double-underline's top rail but anchored to the top of the cell box so
+        // contiguous overlined runs join into one continuous line. Drawn in the
+        // decoration color, like the underline/strikeout strokes.
+        if dec.overline {
+            self.push_solid(x, oy.round(), w, th, c);
         }
 
         // Underline baseline y, clamped to stay inside the cell.

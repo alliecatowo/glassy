@@ -166,6 +166,16 @@ impl App {
     pub(crate) fn report_mouse(&self, button: u8, pressed: bool, motion: bool, mode: TermMode) {
         let Some(pty) = self.pty.as_ref() else { return };
         let (col, row) = self.mouse_cell;
+        let sgr = mode.contains(TermMode::SGR_MOUSE);
+        // SGR-Pixel reporting (DECSET 1016): only meaningful in SGR mode. Report
+        // pixel coordinates relative to the terminal content origin (top-left of
+        // the cell grid, i.e. inside the pad and below the tab bar / pane origin),
+        // clamped to non-negative.
+        let pixel = if sgr && self.sgr_pixel_mouse {
+            Some(self.mouse_content_px())
+        } else {
+            None
+        };
         let bytes = encode_mouse(
             MouseReport {
                 button,
@@ -173,11 +183,47 @@ impl App {
                 row,
                 pressed,
                 motion,
+                pixel,
             },
             self.mods,
-            mode.contains(TermMode::SGR_MOUSE),
+            sgr,
         );
         pty.write(bytes);
+    }
+
+    /// The current pointer position as 0-based pixel coordinates relative to the
+    /// terminal content origin (top-left of the cell grid), for SGR-Pixel mouse
+    /// reporting (mode 1016). In a split this is measured from the focused pane's
+    /// tile origin + pad; single-pane subtracts the pad and the tab-bar inset.
+    /// Clamped to [0, grid extent] so a report never lands outside the grid.
+    fn mouse_content_px(&self) -> (u32, u32) {
+        let pad = self
+            .renderer
+            .as_ref()
+            .map(|r| r.pad() as f64)
+            .unwrap_or(0.0);
+        let (mx, my) = self.mouse_px;
+        let (ox, oy) = if let Some(rect) = self.focused_pane_rect() {
+            (rect.x as f64 + pad, rect.y as f64 + pad)
+        } else {
+            (pad, pad + self.effective_tab_bar_h() as f64)
+        };
+        let px = (mx - ox).max(0.0);
+        let py = (my - oy).max(0.0);
+        // Clamp to the grid's pixel extent so an off-grid pointer (e.g. over the
+        // pad) reports the edge rather than a value past the last cell.
+        let (maxx, maxy) = self
+            .renderer
+            .as_ref()
+            .map(|r| {
+                let m = r.cell_metrics();
+                (
+                    (self.cols as f64 * m.width as f64).max(1.0),
+                    (self.rows as f64 * m.height as f64).max(1.0),
+                )
+            })
+            .unwrap_or((1.0, 1.0));
+        (px.min(maxx - 1.0) as u32, py.min(maxy - 1.0) as u32)
     }
 
     /// Which side (left/right half) of its cell a physical x-coordinate falls on.
