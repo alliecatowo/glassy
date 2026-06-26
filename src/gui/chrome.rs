@@ -51,8 +51,9 @@ impl<'r> Ui<'r> {
             .max(m.cell_w * 28.0);
         // font, opacity, bell, theme, font, scrollback, padding, status_bar,
         // pane_headers, tab_bar, follow_system, ligatures, restore_session,
-        // word_sep, font_features, config path, cursor_style, cursor_blink.
-        const ROWS: usize = 18;
+        // word_sep, font_features, cursor_style, cursor_blink, window_effect,
+        // config path.
+        const ROWS: usize = 19;
         let header_h = m.row_h;
         let footer_h = m.row_h + m.gap;
         // Adaptive row step: the natural step is `row_h + gap`, but if the form
@@ -120,10 +121,17 @@ impl<'r> Ui<'r> {
         // ("1.00"); floor the track width so the slider stays usable even when
         // `ctrl_w` is squeezed to its `ctrl_w*0.5` floor on a narrow window.
         let sl = ctrl_rect(y, (ctrl_w - m.cell_w * 6.0).max(m.cell_w * 4.0));
-        let nv = self.slider(id("settings/opacity"), sl, v.opacity, 0.0, 1.0, 0.05);
+        // The slider lives in PERCEPTUAL space (equal drags == equal visual change)
+        // while the config stores the plain linear value, so map both ways around
+        // the widget. The curve itself is applied once, at consumption, in
+        // `glass_bg`; this only reshapes the UI travel.
+        let slider_pos = crate::renderer::opacity_to_slider(v.opacity);
+        let new_pos = self.slider(id("settings/opacity"), sl, slider_pos, 0.0, 1.0, 0.04);
+        let nv = crate::renderer::slider_to_opacity(new_pos);
         if (nv - v.opacity).abs() > f32::EPSILON {
             ev.opacity = Some(nv);
         }
+        // Show the true (linear) opacity value the config will store.
         self.label_right(
             ctrl_x + ctrl_w,
             (y + (ctrl_h - m.cell_h) * 0.5).round(),
@@ -325,6 +333,25 @@ impl<'r> Ui<'r> {
         );
         if self.toggle(id("settings/cursor_blink"), blink_rect, v.cursor_blink) != v.cursor_blink {
             ev.cursor_blink_toggle = true;
+        }
+        y += step;
+
+        // -- Window effect (segmented) ---------------------------------------
+        // Eight modes; abbreviated so the labels fit one segmented control row.
+        // Index order mirrors WindowEffect::index (Off/Frost/Acryl/CRT/Scan/
+        // Grain/Vig/Bloom). The settings keyboard path (Left/Right) also cycles
+        // this control, which is the comfortable way to walk all eight.
+        row_label(self, y, "Effect");
+        let we = self.segmented(
+            id("settings/window_effect"),
+            ctrl_rect(y, ctrl_w),
+            &[
+                "Off", "Frost", "Acryl", "CRT", "Scan", "Grain", "Vig", "Bloom",
+            ],
+            v.window_effect_idx.min(7),
+        );
+        if we != v.window_effect_idx {
+            ev.window_effect = Some(we);
         }
         y += step;
 

@@ -34,7 +34,7 @@ impl App {
     /// for Tab / Shift+Tab / Up / Down focus movement (the form itself collects
     /// the live order each paint, but key handling runs between paints so it walks
     /// this fixed list — identical ordering keeps focus stable).
-    pub(crate) fn settings_focus_order() -> [gui::WidgetId; 19] {
+    pub(crate) fn settings_focus_order() -> [gui::WidgetId; 20] {
         [
             gui::id("settings/font_size"),
             gui::id("settings/opacity"),
@@ -53,6 +53,7 @@ impl App {
             gui::id("settings/font_features"),
             gui::id("settings/cursor_style"),
             gui::id("settings/cursor_blink"),
+            gui::id("settings/window_effect"),
             gui::id("settings/config"),
             gui::id("settings/save"),
         ]
@@ -156,6 +157,10 @@ impl App {
         } else if f == Some(gui::id("settings/cursor_style")) {
             let cur = self.cursor_style_index() as i32;
             self.set_cursor_style_index(((cur + dir).rem_euclid(3)) as usize);
+        } else if f == Some(gui::id("settings/window_effect")) {
+            // 8 modes (None..Bloom); wrap with rem_euclid so Left at 0 lands on Bloom.
+            let cur = self.config.window_effect.index() as i32;
+            self.set_window_effect_index(((cur + dir).rem_euclid(8)) as usize);
         }
     }
 
@@ -213,6 +218,10 @@ impl App {
         } else if f == Some(gui::id("settings/cursor_blink")) {
             self.config.cursor_blink = !self.config.cursor_blink;
             self.settings_saved = false;
+        } else if f == Some(gui::id("settings/window_effect")) {
+            // Segmented: Enter/Space advances to the next of the 8 effect modes.
+            let cur = self.config.window_effect.index() as i32;
+            self.set_window_effect_index(((cur + 1).rem_euclid(8)) as usize);
         } else {
             self.save_settings();
         }
@@ -282,6 +291,22 @@ impl App {
         }
         self.config.show_tab_bar = mode;
         self.reflow_grid();
+        self.settings_saved = false;
+        self.force_full_redraw = true;
+    }
+
+    /// Set the window post-process effect from a segmented index (see
+    /// [`crate::renderer::WindowEffect::from_index`]). Applies live in the renderer
+    /// (which lazily builds / tears down the offscreen pass) and forces a repaint.
+    pub(crate) fn set_window_effect_index(&mut self, idx: usize) {
+        let effect = crate::renderer::WindowEffect::from_index(idx);
+        if effect == self.config.window_effect {
+            return;
+        }
+        self.config.window_effect = effect;
+        if let Some(r) = self.renderer.as_mut() {
+            r.set_window_effect(effect);
+        }
         self.settings_saved = false;
         self.force_full_redraw = true;
     }
@@ -639,6 +664,10 @@ impl App {
                 self.config.cursor_style.as_str().to_string(),
             ),
             ("cursor_blink", self.config.cursor_blink.to_string()),
+            (
+                "window_effect",
+                self.config.window_effect.as_str().to_string(),
+            ),
         ];
         match crate::config::save(&updates) {
             Ok(()) => {

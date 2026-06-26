@@ -9,7 +9,8 @@
 //! font_family = FiraCode Nerd Font Mono
 //! font_size   = 14
 //! theme       = tokyo-night            # or: catppuccin-mocha
-//! opacity     = 0.92                   # 0.0 (clear) .. 1.0 (opaque)
+//! opacity     = 0.92                   # 0.0 (clear) .. 1.0 (opaque); perceptual curve
+//! window_effect = none                 # none|frosted|acrylic|crt|scanlines|grain|vignette|bloom
 //! padding     = 6                      # logical px grid inset (all sides)
 //! padding_top = 8                      # per-side overrides (optional, override padding)
 //! padding_bottom = 6

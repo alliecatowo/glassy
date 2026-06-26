@@ -166,10 +166,11 @@ pub struct Config {
     /// instead of jumping instantly. Default false. Strictly idle-safe — only
     /// schedules frames while the cursor is mid-glide.
     pub cursor_trail: bool,
-    /// gpu-fx: enable the CRT / glow / scanline fullscreen post-process. Default
-    /// false. Adds real GPU cost (an offscreen pass), so it MUST stay off by
-    /// default to preserve the 0%-idle + perf numbers; when off it is a complete
-    /// no-op (no offscreen pass, no allocation).
+    /// gpu-fx: legacy CRT toggle. SUPERSEDED by [`Self::window_effect`] (a
+    /// `crt_effect = true` config is folded into `window_effect = crt` at parse
+    /// time). Retained on the struct so old configs still round-trip; the renderer
+    /// is now driven entirely by `window_effect`.
+    #[allow(dead_code)]
     pub crt_effect: bool,
     /// When to show the tab strip. `Auto` (default) hides it while only one tab
     /// is open and shows it once a second tab is spawned; `Always` keeps it; and
@@ -212,6 +213,13 @@ pub struct Config {
     /// history source (captured from OSC 133 `B`..`C` zones). 0 disables capture.
     /// Default 200.
     pub command_history: usize,
+    /// Window post-process effect (`none` by default). Selects ONE of the
+    /// fullscreen effects (frosted / acrylic / crt / scanlines / grain / vignette /
+    /// bloom). `None` is a complete no-op (no offscreen pass, zero idle cost);
+    /// every other mode routes the grid through the shared CRT post pass. Supersedes
+    /// the legacy `crt_effect` bool. Config key `window_effect`; env override
+    /// `GLASSY_EFFECT=<mode>`.
+    pub window_effect: crate::renderer::WindowEffect,
 }
 
 /// The three user-facing default cursor shapes.

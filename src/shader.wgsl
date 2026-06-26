@@ -222,8 +222,21 @@ struct CrtU {
     // x = curvature strength (0 = flat), y = scanline strength (0..1),
     // z = glow strength (0..1), w = vignette strength (0..1).
     params: vec4<f32>,
+    // x = window-effect mode discriminant (see WindowEffect::shader_mode):
+    //   1 = crt, 2 = frosted, 3 = acrylic, 4 = scanlines, 5 = grain,
+    //   6 = vignette, 7 = bloom. (0 = none, but then this pass is never run.)
+    // .yzw unused padding (kept for 16-byte alignment).
+    mode: vec4<u32>,
 };
 @group(2) @binding(2) var<uniform> crt: CrtU;
+
+// Cheap hash-based value noise for film grain, in 0..1 from a 2D coord. Static
+// (no time input) so the grain is a fixed dither — this keeps the effect
+// 0%-idle-safe (no per-frame animation wakeups); it still reads as film texture.
+fn crt_hash(p: vec2<f32>) -> f32 {
+    let h = dot(p, vec2<f32>(127.1, 311.7));
+    return fract(sin(h) * 43758.5453123);
+}
 
 struct CrtOut {
     @builtin(position) clip: vec4<f32>,
@@ -253,63 +266,115 @@ fn crt_curve(p: vec2<f32>, amt: f32) -> vec2<f32> {
 }
 
 @fragment fn fs_crt(in: CrtOut) -> @location(0) vec4<f32> {
+    let mode = crt.mode.x;
     let curvature = crt.params.x;
     let scan_amt = crt.params.y;
     let glow_amt = crt.params.z;
     let vig_amt = crt.params.w;
 
+    // Whether to keep the surface's own alpha (so a translucent window stays
+    // translucent THROUGH the effect) versus forcing opaque. The CRT bezel/black
+    // border needs an opaque result, but the glass-style modes (frosted/acrylic)
+    // and the lighter overlays should preserve transparency. We read the scene
+    // alpha below and decide per-mode.
+    let is_crt = mode == 1u;
+    let is_frosted = mode == 2u;
+    let is_acrylic = mode == 3u;
+    let is_scanlines = mode == 4u;
+    let is_grain = mode == 5u;
+    let is_vignette = mode == 6u;
+    let is_bloom = mode == 7u;
+
     // Barrel curvature: warp the sample coordinate around the screen center.
+    // Only the full-CRT mode curves; everything else samples the scene 1:1.
     var uv = in.uv;
-    if (curvature > 0.0) {
+    if (is_crt && curvature > 0.0) {
         let centered = uv * 2.0 - 1.0;
         let warped = crt_curve(centered, curvature);
         uv = warped * 0.5 + 0.5;
-        // Outside the curved screen is the bezel (black).
+        // Outside the curved screen is the bezel (black, opaque).
         if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
             return vec4<f32>(0.0, 0.0, 0.0, 1.0);
         }
     }
 
     let texel = 1.0 / u.screen.xy;
-    var col = textureSample(crt_tex, crt_samp, uv).rgb;
+    let scene = textureSample(crt_tex, crt_samp, uv);
+    var col = scene.rgb;
+    var alpha = scene.a;
 
-    // Cheap glow: a few offset taps summed and weighted, added back as bloom so
-    // bright glyphs bleed light into neighbouring pixels (the phosphor halo).
+    // Cheap glow / bloom: a few offset taps summed and weighted, added back so
+    // bright glyphs bleed light into neighbours (the phosphor halo). Used by the
+    // CRT, bloom and (subtly) the frosted/acrylic glass modes.
     if (glow_amt > 0.0) {
         var bloom = vec3<f32>(0.0);
-        let r = texel * 1.5;
+        // A wider radius reads as soft glass diffusion for the frosted modes; the
+        // tighter CRT radius stays a crisp phosphor halo.
+        let spread = select(1.5, 3.0, is_frosted || is_acrylic);
+        let r = texel * spread;
         bloom += textureSample(crt_tex, crt_samp, uv + vec2<f32>( r.x, 0.0)).rgb;
         bloom += textureSample(crt_tex, crt_samp, uv + vec2<f32>(-r.x, 0.0)).rgb;
         bloom += textureSample(crt_tex, crt_samp, uv + vec2<f32>(0.0,  r.y)).rgb;
         bloom += textureSample(crt_tex, crt_samp, uv + vec2<f32>(0.0, -r.y)).rgb;
-        bloom *= 0.25;
+        bloom += textureSample(crt_tex, crt_samp, uv + r * 0.7).rgb;
+        bloom += textureSample(crt_tex, crt_samp, uv - r * 0.7).rgb;
+        bloom *= (1.0 / 6.0);
         col += bloom * glow_amt;
+    }
+
+    // Frosted / acrylic glass tint: lift the image toward a soft milky white
+    // (frosted, warm) or a cool slate (acrylic) by a small amount so the surface
+    // reads as a translucent frosted pane over whatever the compositor shows
+    // through. The full look also wants compositor blur-behind (see effect.rs);
+    // this is the in-shader foreground half of it.
+    if (is_frosted) {
+        col = mix(col, vec3<f32>(0.92, 0.93, 0.95), 0.10);
+    } else if (is_acrylic) {
+        col = mix(col, vec3<f32>(0.60, 0.64, 0.72), 0.12);
     }
 
     // Scanlines: darken every other physical row in a smooth sine so the effect
     // reads as a real raster line rather than a hard 1px comb. Tied to the
     // physical pixel row (uv.y * height) so the line density is DPI-correct.
+    // Used by the CRT and scanlines-only modes.
     if (scan_amt > 0.0) {
         let line = sin(uv.y * u.screen.y * 3.14159265);
         let scan = 1.0 - scan_amt * (0.5 - 0.5 * line);
         col *= scan;
-        // Aperture-grille tint: a soft per-column RGB cycle so vertical triads
-        // shimmer like a Trinitron, scaled down so it stays subtle.
-        let triad = uv.x * u.screen.x;
-        let grille = vec3<f32>(
-            0.5 + 0.5 * cos(triad * 2.094395 + 0.0),
-            0.5 + 0.5 * cos(triad * 2.094395 + 2.094395),
-            0.5 + 0.5 * cos(triad * 2.094395 + 4.18879),
-        );
-        col *= mix(vec3<f32>(1.0), grille, scan_amt * 0.15);
+        // Aperture-grille tint (CRT only): a soft per-column RGB cycle so vertical
+        // triads shimmer like a Trinitron. Skipped for the clean scanlines mode.
+        if (is_crt) {
+            let triad = uv.x * u.screen.x;
+            let grille = vec3<f32>(
+                0.5 + 0.5 * cos(triad * 2.094395 + 0.0),
+                0.5 + 0.5 * cos(triad * 2.094395 + 2.094395),
+                0.5 + 0.5 * cos(triad * 2.094395 + 4.18879),
+            );
+            col *= mix(vec3<f32>(1.0), grille, scan_amt * 0.15);
+        }
+    }
+
+    // Film grain: a faint per-pixel dither. Static (no time term) to stay
+    // 0%-idle-safe — it only repaints on normal damage frames.
+    if (is_grain) {
+        let n = crt_hash(in.uv * u.screen.xy) - 0.5;
+        col += vec3<f32>(n) * 0.06;
     }
 
     // Vignette: gently darken toward the corners for the tube-glass falloff.
+    // Used by the CRT, frosted/acrylic and vignette-only modes.
     if (vig_amt > 0.0) {
         let c = in.uv * 2.0 - 1.0;
         let v = 1.0 - vig_amt * dot(c, c) * 0.35;
         col *= clamp(v, 0.0, 1.0);
     }
 
-    return vec4<f32>(col, 1.0);
+    // Alpha policy: the CRT mode is an opaque tube (the bezel must be solid), so
+    // force alpha = 1. Every other mode preserves the scene alpha so a translucent
+    // window stays translucent through the effect (the macOS/Linux opacity work
+    // composites the same way it does on the direct path).
+    if (is_crt) {
+        alpha = 1.0;
+    }
+    return vec4<f32>(col, alpha);
 }

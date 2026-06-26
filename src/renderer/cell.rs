@@ -258,7 +258,10 @@ impl Renderer {
         if !self.transparent {
             return color;
         }
-        let a = color[3] * self.opacity;
+        // Map the stored linear opacity through the perceptual curve so the dense
+        // high-opacity band (the glass looks people actually run at) gets the most
+        // granularity. Identity at the endpoints, so 0.0/1.0 are unchanged.
+        let a = color[3] * super::opacity::perceptual(self.opacity);
         if self.premultiplied_surface {
             [color[0] * a, color[1] * a, color[2] * a, a]
         } else {

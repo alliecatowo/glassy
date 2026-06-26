@@ -20,13 +20,18 @@ use crate::text::{CellMetrics, Text};
 mod cell;
 mod crt;
 mod cursor_trail;
+mod effect;
 mod frame;
 mod geometry;
 mod image_draw;
 mod init;
 mod multipane;
+mod opacity;
 mod overlay;
 mod pipeline;
+
+pub use effect::WindowEffect;
+pub use opacity::{opacity_to_slider, slider_to_opacity};
 
 // Re-export geometry helpers so `use super::*` in sibling modules keeps working.
 pub(crate) use geometry::{Packer, ScissorRect, clamp_scissor};
@@ -514,6 +519,11 @@ pub struct Renderer {
     /// Idle-safe: only animates while the cursor is mid-glide. See
     /// [`cursor_trail::CursorTrail`].
     cursor_trail: cursor_trail::CursorTrail,
+    /// The currently-selected window post-process effect (config `window_effect`,
+    /// default `None`). `None` keeps the zero-cost direct path; every other mode
+    /// routes the grid through the shared CRT post pass with mode-specific params.
+    /// See [`effect::WindowEffect`].
+    window_effect: WindowEffect,
 }
 
 /// State for the multi-pane (split) render path. A flat instance list whose

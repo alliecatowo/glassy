@@ -428,6 +428,10 @@ pub struct SettingsView<'a> {
     /// Tab-strip visibility policy as a segmented index: 0 = Auto, 1 = Always,
     /// 2 = Never.
     pub tab_bar_mode: usize,
+    /// Window post-process effect as a segmented index (see
+    /// [`crate::renderer::WindowEffect::index`]): 0 = None, 1 = Frosted, 2 =
+    /// Acrylic, 3 = CRT, 4 = Scanlines, 5 = Grain, 6 = Vignette, 7 = Bloom.
+    pub window_effect_idx: usize,
 }
 
 /// Everything the settings form reported this frame. The App applies each
@@ -479,6 +483,8 @@ pub struct SettingsEvents {
     pub cursor_blink_toggle: bool,
     /// New tab-bar-mode index if the segmented control changed (0/1/2).
     pub tab_bar_mode: Option<usize>,
+    /// New window-effect index if the segmented control changed (0..=7).
+    pub window_effect: Option<usize>,
 }
 
 // ---------------------------------------------------------------------------

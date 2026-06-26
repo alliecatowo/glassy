@@ -442,6 +442,16 @@ impl Renderer {
             cache: pipeline_cache.as_ref(),
         });
 
+        // Foreground (glyph) write mask, chosen by the surface's alpha convention.
+        // PreMultiplied (Linux): COLOR only — text inherits window opacity (glass).
+        // PostMultiplied (macOS/Metal): ALL — text raises surface alpha to opaque so
+        // ONLY the background is translucent (fixes the macOS whole-window-text bug).
+        let fg_write_mask = if premultiplied_surface {
+            wgpu::ColorWrites::COLOR
+        } else {
+            wgpu::ColorWrites::ALL
+        };
+
         let fg_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("fg-pipeline"),
             layout: Some(&fg_pipeline_layout),
@@ -461,17 +471,31 @@ impl Renderer {
                     // the shader emits premultiplied color, so dst is weighted by
                     // (1 - src.a). The RGB blend is correct as-is.
                     //
-                    // write_mask = COLOR (RGB, NOT alpha): a fully-covered glyph
-                    // returns src alpha 1.0, and the premultiplied alpha equation
-                    // (a = src_a + dst_a*(1-src_a)) would raise the SURFACE alpha
-                    // from `opacity` to 1.0 for every text pixel — making a window
-                    // full of text effectively opaque to the compositor regardless
-                    // of the configured opacity. Masking out the alpha write keeps
-                    // the surface alpha at `opacity` (set by the bg clear/quads), so
-                    // the whole window — text included — composites at the chosen
-                    // transparency, matching ghostty et al.
+                    // write_mask is PLATFORM-DEPENDENT (see `fg_write_mask` below):
+                    //
+                    // PreMultiplied surface (Vulkan/Linux): COLOR (RGB, NOT alpha).
+                    // A fully-covered glyph returns src alpha 1.0, and the
+                    // premultiplied alpha equation (a = src_a + dst_a*(1-src_a))
+                    // would raise the SURFACE alpha from `opacity` to 1.0 for every
+                    // text pixel. The compositor reads premultiplied RGB directly, so
+                    // we WANT the whole window — text included — to composite at the
+                    // chosen transparency; masking the alpha keeps surface alpha at
+                    // `opacity` (set by the bg clear/quads) and the text reads as
+                    // translucent glass, matching ghostty on Linux.
+                    //
+                    // PostMultiplied surface (Metal/macOS): ALL (RGB + alpha). The
+                    // compositor multiplies the surface RGB by the surface alpha
+                    // (straight-alpha convention), so leaving surface alpha at
+                    // `opacity` everywhere makes glyph pixels translucent too — the
+                    // exact macOS bug the owner reported (text bleeds the desktop
+                    // through). Writing alpha here lets each glyph raise the surface
+                    // alpha toward 1.0 by its coverage (a = cov + opacity*(1-cov)),
+                    // so text composites OPAQUE while the background stays at
+                    // `opacity`. No shader change is needed: `fs_fg` already returns
+                    // the glyph coverage as its alpha, so a full glyph drives surface
+                    // alpha to 1.0 and only the BACKGROUND inherits window opacity.
                     blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::COLOR,
+                    write_mask: fg_write_mask,
                 })],
                 compilation_options: Default::default(),
             }),
@@ -669,6 +693,7 @@ impl Renderer {
             uniform_bind_group_layout,
             crt: crt::CrtPass::default(),
             cursor_trail: cursor_trail::CursorTrail::default(),
+            window_effect: WindowEffect::None,
         };
 
         // Probe the loaded font for OpenType GSUB liga support. This shapes the
