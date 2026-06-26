@@ -18,6 +18,11 @@ on:
     branches:
       - main
   workflow_dispatch:
+    inputs:
+      publish:
+        description: "Cut a real release (tag + GitHub Release + brew/dnf/apt). Leave OFF for a build-only test."
+        type: boolean
+        default: false
 
 env:
   CARGO_TERM_COLOR: always
@@ -149,9 +154,13 @@ jobs:
           # cargo-generate-rpm puts the rpm in target/generate-rpm/
           find target/generate-rpm -name '*.rpm' -exec cp {} dist/ \;
           # Source tarball (used by AUR / Homebrew sha256 verification).
-          tar -czf dist/${{ env.BIN }}-${{ steps.meta.outputs.version }}-src.tar.gz \
+          # Write OUTSIDE the tree, then move in — archiving `.` into `dist/`
+          # self-includes the growing tarball ("file changed as we read it" -> exit 1).
+          tar -czf "${RUNNER_TEMP:-/tmp}/${{ env.BIN }}-src.tar.gz" \
             --transform "s|^\.|${BIN}-${{ steps.meta.outputs.version }}|" \
-            --exclude='./.git' --exclude='./target' .
+            --exclude='./.git' --exclude='./target' --exclude='./dist' .
+          mv "${RUNNER_TEMP:-/tmp}/${{ env.BIN }}-src.tar.gz" \
+            dist/${{ env.BIN }}-${{ steps.meta.outputs.version }}-src.tar.gz
 
       - name: Generate SHA256SUMS
         working-directory: dist
@@ -451,7 +460,11 @@ jobs:
     # the main-push trigger safe: a re-merge or an unrelated push to main where
     # Cargo.toml's version was already released becomes a no-op here. Optional
     # build jobs (aarch64/windows) may fail without blocking the release.
-    if: always() && needs.build-linux-x86_64.result == 'success' && needs.resolve-version.outputs.is_new == 'true'
+    # A plain workflow_dispatch is a BUILD-ONLY TEST (publish=false default) and
+    # skips this job — which gates the whole publish chain (homebrew/aur/dnf/apt
+    # all `needs: publish`). Tag/main pushes always publish; a dispatch publishes
+    # only when explicitly requested with publish=true.
+    if: always() && needs.build-linux-x86_64.result == 'success' && needs.resolve-version.outputs.is_new == 'true' && (github.event_name != 'workflow_dispatch' || github.event.inputs.publish == 'true')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -507,7 +520,9 @@ jobs:
           files: release/*
           fail_on_unmatched_files: false
           draft: false
-          prerelease: false
+          # Any tag with a pre-release identifier (e.g. v0.2.0-rc1) is marked as
+          # a GitHub pre-release (not "latest"); clean tags (v0.2.0) are full releases.
+          prerelease: ${{ contains(steps.meta.outputs.tag, '-') }}
 
   # -------------------------------------------------------------------------
   # Homebrew formula bump (this repo IS its own tap — Formula/glassy.rb).
