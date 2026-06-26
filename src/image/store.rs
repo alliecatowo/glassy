@@ -372,7 +372,7 @@ impl StreamTap {
                         self.state = TapState::OscEscape;
                     } else if b == 0x07 {
                         out.push(0x07); // BEL terminator (passed through)
-                        if let Some(ev) = self.finish_osc() {
+                        if let Some(ev) = self.finish_osc(store) {
                             if !out.is_empty() {
                                 events.push(TapEvent::Vt(std::mem::take(&mut out)));
                             }
@@ -390,7 +390,7 @@ impl StreamTap {
                     if b == b'\\' {
                         out.push(0x1b); // ST terminator (ESC \), passed through
                         out.push(b'\\');
-                        if let Some(ev) = self.finish_osc() {
+                        if let Some(ev) = self.finish_osc(store) {
                             if !out.is_empty() {
                                 events.push(TapEvent::Vt(std::mem::take(&mut out)));
                             }
@@ -465,8 +465,24 @@ impl StreamTap {
     /// The raw OSC bytes are always passed through to the VT parser already (before
     /// this method is called); this only observes them for side-effects.
     /// Always clears the buffer.
-    fn finish_osc(&mut self) -> Option<TapEvent> {
+    fn finish_osc(&mut self, store: &FairMutex<ImageStore>) -> Option<TapEvent> {
         let osc = std::mem::take(&mut self.osc);
+        // OSC 1337 File= — iTerm2 inline image protocol (so `imgcat` works). Decode
+        // the embedded base64 image and store it, returning a Display event so the
+        // PTY loop anchors it at the cursor (mirroring the kitty/sixel image path).
+        // Checked before the generic OSC 1337 Peek= and OSC 7 so File= is not
+        // mis-routed. Only PNG is decodable (glassy ships no JPEG/GIF decoder), so a
+        // non-PNG payload yields no event and passes through harmlessly.
+        if let Some(image) = parse_osc1337_file(&osc) {
+            let id = self.next_sixel_id;
+            self.next_sixel_id = self.next_sixel_id.wrapping_add(1).max(SIXEL_ID_BASE);
+            store.lock().insert_pixels(id, image);
+            return Some(TapEvent::Display(PendingDisplay {
+                id,
+                cols: 0,
+                rows: 0,
+            }));
+        }
         // Try OSC 7 first — most common shell-integration sequence.
         if let Some(path) = parse_osc7_cwd(&osc) {
             return Some(TapEvent::Cwd(path));
@@ -577,6 +593,37 @@ pub(crate) fn parse_osc777_notification(body: &[u8]) -> Option<TapEvent> {
         _ => return None,
     };
     Some(TapEvent::Notification(text))
+}
+
+/// Parse an OSC 1337 File= body (iTerm2 inline image protocol) into a decoded
+/// image. The format is:
+///
+/// `1337;File=<key>=<value>;<key>=<value>...:<base64 image bytes>`
+///
+/// The args (name, size, width, height, inline, preserveAspectRatio, …) precede a
+/// colon; everything after the colon is the base64-encoded image file. We decode
+/// the base64 then decode the image (PNG only — glassy ships no JPEG/GIF decoder),
+/// returning the RGBA pixels. Display sizing (`width=`/`height=`) is currently
+/// ignored: the image is placed at native pixels at the cursor, like sixel. Returns
+/// `None` for any non-File= OSC 1337, a missing payload, or an undecodable image.
+///
+/// LIMITATION: the OSC observation buffer is capped at [`TAP_BUF_CAP`] (1 MiB), so
+/// a base64 payload larger than that is truncated and will fail to decode. This
+/// covers typical `imgcat` icons/screenshots; very large inline images are not yet
+/// supported (kitty/sixel remain the path for those).
+pub(crate) fn parse_osc1337_file(body: &[u8]) -> Option<DecodedImage> {
+    // The args region is ASCII; the base64 payload is ASCII too. Find the prefix.
+    let body = std::str::from_utf8(body).ok()?;
+    let rest = body.strip_prefix("1337;File=")?;
+    // Split the key=value args from the base64 payload at the first ':'.
+    let (_args, payload_b64) = rest.split_once(':')?;
+    let bytes = b64_decode(payload_b64.trim());
+    if bytes.is_empty() {
+        return None;
+    }
+    // Only PNG is decodable here. iTerm2's `imgcat` emits PNG for most captures;
+    // other formats pass through without an image (no panic, no event).
+    decode_png(&bytes)
 }
 
 /// Parse an OSC 1337 body (`1337;Peek=<path>`) into a [`TapEvent::Peek`]. This is

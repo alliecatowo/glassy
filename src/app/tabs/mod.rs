@@ -99,6 +99,7 @@ impl App {
             overlay_opened_by_press: false,
             gui_anim_last: Instant::now(),
             modify_other_keys: ModifyOtherKeys::default(),
+            sgr_pixel_mouse: false,
             search: None,
             palette: None,
             palette_rows: Vec::new(),

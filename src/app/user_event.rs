@@ -225,6 +225,15 @@ pub(super) fn dispatch(
             }
             return;
         }
+        UserEvent::SgrPixelMouse(id, on) => {
+            // DECSET/DECRST 1016 (SGR-Pixel mouse) toggled by the running app.
+            // Only the active focused pane's state applies (mouse reports route to
+            // self.pty). Not a visual change, so no repaint.
+            if id == app.active_focused_id() {
+                app.sgr_pixel_mouse = on;
+            }
+            return;
+        }
         UserEvent::CommandRun(_id, cmd) => {
             // OSC 133 command-zone capture: record the run command into the
             // history ring for the command palette (any pane's commands are

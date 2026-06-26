@@ -201,9 +201,12 @@ impl ApplicationHandler<UserEvent> for App {
 
         // Headless input/resize harness (used with GLASSY_CAPTURE for autonomous
         // verification of the custom PTY loop's write + resize paths):
-        //   GLASSY_INPUT  - bytes to write through the real input channel; `\n`
-        //                   and `\t` escapes are honored. Exercises the loop's
-        //                   `write_all` on the blocking master fd round-trip.
+        //   GLASSY_INPUT  - bytes to write through the real input channel; `\n`,
+        //                   `\t`, `\e`/`\x1b` (ESC) escapes are honored, so a
+        //                   capture can drive raw VT sequences (e.g. SGR 53
+        //                   overline, OSC 1337 inline images, DECSET 1016 SGR-Pixel
+        //                   mouse) end-to-end. Exercises the loop's `write_all` on
+        //                   the blocking master fd round-trip.
         //   GLASSY_RESIZE - "COLSxROWS" to drive a grid resize (LoopMsg::Resize
         //                   -> on_resize) before the capture deadline.
         if let Some(pty) = &self.pty {
@@ -218,7 +221,7 @@ impl ApplicationHandler<UserEvent> for App {
                 self.force_full_redraw = true;
             }
             if let Ok(input) = std::env::var("GLASSY_INPUT") {
-                let bytes = input.replace("\\n", "\n").replace("\\t", "\t").into_bytes();
+                let bytes = super::headless_input::decode_input_escapes(&input);
                 pty.write(bytes);
             }
         }

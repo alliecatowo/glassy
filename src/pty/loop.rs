@@ -55,6 +55,7 @@ pub(crate) const PTY_THREAD_STACK: usize = 256 * 1024; // 256 KiB
 /// whichever comes first. This avoids waking the renderer mid-frame and tearing
 /// complex full-screen redraws. The VT parser still receives all bytes eagerly
 /// (so terminal state stays up to date) — we only delay the `Wakeup` event.
+#[allow(clippy::too_many_arguments)]
 pub fn run_loop(
     mut pty: tty::Pty,
     term: Arc<FairMutex<Term<EventProxy>>>,
@@ -63,6 +64,7 @@ pub fn run_loop(
     poller: Arc<Poller>,
     images: Arc<FairMutex<ImageStore>>,
     prompts: Arc<Mutex<PromptTracker>>,
+    overline: Arc<Mutex<crate::pty::overline::OverlineTracker>>,
 ) {
     const PTY_KEY: usize = 1;
     let mut processor: Processor = Processor::new();
@@ -185,6 +187,15 @@ pub fn run_loop(
                                         proxy.id, level,
                                     ));
                                 }
+                                // SGR-Pixel mouse mode (DECSET 1016): alacritty does
+                                // not model it, so intercept the toggle and forward
+                                // the new state so report_mouse can encode pixel
+                                // coordinates instead of cell coordinates.
+                                if let Some(on) = scan::scan_sgr_pixel_1016(&bytes) {
+                                    proxy.send_user(crate::pty::UserEvent::SgrPixelMouse(
+                                        proxy.id, on,
+                                    ));
+                                }
                                 // Detect SGR 5/6 (text blink) in the byte stream.
                                 // alacritty_terminal silently ignores these attrs, so
                                 // we intercept here and arm the UI's text-blink timer.
@@ -223,6 +234,11 @@ pub fn run_loop(
                                 // Display events after this Vt run).
                                 if scan::clears_screen(&bytes) {
                                     images.lock().delete(0);
+                                    // The erase also wipes any cells overline sat
+                                    // on, so drop overline coverage too.
+                                    if let Ok(mut o) = overline.lock() {
+                                        o.clear();
+                                    }
                                     // The erase also wipes any SGR 5/6 blinking
                                     // cells, so disarm the UI's text-blink timer —
                                     // UNLESS this same burst also re-introduced blink
@@ -235,7 +251,16 @@ pub fn run_loop(
                                         ));
                                     }
                                 }
-                                processor.advance(&mut *term, &bytes);
+                                // Feed the bytes through the overline tracker,
+                                // which advances the real parser while recording
+                                // SGR 53 overline coverage (alacritty has no
+                                // overline flag). Falls back to a plain advance for
+                                // streams with no overline activity.
+                                if let Ok(mut o) = overline.lock() {
+                                    o.advance(&mut *term, &mut processor, &bytes);
+                                } else {
+                                    processor.advance(&mut *term, &bytes);
+                                }
                                 did_process = true;
                             }
                             crate::image::TapEvent::Display(p) => {

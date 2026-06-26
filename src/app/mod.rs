@@ -35,6 +35,7 @@ use crate::renderer::{CursorOverlay, Decorations, LigatureCell, Renderer, Underl
 mod chrome;
 mod command_blocks;
 mod event_loop;
+mod headless_input;
 mod helpers;
 mod hints;
 mod ime;
@@ -611,6 +612,13 @@ pub struct App {
     /// in the PTY byte stream. Forwarded to encode_key so modified printable keys
     /// emit the CSI 27 ; mods ; code ~ form expected by legacy-mode TUIs.
     modify_other_keys: ModifyOtherKeys,
+
+    /// SGR-Pixel mouse reporting (DECSET 1016) state for the active session.
+    /// alacritty_terminal does not model mode 1016; the PTY loop scans for the
+    /// toggle and forwards it via `UserEvent::SgrPixelMouse`. When `true` AND the
+    /// app has SGR mouse mode on, `report_mouse` reports pixel coordinates
+    /// (relative to the pane's content origin) instead of cell col/row.
+    sgr_pixel_mouse: bool,
 
     /// In-terminal find bar (Ctrl+Shift+F). `Some` exactly while it is open; it
     /// owns the keyboard and paints a bottom bar + match highlights. See

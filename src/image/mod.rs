@@ -738,6 +738,86 @@ mod tests {
         assert!(parse_osc1337_peek(b"9;hello").is_none());
     }
 
+    /// Minimal standard-base64 encoder for the OSC 1337 File= test (no dependency).
+    fn b64_encode(data: &[u8]) -> String {
+        const TBL: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut out = String::new();
+        for chunk in data.chunks(3) {
+            let b = [
+                chunk[0],
+                *chunk.get(1).unwrap_or(&0),
+                *chunk.get(2).unwrap_or(&0),
+            ];
+            let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
+            out.push(TBL[((n >> 18) & 63) as usize] as char);
+            out.push(TBL[((n >> 12) & 63) as usize] as char);
+            out.push(if chunk.len() > 1 {
+                TBL[((n >> 6) & 63) as usize] as char
+            } else {
+                '='
+            });
+            out.push(if chunk.len() > 2 {
+                TBL[(n & 63) as usize] as char
+            } else {
+                '='
+            });
+        }
+        out
+    }
+
+    #[test]
+    fn osc1337_file_decodes_inline_png() {
+        use super::store::parse_osc1337_file;
+        // Encode a 2x1 RGBA PNG (red, green), then wrap it in an OSC 1337 File=
+        // body and confirm it decodes back to the same pixels (imgcat path).
+        let mut png_bytes = Vec::new();
+        {
+            let mut enc = png::Encoder::new(&mut png_bytes, 2, 1);
+            enc.set_color(png::ColorType::Rgba);
+            enc.set_depth(png::BitDepth::Eight);
+            let mut w = enc.write_header().unwrap();
+            w.write_image_data(&[255, 0, 0, 255, 0, 255, 0, 255])
+                .unwrap();
+        }
+        let body = format!("1337;File=name=Zm9v;inline=1:{}", b64_encode(&png_bytes));
+        let img = parse_osc1337_file(body.as_bytes()).expect("decoded inline PNG");
+        assert_eq!((img.width, img.height), (2, 1));
+        assert_eq!(img.rgba, vec![255, 0, 0, 255, 0, 255, 0, 255]);
+    }
+
+    #[test]
+    fn osc1337_file_rejects_non_image_and_other_keys() {
+        use super::store::parse_osc1337_file;
+        // Non-PNG payload (garbage base64) yields no image.
+        assert!(parse_osc1337_file(b"1337;File=inline=1:Zm9vYmFy").is_none());
+        // A different OSC 1337 key is not a File= and is rejected.
+        assert!(parse_osc1337_file(b"1337;Peek=/tmp/x").is_none());
+        // Missing the args:payload separator.
+        assert!(parse_osc1337_file(b"1337;File=name=Zm9v").is_none());
+    }
+
+    #[test]
+    fn osc1337_file_routed_to_display_through_tap() {
+        use alacritty_terminal::sync::FairMutex;
+        // End-to-end: feed an OSC 1337 File= sequence through the StreamTap and
+        // confirm it produces a Display event AND stores the decoded image.
+        let mut png_bytes = Vec::new();
+        {
+            let mut enc = png::Encoder::new(&mut png_bytes, 1, 1);
+            enc.set_color(png::ColorType::Rgba);
+            enc.set_depth(png::BitDepth::Eight);
+            let mut w = enc.write_header().unwrap();
+            w.write_image_data(&[1, 2, 3, 255]).unwrap();
+        }
+        let seq = format!("\x1b]1337;File=inline=1:{}\x07", b64_encode(&png_bytes));
+        let store = FairMutex::new(ImageStore::new());
+        let mut tap = StreamTap::new();
+        let events = tap.process(seq.as_bytes(), &store);
+        let has_display = events.iter().any(|e| matches!(e, TapEvent::Display(_)));
+        assert!(has_display, "OSC 1337 File= should emit a Display event");
+        assert_eq!(store.lock().len(), 1, "decoded image should be stored");
+    }
+
     #[test]
     fn osc133_mark_parsed() {
         use super::store::parse_osc133_mark;

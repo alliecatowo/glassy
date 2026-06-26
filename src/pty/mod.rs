@@ -31,6 +31,7 @@ use crate::input::ModifyOtherKeys;
 
 pub mod cmdzone;
 pub mod r#loop;
+pub mod overline;
 mod scan;
 
 // ---- Terminfo availability check ------------------------------------------------
@@ -543,6 +544,11 @@ pub enum UserEvent {
     /// `CSI > 4 ; N m`. The UI thread updates `App::modify_other_keys` so
     /// subsequent key events are encoded with the correct form.
     ModifyOtherKeys(usize, ModifyOtherKeys),
+    /// The running application toggled SGR-Pixel mouse reporting (DECSET/DECRST
+    /// 1016). alacritty_terminal does not model mode 1016, so the PTY loop scans
+    /// for it and forwards the new state (`true` = on). The UI thread updates
+    /// `App::sgr_pixel_mouse` so `report_mouse` encodes pixel coordinates.
+    SgrPixelMouse(usize, bool),
     /// A single-instance IPC control command (`glassy toggle/show/hide`) arrived
     /// over the Unix socket from a second invocation. Drives the quake / dropdown
     /// window's slide animation. Carries no session id — it's a window-level
@@ -858,6 +864,11 @@ pub struct Pty {
     /// against the live `display_offset` and issues a `scroll_display(Scroll::Delta)`
     /// to jump there.
     pub prompts: Arc<Mutex<PromptTracker>>,
+    /// SGR 53/55 overline coverage for this session. The PTY loop records which
+    /// cells were printed while overline was active (alacritty_terminal has no
+    /// overline flag); the render path reads it via `overline.lock()` to set the
+    /// per-cell `Decorations::overline` bit. See [`overline::OverlineTracker`].
+    pub overline: Arc<Mutex<overline::OverlineTracker>>,
     /// PID of the spawned shell process. Used to read `/proc/<shell_pid>/cwd`
     /// and the tty foreground pgid for the pane header and status bar.
     pub shell_pid: u32,
@@ -987,11 +998,13 @@ impl Pty {
         let poller = Arc::new(Poller::new()?);
         let images = Arc::new(FairMutex::new(ImageStore::new()));
         let prompts = Arc::new(Mutex::new(PromptTracker::new()));
+        let overline = Arc::new(Mutex::new(overline::OverlineTracker::new()));
 
         let loop_term = term.clone();
         let loop_poller = poller.clone();
         let loop_images = images.clone();
         let loop_prompts = prompts.clone();
+        let loop_overline = overline.clone();
         // 256 KiB stack: the PTY read/parse loop has no deep recursion (only a
         // fixed read buffer + a handful of local variables), so the default
         // 8 MiB OS stack is wasteful. See `r#loop::PTY_THREAD_STACK`.
@@ -1007,6 +1020,7 @@ impl Pty {
                     loop_poller,
                     loop_images,
                     loop_prompts,
+                    loop_overline,
                 );
             })?;
 
@@ -1020,6 +1034,7 @@ impl Pty {
             term,
             images,
             prompts,
+            overline,
             shell_pid,
             shell_comm,
             pane_info,
