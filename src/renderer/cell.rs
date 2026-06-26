@@ -145,14 +145,22 @@ impl Renderer {
         if (font_px - self.font_px).abs() < 0.01 {
             return;
         }
-        let (text, metrics) =
-            match Text::load(self.font_family.as_deref(), font_px, &self.font_features) {
-                Ok(loaded) => loaded,
-                Err(e) => {
-                    log::warn!("glassy: font resize to {font_px:.1}px failed: {e:#}");
-                    return;
-                }
-            };
+        let (text, metrics) = match Text::load_with_config(crate::text::shape::FontConfig {
+            family: self.font_family.as_deref(),
+            font_px,
+            font_features: &self.font_features,
+            bold_family: self.font_bold.as_deref(),
+            italic_family: self.font_italic.as_deref(),
+            bold_italic_family: self.font_bold_italic.as_deref(),
+            symbol_map: self.font_symbol_map.clone(),
+            font_variations: &self.font_variations,
+        }) {
+            Ok(loaded) => loaded,
+            Err(e) => {
+                log::warn!("glassy: font resize to {font_px:.1}px failed: {e:#}");
+                return;
+            }
+        };
         self.text = text;
         self.metrics = metrics;
         self.pad = self.pad_override.unwrap_or_else(|| pad_for(metrics.height));

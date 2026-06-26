@@ -1276,4 +1276,190 @@ ctrl+a g g = scroll_top\n\
             Ok(Some(KeyAction::SaveScrollback))
         ));
     }
+
+    // -----------------------------------------------------------------------
+    // FONTS stream: symbol map + per-style overrides + variations
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn font_bold_italic_bold_italic_parse() {
+        use super::parse::parse_config_file;
+        let mut raw = RawConfig::default();
+        parse_config_file(
+            "font_bold = MyFont Bold\nfont_italic = MyFont Italic\nfont_bold_italic = MyFont Bold Italic\n",
+            &mut raw,
+        )
+        .unwrap();
+        assert_eq!(raw.font_bold.as_deref(), Some("MyFont Bold"));
+        assert_eq!(raw.font_italic.as_deref(), Some("MyFont Italic"));
+        assert_eq!(raw.font_bold_italic.as_deref(), Some("MyFont Bold Italic"));
+        // Values must flow through into_settings.
+        let s = raw.into_settings().unwrap();
+        assert_eq!(s.config.font_bold.as_deref(), Some("MyFont Bold"));
+        assert_eq!(s.config.font_italic.as_deref(), Some("MyFont Italic"));
+        assert_eq!(
+            s.config.font_bold_italic.as_deref(),
+            Some("MyFont Bold Italic")
+        );
+    }
+
+    #[test]
+    fn font_bold_italic_defaults_none() {
+        let s = RawConfig::default().into_settings().unwrap();
+        assert!(
+            s.config.font_bold.is_none(),
+            "font_bold must default to None"
+        );
+        assert!(
+            s.config.font_italic.is_none(),
+            "font_italic must default to None"
+        );
+        assert!(
+            s.config.font_bold_italic.is_none(),
+            "font_bold_italic must default to None"
+        );
+    }
+
+    #[test]
+    fn parse_symbol_map_single_range() {
+        use super::parse::parse_symbol_map;
+        let entries = parse_symbol_map("U+E000-U+F8FF : Symbols Nerd Font Mono");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].start, 0xE000);
+        assert_eq!(entries[0].end, 0xF8FF);
+        assert_eq!(entries[0].family, "Symbols Nerd Font Mono");
+    }
+
+    #[test]
+    fn parse_symbol_map_single_codepoint() {
+        use super::parse::parse_symbol_map;
+        let entries = parse_symbol_map("U+2764:Noto Emoji");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].start, 0x2764);
+        assert_eq!(entries[0].end, 0x2764);
+    }
+
+    #[test]
+    fn parse_symbol_map_multiple_entries() {
+        use super::parse::parse_symbol_map;
+        let entries = parse_symbol_map("U+E000-U+F8FF:Nerd Font, U+2500-U+257F:Box Drawing Font");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].start, 0xE000);
+        assert_eq!(entries[1].family, "Box Drawing Font");
+    }
+
+    #[test]
+    fn parse_symbol_map_invalid_entries_skipped() {
+        use super::parse::parse_symbol_map;
+        // "garbage" has no colon separator — must be skipped, not panicked.
+        let entries = parse_symbol_map("garbage, U+0041:My Font");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].start, 0x0041);
+    }
+
+    #[test]
+    fn parse_symbol_map_empty() {
+        use super::parse::parse_symbol_map;
+        assert!(parse_symbol_map("").is_empty());
+        assert!(parse_symbol_map("   ").is_empty());
+    }
+
+    #[test]
+    fn font_symbol_map_config_key_parses() {
+        use super::parse::parse_config_file;
+        let mut raw = RawConfig::default();
+        parse_config_file(
+            "font_symbol_map = U+E000-U+F8FF:Nerd Font Symbols\n",
+            &mut raw,
+        )
+        .unwrap();
+        let entries = raw.font_symbol_map.as_ref().expect("should be set");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].family, "Nerd Font Symbols");
+        let s = raw.into_settings().unwrap();
+        assert_eq!(s.config.font_symbol_map.len(), 1);
+    }
+
+    #[test]
+    fn font_symbol_map_defaults_empty() {
+        let s = RawConfig::default().into_settings().unwrap();
+        assert!(
+            s.config.font_symbol_map.is_empty(),
+            "font_symbol_map must default to empty"
+        );
+    }
+
+    #[test]
+    fn parse_font_variations_wght_and_wdth() {
+        use super::parse::parse_font_variations;
+        let v = parse_font_variations("wght=450, wdth=75");
+        assert_eq!(v.len(), 2);
+        assert!(v.contains(&"wght=450".to_string()));
+        assert!(v.contains(&"wdth=75".to_string()));
+    }
+
+    #[test]
+    fn parse_font_variations_space_separated() {
+        use super::parse::parse_font_variations;
+        let v = parse_font_variations("wght=700 slnt=-5");
+        assert_eq!(v.len(), 2);
+    }
+
+    #[test]
+    fn font_variations_config_key_parses() {
+        use super::parse::parse_config_file;
+        let mut raw = RawConfig::default();
+        parse_config_file("font_variations = wght=450\n", &mut raw).unwrap();
+        let vars = raw.font_variations.as_ref().expect("should be set");
+        assert_eq!(vars.len(), 1);
+        assert_eq!(vars[0], "wght=450");
+        let s = raw.into_settings().unwrap();
+        assert_eq!(s.config.font_variations.len(), 1);
+    }
+
+    #[test]
+    fn font_variations_defaults_empty() {
+        let s = RawConfig::default().into_settings().unwrap();
+        assert!(
+            s.config.font_variations.is_empty(),
+            "font_variations must default to empty"
+        );
+    }
+
+    #[test]
+    fn symbol_map_lookup_finds_range() {
+        use crate::config::parse::SymbolMapEntry;
+        use crate::text::shape::lookup_symbol_family;
+        let mut map = vec![
+            SymbolMapEntry {
+                start: 0xE000,
+                end: 0xF8FF,
+                family: "Nerd Font".to_string(),
+            },
+            SymbolMapEntry {
+                start: 0x2500,
+                end: 0x257F,
+                family: "Box Font".to_string(),
+            },
+        ];
+        // Sort by start for binary search (normally done in load_with_config).
+        map.sort_unstable_by_key(|e| e.start);
+
+        // Inside first range.
+        assert_eq!(lookup_symbol_family(&map, '\u{E001}'), Some("Nerd Font"));
+        // Start of second range.
+        assert_eq!(lookup_symbol_family(&map, '\u{2500}'), Some("Box Font"));
+        // End of second range.
+        assert_eq!(lookup_symbol_family(&map, '\u{257F}'), Some("Box Font"));
+        // Just past the end of the second range.
+        assert_eq!(lookup_symbol_family(&map, '\u{2580}'), None);
+        // ASCII is not covered.
+        assert_eq!(lookup_symbol_family(&map, 'A'), None);
+    }
+
+    #[test]
+    fn symbol_map_lookup_empty_map() {
+        use crate::text::shape::lookup_symbol_family;
+        assert_eq!(lookup_symbol_family(&[], 'A'), None);
+    }
 }

@@ -35,6 +35,8 @@ pub use opacity::{opacity_to_slider, slider_to_opacity};
 
 // Re-export geometry helpers so `use super::*` in sibling modules keeps working.
 pub(crate) use geometry::{Packer, ScissorRect, clamp_scissor};
+// Re-export font config struct for call sites outside the renderer module.
+pub use init::RendererFontConfig;
 
 #[cfg(test)]
 mod tests;
@@ -444,6 +446,15 @@ pub struct Renderer {
     /// kept here so runtime font size changes re-apply the same features to the
     /// newly loaded face.
     font_features: Vec<String>,
+    // --- FONTS stream: per-style overrides + symbol map + variation axes. ---
+    /// Per-style family overrides (`font_bold` / `font_italic` / `font_bold_italic`).
+    font_bold: Option<String>,
+    font_italic: Option<String>,
+    font_bold_italic: Option<String>,
+    /// Codepoint routing map (`font_symbol_map`).
+    font_symbol_map: Vec<crate::config::parse::SymbolMapEntry>,
+    /// Variable-font axis settings (`font_variations`).
+    font_variations: Vec<String>,
 
     /// Persistent per-row instance storage. Index `r` holds row `r`'s background
     /// and foreground instances; only the rows reported as changed are rewritten

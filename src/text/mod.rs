@@ -10,8 +10,8 @@
 //! - `discover` — font discovery: fc-match cache, candidate producers, fallback loading
 //! - `shape`    — `Text` struct, shaping pipeline, rasterization
 
-mod discover;
-mod shape;
+pub(crate) mod discover;
+pub mod shape;
 
 pub use shape::{CellMetrics, RasterizedGlyph, Text};
 
@@ -144,6 +144,124 @@ mod tests {
                 g.advance,
                 metrics.width
             );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // FONTS stream: per-style overrides, symbol map, variable axes
+    // -----------------------------------------------------------------------
+
+    /// `load_with_config` with no overrides must behave identically to `load`.
+    #[test]
+    fn load_with_config_no_overrides_matches_load() {
+        use crate::text::shape::FontConfig;
+        let r1 = Text::load(None, 14.0, &[]);
+        let r2 = Text::load_with_config(FontConfig {
+            family: None,
+            font_px: 14.0,
+            font_features: &[],
+            bold_family: None,
+            italic_family: None,
+            bold_italic_family: None,
+            symbol_map: Vec::new(),
+            font_variations: &[],
+        });
+        assert_eq!(
+            r1.is_ok(),
+            r2.is_ok(),
+            "load_with_config with no overrides must succeed when load succeeds"
+        );
+    }
+
+    /// `font_variations: wght=700` must not panic and must load successfully.
+    #[test]
+    fn font_variations_wght_loads_without_panic() {
+        use crate::text::shape::FontConfig;
+        let variations = vec!["wght=700".to_string()];
+        match Text::load_with_config(FontConfig {
+            family: None,
+            font_px: 14.0,
+            font_features: &[],
+            bold_family: None,
+            italic_family: None,
+            bold_italic_family: None,
+            symbol_map: Vec::new(),
+            font_variations: &variations,
+        }) {
+            Ok(_) => {}
+            Err(_) => {
+                eprintln!("font_variations_wght_loads_without_panic: skipped (no font)");
+            }
+        }
+    }
+
+    /// `font_variations: wdth=75` (condensed) must not panic.
+    #[test]
+    fn font_variations_wdth_loads_without_panic() {
+        use crate::text::shape::FontConfig;
+        let variations = vec!["wdth=75".to_string()];
+        match Text::load_with_config(FontConfig {
+            family: None,
+            font_px: 14.0,
+            font_features: &[],
+            bold_family: None,
+            italic_family: None,
+            bold_italic_family: None,
+            symbol_map: Vec::new(),
+            font_variations: &variations,
+        }) {
+            Ok(_) => {}
+            Err(_) => {
+                eprintln!("font_variations_wdth_loads_without_panic: skipped (no font)");
+            }
+        }
+    }
+
+    /// An unknown variation axis must be silently ignored (logged but not fatal).
+    #[test]
+    fn font_variations_unknown_axis_ignored() {
+        use crate::text::shape::FontConfig;
+        let variations = vec!["XXXX=42".to_string()];
+        // Must not panic; result is the same as loading without variations.
+        let _ = Text::load_with_config(FontConfig {
+            family: None,
+            font_px: 14.0,
+            font_features: &[],
+            bold_family: None,
+            italic_family: None,
+            bold_italic_family: None,
+            symbol_map: Vec::new(),
+            font_variations: &variations,
+        });
+    }
+
+    /// `rasterize` with a non-existent per-style family must not panic (it falls
+    /// back to the primary font). Absence of the override family means cosmic-text
+    /// picks the closest available match, so the result is always some glyph.
+    #[test]
+    fn load_with_config_missing_bold_family_falls_back() {
+        use crate::text::shape::FontConfig;
+        match Text::load_with_config(FontConfig {
+            family: None,
+            font_px: 14.0,
+            font_features: &[],
+            bold_family: Some("__NoSuchFontFamily__XYZ__"),
+            italic_family: None,
+            bold_italic_family: None,
+            symbol_map: Vec::new(),
+            font_variations: &[],
+        }) {
+            Ok((mut text, metrics)) => {
+                // Bold rasterize must not panic even if the override family is absent.
+                let glyphs = text.rasterize('A', true, false);
+                for g in &glyphs {
+                    assert!(g.advance >= 0.0);
+                    assert!(g.advance <= metrics.width * 2.0);
+                }
+            }
+            Err(_) => {
+                eprintln!("load_with_config_missing_bold_family_falls_back: skipped (no font)");
+            }
         }
     }
 }

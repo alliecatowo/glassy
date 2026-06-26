@@ -75,12 +75,19 @@ impl ApplicationHandler<UserEvent> for App {
         let font_px = self.config.font_size * scale;
         self.base_font_px = Some(font_px);
 
-        let mut renderer = match Renderer::new(
+        let mut renderer = match Renderer::new_with_fonts(
             window.clone(),
-            self.config.font_family.clone(),
-            font_px,
+            crate::renderer::RendererFontConfig {
+                font_family: self.config.font_family.clone(),
+                font_px,
+                font_features: self.config.font_features.clone(),
+                font_bold: self.config.font_bold.clone(),
+                font_italic: self.config.font_italic.clone(),
+                font_bold_italic: self.config.font_bold_italic.clone(),
+                font_symbol_map: self.config.font_symbol_map.clone(),
+                font_variations: self.config.font_variations.clone(),
+            },
             self.config.opacity,
-            self.config.font_features.clone(),
         ) {
             Ok(r) => r,
             Err(e) => {

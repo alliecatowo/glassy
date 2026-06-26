@@ -5,11 +5,12 @@
 
 use anyhow::Result;
 use cosmic_text::{
-    Attrs, Buffer, Family, FeatureTag, FontFeatures, FontSystem, Metrics, Shaping, Style,
+    Attrs, Buffer, Family, FeatureTag, FontFeatures, FontSystem, Metrics, Shaping, Stretch, Style,
     SwashCache, SwashContent, Weight, fontdb,
 };
 
-use super::discover::{FamilyOwned, build_font_system, discover_font_producers};
+use super::discover::{FamilyOwned, StyleOverrides, build_font_system, discover_font_producers};
+use crate::config::parse::SymbolMapEntry;
 
 /// Per-cell layout metrics, all in physical pixels.
 #[derive(Clone, Copy, Debug)]
@@ -94,6 +95,22 @@ pub struct Text {
     /// cell height. Color emoji are bitmaps; rasterizing at ≥ cell size means the
     /// renderer only ever downscales them (crisp) instead of upscaling (blurry).
     emoji_px: f32,
+    // --- FONTS stream additions ---
+    /// Explicit family names for bold / italic / bold-italic text, or `None` to
+    /// synthesise from the primary family. Set from `font_bold` / `font_italic` /
+    /// `font_bold_italic` config keys.
+    bold_family: Option<String>,
+    italic_family: Option<String>,
+    bold_italic_family: Option<String>,
+    /// Resolved codepoint-range → family routing table (`font_symbol_map`).
+    /// Sorted by `start` for binary search. An empty vec means no routing.
+    symbol_map: Vec<SymbolMapEntry>,
+    /// Weight override derived from `font_variations: wght=N`. `None` means use
+    /// the default (bold = `Weight::BOLD`, regular = `Weight::NORMAL`).
+    variation_weight: Option<Weight>,
+    /// Stretch override derived from `font_variations: wdth=N`. `None` means
+    /// use `Stretch::Normal`.
+    variation_stretch: Option<Stretch>,
 }
 
 /// Pick the color-emoji raster size for a given cell height. Snaps up to the
@@ -111,16 +128,37 @@ fn emoji_raster_px(cell_h: f32) -> f32 {
 
 /// Build shaping attributes for the given style against the resolved family,
 /// applying any caller-supplied font features (OpenType feature overrides).
+///
+/// `variation_weight` and `variation_stretch` come from the `font_variations`
+/// config key: when set they override the default regular/bold weight and the
+/// normal stretch on all glyphs. Bold text uses the variation weight + the
+/// BOLD offset (capped at `Weight(900)`) so the contrast between regular and
+/// bold is preserved even when the user dials up a heavier base weight.
 fn build_attrs<'a>(
     family: Family<'a>,
     bold: bool,
     italic: bool,
     features: &FontFeatures,
+    variation_weight: Option<Weight>,
+    variation_stretch: Option<Stretch>,
 ) -> Attrs<'a> {
     let mut attrs = Attrs::new();
     attrs.family = family;
-    attrs.weight = if bold { Weight::BOLD } else { Weight::NORMAL };
+    // Weight: apply variation weight as the base; bold adds a fixed offset.
+    attrs.weight = if bold {
+        if let Some(base) = variation_weight {
+            // Clamp to max CSS weight (900 = Black).
+            Weight(base.0.saturating_add(300).min(900))
+        } else {
+            Weight::BOLD
+        }
+    } else {
+        variation_weight.unwrap_or(Weight::NORMAL)
+    };
     attrs.style = if italic { Style::Italic } else { Style::Normal };
+    if let Some(stretch) = variation_stretch {
+        attrs.stretch = stretch;
+    }
     if !features.features.is_empty() {
         attrs = attrs.font_features(features.clone());
     }
@@ -171,6 +209,119 @@ fn font_fallback_width(line_height: f32) -> f32 {
     (line_height * 0.5).round().max(1.0)
 }
 
+/// Parse the `font_variations` list into a `Weight` and/or `Stretch` override.
+///
+/// Only `wght` and `wdth` axes are mapped to cosmic-text `Attrs` fields.
+/// Other axes are logged at debug level and discarded (cosmic-text 0.19 does
+/// not expose arbitrary axis APIs at the `Attrs` level).
+///
+/// Returns `(weight_override, stretch_override)`.
+fn parse_variation_axes(variations: &[String]) -> (Option<Weight>, Option<Stretch>) {
+    let mut weight: Option<Weight> = None;
+    let mut stretch: Option<Stretch> = None;
+    for entry in variations {
+        let Some((tag, val_str)) = entry.split_once('=') else {
+            log::debug!("glassy: font_variations: skipping bare tag '{entry}' (no value)");
+            continue;
+        };
+        let tag = tag.trim().to_ascii_lowercase();
+        let val_str = val_str.trim();
+        match tag.as_str() {
+            "wght" => {
+                match val_str.parse::<f32>() {
+                    Ok(v) => {
+                        // CSS weight range is 1–1000; clamp to u16.
+                        weight = Some(Weight((v.round() as u16).clamp(1, 1000)));
+                        log::debug!("glassy: font_variations: wght={}", v);
+                    }
+                    Err(_) => {
+                        log::warn!("glassy: font_variations: invalid wght value '{val_str}'");
+                    }
+                }
+            }
+            "wdth" => {
+                // CSS font-stretch percentages: 50, 62.5, 75, 87.5, 100, 112.5, 125, 150, 200.
+                match val_str.parse::<f32>() {
+                    Ok(v) => {
+                        stretch = Some(pct_to_stretch(v));
+                        log::debug!("glassy: font_variations: wdth={}", v);
+                    }
+                    Err(_) => {
+                        log::warn!("glassy: font_variations: invalid wdth value '{val_str}'");
+                    }
+                }
+            }
+            other => {
+                log::debug!(
+                    "glassy: font_variations: axis '{other}' is not mapped by cosmic-text 0.19; \
+                     stored for documentation only"
+                );
+            }
+        }
+    }
+    (weight, stretch)
+}
+
+/// Map a CSS `font-stretch` percentage to the closest `Stretch` variant.
+fn pct_to_stretch(pct: f32) -> Stretch {
+    // Ordered list of (percentage, Stretch variant).
+    const MAP: &[(f32, Stretch)] = &[
+        (50.0, Stretch::UltraCondensed),
+        (62.5, Stretch::ExtraCondensed),
+        (75.0, Stretch::Condensed),
+        (87.5, Stretch::SemiCondensed),
+        (100.0, Stretch::Normal),
+        (112.5, Stretch::SemiExpanded),
+        (125.0, Stretch::Expanded),
+        (150.0, Stretch::ExtraExpanded),
+        (200.0, Stretch::UltraExpanded),
+    ];
+    // Pick the entry whose percentage is closest to `pct`.
+    MAP.iter()
+        .min_by(|(a, _), (b, _)| (*a - pct).abs().partial_cmp(&(*b - pct).abs()).unwrap())
+        .map(|(_, s)| *s)
+        .unwrap_or(Stretch::Normal)
+}
+
+/// Binary-search `symbol_map` (sorted by `start`) for the codepoint, returning
+/// the family name of the first range that covers it, or `None`.
+pub(crate) fn lookup_symbol_family(symbol_map: &[SymbolMapEntry], cp: char) -> Option<&str> {
+    let code = cp as u32;
+    // Binary-search by start; we then verify the hit covers `code`.
+    let idx = symbol_map.partition_point(|e| e.start <= code);
+    // `idx` is the first entry whose start > code. Check the entry before it.
+    if idx == 0 {
+        return None;
+    }
+    let entry = &symbol_map[idx - 1];
+    if code >= entry.start && code <= entry.end {
+        Some(&entry.family)
+    } else {
+        None
+    }
+}
+
+/// Parameters for loading the font subsystem.
+///
+/// Passed to [`Text::load_with_config`]. Keeping them in a struct avoids a
+/// long positional argument list and makes adding future parameters additive.
+pub struct FontConfig<'a> {
+    /// Primary font family name (from `font_family`). `None` uses discovery default.
+    pub family: Option<&'a str>,
+    /// Logical font size in points.
+    pub font_px: f32,
+    /// OpenType feature overrides (`font_features`).
+    pub font_features: &'a [String],
+    /// Per-style family overrides (`font_bold`, `font_italic`, `font_bold_italic`).
+    pub bold_family: Option<&'a str>,
+    pub italic_family: Option<&'a str>,
+    pub bold_italic_family: Option<&'a str>,
+    /// Symbol/codepoint routing map (`font_symbol_map`), already sorted by start.
+    pub symbol_map: Vec<SymbolMapEntry>,
+    /// Variable-font axis overrides (`font_variations`).
+    pub font_variations: &'a [String],
+}
+
 impl Text {
     /// Discover a monospace font, load it, and measure the cell box for `font_px`.
     ///
@@ -184,11 +335,44 @@ impl Text {
     /// non-empty, each feature is parsed and applied to every shaping call so
     /// callers do not need to post-process `Attrs` themselves. `None` / empty
     /// slice means "use the font's defaults" (nothing forced on or off).
+    #[allow(dead_code)]
     pub fn load(
         family: Option<&str>,
         font_px: f32,
         font_features: &[String],
     ) -> Result<(Text, CellMetrics)> {
+        Self::load_with_config(FontConfig {
+            family,
+            font_px,
+            font_features,
+            bold_family: None,
+            italic_family: None,
+            bold_italic_family: None,
+            symbol_map: Vec::new(),
+            font_variations: &[],
+        })
+    }
+
+    /// Full font-load entry point with all FONTS-stream configuration.
+    pub fn load_with_config(cfg: FontConfig<'_>) -> Result<(Text, CellMetrics)> {
+        let family = cfg.family;
+        let font_px = cfg.font_px;
+        let font_features = cfg.font_features;
+
+        // Build the style-override descriptor from config.
+        let style_overrides = StyleOverrides {
+            bold: cfg.bold_family.map(str::to_string),
+            italic: cfg.italic_family.map(str::to_string),
+            bold_italic: cfg.bold_italic_family.map(str::to_string),
+        };
+
+        // Parse variable-font axis overrides.
+        let (variation_weight, variation_stretch) = parse_variation_axes(cfg.font_variations);
+
+        // Sort the symbol map by `start` for binary-search during shaping.
+        let mut symbol_map = cfg.symbol_map;
+        symbol_map.sort_unstable_by_key(|e| e.start);
+
         // Gather candidate *producers* in priority order (explicit override,
         // requested family, curated families verified via fontconfig, generic
         // monospace, known paths). Each producer is a closure that only runs its
@@ -208,7 +392,7 @@ impl Text {
             let Some(candidate) = producer() else {
                 continue;
             };
-            match build_font_system(candidate.bytes, candidate.path) {
+            match build_font_system(candidate.bytes, candidate.path, &style_overrides) {
                 Some(found) => {
                     if found.is_monospaced {
                         loaded = Some(found);
@@ -235,8 +419,13 @@ impl Text {
         // system and is O(hundreds of files) on a typical Linux install, so
         // it adds hundreds of milliseconds to startup. Warn so the user (or
         // packager) knows the curated discovery chain failed entirely.
-        let (font_system, family, emoji_family) = match loaded {
-            Some(found) => (found.font_system, found.family, found.emoji_family),
+        let (font_system, primary_family, emoji_family, style_families) = match loaded {
+            Some(found) => (
+                found.font_system,
+                found.family,
+                found.emoji_family,
+                found.style_families,
+            ),
             None => {
                 log::warn!(
                     "glassy: no usable monospace font found via fc-match or probe paths; \
@@ -244,9 +433,32 @@ impl Text {
                      Install a monospace font (e.g. JetBrains Mono, DejaVu Sans Mono) \
                      or set GLASSY_FONT=<path> to suppress this."
                 );
-                (FontSystem::new(), FamilyOwned::Monospace, None)
+                (
+                    FontSystem::new(),
+                    FamilyOwned::Monospace,
+                    None,
+                    super::discover::StyleFamilies {
+                        bold: None,
+                        italic: None,
+                        bold_italic: None,
+                    },
+                )
             }
         };
+
+        // Now load any fonts referenced by the symbol map that are not already
+        // in the FontSystem database. We clone the font_system's db reference
+        // via the font_system API. Since FontSystem doesn't expose a mutable db
+        // after construction, we need to load symbol fonts during the db build
+        // phase. The symbol map fonts were NOT loaded above (build_font_system
+        // only knows about style overrides). We load them now by building a new
+        // db that merges the already-loaded system with the symbol fonts.
+        //
+        // Implementation note: cosmic_text's FontSystem wraps an Arc<Mutex<...>>
+        // database. We can add fonts to it after construction via
+        // `font_system.db_mut().load_font_file(...)`.
+        let mut font_system = font_system;
+        Self::load_symbol_map_fonts(&mut font_system, &symbol_map);
 
         // Line height is the cell height; round so cells land on pixel
         // boundaries. 1.30x the em gives comfortable vertical spacing.
@@ -257,11 +469,17 @@ impl Text {
             font_system,
             swash_cache: SwashCache::new(),
             buffer: Buffer::new_empty(metrics),
-            family,
+            family: primary_family,
             font_features: parse_font_features(font_features),
             emoji_family,
             font_px,
             emoji_px: emoji_raster_px(line_height),
+            bold_family: style_families.bold,
+            italic_family: style_families.italic,
+            bold_italic_family: style_families.bold_italic,
+            symbol_map,
+            variation_weight,
+            variation_stretch,
         };
 
         let cell = text.measure_cell(font_px, line_height);
@@ -269,9 +487,13 @@ impl Text {
             FamilyOwned::Named(n) => n.as_str(),
             FamilyOwned::Monospace => "<system monospace>",
         };
+        let bold_info = text.bold_family.as_deref().unwrap_or("<synthesised>");
+        let italic_info = text.italic_family.as_deref().unwrap_or("<synthesised>");
         log::info!(
-            "font='{}' font_px={:.1} cell={}x{} ascent={}",
+            "font='{}' bold='{}' italic='{}' font_px={:.1} cell={}x{} ascent={}",
             family_name,
+            bold_info,
+            italic_info,
             font_px,
             cell.width,
             cell.height,
@@ -280,11 +502,144 @@ impl Text {
         Ok((text, cell))
     }
 
+    /// Load all distinct font families referenced by `symbol_map` into the
+    /// `FontSystem`'s database. Fonts already present (i.e. loaded by the
+    /// discovery chain or as style overrides) are skipped by fontdb's de-dup.
+    /// Best-effort: resolution failures are logged and skipped.
+    fn load_symbol_map_fonts(font_system: &mut FontSystem, symbol_map: &[SymbolMapEntry]) {
+        // Collect unique family names.
+        let mut families: Vec<&str> = symbol_map.iter().map(|e| e.family.as_str()).collect();
+        families.dedup();
+        families.sort_unstable();
+        families.dedup();
+
+        for name in families {
+            // Skip entries that already look like a loaded family (cheap heuristic:
+            // if a face in the db already has this family name, skip). fontdb's
+            // load_font_file is idempotent for the same path but not for names.
+            let already_loaded = font_system
+                .db()
+                .faces()
+                .any(|f| f.families.iter().any(|(n, _)| n.eq_ignore_ascii_case(name)));
+            if already_loaded {
+                log::debug!("glassy: symbol map font '{name}' already in db; skipping");
+                continue;
+            }
+
+            // Try to load by file path, then by family via platform search.
+            let path = std::path::Path::new(name);
+            if path.is_file() {
+                match font_system.db_mut().load_font_file(path) {
+                    Ok(()) => {
+                        log::debug!("glassy: loaded symbol map font (path): {name}");
+                    }
+                    Err(e) => {
+                        log::warn!("glassy: symbol map font '{name}' file load failed: {e}");
+                    }
+                }
+                continue;
+            }
+
+            // Platform font resolution for the symbol family name.
+            #[cfg(target_os = "linux")]
+            {
+                use super::discover::{fc_cache_insert, fc_cache_load, fc_match_file_live};
+                let cache = fc_cache_load();
+                let key = format!("family:{name}");
+                let path_opt = if let Some(p) = cache.get(&key)
+                    && std::path::Path::new(p).exists()
+                {
+                    Some(p.clone())
+                } else {
+                    fc_match_file_live(name)
+                };
+                if let Some(p) = path_opt {
+                    if !cache.contains_key(&key) {
+                        fc_cache_insert(&key, &p);
+                    }
+                    match font_system
+                        .db_mut()
+                        .load_font_file(std::path::Path::new(&p))
+                    {
+                        Ok(()) => log::debug!("glassy: loaded symbol map font '{name}': {p}"),
+                        Err(e) => {
+                            log::warn!("glassy: symbol map font '{name}' load failed: {e}")
+                        }
+                    }
+                } else {
+                    log::warn!("glassy: symbol map font '{name}' not found via fontconfig");
+                }
+            }
+            #[cfg(target_os = "macos")]
+            {
+                use super::discover::{find_macos_font_file, macos_font_cache_load};
+                let cache = macos_font_cache_load();
+                if let Some(path) = find_macos_font_file(name, &cache) {
+                    match font_system.db_mut().load_font_file(&path) {
+                        Ok(()) => {
+                            log::debug!(
+                                "glassy: loaded symbol map font '{}': {}",
+                                name,
+                                path.display()
+                            )
+                        }
+                        Err(e) => {
+                            log::warn!("glassy: symbol map font '{name}' load failed: {e}")
+                        }
+                    }
+                } else {
+                    log::warn!("glassy: symbol map font '{name}' not found (macOS)");
+                }
+            }
+            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+            {
+                log::warn!(
+                    "glassy: symbol map font '{name}' could not be resolved on this platform"
+                );
+            }
+        }
+    }
+
+    /// Return the best `Family` to use for a given codepoint and bold/italic flags.
+    ///
+    /// Priority:
+    /// 1. Symbol map override (if the codepoint falls in a configured range).
+    /// 2. Per-style family override (bold_family / italic_family / bold_italic_family).
+    /// 3. Primary family.
+    fn pick_family_for(&self, ch: char, bold: bool, italic: bool) -> FamilyOwned {
+        // 1. Symbol map.
+        if let Some(name) = lookup_symbol_family(&self.symbol_map, ch) {
+            return FamilyOwned::Named(name.to_string());
+        }
+        // 2. Per-style override.
+        let override_name = match (bold, italic) {
+            (true, true) => self.bold_italic_family.as_deref(),
+            (true, false) => self.bold_family.as_deref(),
+            (false, true) => self.italic_family.as_deref(),
+            (false, false) => None,
+        };
+        if let Some(name) = override_name {
+            return FamilyOwned::Named(name.to_string());
+        }
+        // 3. Primary.
+        match &self.family {
+            FamilyOwned::Named(n) => FamilyOwned::Named(n.clone()),
+            FamilyOwned::Monospace => FamilyOwned::Monospace,
+        }
+    }
+
     /// Shape a representative string to derive the monospace advance width and
     /// the baseline (ascent) for one line, plus the decoration (underline /
     /// strikeout) stroke positions read from the primary font's metrics.
     fn measure_cell(&mut self, font_px: f32, line_height: f32) -> CellMetrics {
-        let attrs = build_attrs(self.family.as_family(), false, false, &self.font_features);
+        let attrs = build_attrs(
+            self.family.as_family(),
+            false,
+            false,
+            &self.font_features,
+            self.variation_weight,
+            self.variation_stretch,
+        );
         self.buffer.set_text("MM", &attrs, Shaping::Advanced, None);
         self.buffer.shape_until_scroll(&mut self.font_system, false);
 
@@ -387,7 +742,24 @@ impl Text {
     /// duplicate bitmap that is never read.
     pub fn rasterize(&mut self, ch: char, bold: bool, italic: bool) -> Vec<RasterizedGlyph> {
         let mut tmp = [0u8; 4];
-        self.build_glyphs(ch.encode_utf8(&mut tmp), bold, italic)
+        let text = ch.encode_utf8(&mut tmp);
+        // Pick the family for this codepoint (symbol map, then style override, then primary).
+        let family_owned = self.pick_family_for(ch, bold, italic);
+        let family_str: Option<String> = match &family_owned {
+            FamilyOwned::Named(n) => Some(n.clone()),
+            FamilyOwned::Monospace => None,
+        };
+        if let Some(ref name) = family_str {
+            let is_primary = match &self.family {
+                FamilyOwned::Named(n) => n == name,
+                FamilyOwned::Monospace => false,
+            };
+            if !is_primary {
+                let name_clone = name.clone();
+                return self.build_glyphs_with_family(text, &name_clone, bold, italic);
+            }
+        }
+        self.build_glyphs(text, bold, italic)
     }
 
     /// Rasterize a full grapheme cluster (a base character plus its combining
@@ -431,7 +803,7 @@ impl Text {
     }
 
     /// Shape using an explicit family name rather than the primary font. Used for
-    /// ZWJ emoji clusters that must stay in a single font run.
+    /// ZWJ emoji clusters and symbol-map / style-override routing.
     #[cfg_attr(target_os = "macos", allow(dead_code))]
     fn build_glyphs_with_family(
         &mut self,
@@ -440,7 +812,14 @@ impl Text {
         bold: bool,
         italic: bool,
     ) -> Vec<RasterizedGlyph> {
-        let attrs = build_attrs(Family::Name(family), bold, italic, &self.font_features);
+        let attrs = build_attrs(
+            Family::Name(family),
+            bold,
+            italic,
+            &self.font_features,
+            self.variation_weight,
+            self.variation_stretch,
+        );
         self.buffer.set_text(text, &attrs, Shaping::Advanced, None);
         self.buffer.shape_until_scroll(&mut self.font_system, false);
         self.collect_glyphs()
@@ -450,7 +829,16 @@ impl Text {
     fn build_glyphs(&mut self, text: &str, bold: bool, italic: bool) -> Vec<RasterizedGlyph> {
         // `family` borrows `self`, so capture the borrowed `Family` before the
         // `&mut self.font_system` borrows below; they touch disjoint fields.
-        let attrs = build_attrs(self.family.as_family(), bold, italic, &self.font_features);
+        let vw = self.variation_weight;
+        let vs = self.variation_stretch;
+        let attrs = build_attrs(
+            self.family.as_family(),
+            bold,
+            italic,
+            &self.font_features,
+            vw,
+            vs,
+        );
         self.buffer.set_text(text, &attrs, Shaping::Advanced, None);
         self.buffer.shape_until_scroll(&mut self.font_system, false);
 
@@ -575,7 +963,16 @@ impl Text {
             return Vec::new();
         }
 
-        let attrs = build_attrs(self.family.as_family(), bold, italic, &self.font_features);
+        let vw = self.variation_weight;
+        let vs = self.variation_stretch;
+        let attrs = build_attrs(
+            self.family.as_family(),
+            bold,
+            italic,
+            &self.font_features,
+            vw,
+            vs,
+        );
         self.buffer.set_text(text, &attrs, Shaping::Advanced, None);
         self.buffer.shape_until_scroll(&mut self.font_system, false);
 
@@ -709,7 +1106,16 @@ impl Text {
     /// collapses "fi" into a single ligature glyph; a font without liga returns two
     /// separate glyph records.
     pub fn has_ligatures(&mut self) -> bool {
-        let attrs = build_attrs(self.family.as_family(), false, false, &self.font_features);
+        let vw = self.variation_weight;
+        let vs = self.variation_stretch;
+        let attrs = build_attrs(
+            self.family.as_family(),
+            false,
+            false,
+            &self.font_features,
+            vw,
+            vs,
+        );
         self.buffer.set_text("fi", &attrs, Shaping::Advanced, None);
         self.buffer.shape_until_scroll(&mut self.font_system, false);
 
