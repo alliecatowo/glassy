@@ -105,7 +105,7 @@ fn set_macos_app_icon() {
     use objc2_app_kit::{NSApplication, NSImage};
     use objc2_foundation::NSData;
 
-    let icon_bytes = include_bytes!("../assets/icons/glassy.icns");
+    let icon_bytes = include_bytes!("../assets/icons/glassy-pink.icns");
     unsafe {
         objc2::rc::autoreleasepool(|_| {
             let mtm = objc2_foundation::MainThreadMarker::new().unwrap();
