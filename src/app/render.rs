@@ -226,6 +226,11 @@ impl App {
                 (self.mouse_px.0 as f32, self.mouse_px.1 as f32),
                 self.held_button == Some(0),
                 self.gui_click_edge,
+                self.settings_section,
+                self.settings_section_scroll,
+                self.custom_theme_swatches(),
+                self.settings_custom_editing,
+                self.settings_profiles.clone(),
             ))
         } else {
             None
@@ -935,6 +940,11 @@ impl App {
             mouse,
             mouse_down,
             click_edge,
+            section,
+            section_scroll,
+            ref custom_swatches,
+            custom_editing,
+            ref profile_names,
         )) = settings_inputs
         {
             let font_px = renderer.font_px();
@@ -945,6 +955,8 @@ impl App {
                 font_feat_ms: &mut self.settings_font_feat_ms,
                 blink_on: self.blink_on,
                 double_click: self.gui_double_click,
+                theme_hex: &mut self.settings_theme_hex,
+                theme_hex_ms: &mut self.settings_theme_hex_ms,
             };
             settings_events = Some(Self::paint_settings(
                 renderer,
@@ -963,6 +975,11 @@ impl App {
                 &mut self.gui_focused,
                 &mut self.gui_anims,
                 &mut fields,
+                section,
+                section_scroll,
+                custom_swatches,
+                custom_editing,
+                profile_names,
             ));
         } else if self.help_open {
             // Real GUI help panel (§3.7): scrollable two-column keybindings over

@@ -9,6 +9,8 @@
 //! font_family = FiraCode Nerd Font Mono
 //! font_size   = 14
 //! theme       = tokyo-night            # or: catppuccin-mocha
+//!                                       # split form: theme = light:one-light, dark:tokyo-night
+//!                                       # (turns on follow_system + pins per-scheme themes)
 //! opacity     = 0.92                   # 0.0 (clear) .. 1.0 (opaque)
 //! padding     = 6                      # logical px grid inset (all sides)
 //! padding_top = 8                      # per-side overrides (optional, override padding)
@@ -156,6 +158,38 @@ impl Settings {
         // 5. Convert accumulated raw config into final settings.
         raw.into_settings().map(Some)
     }
+
+    /// Re-resolve settings from the on-disk config file with the named profile
+    /// activated, for the LIVE runtime profile switch (palette / keybind). Unlike
+    /// [`Settings::resolve`] this skips CLI parsing (there is none at runtime) and
+    /// ignores the originally-passed `--profile`. Returns an error if the file is
+    /// missing or the profile is unknown.
+    pub fn resolve_with_profile(profile: &str) -> Result<Settings> {
+        let mut raw = parse::RawConfig::default();
+        if let Some(path) = parse::path()
+            && let Ok(text) = std::fs::read_to_string(&path)
+        {
+            parse::parse_config_file(&text, &mut raw)
+                .with_context(|| format!("parsing {}", path.display()))?;
+        }
+        raw.activate_profile(profile)?;
+        raw.into_settings()
+    }
+}
+
+/// Read the names of every `[profile.NAME]` section defined in the on-disk config
+/// file, in first-seen order, for the runtime profile switcher (palette +
+/// settings). Returns an empty list when no config file exists or it defines no
+/// profiles. Errors in parsing are swallowed (returns what was collected) so the
+/// switcher never blocks on a malformed file.
+pub fn profile_names() -> Vec<String> {
+    let Some(path) = parse::path() else {
+        return Vec::new();
+    };
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    parse::profile_names_from_text(&text)
 }
 
 #[cfg(test)]
@@ -270,6 +304,40 @@ opacity = 0.80
     fn activate_unknown_profile_errors() {
         let mut raw = RawConfig::default();
         assert!(raw.activate_profile("nope").is_err());
+    }
+
+    #[test]
+    fn split_theme_sets_follow_system_and_per_scheme() {
+        let mut raw = RawConfig::default();
+        parse_config_file("theme = light:one-light, dark:tokyo-night\n", &mut raw).unwrap();
+        assert_eq!(raw.follow_system, Some(true));
+        assert_eq!(raw.theme_light.as_deref(), Some("one-light"));
+        assert_eq!(raw.theme_dark.as_deref(), Some("tokyo-night"));
+        let s = raw.into_settings().unwrap();
+        assert!(s.config.follow_system);
+        assert_eq!(s.config.theme_light, "one-light");
+        assert_eq!(s.config.theme_dark, "tokyo-night");
+    }
+
+    #[test]
+    fn split_theme_order_independent_and_partial() {
+        let mut raw = RawConfig::default();
+        parse_config_file("theme = dark:dracula\n", &mut raw).unwrap();
+        assert_eq!(raw.follow_system, Some(true));
+        assert_eq!(raw.theme_dark.as_deref(), Some("dracula"));
+        // Bare names still use the single-theme path (no follow_system flip).
+        let mut bare = RawConfig::default();
+        parse_config_file("theme = dracula\n", &mut bare).unwrap();
+        assert_eq!(bare.follow_system, None);
+        assert_eq!(bare.theme.as_deref(), Some("dracula"));
+    }
+
+    #[test]
+    fn profile_names_from_text_preserves_order() {
+        use super::parse::profile_names_from_text;
+        let text = "[profile.work]\nfont_size=16\n[profile.home]\nfont_size=12\n[profile.work]\ntheme=nord\n";
+        let names = profile_names_from_text(text);
+        assert_eq!(names, vec!["work".to_string(), "home".to_string()]);
     }
 
     #[test]

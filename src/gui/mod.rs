@@ -28,12 +28,14 @@ use crate::renderer::Renderer;
 
 mod chrome;
 mod help;
+mod settings_panel;
 mod textedit;
 mod textinput;
 mod widgets;
 
 pub use chrome::*;
 pub use help::*;
+// `settings_panel` only adds inherent methods to `Ui`; nothing to re-export.
 pub use textedit::*;
 pub use textinput::*;
 pub use widgets::*;
@@ -381,6 +383,10 @@ pub enum SettingsDrop {
     Theme,
     /// The font-family chooser list is open.
     Font,
+    /// The system-Light theme chooser list is open (Themes section).
+    ThemeLight,
+    /// The system-Dark theme chooser list is open (Themes section).
+    ThemeDark,
 }
 
 /// The live, read-only view of state the settings form draws from. The App
@@ -428,6 +434,80 @@ pub struct SettingsView<'a> {
     /// Tab-strip visibility policy as a segmented index: 0 = Auto, 1 = Always,
     /// 2 = Never.
     pub tab_bar_mode: usize,
+
+    // --- settings-themes stream: sectioned window + custom theme + profiles ---
+    /// Active left-sidebar section index (see [`SettingsSection`]).
+    pub section: usize,
+    /// Current vertical scroll offset (px) of the active section's right pane.
+    pub section_scroll: f32,
+    /// Copy-on-select enabled.
+    pub copy_on_select: bool,
+    /// Show the minimap / overview strip at the right edge.
+    pub minimap: bool,
+    /// Show command-block badges (OSC 133 exit/duration affordances).
+    pub command_badges: bool,
+    /// Animate the cursor between cells (cursor trail).
+    pub cursor_trail: bool,
+    /// CRT / scanline post-process effect enabled.
+    pub crt_effect: bool,
+    /// Include the cwd in the OS window title.
+    pub title_show_cwd: bool,
+    /// Append " · N tabs" to the OS window title.
+    pub title_show_count: bool,
+    /// Theme to use in system Light mode (canonical name).
+    pub theme_light: &'a str,
+    /// Theme to use in system Dark mode (canonical name).
+    pub theme_dark: &'a str,
+    /// The 20 custom-theme entry labels in editor order (fg/bg/cursor/sel + ansi0-15).
+    pub custom_labels: &'a [&'a str],
+    /// The current custom-theme swatch colors, parallel to `custom_labels`.
+    pub custom_swatches: &'a [[f32; 4]],
+    /// Which custom-theme entry is being edited (index into `custom_labels`), or
+    /// `usize::MAX` when none is selected for editing.
+    pub custom_editing: usize,
+    /// The available runtime profile names (from `[profile.*]` sections).
+    pub profile_names: &'a [&'a str],
+}
+
+/// The left-sidebar sections of the revamped settings window, in display order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SettingsSection {
+    General,
+    Appearance,
+    Themes,
+    Keys,
+    Panes,
+    Advanced,
+}
+
+impl SettingsSection {
+    /// All sections in sidebar order.
+    pub const ALL: &'static [SettingsSection] = &[
+        SettingsSection::General,
+        SettingsSection::Appearance,
+        SettingsSection::Themes,
+        SettingsSection::Keys,
+        SettingsSection::Panes,
+        SettingsSection::Advanced,
+    ];
+    /// The sidebar label for this section.
+    pub fn label(self) -> &'static str {
+        match self {
+            SettingsSection::General => "General",
+            SettingsSection::Appearance => "Appearance",
+            SettingsSection::Themes => "Themes",
+            SettingsSection::Keys => "Keys",
+            SettingsSection::Panes => "Panes",
+            SettingsSection::Advanced => "Advanced",
+        }
+    }
+    /// Resolve a section from its index, clamped to a valid section.
+    pub fn from_index(i: usize) -> SettingsSection {
+        Self::ALL
+            .get(i)
+            .copied()
+            .unwrap_or(SettingsSection::General)
+    }
 }
 
 /// Everything the settings form reported this frame. The App applies each
@@ -479,6 +559,43 @@ pub struct SettingsEvents {
     pub cursor_blink_toggle: bool,
     /// New tab-bar-mode index if the segmented control changed (0/1/2).
     pub tab_bar_mode: Option<usize>,
+
+    // --- settings-themes stream ---
+    /// A sidebar section was clicked (new active section index).
+    pub section_pick: Option<usize>,
+    /// The active section's right-pane scroll moved (new offset in px).
+    pub section_scroll: Option<f32>,
+    /// Copy-on-select toggle was clicked.
+    pub copy_on_select_toggle: bool,
+    /// Minimap toggle was clicked.
+    pub minimap_toggle: bool,
+    /// Command-badges toggle was clicked.
+    pub command_badges_toggle: bool,
+    /// Cursor-trail toggle was clicked.
+    pub cursor_trail_toggle: bool,
+    /// CRT-effect toggle was clicked.
+    pub crt_effect_toggle: bool,
+    /// Title-show-cwd toggle was clicked.
+    pub title_show_cwd_toggle: bool,
+    /// Title-show-count toggle was clicked.
+    pub title_show_count_toggle: bool,
+    /// The system Light-mode theme dropdown header was toggled.
+    pub theme_light_toggle: bool,
+    /// A system Light-mode theme row was picked (absolute index into THEME_NAMES).
+    pub theme_light_pick: Option<usize>,
+    /// The system Dark-mode theme dropdown header was toggled.
+    pub theme_dark_toggle: bool,
+    /// A system Dark-mode theme row was picked (absolute index into THEME_NAMES).
+    pub theme_dark_pick: Option<usize>,
+    /// A custom-theme color row was clicked to begin editing it (entry index).
+    pub custom_color_pick: Option<usize>,
+    /// Apply the edited custom theme to the live palette (preview).
+    pub custom_apply: bool,
+    /// Save the custom theme to config (color.* keys).
+    pub custom_save: bool,
+    /// A runtime profile was picked from the Advanced section (index into
+    /// `profile_names`).
+    pub profile_pick: Option<usize>,
 }
 
 // ---------------------------------------------------------------------------

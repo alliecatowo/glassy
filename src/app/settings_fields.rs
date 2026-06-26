@@ -11,7 +11,10 @@ impl App {
     /// the field's [`gui::TextEdit`] while one of these is focused.
     pub(crate) fn settings_editing_field(&self) -> Option<gui::WidgetId> {
         let f = self.gui_focused?;
-        if f == gui::id("settings/word_separator") || f == gui::id("settings/font_features") {
+        if f == gui::id("settings/word_separator")
+            || f == gui::id("settings/font_features")
+            || f == gui::id("settings/custom/hex")
+        {
             Some(f)
         } else {
             None
@@ -53,6 +56,8 @@ impl App {
         };
         let edit = if field == gui::id("settings/word_separator") {
             &mut self.settings_word_sep
+        } else if field == gui::id("settings/custom/hex") {
+            &mut self.settings_theme_hex
         } else {
             &mut self.settings_font_feat
         };
@@ -114,6 +119,9 @@ impl App {
         } else if field == gui::id("settings/font_features") {
             let text = self.settings_font_feat.text();
             self.config.font_features = text.split_whitespace().map(|s| s.to_string()).collect();
+        } else if field == gui::id("settings/custom/hex") {
+            // Live-parse the hex into the working custom-theme entry + preview it.
+            self.apply_custom_hex();
         }
     }
 }

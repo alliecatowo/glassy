@@ -74,6 +74,10 @@ pub(crate) enum PaletteCmd {
     /// Change into a recent working directory: paste `cd <dir>` and submit. The
     /// directory string lives in [`PaletteEntry::payload`].
     CdTo,
+    /// Switch the live runtime profile to the `[profile.NAME]` whose name lives in
+    /// [`PaletteEntry::payload`]. Applies the profile's live-applicable settings
+    /// immediately (theme / opacity / bell / status / panes / word seps).
+    SwitchProfile,
 }
 
 impl PaletteCmd {
@@ -95,6 +99,7 @@ impl PaletteCmd {
             NextTheme | PrevTheme | SetTheme(_) | GenerateThemeFromWallpaper => "Theme",
             RunCommand => "History",
             CdTo => "Cwd",
+            SwitchProfile => "Profile",
         }
     }
 
@@ -136,8 +141,8 @@ impl PaletteCmd {
             ToggleFold => "Fold/unfold command output".into(),
             SetTheme(_) => String::new(),
             GenerateThemeFromWallpaper => "Generate theme from wallpaper image".into(),
-            // History/cwd labels are filled in by the registry from the payload.
-            RunCommand | CdTo => String::new(),
+            // History/cwd/profile labels are filled in by the registry from the payload.
+            RunCommand | CdTo | SwitchProfile => String::new(),
         }
     }
 
@@ -305,6 +310,18 @@ impl App {
                 haystack,
                 hint: None,
                 payload: Some(dir.to_string_lossy().into_owned()),
+            });
+        }
+        // Runtime profile switches: one entry per `[profile.NAME]` section.
+        for name in crate::config::profile_names() {
+            let display = format!("Profile  Switch to {name}");
+            let haystack = display.to_lowercase();
+            entries.push(PaletteEntry {
+                cmd: SwitchProfile,
+                display,
+                haystack,
+                hint: None,
+                payload: Some(name),
             });
         }
         entries
@@ -480,6 +497,12 @@ impl App {
                 if let Some(dir) = payload {
                     let line = format!("cd {}", shell_quote(&dir));
                     self.palette_submit_line(&line, event_loop);
+                }
+            }
+            SwitchProfile => {
+                if let Some(name) = payload {
+                    self.switch_profile_by_name(&name);
+                    self.mark_dirty(event_loop);
                 }
             }
             NewTab => self.new_tab(event_loop),

@@ -306,6 +306,11 @@ impl App {
         gui_focused: &mut Option<gui::WidgetId>,
         gui_anims: &mut std::collections::HashMap<gui::WidgetId, gui::Anim>,
         fields: &mut gui::SettingsFields,
+        section: usize,
+        section_scroll: f32,
+        custom_swatches: &[[f32; 4]],
+        custom_editing: usize,
+        profile_names: &[String],
     ) -> gui::SettingsEvents {
         // Theme names + per-theme accent swatches (the cursor color each theme
         // deliberately picks to pop).
@@ -360,6 +365,9 @@ impl App {
             crate::app::CursorStyleConfig::Beam => 1,
             crate::app::CursorStyleConfig::Underline => 2,
         };
+        // Custom-theme editor view data + the runtime profile names.
+        let custom_labels: Vec<&str> = crate::app::settings_themes::CUSTOM_THEME_LABELS.to_vec();
+        let profile_refs: Vec<&str> = profile_names.iter().map(|s| s.as_str()).collect();
         let view = gui::SettingsView {
             font_px,
             opacity: config.opacity,
@@ -385,6 +393,21 @@ impl App {
             cursor_style_idx,
             cursor_blink: config.cursor_blink,
             tab_bar_mode,
+            section,
+            section_scroll,
+            copy_on_select: config.copy_on_select,
+            minimap: config.minimap,
+            command_badges: config.command_badges,
+            cursor_trail: config.cursor_trail,
+            crt_effect: config.crt_effect,
+            title_show_cwd: config.title_show_cwd,
+            title_show_count: config.title_show_count,
+            theme_light: &config.theme_light,
+            theme_dark: &config.theme_dark,
+            custom_labels: &custom_labels,
+            custom_swatches,
+            custom_editing,
+            profile_names: &profile_refs,
         };
         ui.build_settings((sw as f32, sh as f32), &view, fields)
     }
@@ -487,6 +510,98 @@ impl App {
         if ev.cursor_blink_toggle {
             self.config.cursor_blink = !self.config.cursor_blink;
             self.settings_saved = false;
+            changed = true;
+        }
+        // --- settings-themes stream events ---
+        if let Some(idx) = ev.section_pick {
+            self.settings_set_section(idx);
+            changed = true;
+        }
+        if let Some(s) = ev.section_scroll {
+            self.settings_section_scroll = s;
+            changed = true;
+        }
+        if ev.copy_on_select_toggle {
+            self.config.copy_on_select = !self.config.copy_on_select;
+            self.settings_saved = false;
+            changed = true;
+        }
+        if ev.minimap_toggle {
+            self.config.minimap = !self.config.minimap;
+            self.settings_saved = false;
+            changed = true;
+        }
+        if ev.command_badges_toggle {
+            self.config.command_badges = !self.config.command_badges;
+            self.settings_saved = false;
+            changed = true;
+        }
+        if ev.cursor_trail_toggle {
+            self.config.cursor_trail = !self.config.cursor_trail;
+            if let Some(r) = self.renderer.as_mut() {
+                r.set_cursor_trail(self.config.cursor_trail);
+            }
+            self.settings_saved = false;
+            changed = true;
+        }
+        if ev.crt_effect_toggle {
+            self.config.crt_effect = !self.config.crt_effect;
+            if let Some(r) = self.renderer.as_mut() {
+                r.set_crt(self.config.crt_effect);
+            }
+            self.settings_saved = false;
+            changed = true;
+        }
+        if ev.title_show_cwd_toggle {
+            self.config.title_show_cwd = !self.config.title_show_cwd;
+            self.settings_saved = false;
+            changed = true;
+        }
+        if ev.title_show_count_toggle {
+            self.config.title_show_count = !self.config.title_show_count;
+            self.settings_saved = false;
+            changed = true;
+        }
+        if ev.theme_light_toggle {
+            self.settings_drop = if self.settings_drop == gui::SettingsDrop::ThemeLight {
+                gui::SettingsDrop::None
+            } else {
+                gui::SettingsDrop::ThemeLight
+            };
+            changed = true;
+        }
+        if let Some(idx) = ev.theme_light_pick {
+            self.set_theme_light_by_idx(idx);
+            self.settings_drop = gui::SettingsDrop::None;
+            changed = true;
+        }
+        if ev.theme_dark_toggle {
+            self.settings_drop = if self.settings_drop == gui::SettingsDrop::ThemeDark {
+                gui::SettingsDrop::None
+            } else {
+                gui::SettingsDrop::ThemeDark
+            };
+            changed = true;
+        }
+        if let Some(idx) = ev.theme_dark_pick {
+            self.set_theme_dark_by_idx(idx);
+            self.settings_drop = gui::SettingsDrop::None;
+            changed = true;
+        }
+        if let Some(idx) = ev.custom_color_pick {
+            self.select_custom_color(idx);
+            changed = true;
+        }
+        if ev.custom_apply {
+            self.apply_custom_theme_preview();
+            changed = true;
+        }
+        if ev.custom_save {
+            self.save_custom_theme();
+            changed = true;
+        }
+        if let Some(idx) = ev.profile_pick {
+            self.switch_profile_by_idx(idx);
             changed = true;
         }
         if ev.copy_path {

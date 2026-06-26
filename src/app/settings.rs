@@ -71,6 +71,14 @@ impl App {
         self.settings_word_sep_ms = gui::TextInputMouse::default();
         self.settings_font_feat = gui::TextEdit::new(&self.config.font_features.join(" "));
         self.settings_font_feat_ms = gui::TextInputMouse::default();
+        // Seed the custom-theme working palette from the active theme + refresh the
+        // runtime profile list, and reset the section + scroll + hex editor.
+        self.seed_custom_theme();
+        self.settings_custom_editing = usize::MAX;
+        self.settings_theme_hex = gui::TextEdit::default();
+        self.settings_theme_hex_ms = gui::TextInputMouse::default();
+        self.settings_profiles = crate::config::profile_names();
+        self.settings_section_scroll = 0.0;
         // Seed the click-outside hit rect to the WHOLE surface so a stray press
         // landing in the same frame the form opens (before the first paint sets
         // the real panel rect at `render`) is treated as "inside" and never
