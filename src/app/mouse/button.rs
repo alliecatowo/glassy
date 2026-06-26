@@ -170,10 +170,14 @@ impl App {
             self.dragging_tab = None; // end any tab drag-reorder on release
             self.minimap_dragging = false; // end any minimap scrub on release
             // End any gutter drag; re-evaluate the cursor for the spot we
-            // released over (still a gutter -> resize arrow, else default).
+            // released over (still a gutter -> resize arrow, else content).
             if self.dragging_gutter.take().is_some() {
                 let g = self.gutter_at(self.mouse_px.0, self.mouse_px.1);
-                self.apply_gutter_cursor(g.as_ref());
+                if g.is_some() {
+                    self.apply_gutter_cursor(g.as_ref());
+                } else {
+                    self.apply_content_cursor();
+                }
                 self.hovered_gutter = g;
                 self.mark_dirty(event_loop);
             }

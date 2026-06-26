@@ -115,7 +115,14 @@ impl App {
         {
             let new_gutter = self.gutter_at(position.x, position.y);
             if new_gutter != self.hovered_gutter {
-                self.apply_gutter_cursor(new_gutter.as_ref());
+                if new_gutter.is_some() {
+                    // Resize cursor while over a divider.
+                    self.apply_gutter_cursor(new_gutter.as_ref());
+                } else {
+                    // Leaving the gutter: restore the content-area cursor so the
+                    // pointer does not remain a resize arrow over terminal text.
+                    self.apply_content_cursor();
+                }
                 self.hovered_gutter = new_gutter;
                 self.mark_dirty(event_loop);
             }
@@ -141,10 +148,12 @@ impl App {
 
         // Tab-bar hover highlighting: track the item under the pointer (only
         // while over the bar's pixel band), repaint when it changes.
+        let over_tab_bar;
         {
             // 0 when the strip is hidden, so the top band routes to the terminal.
             let bar_h = self.effective_tab_bar_h() as f64;
-            let new_hover = if position.y < bar_h {
+            over_tab_bar = position.y < bar_h && bar_h > 0.0;
+            let new_hover = if over_tab_bar {
                 self.strip_item_at_px(position.x as f32, position.y as f32)
             } else {
                 None
@@ -175,11 +184,45 @@ impl App {
                 let link = self
                     .cell_hyperlink(c, r)
                     .or_else(|| self.plain_link_at(c, r));
-                if link != self.hovered_link {
+                let link_changed = link != self.hovered_link;
+                if link_changed {
                     self.hovered_link = link;
                     self.mark_dirty(event_loop);
                 }
             }
+            // Update the OS cursor icon on every cell move (cheap: winit deduplicates
+            // repeated set_cursor calls on most backends). Rules:
+            //   • Pointer  — over a hoverable link (Ctrl+click opens it)
+            //   • Default  — over the tab-strip chrome (arrow for UI affordances)
+            //   • Text     — over the terminal content area (I-beam for selection)
+            // This runs for both mouse-reporting and non-reporting modes so the
+            // cursor stays correct even when the app consumes mouse events.
+            if let Some(window) = self.window.as_ref() {
+                use winit::window::CursorIcon;
+                let icon = if self.hovered_link.is_some() {
+                    CursorIcon::Pointer
+                } else if over_tab_bar {
+                    CursorIcon::Default
+                } else {
+                    CursorIcon::Text
+                };
+                window.set_cursor(icon);
+            }
+        }
+    }
+
+    /// Set (or restore) the OS cursor to match the terminal content area:
+    /// `Text` (I-beam) so text selection feels native. Called when leaving a
+    /// gutter (resize cursor) back into regular content.
+    pub(crate) fn apply_content_cursor(&self) {
+        use winit::window::CursorIcon;
+        let icon = if self.hovered_link.is_some() {
+            CursorIcon::Pointer
+        } else {
+            CursorIcon::Text
+        };
+        if let Some(window) = self.window.as_ref() {
+            window.set_cursor(icon);
         }
     }
 }

@@ -454,6 +454,17 @@ impl ApplicationHandler<UserEvent> for App {
             self.force_full_redraw = true;
         }
 
+        // Headless: inject a synthetic kitty inline image into the active pane's
+        // image store so the kitty-graphics renderer path can be captured without a
+        // real image-producing program. GLASSY_IMGDEMO=1 synthesises a small RGBA
+        // colour swatch (8×8, rainbow gradient) and places it at grid row 2, col 2.
+        // This exercises the full render path (ImageStore -> renderer draw quads)
+        // without touching the PTY byte stream. Hook name: GLASSY_IMGDEMO.
+        if std::env::var_os("GLASSY_IMGDEMO").is_some() {
+            self.inject_demo_inline_image();
+            self.force_full_redraw = true;
+        }
+
         // Quake / dropdown mode: reconfigure the window to be borderless,
         // top-anchored, always-on-top, and start a slide-in. Done before the first
         // render so the window is already positioned + sized when shown. A no-op
@@ -597,6 +608,25 @@ impl ApplicationHandler<UserEvent> for App {
                 self.quake_refresh_geometry(event_loop);
             }
             WindowEvent::RedrawRequested => self.render(),
+
+            // Window moved to a different position (e.g. dragged to another
+            // monitor). In quake mode the drop anchor is tied to the current
+            // monitor's top-left; re-derive + reposition so a window dragged
+            // across monitors doesn't slide off the wrong monitor edge.
+            // In normal mode this is a no-op (quake is None).
+            WindowEvent::Moved(_) => {
+                self.quake_refresh_geometry(event_loop);
+            }
+
+            // The compositor reveals the window after it was fully hidden.
+            // Force a full repaint so the restored content is fresh. When the
+            // window is hidden (occluded=true) we do nothing — the 0%-idle
+            // `Wait` path already suppresses GPU submits.
+            WindowEvent::Occluded(false) => {
+                self.force_full_redraw = true;
+                self.mark_dirty(event_loop);
+            }
+
             _ => {}
         }
     }
