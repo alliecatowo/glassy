@@ -14,18 +14,16 @@
 
 use super::*;
 
-/// CRT parameter uniform, mirrored from the WGSL `CrtU`.
+/// CRT / window-effect parameter uniform, mirrored from the WGSL `CrtU`.
 /// `params = [curvature, scanline, glow, vignette]`.
+/// `mode`   = the [`super::effect::WindowEffect`] shader discriminant; `.yzw`
+/// are padding so the struct stays a clean 32 bytes (16-byte aligned for WGSL).
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct CrtUniform {
     params: [f32; 4],
+    mode: [u32; 4],
 }
-
-/// Default CRT look: a gentle, readable retro tube — subtle curvature, soft
-/// scanlines, light glow, mild vignette. Tuned to stay legible (this is a real
-/// terminal, not a demo) while clearly reading as "CRT".
-const DEFAULT_PARAMS: [f32; 4] = [0.08, 0.30, 0.35, 0.45];
 
 /// Lazily-allocated post-process resources. Everything is `Option`/empty until
 /// the effect is enabled AND a non-1×1 size is known, so an off session never
@@ -43,6 +41,10 @@ pub(crate) struct CrtPass {
     /// The CRT parameter uniform buffer + its current values.
     params_buffer: Option<wgpu::Buffer>,
     params: [f32; 4],
+    /// The active effect's shader-mode discriminant (see
+    /// [`super::effect::WindowEffect::shader_mode`]). 1 = the classic CRT look,
+    /// which is what `set_crt(true)` selects for backward compatibility.
+    mode: u32,
     /// The offscreen scene target + its bind group, sized to the surface. Both
     /// are recreated whenever the surface size changes.
     scene_texture: Option<wgpu::Texture>,
@@ -66,13 +68,32 @@ impl Renderer {
     /// nothing heavy immediately (the GPU resources are cheap to keep) but the
     /// render path reverts to direct-to-surface so there is no per-frame cost.
     /// The caller should force a full repaint after toggling so the change shows.
+    #[allow(dead_code)] // retained legacy API; app now drives via set_window_effect
     pub fn set_crt(&mut self, enabled: bool) {
-        if enabled == self.crt.enabled {
+        // Classic CRT == the `WindowEffect::Crt` mode + params (single source of
+        // truth). Delegate to the unified mode setter so the CRT bool stays a thin
+        // wrapper over the window-effect machinery.
+        let crt = super::effect::WindowEffect::Crt;
+        self.set_crt_mode(enabled, crt.shader_mode(), crt.params());
+    }
+
+    /// Unified entry point for every window-effect mode (CRT included). `active`
+    /// gates the offscreen post pass; `mode` is the `fs_crt` shader discriminant;
+    /// `params` is `[curvature, scanline, glow, vignette]`. When `active` is false
+    /// the render path reverts to direct-to-surface (zero per-frame cost). When
+    /// true it lazily builds the post pipeline + offscreen target and pushes the
+    /// new params + mode to the uniform. Idempotent for an unchanged selection.
+    pub(crate) fn set_crt_mode(&mut self, active: bool, mode: u32, params: [f32; 4]) {
+        // Nothing to do if the selection is unchanged.
+        if active == self.crt.enabled
+            && (!active || (self.crt.mode == mode && self.crt.params == params))
+        {
             return;
         }
-        self.crt.enabled = enabled;
-        if enabled {
-            self.crt.params = DEFAULT_PARAMS;
+        self.crt.enabled = active;
+        if active {
+            self.crt.params = params;
+            self.crt.mode = mode;
             self.ensure_crt_resources();
         }
     }
@@ -201,6 +222,7 @@ impl Renderer {
                 0,
                 bytemuck::bytes_of(&CrtUniform {
                     params: self.crt.params,
+                    mode: [self.crt.mode, 0, 0, 0],
                 }),
             );
         }

@@ -64,6 +64,9 @@ pub(super) struct RawConfig {
     pub wallpaper_theme: Option<String>,
     pub cursor_trail: Option<bool>,
     pub crt_effect: Option<bool>,
+    /// Window post-process effect mode (none|frosted|acrylic|crt|scanlines|grain|
+    /// vignette|bloom). Supersedes the legacy `crt_effect` bool when present.
+    pub window_effect: Option<String>,
     pub show_tab_bar: Option<String>,
     pub title_show_cwd: Option<bool>,
     pub title_show_count: Option<bool>,
@@ -182,6 +185,19 @@ impl RawConfig {
                 .map(PathBuf::from),
             cursor_trail: self.cursor_trail.unwrap_or(false),
             crt_effect: self.crt_effect.unwrap_or(false),
+            // Resolve the window effect: an explicit `window_effect` wins; else the
+            // legacy `crt_effect = true` maps to the CRT mode; else None. This keeps
+            // old configs working while exposing the full mode set.
+            window_effect: match self.window_effect.as_deref() {
+                Some(s) => crate::renderer::WindowEffect::parse(s),
+                None => {
+                    if self.crt_effect == Some(true) {
+                        crate::renderer::WindowEffect::Crt
+                    } else {
+                        crate::renderer::WindowEffect::None
+                    }
+                }
+            },
             show_tab_bar: parse_tab_bar_mode(self.show_tab_bar.as_deref()),
             title_show_cwd: self.title_show_cwd.unwrap_or(true),
             title_show_count: self.title_show_count.unwrap_or(false),
@@ -580,6 +596,23 @@ pub(super) fn apply_kv(key: &str, value: &str, raw: &mut RawConfig) -> Result<()
         }
         "crt_effect" => {
             raw.crt_effect = Some(parse_bool(value, "crt_effect")?);
+        }
+        "window_effect" => {
+            // Accept any of the mode words (or bool-ish spellings, which migrate
+            // from `crt_effect`). Unknown strings are tolerated and resolve to
+            // `none` at finalization, so a typo never aborts config load.
+            let v = value.to_ascii_lowercase();
+            match v.as_str() {
+                "none" | "off" | "false" | "no" | "0" | "frosted" | "frost" | "acrylic" | "crt"
+                | "true" | "on" | "yes" | "1" | "scanlines" | "scanline" | "scan" | "grain"
+                | "noise" | "film" | "vignette" | "vig" | "bloom" | "glow" => {
+                    raw.window_effect = Some(v);
+                }
+                _ => bail!(
+                    "window_effect must be one of none/frosted/acrylic/crt/scanlines/grain/\
+                     vignette/bloom, got '{value}'"
+                ),
+            }
         }
         "show_tab_bar" => {
             // Accepts the three policy words plus the usual bool spellings

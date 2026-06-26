@@ -394,10 +394,17 @@ impl<'r> Ui<'r> {
             } => {
                 self.label_clip(px.round(), ly, label, label_clip, fg_dim());
                 let sl = rect((ctrl_w - m.cell_w * 6.0).max(m.cell_w * 4.0));
-                let nv = self.slider(id(wid), sl, *value, 0.0, 1.0, 0.05);
+                // The slider lives in PERCEPTUAL space (equal drags == equal
+                // visual change) while the config stores the plain linear value,
+                // so map both ways around the widget. The curve itself is applied
+                // once at consumption (`glass_bg`); this only reshapes UI travel.
+                let slider_pos = crate::renderer::opacity_to_slider(*value);
+                let new_pos = self.slider(id(wid), sl, slider_pos, 0.0, 1.0, 0.04);
+                let nv = crate::renderer::slider_to_opacity(new_pos);
                 if (nv - value).abs() > f32::EPSILON {
                     ev.opacity = Some(nv);
                 }
+                // Show the true (linear) opacity value the config will store.
                 self.label_right(ctrl_x + ctrl_w, ly, &format!("{nv:.2}"), fg());
             }
             RowKind::Segmented {
@@ -618,10 +625,16 @@ fn build_section_rows<'a>(section: SettingsSection, v: &'a SettingsView<'a>) -> 
                 label: "Minimap",
                 value: v.minimap,
             });
-            rows.push(RowKind::Toggle {
-                id: "settings/crt_effect",
-                label: "CRT effect",
-                value: v.crt_effect,
+            // Unified window post-process effect (supersedes the legacy CRT
+            // toggle). Eight modes; abbreviated so the labels fit one segmented
+            // row. Index order mirrors `WindowEffect::index`.
+            rows.push(RowKind::Segmented {
+                id: "settings/window_effect",
+                label: "Effect",
+                options: &[
+                    "Off", "Frost", "Acryl", "CRT", "Scan", "Grain", "Vig", "Bloom",
+                ],
+                sel: v.window_effect_idx.min(7),
             });
         }
         SettingsSection::Themes => {
@@ -786,6 +799,7 @@ fn apply_segmented_event(wid: &str, nv: usize, ev: &mut SettingsEvents) {
         "settings/bell" => ev.bell = Some(nv),
         "settings/cursor_style" => ev.cursor_style = Some(nv),
         "settings/tab_bar" => ev.tab_bar_mode = Some(nv),
+        "settings/window_effect" => ev.window_effect = Some(nv),
         _ => {}
     }
 }
@@ -885,6 +899,7 @@ mod tests {
             cursor_style_idx: 0,
             cursor_blink: false,
             tab_bar_mode: 0,
+            window_effect_idx: 0,
             section: 0,
             section_scroll: 0.0,
             copy_on_select: false,

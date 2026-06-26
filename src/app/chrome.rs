@@ -393,6 +393,7 @@ impl App {
             cursor_style_idx,
             cursor_blink: config.cursor_blink,
             tab_bar_mode,
+            window_effect_idx: config.window_effect.index(),
             section,
             section_scroll,
             copy_on_select: config.copy_on_select,
@@ -478,6 +479,10 @@ impl App {
         }
         if let Some(idx) = ev.tab_bar_mode {
             self.set_tab_bar_mode_index(idx);
+            changed = true;
+        }
+        if let Some(idx) = ev.window_effect {
+            self.set_window_effect_index(idx);
             changed = true;
         }
         if ev.follow_system_toggle {

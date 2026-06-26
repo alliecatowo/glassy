@@ -124,9 +124,20 @@ impl ApplicationHandler<UserEvent> for App {
         // capture verification regardless of the config.
         let cursor_trail =
             self.config.cursor_trail || std::env::var_os("GLASSY_CURSOR_TRAIL").is_some();
-        let crt_effect = self.config.crt_effect || std::env::var_os("GLASSY_CRT").is_some();
         renderer.set_cursor_trail(cursor_trail);
-        renderer.set_crt(crt_effect);
+
+        // Window effect: GLASSY_EFFECT=<mode> overrides the config (headless capture
+        // hook). The legacy GLASSY_CRT=1 still forces the CRT look. Otherwise the
+        // resolved config `window_effect` (which already folds in `crt_effect`).
+        let window_effect = if let Some(s) = std::env::var_os("GLASSY_EFFECT") {
+            crate::renderer::WindowEffect::parse(&s.to_string_lossy())
+        } else if std::env::var_os("GLASSY_CRT").is_some() {
+            crate::renderer::WindowEffect::Crt
+        } else {
+            self.config.window_effect
+        };
+        self.config.window_effect = window_effect;
+        renderer.set_window_effect(window_effect);
 
         let size = window.inner_size();
         renderer.resize(size.width, size.height);

@@ -472,6 +472,17 @@ impl App {
             self.dirty = true;
         }
 
+        // Window effect changes hot-swap the post-process mode. Switching to/from
+        // None toggles the offscreen pass; the renderer rebuilds resources lazily.
+        if new_config.window_effect != self.config.window_effect {
+            self.config.window_effect = new_config.window_effect;
+            if let Some(r) = &mut self.renderer {
+                r.set_window_effect(self.config.window_effect);
+            }
+            self.dirty = true;
+            self.force_full_redraw = true;
+        }
+
         // Bell flags can be toggled without a reload.
         if new_config.bell_visual != self.config.bell_visual {
             self.config.bell_visual = new_config.bell_visual;
