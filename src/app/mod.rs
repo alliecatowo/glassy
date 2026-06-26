@@ -212,6 +212,27 @@ pub struct Config {
     /// history source (captured from OSC 133 `B`..`C` zones). 0 disables capture.
     /// Default 200.
     pub command_history: usize,
+    // --- FONTS stream additions (appended after stable fields) ---
+    /// Explicit font family for **bold** text. When set, glassy loads this
+    /// family (or file path) instead of using the synthesised bold weight of
+    /// the primary font. `None` uses the primary family at `Weight::BOLD`.
+    pub font_bold: Option<String>,
+    /// Explicit font family for *italic* text. `None` synthesises italic from
+    /// the primary family.
+    pub font_italic: Option<String>,
+    /// Explicit font family for ***bold-italic*** text. `None` synthesises from
+    /// the primary family.
+    pub font_bold_italic: Option<String>,
+    /// Codepoint-range → font-family routing entries (from `font_symbol_map`).
+    /// An empty vec means no routing (all codepoints use the primary font or
+    /// cosmic-text's per-glyph fallback). Sorted by `start` at load time for
+    /// O(log n) lookup during shaping.
+    pub font_symbol_map: Vec<crate::config::parse::SymbolMapEntry>,
+    /// Variable-font axis settings (e.g. `["wght=450"]`). Applied at shaping
+    /// time: `wght` drives `Weight` in `Attrs`, `wdth` drives `Stretch`. Other
+    /// axes are stored but currently ignored (logged at debug level) because
+    /// cosmic-text 0.19 does not expose them in `Attrs`.
+    pub font_variations: Vec<String>,
 }
 
 /// The three user-facing default cursor shapes.

@@ -2,7 +2,24 @@
 
 use super::*;
 
+/// All font-related configuration passed to [`Renderer::new`]. Kept in a struct
+/// so new font parameters can be added without changing call sites one-by-one.
+pub struct RendererFontConfig {
+    pub font_family: Option<String>,
+    pub font_px: f32,
+    pub font_features: Vec<String>,
+    /// Per-style family overrides (`font_bold`, `font_italic`, `font_bold_italic`).
+    pub font_bold: Option<String>,
+    pub font_italic: Option<String>,
+    pub font_bold_italic: Option<String>,
+    /// Codepoint routing map (`font_symbol_map`).
+    pub font_symbol_map: Vec<crate::config::parse::SymbolMapEntry>,
+    /// Variable-font axis settings (`font_variations`).
+    pub font_variations: Vec<String>,
+}
+
 impl Renderer {
+    #[allow(dead_code)]
     pub fn new(
         window: Arc<Window>,
         font_family: Option<String>,
@@ -10,6 +27,31 @@ impl Renderer {
         opacity: f32,
         font_features: Vec<String>,
     ) -> Result<Renderer> {
+        Self::new_with_fonts(
+            window,
+            RendererFontConfig {
+                font_family,
+                font_px,
+                font_features,
+                font_bold: None,
+                font_italic: None,
+                font_bold_italic: None,
+                font_symbol_map: Vec::new(),
+                font_variations: Vec::new(),
+            },
+            opacity,
+        )
+    }
+
+    /// Full constructor with all font configuration from the FONTS stream.
+    pub fn new_with_fonts(
+        window: Arc<Window>,
+        font_cfg: RendererFontConfig,
+        opacity: f32,
+    ) -> Result<Renderer> {
+        let font_family = font_cfg.font_family;
+        let font_px = font_cfg.font_px;
+        let font_features = font_cfg.font_features;
         let t = std::time::Instant::now();
         let ms = |t: std::time::Instant| t.elapsed().as_secs_f64() * 1000.0;
 
@@ -94,8 +136,17 @@ impl Renderer {
         );
 
         // Font load runs concurrently with the GPU thread above.
-        let (text, metrics) = Text::load(font_family.as_deref(), font_px, &font_features)
-            .context("loading font and cell metrics")?;
+        let (text, metrics) = Text::load_with_config(crate::text::shape::FontConfig {
+            family: font_family.as_deref(),
+            font_px,
+            font_features: &font_features,
+            bold_family: font_cfg.font_bold.as_deref(),
+            italic_family: font_cfg.font_italic.as_deref(),
+            bold_italic_family: font_cfg.font_bold_italic.as_deref(),
+            symbol_map: font_cfg.font_symbol_map.clone(),
+            font_variations: &font_cfg.font_variations,
+        })
+        .context("loading font and cell metrics")?;
         log::info!("  renderer: font loaded {:.1} ms", ms(t));
 
         // Recover the surface from the Arc now that the thread is done (or about to
@@ -640,6 +691,12 @@ impl Renderer {
             font_px,
             font_family,
             font_features,
+            // FONTS stream additions
+            font_bold: font_cfg.font_bold,
+            font_italic: font_cfg.font_italic,
+            font_bold_italic: font_cfg.font_bold_italic,
+            font_symbol_map: font_cfg.font_symbol_map,
+            font_variations: font_cfg.font_variations,
             rows: Vec::new(),
             cur_row: 0,
             bg_row_offsets: Vec::new(),

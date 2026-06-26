@@ -18,6 +18,119 @@ const DEFAULT_SCROLLBACK: usize = 10_000;
 /// history source (OSC 133 `B`..`C` capture). 0 disables it.
 const DEFAULT_COMMAND_HISTORY: usize = 200;
 
+/// A single entry in the `font_symbol_map` config key: a Unicode range mapped
+/// to a specific font family. The shaper routes codepoints in `[start, end]`
+/// (inclusive) to the named family instead of the primary font.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SymbolMapEntry {
+    /// First codepoint of the range (inclusive).
+    pub start: u32,
+    /// Last codepoint of the range (inclusive; equal to `start` for a single
+    /// codepoint mapping).
+    pub end: u32,
+    /// Font family name (or absolute file path) to route this range to.
+    pub family: String,
+}
+
+/// Parse the `font_symbol_map` value into a `Vec<SymbolMapEntry>`.
+///
+/// Each entry is `"RANGE:Family"` where RANGE is `U+XXXX` or `U+XXXX-U+YYYY`
+/// (hex codepoints). Multiple entries are separated by commas. Entries that
+/// cannot be parsed are logged at warn level and skipped.
+///
+/// Examples:
+/// ```text
+/// U+E000-U+F8FF : Symbols Nerd Font Mono
+/// U+2500-U+257F : FiraCode Nerd Font Mono, U+1F600-U+1F64F : Noto Color Emoji
+/// ```
+pub fn parse_symbol_map(value: &str) -> Vec<SymbolMapEntry> {
+    let mut out = Vec::new();
+    // Split on commas first (entries), then parse each.
+    for entry in value.split(',') {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+        // The colon separator between range and family. Use rfind so a family
+        // name containing ':' (unlikely but safe) doesn't confuse the split.
+        // Actually we need the FIRST colon that appears after a codepoint range.
+        // Ranges look like "U+XXXX" or "U+XXXX-U+YYYY" — find the colon after
+        // the range token.
+        //
+        // Strategy: split on ':' and reconstruct family from tail parts.
+        let parts: Vec<&str> = entry.splitn(2, ':').collect();
+        if parts.len() != 2 {
+            log::warn!("glassy: font_symbol_map: expected 'RANGE:Family', got '{entry}'; skipping");
+            continue;
+        }
+        let range_str = parts[0].trim();
+        let family = parts[1].trim().to_string();
+        if family.is_empty() {
+            log::warn!("glassy: font_symbol_map: empty family in '{entry}'; skipping");
+            continue;
+        }
+        // Parse "U+XXXX" or "U+XXXX-U+YYYY".
+        let (start, end) = if let Some((lo, hi)) = range_str.split_once('-') {
+            // "U+XXXX-U+YYYY" — note the split_once('-') will split at the
+            // first dash, which could be the dash between U+XXXX and U+YYYY.
+            // But "U+E000-U+F8FF" splits as lo="U+E000" hi="U+F8FF". Correct.
+            let s = parse_codepoint(lo.trim());
+            let e = parse_codepoint(hi.trim());
+            match (s, e) {
+                (Some(s), Some(e)) => (s, e.max(s)),
+                _ => {
+                    log::warn!("glassy: font_symbol_map: invalid range '{range_str}'; skipping");
+                    continue;
+                }
+            }
+        } else {
+            match parse_codepoint(range_str) {
+                Some(cp) => (cp, cp),
+                None => {
+                    log::warn!(
+                        "glassy: font_symbol_map: invalid codepoint '{range_str}'; skipping"
+                    );
+                    continue;
+                }
+            }
+        };
+        out.push(SymbolMapEntry { start, end, family });
+    }
+    out
+}
+
+/// Parse a `U+XXXX` (or bare `XXXX` hex) codepoint string to a `u32`.
+fn parse_codepoint(s: &str) -> Option<u32> {
+    let hex = s
+        .strip_prefix("U+")
+        .or_else(|| s.strip_prefix("u+"))
+        .unwrap_or(s);
+    u32::from_str_radix(hex.trim(), 16).ok()
+}
+
+/// Parse a `font_variations` value into a `Vec<String>` of `"axis=value"` entries.
+///
+/// Accepts comma or space separation. Each token is either:
+///   - `"axis=value"` (e.g. `"wght=450"`, `"wdth=75"`)
+///   - A bare 4-char tag (treated as "enable", same as feature tags) — not
+///     meaningful for axes; warned and kept for forward-compat.
+pub fn parse_font_variations(value: &str) -> Vec<String> {
+    value
+        .split([',', ' '])
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|token| {
+            let tag = token.split('=').next().unwrap_or(token).trim();
+            if tag.len() != 4 || !tag.is_ascii() {
+                log::warn!(
+                    "glassy: font_variations: axis tag '{tag}' is not 4 ASCII chars; skipping"
+                );
+            }
+            token.to_string()
+        })
+        .collect()
+}
+
 /// Accumulated raw configuration before validation/finalization. Every field is
 /// optional so the file and CLI layers can each set a subset.
 #[derive(Default)]
@@ -72,6 +185,26 @@ pub(super) struct RawConfig {
     pub quake_height: Option<f32>,
     pub quake_animation_ms: Option<u64>,
     pub command_history: Option<usize>,
+    // --- FONTS stream additions ---
+    /// Per-style font family overrides. When set, the named family is used
+    /// for bold / italic / bold-italic text instead of synthesizing from the
+    /// primary family. Value is a font family name or an absolute file path.
+    pub font_bold: Option<String>,
+    pub font_italic: Option<String>,
+    pub font_bold_italic: Option<String>,
+    /// Codepoint / Unicode-range → font-family routing map.
+    /// Each entry is `"RANGE:Family"` where RANGE is one of:
+    ///   - A single scalar:  `U+E000`
+    ///   - An inclusive range: `U+E000-U+F8FF`
+    ///     Example: `"U+E000-U+F8FF:Symbols Nerd Font Mono"`.
+    ///     Multiple entries are separated by commas or newlines.
+    pub font_symbol_map: Option<Vec<SymbolMapEntry>>,
+    /// OpenType variable-font axis settings, e.g. `["wght=450", "wdth=75"]`.
+    /// `wght` maps to `Weight` in cosmic-text; `wdth` maps to `Stretch`.
+    /// Other axis tags are accepted in config but are currently no-ops
+    /// (cosmic-text 0.19 does not expose arbitrary axis APIs at the Attrs
+    /// level — they log a warning). Comma or space separated.
+    pub font_variations: Option<Vec<String>>,
 }
 
 impl RawConfig {
@@ -200,6 +333,12 @@ impl RawConfig {
             },
             quake_animation_ms: self.quake_animation_ms.unwrap_or(180).min(5_000),
             command_history: self.command_history.unwrap_or(DEFAULT_COMMAND_HISTORY),
+            // FONTS stream
+            font_bold: self.font_bold,
+            font_italic: self.font_italic,
+            font_bold_italic: self.font_bold_italic,
+            font_symbol_map: self.font_symbol_map.unwrap_or_default(),
+            font_variations: self.font_variations.unwrap_or_default(),
         };
 
         Ok(super::Settings { config, theme })
@@ -639,6 +778,32 @@ pub(super) fn apply_kv(key: &str, value: &str, raw: &mut RawConfig) -> Result<()
         "wallpaper_theme" => {
             if !value.is_empty() {
                 raw.wallpaper_theme = Some(value.to_string());
+            }
+        }
+        // --- FONTS stream ---
+        "font_bold" => {
+            if !value.is_empty() {
+                raw.font_bold = Some(value.to_string());
+            }
+        }
+        "font_italic" => {
+            if !value.is_empty() {
+                raw.font_italic = Some(value.to_string());
+            }
+        }
+        "font_bold_italic" => {
+            if !value.is_empty() {
+                raw.font_bold_italic = Some(value.to_string());
+            }
+        }
+        "font_symbol_map" => {
+            if !value.is_empty() {
+                raw.font_symbol_map = Some(parse_symbol_map(value));
+            }
+        }
+        "font_variations" => {
+            if !value.is_empty() {
+                raw.font_variations = Some(parse_font_variations(value));
             }
         }
         other => {
