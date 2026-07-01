@@ -432,6 +432,12 @@ pub struct Renderer {
     /// chrome paints into the band `[0, grid_origin_y)`. Zero when no GUI chrome is
     /// active (the default), so the legacy single-pane path is unchanged.
     grid_origin_y: f32,
+    /// Transient horizontal shake offset (physical px) added to every grid cell's
+    /// and the cursor's X origin. Non-zero only while a Power-Mode "screen rock" is
+    /// in flight; zero at rest (so the legacy layout is byte-identical). Set via
+    /// [`Renderer::set_grid_origin_x`]. The chrome/overlays are NOT shifted — only
+    /// the terminal content — so the tab bar/status bar stay pinned during a shake.
+    grid_origin_x: f32,
     /// Explicit padding override in physical px (from config). When `Some`, it is
     /// used verbatim instead of the cell-derived `pad_for`, and is preserved
     /// across runtime font resizes.

@@ -439,6 +439,10 @@ impl App {
                 // input is active (else just the focused pane).
                 self.write_input(bytes);
             }
+            // Power Mode (opt-in): burst particles from the cursor + grow the
+            // typing streak. A no-op when disabled, so the default path is
+            // unchanged; when on it schedules its own animation frames.
+            self.power_on_keystroke(event_loop);
             // The snap-to-bottom (and the cursor/selection reset above) are
             // visual changes even when the child emits nothing back — e.g.
             // typing while scrolled up into a paused/blocked program. Repaint

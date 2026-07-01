@@ -375,7 +375,7 @@ impl Renderer {
         // Grid origin of this cell, offset by the window padding (inset) and the
         // GUI tab-bar inset (`grid_origin_y`, zero in the multi-pane path where
         // each pane carries its own pixel origin).
-        let origin_x = col as f32 * cell_w + pad_l;
+        let origin_x = col as f32 * cell_w + pad_l + self.grid_origin_x;
         let origin_y = row as f32 * cell_h + pad + self.grid_origin_y;
 
         // A double-width (CJK / wide-emoji) cell occupies two columns: its advance
@@ -536,7 +536,7 @@ impl Renderer {
 
         for i in 0..run_len {
             let cell = &cells[i];
-            let origin_x = cell.col as f32 * cell_w + pad;
+            let origin_x = cell.col as f32 * cell_w + pad + self.grid_origin_x;
             let origin_y = row as f32 * cell_h + pad + self.grid_origin_y;
             let box_w = if cell.wide { cell_w * 2.0 } else { cell_w };
 

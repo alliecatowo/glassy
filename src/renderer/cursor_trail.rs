@@ -183,7 +183,7 @@ impl Renderer {
     pub fn aim_cursor_trail(&mut self, col: usize, row: usize) {
         let cell_w = self.metrics.width;
         let cell_h = self.metrics.height;
-        let ox = (col as f32 * cell_w + self.pad).round();
+        let ox = (col as f32 * cell_w + self.pad + self.grid_origin_x).round();
         let oy = (row as f32 * cell_h + self.pad + self.grid_origin_y).round();
         self.cursor_trail
             .set_target(ox, oy, cell_w.round(), cell_h.round());

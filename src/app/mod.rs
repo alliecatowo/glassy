@@ -52,6 +52,7 @@ mod palette;
 mod pane_ops;
 mod panes;
 pub(crate) mod peek;
+mod power;
 mod quake;
 mod remote;
 mod render;
@@ -293,6 +294,15 @@ pub struct Config {
     /// Gates the `ToggleFold` action + fold caret. Default true (a no-op until a
     /// shell-integration script emits OSC 133). Config key `command_fold`.
     pub command_fold: bool,
+    /// Power Mode: a fun, opt-in typing effect — keystrokes burst glow particles
+    /// out of the cursor and a rapid streak makes the terminal content shake.
+    /// Default false. Strictly idle-safe: entirely inert when off or idle, so the
+    /// 0%-idle invariant is preserved. Config key `power_mode`; also runtime-
+    /// togglable via the command palette. See [`crate::app::power`].
+    pub power_mode: bool,
+    /// Power Mode effect strength in `[0, 1]` (particle count/size/speed + shake).
+    /// Default 0.6. Config key `power_mode_intensity`.
+    pub power_mode_intensity: f32,
 }
 
 /// Configurable segments for the status bar (config key `status_bar_segments`).
@@ -777,6 +787,14 @@ pub struct App {
     /// Active toast stack (most-recent at back). Each toast fades in, stays
     /// ~4 s, then fades out. Painted by `toast.rs`.
     toasts: Vec<crate::app::toast::Toast>,
+
+    // --- Power Mode (opt-in typing effect) -----------------------------------
+    /// Particle-burst + screen-shake typing effect. Seeded from `config.power_mode`
+    /// / `config.power_mode_intensity` and runtime-togglable via the command
+    /// palette. Entirely dormant (no particles, no shake, no wakeups) unless a
+    /// keystroke spawns a burst while enabled — so the 0%-idle invariant holds.
+    /// Advanced in `about_to_wait`, painted in the render path. See [`power`].
+    power: power::PowerState,
 
     // --- Inline file peek ----------------------------------------------------
     /// Active inline-preview card, if any. Set when the shell emits an

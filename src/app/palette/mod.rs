@@ -64,6 +64,8 @@ pub(crate) enum PaletteCmd {
     ToggleStatusBar,
     ToggleMinimap,
     TogglePaneHeaders,
+    /// Toggle the Power Mode typing effect (cursor particle bursts + streak shake).
+    TogglePowerMode,
     BellOff,
     BellVisual,
     BellAudible,
@@ -139,8 +141,8 @@ impl PaletteCmd {
             Copy | Paste => "Edit",
             ToggleFullscreen | ToggleQuake => "Window",
             FontIncrease | FontDecrease | FontReset => "Font",
-            ToggleStatusBar | ToggleMinimap | TogglePaneHeaders | BellOff | BellVisual
-            | BellAudible | ScrollbackIncrease | ScrollbackDecrease => "Setting",
+            ToggleStatusBar | ToggleMinimap | TogglePaneHeaders | TogglePowerMode | BellOff
+            | BellVisual | BellAudible | ScrollbackIncrease | ScrollbackDecrease => "Setting",
             ToggleFold => "View",
             NextTheme | PrevTheme | SetTheme(_) | GenerateThemeFromWallpaper => "Theme",
             IncreaseOpacity | DecreaseOpacity | SetOpacity(_) | ToggleOpacity => "Opacity",
@@ -187,6 +189,7 @@ impl PaletteCmd {
             ToggleStatusBar => "Toggle status bar".into(),
             ToggleMinimap => "Toggle minimap".into(),
             TogglePaneHeaders => "Toggle pane headers".into(),
+            TogglePowerMode => "Toggle Power Mode (typing effect)".into(),
             BellOff => "Bell: off".into(),
             BellVisual => "Bell: visual".into(),
             BellAudible => "Bell: audible".into(),
@@ -325,6 +328,7 @@ impl App {
             ToggleStatusBar,
             ToggleMinimap,
             TogglePaneHeaders,
+            TogglePowerMode,
             BellOff,
             BellVisual,
             BellAudible,
@@ -723,6 +727,7 @@ impl App {
                 self.toggle_pane_headers();
                 self.mark_dirty(event_loop);
             }
+            TogglePowerMode => self.toggle_power_mode(event_loop),
             BellOff => {
                 self.set_bell_index(0);
                 self.force_full_redraw = true;
@@ -890,6 +895,7 @@ mod tests {
             ToggleStatusBar,
             ToggleMinimap,
             TogglePaneHeaders,
+            TogglePowerMode,
             BellOff,
             BellVisual,
             BellAudible,

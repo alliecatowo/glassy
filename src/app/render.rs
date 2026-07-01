@@ -327,6 +327,12 @@ impl App {
         // inside the renderer borrow). `None` when hints mode is closed.
         let hints_inputs = self.hints_snapshot();
 
+        // Power Mode "screen rock": a transient decaying jitter added to the grid
+        // content origin (never the OS window). `(0, 0)` at rest, so the resting
+        // frame is byte-identical to before. Snapshotted here (under `&self`) before
+        // the disjoint renderer/pty borrows below.
+        let (shake_x, shake_y) = self.power_shake_offset();
+
         // Take the minimap cache out into a local so the strip painter can read it
         // while `&mut self.renderer` is borrowed below (both are `self` fields);
         // it is moved back at the end of the frame. Cheap (a Vec pointer swap).
@@ -337,9 +343,18 @@ impl App {
             return;
         };
         renderer.set_flash(flash);
+        let shaking = shake_x != 0.0 || shake_y != 0.0;
         // The single-pane terminal grid is inset below the GUI tab bar in PIXELS
         // (zero when the strip is hidden, so the grid reclaims the band).
-        renderer.set_grid_origin_y(tab_strip_h);
+        renderer.set_grid_origin_y(tab_strip_h + shake_y);
+        renderer.set_grid_origin_x(shake_x);
+        // A live shake moves EVERY row's pixel origin, so partial per-row damage
+        // would leave un-repainted rows at the previous offset (tearing). Force a
+        // full rebuild while shaking so the whole grid re-lands at the new origin;
+        // a no-op at rest (`shaking == false`), preserving the incremental path.
+        if shaking {
+            self.force_full_redraw = true;
+        }
 
         // Hold the terminal lock only long enough to copy out renderable state.
         let mut term = pty.term.lock();
@@ -1133,6 +1148,14 @@ impl App {
             };
             Self::paint_peek(renderer, peek, area);
         }
+
+        // Power Mode particle burst: soft glow dots flying out of the cursor,
+        // painted above the terminal content but below the toasts/modals. A no-op
+        // (zero overlay quads) when there are no live particles, so the common
+        // resting frame is untouched. `self.power` is a disjoint field from
+        // `self.renderer` (borrowed as `renderer`), so this coexists with the
+        // active renderer borrow.
+        self.power.paint(renderer, Instant::now());
 
         // In-app toast notifications: painted above the terminal chrome but below
         // any modal (settings/help). Toasts are transient overlays that do not block

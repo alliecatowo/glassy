@@ -711,6 +711,7 @@ impl Renderer {
             pad_left: None,
             pad_right: None,
             grid_origin_y: 0.0,
+            grid_origin_x: 0.0,
             pad_override: None,
             font_px,
             font_family,

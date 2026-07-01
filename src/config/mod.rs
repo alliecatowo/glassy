@@ -45,6 +45,8 @@
 //! quake_animation_ms = 180             # slide duration in ms (0 = instant)
 //! copy_on_select = false               # copy a selection to the clipboard as soon as it is made
 //! copy_html   = false                  # also place a rich-text (HTML) flavor on the clipboard on copy
+//! power_mode  = false                  # fun typing effect: cursor particle bursts + streak shake
+//! power_mode_intensity = 0.6           # power-mode strength: 0.0 (subtle) .. 1.0 (max)
 //! ```
 //!
 //! Quake / dropdown mode (see `docs/quake-mode.md`): with `quake = true` glassy

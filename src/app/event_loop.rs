@@ -192,6 +192,12 @@ impl ApplicationHandler<UserEvent> for App {
         self.config.window_effect = window_effect;
         renderer.set_window_effect_resolved(window_effect, self.config.custom_effect);
 
+        // Power Mode (opt-in typing effect, OFF by default). GLASSY_POWER=1 forces
+        // it on for headless capture verification regardless of the config.
+        if std::env::var_os("GLASSY_POWER").is_some() {
+            self.set_power_mode(true);
+        }
+
         let size = window.inner_size();
         renderer.resize(size.width, size.height);
         let m = renderer.cell_metrics();
@@ -905,6 +911,14 @@ impl ApplicationHandler<UserEvent> for App {
             false
         };
 
+        // Power Mode (opt-in): while particles are alive or the screen shake is
+        // still settling, advance the simulation and keep the frame dirty so the
+        // burst repaints. Like the GUI anims + quake slide it runs the loop on
+        // `Poll`; the instant the last particle dies and the shake reaches zero
+        // `step_power` returns false and we fall back to `Wait` (0% idle). Fully
+        // dormant when the feature is off or idle (the resting frame is untouched).
+        let power_active = self.step_power(now);
+
         // Cursor blink: only runs while focused and the child asked for a blinking
         // cursor. When that holds, advance the phase at each `blink_at` deadline and
         // mark dirty so the cursor redraws; otherwise the cursor stays solid and we
@@ -1027,9 +1041,9 @@ impl ApplicationHandler<UserEvent> for App {
         if !self.dirty {
             // Idle: stay parked on `Wait` (0% CPU) unless a blink flip, a flash
             // boundary, or a spinner frame is pending — then wake at the earliest.
-            // A live GUI animation or quake slide overrides everything with `Poll`
-            // until it settles.
-            if gui_active || quake_active {
+            // A live GUI animation, quake slide, or Power-Mode burst overrides
+            // everything with `Poll` until it settles.
+            if gui_active || quake_active || power_active {
                 event_loop.set_control_flow(ControlFlow::Poll);
             } else {
                 let wake = [
@@ -1068,9 +1082,9 @@ impl ApplicationHandler<UserEvent> for App {
             // RedrawRequested will clear `dirty`. Keep a wakeup scheduled for the
             // next blink flip, flash boundary, or spinner frame; else wait for an
             // event. A live GUI animation, an in-flight cursor trail, OR a quake
-            // slide keeps us on `Poll` until it settles (all hard-stop to `Wait`
-            // once done).
-            if gui_active || trail_active || quake_active {
+            // slide (or a Power-Mode burst) keeps us on `Poll` until it settles
+            // (all hard-stop to `Wait` once done).
+            if gui_active || trail_active || quake_active || power_active {
                 event_loop.set_control_flow(ControlFlow::Poll);
             } else {
                 match self.next_wake(blink_active, flash_active, spin_active) {
