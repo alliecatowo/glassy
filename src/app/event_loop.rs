@@ -7,6 +7,31 @@
 
 use super::*;
 
+/// Decode the embedded flat dot icon (256px PNG) into a winit window icon for
+/// the taskbar / switcher. Returns `None` on any decode error (the window just
+/// falls back to the platform default — never fatal). Non-macOS only.
+#[cfg(not(target_os = "macos"))]
+fn load_window_icon() -> Option<winit::window::Icon> {
+    const ICON_PNG: &[u8] = include_bytes!("../../assets/icons/glassy-256.png");
+    let decoder = png::Decoder::new(std::io::Cursor::new(ICON_PNG));
+    let mut reader = decoder.read_info().ok()?;
+    let mut buf = vec![0u8; reader.output_buffer_size()];
+    let info = reader.next_frame(&mut buf).ok()?;
+    // Our asset is 8-bit; normalise RGB→RGBA so winit always gets 4 channels.
+    let rgba = match info.color_type {
+        png::ColorType::Rgba => {
+            buf.truncate(info.buffer_size());
+            buf
+        }
+        png::ColorType::Rgb => buf[..info.buffer_size()]
+            .chunks_exact(3)
+            .flat_map(|p| [p[0], p[1], p[2], 255])
+            .collect(),
+        _ => return None,
+    };
+    winit::window::Icon::from_rgba(rgba, info.width, info.height).ok()
+}
+
 impl ApplicationHandler<UserEvent> for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
@@ -22,6 +47,27 @@ impl ApplicationHandler<UserEvent> for App {
             // this is a harmless no-op and the window stays opaque.
             .with_transparent(true)
             .with_visible(false); // shown after the first frame to avoid a flash
+
+        // Non-macOS: hand winit a window icon so the X11 taskbar / Alt-Tab
+        // switcher / any WM that reads _NET_WM_ICON shows the flat dot icon (the
+        // same art the hicolor PNGs + .desktop install use), instead of a
+        // stale/blue or generic fallback. macOS ignores window icons — it uses
+        // the bundled .icns (set separately via the dock-icon path), so skip it
+        // there. Wayland ignores it too but the call is a harmless no-op.
+        #[cfg(not(target_os = "macos"))]
+        let attrs = attrs.with_window_icon(load_window_icon());
+
+        // Wayland has no per-window icon in the core protocol — GNOME/KDE resolve
+        // the dock + switcher icon by matching the surface's app_id against an
+        // installed .desktop file. Pin it to "glassy" so it matches
+        // glassy.desktop (Icon=glassy → the hicolor PNGs) instead of winit's
+        // derived default, which is what made the dock icon differ from the
+        // Applications-grid icon.
+        #[cfg(all(unix, not(target_os = "macos")))]
+        let attrs = {
+            use winit::platform::wayland::WindowAttributesExtWayland;
+            WindowAttributesExtWayland::with_name(attrs, "glassy", "glassy")
+        };
 
         // macOS: drop the separate OS title bar and let glassy's own content fill
         // the whole window (ghostty-style). The traffic-light buttons float over

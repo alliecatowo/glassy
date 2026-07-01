@@ -6,3 +6,4 @@ Icon=glassy
 Type=Application
 Categories=System;TerminalEmulator;Utility;
 Terminal=false
+StartupWMClass=glassy
