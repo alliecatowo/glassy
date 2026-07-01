@@ -794,21 +794,13 @@ pub(super) fn apply_kv(key: &str, value: &str, raw: &mut RawConfig) -> Result<()
             raw.crt_effect = Some(parse_bool(value, "crt_effect")?);
         }
         "window_effect" => {
-            // Accept any of the mode words (or bool-ish spellings, which migrate
-            // from `crt_effect`). Unknown strings are tolerated and resolve to
-            // `none` at finalization, so a typo never aborts config load.
-            let v = value.to_ascii_lowercase();
-            match v.as_str() {
-                "none" | "off" | "false" | "no" | "0" | "frosted" | "frost" | "acrylic" | "crt"
-                | "true" | "on" | "yes" | "1" | "scanlines" | "scanline" | "scan" | "grain"
-                | "noise" | "film" | "vignette" | "vig" | "bloom" | "glow" => {
-                    raw.window_effect = Some(v);
-                }
-                _ => bail!(
-                    "window_effect must be one of none/frosted/acrylic/crt/scanlines/grain/\
-                     vignette/bloom, got '{value}'"
-                ),
-            }
+            // Accept ANY value here and let `WindowEffect::parse` resolve it at
+            // finalization (unknown → `none`). Per this key's long-standing
+            // contract, a typo — or a mode word this build predates — must never
+            // abort config load; validating with a hardcoded allowlist here was a
+            // latent bug (it rejected `custom` and killed startup). The single
+            // source of truth for the mode set is `WindowEffect::parse`.
+            raw.window_effect = Some(value.to_ascii_lowercase());
         }
         "show_tab_bar" => {
             // Accepts the three policy words plus the usual bool spellings
