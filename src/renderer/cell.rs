@@ -187,6 +187,65 @@ impl Renderer {
         }
     }
 
+    /// Reload the whole font stack (family + OpenType features) at the CURRENT
+    /// font size, rebuilding the glyph atlas and refreshing the cached cell
+    /// metrics. This is the font-*family* analogue of [`Renderer::set_font_size`]:
+    /// where that swaps only the px size, this swaps the resolved family (and any
+    /// feature overrides) so a live Settings → font-family change is visible
+    /// without a restart.
+    ///
+    /// `family = None` restores the discovery default font (same sentinel the
+    /// startup path uses). On failure the previous font is retained (the error is
+    /// logged) so a bad family never breaks rendering.
+    ///
+    /// The caller is responsible for re-querying `cell_metrics()`/`pad()` and
+    /// reflowing the PTY grid afterward (the renderer does not know the grid) —
+    /// exactly as after `set_font_size`, because the new face's cell box differs.
+    pub fn reload_fonts(&mut self, family: Option<&str>, font_features: &[String]) {
+        // Reload at the current px size; only the family/features change here.
+        let (text, metrics) = match Text::load(family, self.font_px, font_features) {
+            Ok(loaded) => loaded,
+            Err(e) => {
+                log::warn!(
+                    "glassy: font reload to family {family:?} failed: {e:#}; keeping current font"
+                );
+                return;
+            }
+        };
+        self.text = text;
+        self.metrics = metrics;
+        // Cell-derived padding tracks the (new) cell height unless an explicit
+        // override is pinned — mirrors set_font_size.
+        self.pad = self.pad_override.unwrap_or_else(|| pad_for(metrics.height));
+        // Remember the new family/features so a later font-size resize reloads the
+        // same face rather than reverting to the old family.
+        self.font_family = family.map(str::to_string);
+        self.font_features = font_features.to_vec();
+
+        // The atlases hold glyphs rasterized from the OLD font; reset both packers
+        // and every per-glyph cache so glyphs are re-rasterized from the new face
+        // on demand and no row keeps stale UVs. Flag the reset so the app forces a
+        // full row rebuild next frame (same contract as an atlas overflow repack).
+        self.packer.reset();
+        self.color_packer.reset();
+        self.glyph_cache.clear();
+        self.cluster_cache.clear();
+        self.ligature_run_cache.clear();
+        self.wide_char_set.clear();
+        self.atlas_reset = true;
+
+        // Re-probe ligature support: the new font file may or may not carry an
+        // OpenType GSUB `liga` feature, which gates run-shaping.
+        self.font_has_ligatures = self.text.has_ligatures();
+
+        // Pre-warm printable ASCII (regular + bold) from the new face for a
+        // rasterize-free first frame after the family change.
+        for byte in 0x20u8..=0x7E {
+            self.ensure_glyphs(byte as char, false, false);
+            self.ensure_glyphs(byte as char, true, false);
+        }
+    }
+
     /// Take the "atlas was repacked" flag (clearing it). When true, the caller
     /// should force a full row rebuild + repaint so no row keeps stale glyph UVs.
     pub fn pull_atlas_reset(&mut self) -> bool {
