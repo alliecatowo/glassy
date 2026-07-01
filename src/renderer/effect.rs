@@ -143,10 +143,10 @@ impl WindowEffect {
         match self {
             // [curvature, scanline, glow, vignette]
             Self::None => [0.0, 0.0, 0.0, 0.0],
-            Self::Crt => [0.08, 0.30, 0.35, 0.45],
+            Self::Crt => [0.10, 0.50, 0.35, 0.45],
             Self::Frosted => [0.0, 0.0, 0.18, 0.30],
             Self::Acrylic => [0.0, 0.0, 0.12, 0.40],
-            Self::Scanlines => [0.0, 0.28, 0.0, 0.0],
+            Self::Scanlines => [0.0, 0.55, 0.0, 0.0],
             Self::Grain => [0.0, 0.0, 0.0, 0.0],
             Self::Vignette => [0.0, 0.0, 0.0, 0.55],
             Self::Bloom => [0.0, 0.0, 0.45, 0.0],

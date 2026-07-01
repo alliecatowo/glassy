@@ -256,13 +256,20 @@ struct CrtOut {
     return o;
 }
 
-// Apply a gentle barrel distortion to a centered (-1..1) coordinate. `amt` is
-// the curvature strength; 0 returns the input unchanged.
-fn crt_curve(p: vec2<f32>, amt: f32) -> vec2<f32> {
-    // Push corners outward proportional to the squared distance along the other
-    // axis — the canonical cheap CRT bulge.
-    let off = p.yx * p.yx * amt;
-    return p + p * off;
+// Barrel-bulge a screen-space uv ([0,1]) into the scene-sample uv. Done PER
+// AXIS (each coord bent by the OTHER coord squared) so the edge midpoints stay
+// pinned to the frame — only the four corners bow outward. That means the sides
+// never gap (no empty space); the corner slivers that bow past [0,1] are filled
+// by the ClampToEdge sampler instead of going black. The IDENTICAL transform is
+// mirrored in Rust (`App::warp_mouse`) so clicks land on the visually-warped
+// chrome (cog/tabs) rather than their un-warped layout position.
+fn crt_warp(uv: vec2<f32>, amt: f32) -> vec2<f32> {
+    let c = uv * 2.0 - 1.0;
+    let warped = vec2<f32>(
+        c.x * (1.0 + c.y * c.y * amt),
+        c.y * (1.0 + c.x * c.x * amt),
+    );
+    return warped * 0.5 + 0.5;
 }
 
 @fragment fn fs_crt(in: CrtOut) -> @location(0) vec4<f32> {
@@ -285,17 +292,12 @@ fn crt_curve(p: vec2<f32>, amt: f32) -> vec2<f32> {
     let is_vignette = mode == 6u;
     let is_bloom = mode == 7u;
 
-    // Barrel curvature: warp the sample coordinate around the screen center.
-    // Only the full-CRT mode curves; everything else samples the scene 1:1.
+    // CRT barrel bulge (full mode only). Per-axis so the sides stay full; the
+    // ClampToEdge sampler fills the bowed corner slivers (no black). Everything
+    // else samples 1:1. Mouse coords get the same warp in Rust so clicks align.
     var uv = in.uv;
     if (is_crt && curvature > 0.0) {
-        let centered = uv * 2.0 - 1.0;
-        let warped = crt_curve(centered, curvature);
-        uv = warped * 0.5 + 0.5;
-        // Outside the curved screen is the bezel (black, opaque).
-        if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
-            return vec4<f32>(0.0, 0.0, 0.0, 1.0);
-        }
+        uv = crt_warp(in.uv, curvature);
     }
 
     let texel = 1.0 / u.screen.xy;
@@ -333,24 +335,28 @@ fn crt_curve(p: vec2<f32>, amt: f32) -> vec2<f32> {
         col = mix(col, vec3<f32>(0.60, 0.64, 0.72), 0.12);
     }
 
-    // Scanlines: darken every other physical row in a smooth sine so the effect
-    // reads as a real raster line rather than a hard 1px comb. Tied to the
-    // physical pixel row (uv.y * height) so the line density is DPI-correct.
-    // Used by the CRT and scanlines-only modes.
+    // Scanlines: darken alternating raster rows. Tied to the RAW screen row
+    // (in.uv.y, not the warped uv) so the lines stay dead-straight on the glass
+    // and DPI-consistent. A ~3-physical-px line pair (the * 0.66 lowers the
+    // frequency from a 2px comb that washes out on HiDPI) with a sharpened dark
+    // trough reads boldly — Windows-Terminal-retro, not a faint shimmer. Used by
+    // the CRT and scanlines-only modes.
     if (scan_amt > 0.0) {
-        let line = sin(uv.y * u.screen.y * 3.14159265);
-        let scan = 1.0 - scan_amt * (0.5 - 0.5 * line);
+        let line = sin(in.uv.y * u.screen.y * 3.14159265 * 0.66);
+        // dark in 0..1; pow sharpens the trough so the dark line is crisp.
+        let dark = pow(0.5 - 0.5 * line, 0.7);
+        let scan = 1.0 - scan_amt * dark;
         col *= scan;
         // Aperture-grille tint (CRT only): a soft per-column RGB cycle so vertical
         // triads shimmer like a Trinitron. Skipped for the clean scanlines mode.
         if (is_crt) {
-            let triad = uv.x * u.screen.x;
+            let triad = in.uv.x * u.screen.x;
             let grille = vec3<f32>(
                 0.5 + 0.5 * cos(triad * 2.094395 + 0.0),
                 0.5 + 0.5 * cos(triad * 2.094395 + 2.094395),
                 0.5 + 0.5 * cos(triad * 2.094395 + 4.18879),
             );
-            col *= mix(vec3<f32>(1.0), grille, scan_amt * 0.15);
+            col *= mix(vec3<f32>(1.0), grille, scan_amt * 0.20);
         }
     }
 

@@ -31,7 +31,15 @@ impl App {
         position: winit::dpi::PhysicalPosition<f64>,
         event_loop: &ActiveEventLoop,
     ) {
-        self.mouse_px = (position.x, position.y);
+        // Under the CRT barrel effect the whole scene is bulged by the GPU, so a
+        // raw pointer pixel no longer lines up with the un-warped layout the hit
+        // tests use. Map it through the SAME warp as the shader (screen → scene)
+        // once here; storing the scene-space coord in `mouse_px` fixes every
+        // downstream consumer (hover, links, menus, and — via `mouse_px` — clicks)
+        // in one place. Identity for all other effects.
+        let (wx, wy) = self.warp_mouse(position.x, position.y);
+        let position = winit::dpi::PhysicalPosition::new(wx, wy);
+        self.mouse_px = (wx, wy);
         // Any open GUI overlay (settings, dropdown/context menu, help panel,
         // pane ⋮ menu) owns the pointer: its immediate-mode widgets compute
         // hover / press / slider-drag from `mouse_px` during paint, so every
@@ -217,6 +225,37 @@ impl App {
                 window.set_cursor(icon);
             }
         }
+    }
+
+    /// Map a raw screen-space pixel into scene space when the CRT barrel bulge is
+    /// active, mirroring `crt_warp` in `shader.wgsl` exactly so hover / click hit
+    /// tests (which run in the flat, un-warped layout) line up with the visually
+    /// bulged chrome. Identity for every other window effect (or if the renderer
+    /// isn't up yet), so the common path pays nothing.
+    fn warp_mouse(&self, x: f64, y: f64) -> (f64, f64) {
+        use crate::renderer::WindowEffect;
+        if self.config.window_effect != WindowEffect::Crt {
+            return (x, y);
+        }
+        // Single source of truth for the curvature amount (matches the shader
+        // uniform fed from `WindowEffect::Crt.params()`).
+        let amt = WindowEffect::Crt.params()[0] as f64;
+        if amt <= 0.0 {
+            return (x, y);
+        }
+        let Some(r) = self.renderer.as_ref() else {
+            return (x, y);
+        };
+        let (w, h) = r.surface_size();
+        let (w, h) = (w as f64, h as f64);
+        if w <= 0.0 || h <= 0.0 {
+            return (x, y);
+        }
+        let cx = (x / w) * 2.0 - 1.0;
+        let cy = (y / h) * 2.0 - 1.0;
+        let wx = cx * (1.0 + cy * cy * amt);
+        let wy = cy * (1.0 + cx * cx * amt);
+        ((wx * 0.5 + 0.5) * w, (wy * 0.5 + 0.5) * h)
     }
 
     /// Restore the OS cursor to the normal arrow over the content area (Pointer
