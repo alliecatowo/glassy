@@ -190,8 +190,9 @@ impl Renderer {
     }
 
     /// The dim-overlay alpha laid over an unfocused pane's content (a near-black
-    /// quad). Kept low so the recessed tile stays legible.
-    pub(crate) const PANE_DIM_ALPHA: f32 = 0.10;
+    /// quad). Enough that the unfocused tile clearly recedes as background while
+    /// staying legible — 0.10 was too subtle to read as "dimmed".
+    pub(crate) const PANE_DIM_ALPHA: f32 = 0.28;
 
     /// Record a single dark overlay quad spanning `scissor` as its own bg draw,
     /// drawn (in pane order) immediately after the pane it dims so it composites
