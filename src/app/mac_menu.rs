@@ -159,8 +159,10 @@ fn item(
 /// Append a titled submenu (a top-level bar entry) built from `items` to `bar`.
 fn submenu(mtm: MainThreadMarker, bar: &NSMenu, title: &str, items: &[Retained<NSMenuItem>]) {
     let ns_title = NSString::from_str(title);
-    // SAFETY: standard NSMenu construction with a valid NSString title.
-    let menu = unsafe { NSMenu::initWithTitle(mtm.alloc(), &ns_title) };
+    // Use the SAFE `NSMenu::new` constructor (no unsafe): the inner submenu's own
+    // title is cosmetic — the visible top-level bar label is the entry item's
+    // title, set just below — so we don't need the unsafe `initWithTitle`.
+    let menu = NSMenu::new(mtm);
     for it in items {
         menu.addItem(it);
     }
