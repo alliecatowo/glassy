@@ -602,7 +602,21 @@ impl App {
 /// empty title defaults to "glassy". Errors are logged at debug level (a missing
 /// notification daemon is a non-fatal, common desktop configuration).
 pub(super) fn fire_notification(spec: &crate::image::NotifySpec) {
-    use notify_rust::{Notification, Timeout, Urgency};
+    use notify_rust::{Notification, Timeout};
+    // Apply urgency only where notify-rust supports it: Linux/BSD + Windows expose
+    // `.urgency()`; macOS gates it behind an unstable preview feature, so its
+    // variant is a no-op. Taking the field on both keeps `spec.urgency` read.
+    #[cfg(not(target_os = "macos"))]
+    fn apply_urgency(n: &mut Notification, urgency: crate::image::NotifyUrgency) {
+        use notify_rust::Urgency;
+        n.urgency(match urgency {
+            crate::image::NotifyUrgency::Low => Urgency::Low,
+            crate::image::NotifyUrgency::Normal => Urgency::Normal,
+            crate::image::NotifyUrgency::Critical => Urgency::Critical,
+        });
+    }
+    #[cfg(target_os = "macos")]
+    fn apply_urgency(_n: &mut Notification, _urgency: crate::image::NotifyUrgency) {}
     let spec = spec.clone();
     std::thread::Builder::new()
         .name("glassy-notify".to_string())
@@ -616,12 +630,13 @@ pub(super) fn fire_notification(spec: &crate::image::NotifySpec) {
             n.summary(&summary)
                 .body(&spec.body)
                 .appname("glassy")
-                .timeout(Timeout::Milliseconds(5000))
-                .urgency(match spec.urgency {
-                    crate::image::NotifyUrgency::Low => Urgency::Low,
-                    crate::image::NotifyUrgency::Normal => Urgency::Normal,
-                    crate::image::NotifyUrgency::Critical => Urgency::Critical,
-                });
+                .timeout(Timeout::Milliseconds(5000));
+            // Urgency is applied via a cfg'd helper (below): notify-rust only
+            // exposes `.urgency()` on Linux/BSD + Windows — on macOS it lives
+            // behind an unstable preview feature we don't enable. Routing through
+            // the helper (which always *takes* the field) keeps the mac build
+            // compiling AND keeps `spec.urgency` "read" on every platform.
+            apply_urgency(&mut n, spec.urgency);
             if let Some(icon) = &spec.icon {
                 n.icon(icon);
             }
