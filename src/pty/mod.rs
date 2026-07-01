@@ -1138,6 +1138,32 @@ impl Pty {
         self.term.lock().resize(GridSize { cols, rows });
     }
 
+    /// Update the terminal's DEFAULT cursor style (shape + blink) live, e.g. from
+    /// the settings cursor picker. Rebuilds the Term `Config` exactly as `spawn`
+    /// did (same scrollback + word separators) with the new cursor default and
+    /// applies it via `Term::set_options`, which preserves the grid/scrollback and
+    /// just re-damages. Takes effect immediately unless the child has pushed its
+    /// own DECSCUSR style (that override wins, as it should).
+    pub fn set_default_cursor(
+        &self,
+        shape: alacritty_terminal::vte::ansi::CursorShape,
+        blinking: bool,
+        scrollback: usize,
+        word_separator: &str,
+    ) {
+        let semantic_escape_chars = merge_word_separators(
+            alacritty_terminal::term::SEMANTIC_ESCAPE_CHARS,
+            word_separator,
+        );
+        let config = Config {
+            scrolling_history: scrollback,
+            semantic_escape_chars,
+            default_cursor_style: alacritty_terminal::vte::ansi::CursorStyle { shape, blinking },
+            ..Config::default()
+        };
+        self.term.lock().set_options(config);
+    }
+
     /// Ask the PTY loop to shut down cleanly.
     pub fn shutdown(&self) {
         self.send(LoopMsg::Shutdown);

@@ -86,8 +86,12 @@ impl<'r> Ui<'r> {
     ) -> Option<usize> {
         let m = self.m;
         let row_h = m.row_h;
-        // Cap the popup height; tall lists would overflow the panel.
-        let max_rows = rows.len().min(8);
+        // Cap the popup to what actually fits the surface (leaving a small margin),
+        // never fewer than 4. A fixed cap of 8 silently hid the 9th effect
+        // ("Custom") and any theme past the 8th; sizing to the window shows them
+        // all (it flips above when anchored low, below).
+        let fit = ((surface_h - 4.0 * m.pad) / row_h).floor().max(4.0) as usize;
+        let max_rows = rows.len().min(fit);
         let h = (max_rows as f32 * row_h + 2.0).round();
         // Anchor below by default; flip above when it would overflow the surface.
         let below_y = anchor.y + anchor.h + 2.0;

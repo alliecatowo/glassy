@@ -186,10 +186,18 @@ impl App {
         if let Some(&name) = color::THEME_NAMES.get(idx) {
             self.config.theme_light = name.to_string();
             self.settings_saved = false;
-            if self.config.follow_system
-                && let Some(window) = &self.window
-                && self.apply_system_theme(window.theme())
-            {
+            if self.config.follow_system {
+                if let Some(window) = &self.window
+                    && self.apply_system_theme(window.theme())
+                {
+                    self.force_full_redraw = true;
+                }
+            } else if let Some(theme) = color::theme_by_name(name) {
+                // Not following the system: a Light-theme pick would otherwise have
+                // no visible effect. Apply it as the active theme immediately — this
+                // is also how you pick light-vs-dark when follow-system is off.
+                color::set_theme(theme);
+                self.config.theme = name.to_string();
                 self.force_full_redraw = true;
             }
         }
@@ -201,10 +209,18 @@ impl App {
         if let Some(&name) = color::THEME_NAMES.get(idx) {
             self.config.theme_dark = name.to_string();
             self.settings_saved = false;
-            if self.config.follow_system
-                && let Some(window) = &self.window
-                && self.apply_system_theme(window.theme())
-            {
+            if self.config.follow_system {
+                if let Some(window) = &self.window
+                    && self.apply_system_theme(window.theme())
+                {
+                    self.force_full_redraw = true;
+                }
+            } else if let Some(theme) = color::theme_by_name(name) {
+                // Not following the system: apply the picked Dark theme as active
+                // immediately so it has a visible effect (and gives light/dark
+                // selection without follow-system).
+                color::set_theme(theme);
+                self.config.theme = name.to_string();
                 self.force_full_redraw = true;
             }
         }

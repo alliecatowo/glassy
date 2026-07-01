@@ -75,7 +75,10 @@ impl App {
         // Seed the custom-theme working palette from the active theme + refresh the
         // runtime profile list, and reset the section + scroll + hex editor.
         self.seed_custom_theme();
-        self.settings_custom_editing = usize::MAX;
+        // Start with the first swatch (fg) selected so the custom-theme editor
+        // card is visible + clickable the moment you open the Themes section.
+        // (usize::MAX hid the card entirely — there was nothing to click.)
+        self.settings_custom_editing = 0;
         self.settings_theme_hex = gui::TextEdit::default();
         self.settings_theme_hex_ms = gui::TextInputMouse::default();
         self.settings_profiles = crate::config::profile_names();
@@ -537,7 +540,22 @@ impl App {
             2 => CursorStyleConfig::Underline,
             _ => CursorStyleConfig::Block,
         };
+        // Apply live to every open pane's terminal (was config-only before, so
+        // the change never showed). The child's own DECSCUSR still wins if set.
+        let shape = self.config.cursor_style.to_cursor_shape();
+        let blink = self.config.cursor_blink;
+        let sb = self.config.scrollback;
+        let ws = self.config.word_separator.clone();
+        if let Some(pty) = &self.pty {
+            pty.set_default_cursor(shape, blink, sb, &ws);
+        }
+        if let Some(panes) = &self.panes {
+            for pty in panes.others.values() {
+                pty.set_default_cursor(shape, blink, sb, &ws);
+            }
+        }
         self.settings_saved = false;
+        self.force_full_redraw = true;
     }
 
     /// Cycle the active theme by `dir` through `color::THEME_NAMES`, applying it
