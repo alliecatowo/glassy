@@ -72,6 +72,8 @@ pub(super) struct RawConfig {
     pub quake_height: Option<f32>,
     pub quake_animation_ms: Option<u64>,
     pub command_history: Option<usize>,
+    pub power_mode: Option<bool>,
+    pub power_mode_intensity: Option<f32>,
 }
 
 impl RawConfig {
@@ -200,6 +202,15 @@ impl RawConfig {
             },
             quake_animation_ms: self.quake_animation_ms.unwrap_or(180).min(5_000),
             command_history: self.command_history.unwrap_or(DEFAULT_COMMAND_HISTORY),
+            power_mode: self.power_mode.unwrap_or(false),
+            power_mode_intensity: {
+                let i = self.power_mode_intensity.unwrap_or(0.6);
+                if i.is_finite() {
+                    i.clamp(0.0, 1.0)
+                } else {
+                    0.6
+                }
+            },
         };
 
         Ok(super::Settings { config, theme })
@@ -588,6 +599,18 @@ pub(super) fn apply_kv(key: &str, value: &str, raw: &mut RawConfig) -> Result<()
                 .parse()
                 .with_context(|| format!("quake_animation_ms: invalid integer '{value}'"))?;
             raw.quake_animation_ms = Some(ms.min(5_000));
+        }
+        "power_mode" => {
+            raw.power_mode = Some(parse_bool(value, "power_mode")?);
+        }
+        "power_mode_intensity" => {
+            let i: f32 = value
+                .parse()
+                .with_context(|| format!("power_mode_intensity: invalid number '{value}'"))?;
+            if !(i.is_finite() && (0.0..=1.0).contains(&i)) {
+                bail!("power_mode_intensity must be between 0.0 and 1.0, got {i}");
+            }
+            raw.power_mode_intensity = Some(i);
         }
         "color.fg" => {
             parse_hex_color(value)?;

@@ -345,6 +345,10 @@ impl super::App {
             r.step_cursor_trail();
             self.force_full_redraw = true;
         }
+        // Advance the Power-Mode particle sim one fixed step per settle cycle so a
+        // scripted `wait` animates the burst deterministically (the live path steps
+        // it in about_to_wait, which the script loop bypasses). No-op when idle/off.
+        self.step_power_fixed(1.0 / 60.0);
         self.render();
     }
 

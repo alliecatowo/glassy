@@ -39,6 +39,8 @@
 //! quake       = false                  # quake/dropdown mode: borderless slide-down window
 //! quake_height = 0.5                   # fraction of the monitor height (0.1..1.0)
 //! quake_animation_ms = 180             # slide duration in ms (0 = instant)
+//! power_mode  = false                  # fun typing effect: cursor particle bursts + streak shake
+//! power_mode_intensity = 0.6           # power-mode strength: 0.0 (subtle) .. 1.0 (max)
 //! ```
 //!
 //! Quake / dropdown mode (see `docs/quake-mode.md`): with `quake = true` glassy

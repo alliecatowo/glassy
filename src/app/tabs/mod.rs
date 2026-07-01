@@ -9,6 +9,8 @@ mod session;
 
 impl App {
     pub fn new(proxy: EventLoopProxy<UserEvent>, config: Config) -> Self {
+        // Seed Power Mode from the config before `config` is moved into the struct.
+        let power = power::PowerState::new(config.power_mode, config.power_mode_intensity);
         Self {
             proxy,
             config,
@@ -107,6 +109,7 @@ impl App {
             text_blink_at: Instant::now() + BLINK_INTERVAL,
             text_blink_active: false,
             toasts: Vec::new(),
+            power,
             peek: None,
             confirm_close: None,
             pending_confirm_execute: false,
