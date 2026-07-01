@@ -26,6 +26,18 @@ const EFFECT_NAMES: &[&str] = &[
     "Grain",
     "Vignette",
     "Bloom",
+    "Custom",
+];
+
+/// The Custom-effect slider rows: `(widget id, label, channel index into
+/// `SettingsView::custom_effect`)`. Shown only when the effect is Custom.
+const CUSTOM_FX_SLIDERS: &[(&str, &str, usize)] = &[
+    ("settings/fx_curvature", "Curvature", 0),
+    ("settings/fx_scanline", "Scanlines", 1),
+    ("settings/fx_glow", "Glow", 2),
+    ("settings/fx_vignette", "Vignette", 3),
+    ("settings/fx_grain", "Grain", 4),
+    ("settings/fx_tint", "Glass tint", 5),
 ];
 
 enum RowKind<'a> {
@@ -338,7 +350,7 @@ impl<'r> Ui<'r> {
                     theme_index(v.theme_names, v.theme_dark),
                     Some(v.theme_swatches),
                 ),
-                SettingsDrop::Effect => (EFFECT_NAMES, v.window_effect_idx.min(7), None),
+                SettingsDrop::Effect => (EFFECT_NAMES, v.window_effect_idx.min(8), None),
                 SettingsDrop::None => (&[], 0, None),
             };
             let pick = self.dropdown_popup(
@@ -408,18 +420,26 @@ impl<'r> Ui<'r> {
             } => {
                 self.label_clip(px.round(), ly, label, label_clip, fg_dim());
                 let sl = rect((ctrl_w - m.cell_w * 6.0).max(m.cell_w * 4.0));
-                // The slider lives in PERCEPTUAL space (equal drags == equal
-                // visual change) while the config stores the plain linear value,
-                // so map both ways around the widget. The curve itself is applied
-                // once at consumption (`glass_bg`); this only reshapes UI travel.
-                let slider_pos = crate::renderer::opacity_to_slider(*value);
-                let new_pos = self.slider(id(wid), sl, slider_pos, 0.0, 1.0, 0.04);
-                let nv = crate::renderer::slider_to_opacity(new_pos);
-                if (nv - value).abs() > f32::EPSILON {
-                    ev.opacity = Some(nv);
+                if *wid == "settings/opacity" {
+                    // Opacity's slider lives in PERCEPTUAL space (equal drags ==
+                    // equal visual change) while the config stores the plain
+                    // linear value, so map both ways around the widget.
+                    let slider_pos = crate::renderer::opacity_to_slider(*value);
+                    let new_pos = self.slider(id(wid), sl, slider_pos, 0.0, 1.0, 0.04);
+                    let nv = crate::renderer::slider_to_opacity(new_pos);
+                    if (nv - value).abs() > f32::EPSILON {
+                        ev.opacity = Some(nv);
+                    }
+                    self.label_right(ctrl_x + ctrl_w, ly, &format!("{nv:.2}"), fg());
+                } else {
+                    // Everything else (the Custom-effect channels) is a plain
+                    // linear 0..1 slider.
+                    let nv = self.slider(id(wid), sl, *value, 0.0, 1.0, 0.02);
+                    if (nv - value).abs() > f32::EPSILON {
+                        apply_slider_event(wid, nv, ev);
+                    }
+                    self.label_right(ctrl_x + ctrl_w, ly, &format!("{nv:.2}"), fg());
                 }
-                // Show the true (linear) opacity value the config will store.
-                self.label_right(ctrl_x + ctrl_w, ly, &format!("{nv:.2}"), fg());
             }
             RowKind::Segmented {
                 id: wid,
@@ -652,6 +672,17 @@ fn build_section_rows<'a>(section: SettingsSection, v: &'a SettingsView<'a>) -> 
                 swatch: None,
                 which: SettingsDrop::Effect,
             });
+            // Custom effect: per-channel intensity sliders so any compatible
+            // combination stacks. Only shown when Custom (index 8) is selected.
+            if v.window_effect_idx == 8 {
+                for (id, label, ch) in CUSTOM_FX_SLIDERS {
+                    rows.push(RowKind::Slider {
+                        id,
+                        label,
+                        value: v.custom_effect.get(*ch).copied().unwrap_or(0.0),
+                    });
+                }
+            }
         }
         SettingsSection::Themes => {
             rows.push(RowKind::Heading("Active theme"));
@@ -796,6 +827,17 @@ fn build_section_rows<'a>(section: SettingsSection, v: &'a SettingsView<'a>) -> 
     rows
 }
 
+/// Map a Custom-effect channel slider's new value to its event (carrying the
+/// channel index into `custom_effect`).
+fn apply_slider_event(wid: &str, nv: f32, ev: &mut SettingsEvents) {
+    for entry in CUSTOM_FX_SLIDERS {
+        if entry.0 == wid {
+            ev.custom_effect = Some((entry.2, nv));
+            return;
+        }
+    }
+}
+
 /// Map a stepper widget id to its `*_delta` event field.
 fn apply_stepper_event(wid: &str, delta: i32, ev: &mut SettingsEvents) {
     if delta == 0 {
@@ -917,6 +959,7 @@ mod tests {
             cursor_blink: false,
             tab_bar_mode: 0,
             window_effect_idx: 0,
+            custom_effect: [0.0; 6],
             section: 0,
             section_scroll: 0.0,
             copy_on_select: false,

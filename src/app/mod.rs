@@ -234,6 +234,12 @@ pub struct Config {
     /// the legacy `crt_effect` bool. Config key `window_effect`; env override
     /// `GLASSY_EFFECT=<mode>`.
     pub window_effect: crate::renderer::WindowEffect,
+    /// Per-channel intensities for the `Custom` window effect, in the order
+    /// `[curvature, scanline, glow, vignette, grain, tint]` (each 0..1). Driven
+    /// live by the Appearance → Custom sliders and pushed to the post shader when
+    /// `window_effect == Custom`. (File persistence is a fast-follow; today these
+    /// are runtime-live with a pleasant default.)
+    pub custom_effect: [f32; 6],
     /// Dim the CONTENT of unfocused panes in a split with a subtle dark overlay,
     /// so the focused pane reads as foreground. Default true. Independent of
     /// `pane_headers` (the header always dims its own text regardless). Toggle via

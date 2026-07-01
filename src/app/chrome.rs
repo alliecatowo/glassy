@@ -569,6 +569,7 @@ impl App {
             cursor_blink: config.cursor_blink,
             tab_bar_mode,
             window_effect_idx: config.window_effect.index(),
+            custom_effect: config.custom_effect,
             section,
             section_scroll,
             copy_on_select: config.copy_on_select,
@@ -667,6 +668,13 @@ impl App {
         if let Some(idx) = ev.window_effect {
             self.set_window_effect_index(idx);
             self.settings_drop = gui::SettingsDrop::None;
+            changed = true;
+        }
+        if let Some((ch, val)) = ev.custom_effect
+            && ch < self.config.custom_effect.len()
+        {
+            self.config.custom_effect[ch] = val.clamp(0.0, 1.0);
+            self.apply_custom_effect();
             changed = true;
         }
         if ev.follow_system_toggle {

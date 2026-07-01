@@ -222,9 +222,12 @@ struct CrtU {
     // x = curvature strength (0 = flat), y = scanline strength (0..1),
     // z = glow strength (0..1), w = vignette strength (0..1).
     params: vec4<f32>,
+    // x = grain amplitude, y = glass-tint amount, z/w reserved. These let the
+    // `custom` mode stack grain + tint on top of the first four channels.
+    params2: vec4<f32>,
     // x = window-effect mode discriminant (see WindowEffect::shader_mode):
     //   1 = crt, 2 = frosted, 3 = acrylic, 4 = scanlines, 5 = grain,
-    //   6 = vignette, 7 = bloom. (0 = none, but then this pass is never run.)
+    //   6 = vignette, 7 = bloom, 8 = custom. (0 = none, pass never runs.)
     // .yzw unused padding (kept for 16-byte alignment).
     mode: vec4<u32>,
 };
@@ -278,25 +281,26 @@ fn crt_warp(uv: vec2<f32>, amt: f32) -> vec2<f32> {
     let scan_amt = crt.params.y;
     let glow_amt = crt.params.z;
     let vig_amt = crt.params.w;
+    let grain_amt = crt.params2.x;
+    let tint_amt = crt.params2.y;
 
-    // Whether to keep the surface's own alpha (so a translucent window stays
-    // translucent THROUGH the effect) versus forcing opaque. The CRT bezel/black
-    // border needs an opaque result, but the glass-style modes (frosted/acrylic)
-    // and the lighter overlays should preserve transparency. We read the scene
-    // alpha below and decide per-mode.
+    // The effect is CHANNEL-DRIVEN: every look is applied by its own intensity
+    // (>0) rather than gated behind a single mode, so the `custom` mode can stack
+    // any compatible combination. `mode` now only selects nuances that aren't a
+    // single scalar: the glass-tint COLOR (frosted warm vs acrylic cool) and
+    // whether the aperture grille rides along with curvature (crt / custom).
     let is_crt = mode == 1u;
     let is_frosted = mode == 2u;
     let is_acrylic = mode == 3u;
-    let is_scanlines = mode == 4u;
-    let is_grain = mode == 5u;
-    let is_vignette = mode == 6u;
-    let is_bloom = mode == 7u;
+    let is_custom = mode == 8u;
+    let tube = is_crt || is_custom; // curved-tube looks: grille + opaque bezel
 
-    // CRT barrel bulge (full mode only). Per-axis so the sides stay full; the
-    // ClampToEdge sampler fills the bowed corner slivers (no black). Everything
-    // else samples 1:1. Mouse coords get the same warp in Rust so clicks align.
+    // Barrel bulge: applied whenever curvature is dialed in (crt, or custom with
+    // curvature > 0). Per-axis so the sides stay full; the ClampToEdge sampler
+    // fills the bowed corner slivers (no black). Mouse coords get the same warp
+    // in Rust so clicks align.
     var uv = in.uv;
-    if (is_crt && curvature > 0.0) {
+    if (curvature > 0.0) {
         uv = crt_warp(in.uv, curvature);
     }
 
@@ -306,13 +310,13 @@ fn crt_warp(uv: vec2<f32>, amt: f32) -> vec2<f32> {
     var alpha = scene.a;
 
     // Cheap glow / bloom: a few offset taps summed and weighted, added back so
-    // bright glyphs bleed light into neighbours (the phosphor halo). Used by the
-    // CRT, bloom and (subtly) the frosted/acrylic glass modes.
+    // bright glyphs bleed light into neighbours (the phosphor halo). A wider
+    // radius reads as soft glass diffusion for the tinted/frosted looks; the
+    // tighter CRT radius stays a crisp phosphor halo.
     if (glow_amt > 0.0) {
         var bloom = vec3<f32>(0.0);
-        // A wider radius reads as soft glass diffusion for the frosted modes; the
-        // tighter CRT radius stays a crisp phosphor halo.
-        let spread = select(1.5, 3.0, is_frosted || is_acrylic);
+        let soft = is_frosted || is_acrylic || (is_custom && tint_amt > 0.0);
+        let spread = select(1.5, 3.0, soft);
         let r = texel * spread;
         bloom += textureSample(crt_tex, crt_samp, uv + vec2<f32>( r.x, 0.0)).rgb;
         bloom += textureSample(crt_tex, crt_samp, uv + vec2<f32>(-r.x, 0.0)).rgb;
@@ -324,32 +328,30 @@ fn crt_warp(uv: vec2<f32>, amt: f32) -> vec2<f32> {
         col += bloom * glow_amt;
     }
 
-    // Frosted / acrylic glass tint: lift the image toward a soft milky white
-    // (frosted, warm) or a cool slate (acrylic) by a small amount so the surface
-    // reads as a translucent frosted pane over whatever the compositor shows
-    // through. The full look also wants compositor blur-behind (see effect.rs);
-    // this is the in-shader foreground half of it.
+    // Glass tint: lift the image toward a soft milky white (frosted, warm) or a
+    // cool slate (acrylic), so the surface reads as a translucent frosted pane.
+    // Presets pick their color by mode; the custom mode drives the amount from
+    // `tint_amt` and uses the cool slate.
     if (is_frosted) {
         col = mix(col, vec3<f32>(0.92, 0.93, 0.95), 0.10);
     } else if (is_acrylic) {
         col = mix(col, vec3<f32>(0.60, 0.64, 0.72), 0.12);
+    } else if (tint_amt > 0.0) {
+        col = mix(col, vec3<f32>(0.66, 0.70, 0.80), tint_amt * 0.30);
     }
 
     // Scanlines: darken alternating raster rows. Tied to the RAW screen row
     // (in.uv.y, not the warped uv) so the lines stay dead-straight on the glass
-    // and DPI-consistent. A ~3-physical-px line pair (the * 0.66 lowers the
-    // frequency from a 2px comb that washes out on HiDPI) with a sharpened dark
-    // trough reads boldly — Windows-Terminal-retro, not a faint shimmer. Used by
-    // the CRT and scanlines-only modes.
+    // and DPI-consistent. ~3-physical-px line pairs with a sharpened trough read
+    // boldly — Windows-Terminal-retro, not a faint shimmer.
     if (scan_amt > 0.0) {
         let line = sin(in.uv.y * u.screen.y * 3.14159265 * 0.66);
-        // dark in 0..1; pow sharpens the trough so the dark line is crisp.
         let dark = pow(0.5 - 0.5 * line, 0.7);
         let scan = 1.0 - scan_amt * dark;
         col *= scan;
-        // Aperture-grille tint (CRT only): a soft per-column RGB cycle so vertical
-        // triads shimmer like a Trinitron. Skipped for the clean scanlines mode.
-        if (is_crt) {
+        // Aperture-grille tint rides along with curvature (the tube looks): a
+        // soft per-column RGB cycle so vertical triads shimmer like a Trinitron.
+        if (tube && curvature > 0.0) {
             let triad = in.uv.x * u.screen.x;
             let grille = vec3<f32>(
                 0.5 + 0.5 * cos(triad * 2.094395 + 0.0),
@@ -361,25 +363,25 @@ fn crt_warp(uv: vec2<f32>, amt: f32) -> vec2<f32> {
     }
 
     // Film grain: a faint per-pixel dither. Static (no time term) to stay
-    // 0%-idle-safe — it only repaints on normal damage frames.
-    if (is_grain) {
+    // 0%-idle-safe — it only repaints on normal damage frames. Amplitude is
+    // param-driven so the custom mode can dial it.
+    if (grain_amt > 0.0) {
         let n = crt_hash(in.uv * u.screen.xy) - 0.5;
-        col += vec3<f32>(n) * 0.06;
+        col += vec3<f32>(n) * grain_amt * 0.15;
     }
 
     // Vignette: gently darken toward the corners for the tube-glass falloff.
-    // Used by the CRT, frosted/acrylic and vignette-only modes.
     if (vig_amt > 0.0) {
         let c = in.uv * 2.0 - 1.0;
         let v = 1.0 - vig_amt * dot(c, c) * 0.35;
         col *= clamp(v, 0.0, 1.0);
     }
 
-    // Alpha policy: the CRT mode is an opaque tube (the bezel must be solid), so
-    // force alpha = 1. Every other mode preserves the scene alpha so a translucent
-    // window stays translucent through the effect (the macOS/Linux opacity work
-    // composites the same way it does on the direct path).
-    if (is_crt) {
+    // Alpha policy: a curved tube needs an opaque bezel (the bowed corners must
+    // be solid), so force alpha = 1 whenever curvature is on. Every other look
+    // preserves the scene alpha so a translucent window stays translucent through
+    // the effect (matching the direct opacity path).
+    if (curvature > 0.0) {
         alpha = 1.0;
     }
     return vec4<f32>(col, alpha);

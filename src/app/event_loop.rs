@@ -190,7 +190,7 @@ impl ApplicationHandler<UserEvent> for App {
             self.config.window_effect
         };
         self.config.window_effect = window_effect;
-        renderer.set_window_effect(window_effect);
+        renderer.set_window_effect_resolved(window_effect, self.config.custom_effect);
 
         let size = window.inner_size();
         renderer.resize(size.width, size.height);

@@ -441,8 +441,12 @@ pub struct SettingsView<'a> {
     pub tab_bar_mode: usize,
     /// Window post-process effect as a segmented index (see
     /// [`crate::renderer::WindowEffect::index`]): 0 = None, 1 = Frosted, 2 =
-    /// Acrylic, 3 = CRT, 4 = Scanlines, 5 = Grain, 6 = Vignette, 7 = Bloom.
+    /// Acrylic, 3 = CRT, 4 = Scanlines, 5 = Grain, 6 = Vignette, 7 = Bloom,
+    /// 8 = Custom.
     pub window_effect_idx: usize,
+    /// Custom-effect channel intensities `[curvature, scanline, glow, vignette,
+    /// grain, tint]` (0..1). Only surfaced as sliders when the effect is Custom.
+    pub custom_effect: [f32; 6],
 
     // --- settings-themes stream: sectioned window + custom theme + profiles ---
     /// Active left-sidebar section index (see [`SettingsSection`]).
@@ -570,8 +574,11 @@ pub struct SettingsEvents {
     pub cursor_blink_toggle: bool,
     /// New tab-bar-mode index if the segmented control changed (0/1/2).
     pub tab_bar_mode: Option<usize>,
-    /// New window-effect index if the segmented control changed (0..=7).
+    /// New window-effect index if the segmented control changed (0..=8).
     pub window_effect: Option<usize>,
+    /// A Custom-effect channel slider moved: `(channel index 0..=5, new value)`
+    /// where the index is `[curvature, scanline, glow, vignette, grain, tint]`.
+    pub custom_effect: Option<(usize, f32)>,
 
     // --- settings-themes stream ---
     /// A sidebar section was clicked (new active section index).

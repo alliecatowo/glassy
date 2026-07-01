@@ -476,8 +476,9 @@ impl App {
         // None toggles the offscreen pass; the renderer rebuilds resources lazily.
         if new_config.window_effect != self.config.window_effect {
             self.config.window_effect = new_config.window_effect;
+            let custom = self.config.custom_effect;
             if let Some(r) = &mut self.renderer {
-                r.set_window_effect(self.config.window_effect);
+                r.set_window_effect_resolved(self.config.window_effect, custom);
             }
             self.dirty = true;
             self.force_full_redraw = true;

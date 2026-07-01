@@ -320,8 +320,28 @@ impl App {
             return;
         }
         self.config.window_effect = effect;
+        let p = self.config.custom_effect;
         if let Some(r) = self.renderer.as_mut() {
-            r.set_window_effect(effect);
+            if effect == crate::renderer::WindowEffect::Custom {
+                r.set_window_effect_custom([p[0], p[1], p[2], p[3]], [p[4], p[5], 0.0, 0.0]);
+            } else {
+                r.set_window_effect(effect);
+            }
+        }
+        self.settings_saved = false;
+        self.force_full_redraw = true;
+    }
+
+    /// Re-push the live `Custom` effect channel intensities to the post shader.
+    /// Called when an Appearance → Custom slider moves (only meaningful while the
+    /// active effect is `Custom`; a no-op-ish push otherwise since the mode gates
+    /// it). Forces a repaint so the change shows immediately.
+    pub(crate) fn apply_custom_effect(&mut self) {
+        let p = self.config.custom_effect;
+        if self.config.window_effect == crate::renderer::WindowEffect::Custom
+            && let Some(r) = self.renderer.as_mut()
+        {
+            r.set_window_effect_custom([p[0], p[1], p[2], p[3]], [p[4], p[5], 0.0, 0.0]);
         }
         self.settings_saved = false;
         self.force_full_redraw = true;

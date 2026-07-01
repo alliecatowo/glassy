@@ -52,6 +52,10 @@ pub enum WindowEffect {
     Vignette,
     /// Bloom only: bright glyphs bleed a soft halo (no scanlines/curvature).
     Bloom,
+    /// Custom: every channel (curvature, scanline, glow, vignette, grain, tint)
+    /// is independently dialed from config sliders and stacked — the user builds
+    /// any compatible combination. Its params come from config, not [`params`].
+    Custom,
 }
 
 impl WindowEffect {
@@ -66,6 +70,7 @@ impl WindowEffect {
             Self::Grain => "grain",
             Self::Vignette => "vignette",
             Self::Bloom => "bloom",
+            Self::Custom => "custom",
         }
     }
 
@@ -83,6 +88,7 @@ impl WindowEffect {
             "grain" | "noise" | "film" => Self::Grain,
             "vignette" | "vig" => Self::Vignette,
             "bloom" | "glow" => Self::Bloom,
+            "custom" | "combo" => Self::Custom,
             _ => Self::None,
         }
     }
@@ -98,6 +104,7 @@ impl WindowEffect {
             Self::Grain => 5,
             Self::Vignette => 6,
             Self::Bloom => 7,
+            Self::Custom => 8,
         }
     }
 
@@ -111,6 +118,7 @@ impl WindowEffect {
             5 => Self::Grain,
             6 => Self::Vignette,
             7 => Self::Bloom,
+            8 => Self::Custom,
             _ => Self::None,
         }
     }
@@ -132,6 +140,7 @@ impl WindowEffect {
             Self::Grain => 5,
             Self::Vignette => 6,
             Self::Bloom => 7,
+            Self::Custom => 8,
         }
     }
 
@@ -150,6 +159,21 @@ impl WindowEffect {
             Self::Grain => [0.0, 0.0, 0.0, 0.0],
             Self::Vignette => [0.0, 0.0, 0.0, 0.55],
             Self::Bloom => [0.0, 0.0, 0.45, 0.0],
+            // Custom's params come from config (see App::apply_window_effect);
+            // the static path returns zero so a stray call is a harmless no-op.
+            Self::Custom => [0.0, 0.0, 0.0, 0.0],
+        }
+    }
+
+    /// The second param set `[grain, tint, reserved, reserved]` for this mode.
+    /// Only `Grain` uses it among the presets (grain amplitude); `Custom` drives
+    /// it from config. Everything else is zero (frosted/acrylic tint is applied
+    /// by the mode branch in the shader, not this channel).
+    pub fn params2(self) -> [f32; 4] {
+        match self {
+            // grain amplitude 0.4 → the historic ~0.06 dither (shader scales ×0.15)
+            Self::Grain => [0.4, 0.0, 0.0, 0.0],
+            _ => [0.0, 0.0, 0.0, 0.0],
         }
     }
 }
@@ -167,7 +191,36 @@ impl Renderer {
         // The CRT pass is the single shared post pass; route every mode through it.
         // `set_crt_mode` (re)builds resources only when post is needed and pushes
         // both the params and the mode discriminant to the uniform.
-        self.set_crt_mode(effect.needs_post(), effect.shader_mode(), effect.params());
+        self.set_crt_mode(
+            effect.needs_post(),
+            effect.shader_mode(),
+            effect.params(),
+            effect.params2(),
+        );
+    }
+
+    /// Apply the `Custom` window effect with explicit per-channel intensities
+    /// (from config sliders): `params = [curvature, scanline, glow, vignette]`,
+    /// `params2 = [grain, tint, _, _]`. Routes through the same post pass as the
+    /// presets so any compatible combination stacks. Force a full repaint after.
+    pub fn set_window_effect_custom(&mut self, params: [f32; 4], params2: [f32; 4]) {
+        self.window_effect = WindowEffect::Custom;
+        self.set_crt_mode(true, WindowEffect::Custom.shader_mode(), params, params2);
+    }
+
+    /// Apply `effect`, sourcing the `Custom` mode's channels from `custom`
+    /// (`[curvature, scanline, glow, vignette, grain, tint]`). The single entry
+    /// point every app call site should use so `Custom` never falls back to its
+    /// zero static params.
+    pub fn set_window_effect_resolved(&mut self, effect: WindowEffect, custom: [f32; 6]) {
+        if effect == WindowEffect::Custom {
+            self.set_window_effect_custom(
+                [custom[0], custom[1], custom[2], custom[3]],
+                [custom[4], custom[5], 0.0, 0.0],
+            );
+        } else {
+            self.set_window_effect(effect);
+        }
     }
 
     /// The currently selected window effect.
@@ -192,6 +245,7 @@ mod tests {
             WindowEffect::Grain,
             WindowEffect::Vignette,
             WindowEffect::Bloom,
+            WindowEffect::Custom,
         ] {
             assert_eq!(WindowEffect::parse(e.as_str()), e);
             assert_eq!(WindowEffect::from_index(e.index()), e);
@@ -223,6 +277,7 @@ mod tests {
             WindowEffect::Grain,
             WindowEffect::Vignette,
             WindowEffect::Bloom,
+            WindowEffect::Custom,
         ]
         .iter()
         .map(|e| e.shader_mode())

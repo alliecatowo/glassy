@@ -331,6 +331,10 @@ impl RawConfig {
                 .map(PathBuf::from),
             cursor_trail: self.cursor_trail.unwrap_or(false),
             crt_effect: self.crt_effect.unwrap_or(false),
+            // Custom-effect channel intensities [curvature, scanline, glow,
+            // vignette, grain, tint]. A pleasant retro-glass default; the
+            // Appearance → Custom sliders tune it live.
+            custom_effect: [0.12, 0.35, 0.22, 0.30, 0.15, 0.25],
             // Resolve the window effect: an explicit `window_effect` wins; else the
             // legacy `crt_effect = true` maps to the CRT mode; else None. This keeps
             // old configs working while exposing the full mode set.

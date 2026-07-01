@@ -234,12 +234,13 @@ impl App {
     /// isn't up yet), so the common path pays nothing.
     fn warp_mouse(&self, x: f64, y: f64) -> (f64, f64) {
         use crate::renderer::WindowEffect;
-        if self.config.window_effect != WindowEffect::Crt {
-            return (x, y);
-        }
-        // Single source of truth for the curvature amount (matches the shader
-        // uniform fed from `WindowEffect::Crt.params()`).
-        let amt = WindowEffect::Crt.params()[0] as f64;
+        // Curvature is active for the CRT preset and for a Custom effect whose
+        // curvature channel is dialed up. Match the amount the shader uses.
+        let amt = match self.config.window_effect {
+            WindowEffect::Crt => WindowEffect::Crt.params()[0] as f64,
+            WindowEffect::Custom => self.config.custom_effect[0] as f64,
+            _ => return (x, y),
+        };
         if amt <= 0.0 {
             return (x, y);
         }
