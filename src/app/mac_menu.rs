@@ -19,7 +19,7 @@
 use crate::config::KeyAction;
 use crate::pty::UserEvent;
 use objc2::rc::Retained;
-use objc2::runtime::{AnyObject, Sel};
+use objc2::runtime::{AnyObject, NSObjectProtocol, Sel};
 use objc2::{ClassType, DeclaredClass, declare_class, msg_send_id, mutability, sel};
 use objc2_app_kit::{NSApplication, NSMenu, NSMenuItem};
 use objc2_foundation::{MainThreadMarker, NSString};
@@ -109,7 +109,7 @@ declare_class!(
         }
     }
 
-    unsafe impl objc2::runtime::NSObjectProtocol for MenuTarget {}
+    unsafe impl NSObjectProtocol for MenuTarget {}
 );
 
 impl MenuTarget {
@@ -159,7 +159,8 @@ fn item(
 /// Append a titled submenu (a top-level bar entry) built from `items` to `bar`.
 fn submenu(mtm: MainThreadMarker, bar: &NSMenu, title: &str, items: &[Retained<NSMenuItem>]) {
     let ns_title = NSString::from_str(title);
-    let menu = NSMenu::initWithTitle(mtm.alloc(), &ns_title);
+    // SAFETY: standard NSMenu construction with a valid NSString title.
+    let menu = unsafe { NSMenu::initWithTitle(mtm.alloc(), &ns_title) };
     for it in items {
         menu.addItem(it);
     }
