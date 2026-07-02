@@ -493,7 +493,8 @@ pub fn default_keymap(platform: Platform) -> KeyMap {
 /// from whatever the actual per-platform default (or user override) is.
 pub fn action_chord_display_map(keymap: &KeyMap, platform: Platform) -> HashMap<KeyAction, String> {
     let mut action_chord: HashMap<KeyAction, String> = HashMap::new();
-    let mut entries: Vec<(Chord, KeyAction)> = keymap.iter().map(|(c, &a)| (c.clone(), a)).collect();
+    let mut entries: Vec<(Chord, KeyAction)> =
+        keymap.iter().map(|(c, &a)| (c.clone(), a)).collect();
     // Prefer the chord with fewest modifiers per action (deterministic when a
     // user override adds a second chord for the same action).
     entries.sort_by_key(|(c, _)| {
