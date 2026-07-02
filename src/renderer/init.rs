@@ -2,7 +2,24 @@
 
 use super::*;
 
+/// All font-related configuration passed to [`Renderer::new`]. Kept in a struct
+/// so new font parameters can be added without changing call sites one-by-one.
+pub struct RendererFontConfig {
+    pub font_family: Option<String>,
+    pub font_px: f32,
+    pub font_features: Vec<String>,
+    /// Per-style family overrides (`font_bold`, `font_italic`, `font_bold_italic`).
+    pub font_bold: Option<String>,
+    pub font_italic: Option<String>,
+    pub font_bold_italic: Option<String>,
+    /// Codepoint routing map (`font_symbol_map`).
+    pub font_symbol_map: Vec<crate::config::parse::SymbolMapEntry>,
+    /// Variable-font axis settings (`font_variations`).
+    pub font_variations: Vec<String>,
+}
+
 impl Renderer {
+    #[allow(dead_code)]
     pub fn new(
         window: Arc<Window>,
         font_family: Option<String>,
@@ -10,6 +27,31 @@ impl Renderer {
         opacity: f32,
         font_features: Vec<String>,
     ) -> Result<Renderer> {
+        Self::new_with_fonts(
+            window,
+            RendererFontConfig {
+                font_family,
+                font_px,
+                font_features,
+                font_bold: None,
+                font_italic: None,
+                font_bold_italic: None,
+                font_symbol_map: Vec::new(),
+                font_variations: Vec::new(),
+            },
+            opacity,
+        )
+    }
+
+    /// Full constructor with all font configuration from the FONTS stream.
+    pub fn new_with_fonts(
+        window: Arc<Window>,
+        font_cfg: RendererFontConfig,
+        opacity: f32,
+    ) -> Result<Renderer> {
+        let font_family = font_cfg.font_family;
+        let font_px = font_cfg.font_px;
+        let font_features = font_cfg.font_features;
         let t = std::time::Instant::now();
         let ms = |t: std::time::Instant| t.elapsed().as_secs_f64() * 1000.0;
 
@@ -94,8 +136,17 @@ impl Renderer {
         );
 
         // Font load runs concurrently with the GPU thread above.
-        let (text, metrics) = Text::load(font_family.as_deref(), font_px, &font_features)
-            .context("loading font and cell metrics")?;
+        let (text, metrics) = Text::load_with_config(crate::text::shape::FontConfig {
+            family: font_family.as_deref(),
+            font_px,
+            font_features: &font_features,
+            bold_family: font_cfg.font_bold.as_deref(),
+            italic_family: font_cfg.font_italic.as_deref(),
+            bold_italic_family: font_cfg.font_bold_italic.as_deref(),
+            symbol_map: font_cfg.font_symbol_map.clone(),
+            font_variations: &font_cfg.font_variations,
+        })
+        .context("loading font and cell metrics")?;
         log::info!("  renderer: font loaded {:.1} ms", ms(t));
 
         // Recover the surface from the Arc now that the thread is done (or about to
@@ -442,6 +493,16 @@ impl Renderer {
             cache: pipeline_cache.as_ref(),
         });
 
+        // Foreground (glyph) write mask, chosen by the surface's alpha convention.
+        // PreMultiplied (Linux): COLOR only — text inherits window opacity (glass).
+        // PostMultiplied (macOS/Metal): ALL — text raises surface alpha to opaque so
+        // ONLY the background is translucent (fixes the macOS whole-window-text bug).
+        let fg_write_mask = if premultiplied_surface {
+            wgpu::ColorWrites::COLOR
+        } else {
+            wgpu::ColorWrites::ALL
+        };
+
         let fg_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("fg-pipeline"),
             layout: Some(&fg_pipeline_layout),
@@ -461,17 +522,31 @@ impl Renderer {
                     // the shader emits premultiplied color, so dst is weighted by
                     // (1 - src.a). The RGB blend is correct as-is.
                     //
-                    // write_mask = COLOR (RGB, NOT alpha): a fully-covered glyph
-                    // returns src alpha 1.0, and the premultiplied alpha equation
-                    // (a = src_a + dst_a*(1-src_a)) would raise the SURFACE alpha
-                    // from `opacity` to 1.0 for every text pixel — making a window
-                    // full of text effectively opaque to the compositor regardless
-                    // of the configured opacity. Masking out the alpha write keeps
-                    // the surface alpha at `opacity` (set by the bg clear/quads), so
-                    // the whole window — text included — composites at the chosen
-                    // transparency, matching ghostty et al.
+                    // write_mask is PLATFORM-DEPENDENT (see `fg_write_mask` below):
+                    //
+                    // PreMultiplied surface (Vulkan/Linux): COLOR (RGB, NOT alpha).
+                    // A fully-covered glyph returns src alpha 1.0, and the
+                    // premultiplied alpha equation (a = src_a + dst_a*(1-src_a))
+                    // would raise the SURFACE alpha from `opacity` to 1.0 for every
+                    // text pixel. The compositor reads premultiplied RGB directly, so
+                    // we WANT the whole window — text included — to composite at the
+                    // chosen transparency; masking the alpha keeps surface alpha at
+                    // `opacity` (set by the bg clear/quads) and the text reads as
+                    // translucent glass, matching ghostty on Linux.
+                    //
+                    // PostMultiplied surface (Metal/macOS): ALL (RGB + alpha). The
+                    // compositor multiplies the surface RGB by the surface alpha
+                    // (straight-alpha convention), so leaving surface alpha at
+                    // `opacity` everywhere makes glyph pixels translucent too — the
+                    // exact macOS bug the owner reported (text bleeds the desktop
+                    // through). Writing alpha here lets each glyph raise the surface
+                    // alpha toward 1.0 by its coverage (a = cov + opacity*(1-cov)),
+                    // so text composites OPAQUE while the background stays at
+                    // `opacity`. No shader change is needed: `fs_fg` already returns
+                    // the glyph coverage as its alpha, so a full glyph drives surface
+                    // alpha to 1.0 and only the BACKGROUND inherits window opacity.
                     blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::COLOR,
+                    write_mask: fg_write_mask,
                 })],
                 compilation_options: Default::default(),
             }),
@@ -636,10 +711,17 @@ impl Renderer {
             pad_left: None,
             pad_right: None,
             grid_origin_y: 0.0,
+            grid_origin_x: 0.0,
             pad_override: None,
             font_px,
             font_family,
             font_features,
+            // FONTS stream additions
+            font_bold: font_cfg.font_bold,
+            font_italic: font_cfg.font_italic,
+            font_bold_italic: font_cfg.font_bold_italic,
+            font_symbol_map: font_cfg.font_symbol_map,
+            font_variations: font_cfg.font_variations,
             rows: Vec::new(),
             cur_row: 0,
             bg_row_offsets: Vec::new(),
@@ -669,6 +751,7 @@ impl Renderer {
             uniform_bind_group_layout,
             crt: crt::CrtPass::default(),
             cursor_trail: cursor_trail::CursorTrail::default(),
+            window_effect: WindowEffect::None,
         };
 
         // Probe the loaded font for OpenType GSUB liga support. This shapes the

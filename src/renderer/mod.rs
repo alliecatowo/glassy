@@ -20,16 +20,23 @@ use crate::text::{CellMetrics, Text};
 mod cell;
 mod crt;
 mod cursor_trail;
+mod effect;
 mod frame;
 mod geometry;
 mod image_draw;
 mod init;
 mod multipane;
+mod opacity;
 mod overlay;
 mod pipeline;
 
+pub use effect::WindowEffect;
+pub use opacity::{opacity_to_slider, slider_to_opacity};
+
 // Re-export geometry helpers so `use super::*` in sibling modules keeps working.
 pub(crate) use geometry::{Packer, ScissorRect, clamp_scissor};
+// Re-export font config struct for call sites outside the renderer module.
+pub use init::RendererFontConfig;
 
 #[cfg(test)]
 mod tests;
@@ -223,6 +230,11 @@ pub enum UnderlineStyle {
 pub struct Decorations {
     pub underline: UnderlineStyle,
     pub strikeout: bool,
+    /// SGR 53 overline: a stroke along the cell's TOP edge (mirrors the strikeout
+    /// stroke but at the top). SGR 55 clears it. alacritty_terminal's `Flags` has
+    /// no overline bit (and vte drops SGR 53/55), so glassy tracks overline in a
+    /// side table (`OverlineMap`) and sets this flag in the render path.
+    pub overline: bool,
     pub color: [f32; 4],
 }
 
@@ -420,6 +432,12 @@ pub struct Renderer {
     /// chrome paints into the band `[0, grid_origin_y)`. Zero when no GUI chrome is
     /// active (the default), so the legacy single-pane path is unchanged.
     grid_origin_y: f32,
+    /// Transient horizontal shake offset (physical px) added to every grid cell's
+    /// and the cursor's X origin. Non-zero only while a Power-Mode "screen rock" is
+    /// in flight; zero at rest (so the legacy layout is byte-identical). Set via
+    /// [`Renderer::set_grid_origin_x`]. The chrome/overlays are NOT shifted — only
+    /// the terminal content — so the tab bar/status bar stay pinned during a shake.
+    grid_origin_x: f32,
     /// Explicit padding override in physical px (from config). When `Some`, it is
     /// used verbatim instead of the cell-derived `pad_for`, and is preserved
     /// across runtime font resizes.
@@ -434,6 +452,15 @@ pub struct Renderer {
     /// kept here so runtime font size changes re-apply the same features to the
     /// newly loaded face.
     font_features: Vec<String>,
+    // --- FONTS stream: per-style overrides + symbol map + variation axes. ---
+    /// Per-style family overrides (`font_bold` / `font_italic` / `font_bold_italic`).
+    font_bold: Option<String>,
+    font_italic: Option<String>,
+    font_bold_italic: Option<String>,
+    /// Codepoint routing map (`font_symbol_map`).
+    font_symbol_map: Vec<crate::config::parse::SymbolMapEntry>,
+    /// Variable-font axis settings (`font_variations`).
+    font_variations: Vec<String>,
 
     /// Persistent per-row instance storage. Index `r` holds row `r`'s background
     /// and foreground instances; only the rows reported as changed are rewritten
@@ -514,6 +541,11 @@ pub struct Renderer {
     /// Idle-safe: only animates while the cursor is mid-glide. See
     /// [`cursor_trail::CursorTrail`].
     cursor_trail: cursor_trail::CursorTrail,
+    /// The currently-selected window post-process effect (config `window_effect`,
+    /// default `None`). `None` keeps the zero-cost direct path; every other mode
+    /// routes the grid through the shared CRT post pass with mode-specific params.
+    /// See [`effect::WindowEffect`].
+    window_effect: WindowEffect,
 }
 
 /// State for the multi-pane (split) render path. A flat instance list whose
@@ -557,6 +589,10 @@ struct CachedPane {
     fg: Vec<FgInstance>,
     /// The pane's clamped scissor.
     scissor: ScissorRect,
+    /// Whether this pane is dimmed (an unfocused tile while `dim_unfocused` is on);
+    /// when true a subtle dark overlay quad is emitted over the pane after its
+    /// glyphs. Cached so a reused pane keeps its dim without a rebuild.
+    dimmed: bool,
 }
 
 /// A finished pane's draw record: the GPU scissor rectangle and the half-open
@@ -581,4 +617,8 @@ struct PaneBuild {
     scissor: ScissorRect,
     /// Whether to draw the accent focus border for this pane.
     focused: bool,
+    /// Whether to dim this pane's content with a subtle dark overlay quad (drawn
+    /// after the cells). Set for unfocused panes when `dim_unfocused` is on; the
+    /// dim is part of the cached pane so reused frames stay dimmed.
+    dimmed: bool,
 }

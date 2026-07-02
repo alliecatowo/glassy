@@ -256,10 +256,53 @@ impl App {
         self.fold_state.toggle(5);
     }
 
+    /// Headless capture hook (`GLASSY_IMGDEMO`): synthesise a small RGBA colour
+    /// swatch and inject it directly into the active pane's [`ImageStore`] so the
+    /// kitty inline-image render path can be captured without a real image-producing
+    /// program. Produces an 8×8 rainbow-gradient image (id = 1) placed at grid row
+    /// 2, col 2. Exercises the full GPU image-quad draw path: pixels stored, placed,
+    /// picked up by the renderer's image overlay pass, uploaded as a wgpu texture,
+    /// and blitted over the grid.
+    pub(crate) fn inject_demo_inline_image(&mut self) {
+        use crate::image::DecodedImage;
+        // Build an 8×8 RGBA rainbow swatch. Each pixel's hue cycles across both
+        // axes so the rendered quad shows vivid colour rather than a flat block.
+        const SZ: u32 = 8;
+        let mut rgba = Vec::with_capacity((SZ * SZ * 4) as usize);
+        for row in 0..SZ {
+            for col in 0..SZ {
+                // Simple HSV→RGB: hue cycles across columns, value across rows.
+                let h = (col as f32 / SZ as f32) * 360.0;
+                let v = 0.5 + 0.5 * (row as f32 / SZ as f32);
+                let (r, g, b) = hsv_to_rgb(h, 1.0, v);
+                rgba.push(r);
+                rgba.push(g);
+                rgba.push(b);
+                rgba.push(255);
+            }
+        }
+        let img = DecodedImage {
+            width: SZ,
+            height: SZ,
+            rgba,
+        };
+        if let Some(pty) = self.pty.as_ref() {
+            let mut store = pty.images.lock();
+            // id 1 is a low kitty-range id; use it as our canonical demo image.
+            store.insert_pixels(1, img);
+            // Place it at row 2, col 2, occupying 4 cells × 2 rows.
+            store.place(1, 2, 2, 4, 2);
+        }
+    }
+
     /// Toggle the fold state of the command block currently in view. Bound to the
     /// `ToggleFold` key action and the command palette. No-op when there is no
-    /// finished, foldable block in view.
+    /// finished, foldable block in view, or when output folding is disabled via
+    /// the `command_fold` config key.
     pub(crate) fn toggle_command_fold(&mut self, event_loop: &ActiveEventLoop) {
+        if !self.config.command_fold {
+            return;
+        }
         if let Some(prompt_row) = self.foldable_block_at_view() {
             self.fold_state.toggle(prompt_row);
             self.force_full_redraw = true;
@@ -329,6 +372,31 @@ impl App {
             renderer.push_overlay_glyph_px_str(bx.round(), y.round(), &b.text, b.color);
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Free helpers
+// ---------------------------------------------------------------------------
+
+/// Convert HSV (hue 0..360, saturation/value 0..1) to an sRGB `(r, g, b)` triple
+/// with each component in `0..=255`. Used by the `GLASSY_IMGDEMO` swatch generator.
+fn hsv_to_rgb(h: f32, s: f32, v: f32) -> (u8, u8, u8) {
+    let c = v * s;
+    let x = c * (1.0 - ((h / 60.0) % 2.0 - 1.0).abs());
+    let m = v - c;
+    let (r1, g1, b1) = match (h as u32 / 60) % 6 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    (
+        ((r1 + m) * 255.0).round() as u8,
+        ((g1 + m) * 255.0).round() as u8,
+        ((b1 + m) * 255.0).round() as u8,
+    )
 }
 
 #[cfg(test)]

@@ -120,8 +120,9 @@ fn settings_focus_order_matches_gui_ids_and_is_distinct() {
     assert_eq!(order[14], gui::id("settings/font_features"));
     assert_eq!(order[15], gui::id("settings/cursor_style"));
     assert_eq!(order[16], gui::id("settings/cursor_blink"));
-    assert_eq!(order[17], gui::id("settings/config"));
-    assert_eq!(order[18], gui::id("settings/save"));
+    assert_eq!(order[17], gui::id("settings/window_effect"));
+    assert_eq!(order[18], gui::id("settings/config"));
+    assert_eq!(order[19], gui::id("settings/save"));
     for (i, a) in order.iter().enumerate() {
         for b in order.iter().skip(i + 1) {
             assert_ne!(a, b);

@@ -34,7 +34,7 @@ impl App {
     /// for Tab / Shift+Tab / Up / Down focus movement (the form itself collects
     /// the live order each paint, but key handling runs between paints so it walks
     /// this fixed list — identical ordering keeps focus stable).
-    pub(crate) fn settings_focus_order() -> [gui::WidgetId; 19] {
+    pub(crate) fn settings_focus_order() -> [gui::WidgetId; 20] {
         [
             gui::id("settings/font_size"),
             gui::id("settings/opacity"),
@@ -53,6 +53,7 @@ impl App {
             gui::id("settings/font_features"),
             gui::id("settings/cursor_style"),
             gui::id("settings/cursor_blink"),
+            gui::id("settings/window_effect"),
             gui::id("settings/config"),
             gui::id("settings/save"),
         ]
@@ -71,6 +72,17 @@ impl App {
         self.settings_word_sep_ms = gui::TextInputMouse::default();
         self.settings_font_feat = gui::TextEdit::new(&self.config.font_features.join(" "));
         self.settings_font_feat_ms = gui::TextInputMouse::default();
+        // Seed the custom-theme working palette from the active theme + refresh the
+        // runtime profile list, and reset the section + scroll + hex editor.
+        self.seed_custom_theme();
+        // Start with the first swatch (fg) selected so the custom-theme editor
+        // card is visible + clickable the moment you open the Themes section.
+        // (usize::MAX hid the card entirely — there was nothing to click.)
+        self.settings_custom_editing = 0;
+        self.settings_theme_hex = gui::TextEdit::default();
+        self.settings_theme_hex_ms = gui::TextInputMouse::default();
+        self.settings_profiles = crate::config::profile_names();
+        self.settings_section_scroll = 0.0;
         // Seed the click-outside hit rect to the WHOLE surface so a stray press
         // landing in the same frame the form opens (before the first paint sets
         // the real panel rect at `render`) is treated as "inside" and never
@@ -156,6 +168,10 @@ impl App {
         } else if f == Some(gui::id("settings/cursor_style")) {
             let cur = self.cursor_style_index() as i32;
             self.set_cursor_style_index(((cur + dir).rem_euclid(3)) as usize);
+        } else if f == Some(gui::id("settings/window_effect")) {
+            // 8 modes (None..Bloom); wrap with rem_euclid so Left at 0 lands on Bloom.
+            let cur = self.config.window_effect.index() as i32;
+            self.set_window_effect_index(((cur + dir).rem_euclid(8)) as usize);
         }
     }
 
@@ -213,6 +229,10 @@ impl App {
         } else if f == Some(gui::id("settings/cursor_blink")) {
             self.config.cursor_blink = !self.config.cursor_blink;
             self.settings_saved = false;
+        } else if f == Some(gui::id("settings/window_effect")) {
+            // Segmented: Enter/Space advances to the next of the 8 effect modes.
+            let cur = self.config.window_effect.index() as i32;
+            self.set_window_effect_index(((cur + 1).rem_euclid(8)) as usize);
         } else {
             self.save_settings();
         }
@@ -260,6 +280,14 @@ impl App {
         self.force_full_redraw = true;
     }
 
+    /// Flip the dim-unfocused-pane-content setting. Forces a full redraw so every
+    /// pane is rebuilt with the new dim state (cached tiles carry a stale dim flag
+    /// otherwise). A no-op beyond the flag flip when the active tab isn't split.
+    pub(crate) fn toggle_dim_unfocused(&mut self) {
+        self.config.dim_unfocused = !self.config.dim_unfocused;
+        self.force_full_redraw = true;
+    }
+
     /// Tab-bar mode as a segmented index: 0 = Auto, 1 = Always, 2 = Never.
     pub(crate) fn tab_bar_mode_index(&self) -> usize {
         match self.config.show_tab_bar {
@@ -282,6 +310,42 @@ impl App {
         }
         self.config.show_tab_bar = mode;
         self.reflow_grid();
+        self.settings_saved = false;
+        self.force_full_redraw = true;
+    }
+
+    /// Set the window post-process effect from a segmented index (see
+    /// [`crate::renderer::WindowEffect::from_index`]). Applies live in the renderer
+    /// (which lazily builds / tears down the offscreen pass) and forces a repaint.
+    pub(crate) fn set_window_effect_index(&mut self, idx: usize) {
+        let effect = crate::renderer::WindowEffect::from_index(idx);
+        if effect == self.config.window_effect {
+            return;
+        }
+        self.config.window_effect = effect;
+        let p = self.config.custom_effect;
+        if let Some(r) = self.renderer.as_mut() {
+            if effect == crate::renderer::WindowEffect::Custom {
+                r.set_window_effect_custom([p[0], p[1], p[2], p[3]], [p[4], p[5], 0.0, 0.0]);
+            } else {
+                r.set_window_effect(effect);
+            }
+        }
+        self.settings_saved = false;
+        self.force_full_redraw = true;
+    }
+
+    /// Re-push the live `Custom` effect channel intensities to the post shader.
+    /// Called when an Appearance → Custom slider moves (only meaningful while the
+    /// active effect is `Custom`; a no-op-ish push otherwise since the mode gates
+    /// it). Forces a repaint so the change shows immediately.
+    pub(crate) fn apply_custom_effect(&mut self) {
+        let p = self.config.custom_effect;
+        if self.config.window_effect == crate::renderer::WindowEffect::Custom
+            && let Some(r) = self.renderer.as_mut()
+        {
+            r.set_window_effect_custom([p[0], p[1], p[2], p[3]], [p[4], p[5], 0.0, 0.0]);
+        }
         self.settings_saved = false;
         self.force_full_redraw = true;
     }
@@ -349,17 +413,93 @@ impl App {
     }
 
     /// Select a font family by its index into [`Self::font_family_choices`].
-    /// Index 0 clears to the discovery default. Persisted on Save and applied on
-    /// the next launch (live font reload is out of scope for this layer).
+    /// Index 0 clears to the discovery default. Applies LIVE: the renderer reloads
+    /// the whole font stack (family + features) at the current size and the grid +
+    /// PTY reflow for the new cell metrics, so the change is visible immediately
+    /// without a restart. Persisted on Save.
     pub(crate) fn set_font_family_index(&mut self, idx: usize) {
         let choices = self.font_family_choices();
         let Some(name) = choices.get(idx) else { return };
-        self.config.font_family = if name == "default" {
+        let family = if name == "default" {
             None
         } else {
             Some(name.clone())
         };
+        // No-op if the family didn't actually change (avoids a needless font reload
+        // + full grid reflow when re-picking the current selection).
+        if family == self.config.font_family {
+            self.settings_saved = false;
+            return;
+        }
+        self.config.font_family = family;
         self.settings_saved = false;
+        self.apply_font_family_live();
+    }
+
+    /// Reload the renderer font for the live `config.font_family` (+ font_features)
+    /// at the current size, then reflow the grid + PTY for the new cell metrics.
+    /// The `None` family reloads the discovery default. A no-op before the renderer
+    /// exists. On a bad family the renderer keeps the previous font (logged), and
+    /// the reflow below then just re-derives the unchanged grid — never a panic.
+    pub(crate) fn apply_font_family_live(&mut self) {
+        // Build the family/features from the live config (the same inputs the
+        // startup path feeds `Renderer::new`) and reload the font stack.
+        let family = self.config.font_family.clone();
+        let features = self.config.font_features.clone();
+        if let Some(r) = self.renderer.as_mut() {
+            r.reload_fonts(family.as_deref(), &features);
+        } else {
+            return;
+        }
+        self.reflow_after_font_change();
+    }
+
+    /// Recompute the grid for the (possibly changed) cell metrics after a font
+    /// reload and inform the PTY / panes / background tabs, then force a full
+    /// redraw. Shared by the live font-family path; mirrors the reflow half of
+    /// [`Self::resize_font`] but derives the strip height + grid from the current
+    /// renderer metrics (which the font reload just refreshed).
+    pub(crate) fn reflow_after_font_change(&mut self) {
+        // Strip height tracks the (new) cell height; effective_tab_bar_h reads the
+        // renderer's current (post-reload) metrics, so this is already correct.
+        let strip_h = self.effective_tab_bar_h();
+        if let (Some(window), Some(renderer)) = (self.window.as_ref(), self.renderer.as_ref()) {
+            let size = window.inner_size();
+            if size.width != 0 && size.height != 0 {
+                let m = renderer.cell_metrics();
+                let (cols, rows) = Self::grid_for(
+                    size,
+                    m.width,
+                    m.height,
+                    renderer.pad_x(),
+                    renderer.pad_y(),
+                    self.config.status_bar,
+                    strip_h,
+                );
+                let (cw, ch) = (m.width.round() as u16, m.height.round() as u16);
+                if self.panes.is_some() {
+                    self.resize_panes();
+                } else {
+                    self.cols = cols;
+                    self.rows = rows;
+                    if let Some(pty) = self.pty.as_ref() {
+                        pty.resize(cols, rows, cw, ch);
+                    }
+                }
+                // Keep NON-split background tabs in sync so switching to one is correct.
+                for s in &self.background {
+                    if s.panes.is_none() {
+                        s.pty.resize(cols, rows, cw, ch);
+                    }
+                }
+            }
+        }
+        // The cell box changed, so every glyph position + per-row storage must be
+        // rebuilt next frame; snap the cursor trail to the new metrics (no-op off).
+        self.force_full_redraw = true;
+        if let Some(r) = self.renderer.as_mut() {
+            r.reset_cursor_trail();
+        }
     }
 
     /// Cycle the font family by `dir` through [`Self::font_family_choices`].
@@ -476,7 +616,22 @@ impl App {
             2 => CursorStyleConfig::Underline,
             _ => CursorStyleConfig::Block,
         };
+        // Apply live to every open pane's terminal (was config-only before, so
+        // the change never showed). The child's own DECSCUSR still wins if set.
+        let shape = self.config.cursor_style.to_cursor_shape();
+        let blink = self.config.cursor_blink;
+        let sb = self.config.scrollback;
+        let ws = self.config.word_separator.clone();
+        if let Some(pty) = &self.pty {
+            pty.set_default_cursor(shape, blink, sb, &ws);
+        }
+        if let Some(panes) = &self.panes {
+            for pty in panes.others.values() {
+                pty.set_default_cursor(shape, blink, sb, &ws);
+            }
+        }
         self.settings_saved = false;
+        self.force_full_redraw = true;
     }
 
     /// Cycle the active theme by `dir` through `color::THEME_NAMES`, applying it
@@ -639,6 +794,10 @@ impl App {
                 self.config.cursor_style.as_str().to_string(),
             ),
             ("cursor_blink", self.config.cursor_blink.to_string()),
+            (
+                "window_effect",
+                self.config.window_effect.as_str().to_string(),
+            ),
         ];
         match crate::config::save(&updates) {
             Ok(()) => {

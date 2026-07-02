@@ -295,6 +295,7 @@ pub(crate) fn paint_preedit(
         let decorations = Decorations {
             underline: UnderlineStyle::Single,
             strikeout: false,
+            overline: false,
             color: fg,
         };
         renderer.push_cell(

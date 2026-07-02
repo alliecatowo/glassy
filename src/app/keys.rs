@@ -126,6 +126,13 @@ impl App {
             state,
             repeat,
         };
+        // A pressed non-modifier key turns a bare modifier HOLD into a chord, so
+        // disarm the numbered tab overlay. (Bare modifier presses come through as
+        // `ModifiersChanged`, not here, so this only fires for real keys.) Done
+        // before any consume-and-return path so the overlay always clears.
+        if event.state.is_pressed() && !event.repeat {
+            self.cancel_mod_hold(event_loop);
+        }
         // Window-level shortcuts (fullscreen / maximize) are handled first,
         // before overlays, using the keymap so they can be rebound.
         // We consult the keymap for ToggleFullscreen and ToggleMaximize before
@@ -199,6 +206,34 @@ impl App {
             return;
         }
 
+        // Keyboard copy-mode ("vi mode") owns the keyboard while active: hjkl /
+        // word / line motions, `v`/`V`/Ctrl+v visual, `y` to yank, Esc/`q` to
+        // exit. Checked before the keymap dispatch so motion letters (`j`, `y`,
+        // …) are never stolen by a chord or forwarded to the child — EXCEPT the
+        // bound toggle chord itself, which we let fall through so its keymap
+        // action can exit the mode (and a user-rebound toggle still works).
+        if event.state.is_pressed() && self.vi.active {
+            let is_toggle_chord = chord_from_event(&event.logical_key, self.mods)
+                .and_then(|c| self.config.keymap.get(&c).copied())
+                == Some(KeyAction::ViMode);
+            if !is_toggle_chord && self.vi_handle_key(&event.logical_key, event_loop) {
+                return;
+            }
+        }
+
+        // --------------------------------------------------------------------
+        // Leader / multi-key chord sequences: an armed prefix (or a chord that
+        // begins one and has no flat action) is handled here BEFORE the flat
+        // keymap dispatch and the child-encode path, so leader keys never leak
+        // to the PTY. A no-op (returns false) when no sequences are configured.
+        // --------------------------------------------------------------------
+        if event.state.is_pressed()
+            && let Some(chord) = chord_from_event(&event.logical_key, self.mods)
+            && self.handle_key_sequence(&chord, event_loop)
+        {
+            return;
+        }
+
         // --------------------------------------------------------------------
         // Keymap dispatch: consult the user keymap (which includes defaults)
         // FIRST, before any hard-coded path below. This lets custom bindings
@@ -221,7 +256,21 @@ impl App {
             // terminal apps when this instance isn't in quake mode — there it is a
             // no-op, so let the keypress fall through to the child instead.
             let inert_quake = action == KeyAction::QuakeToggle && self.quake.is_none();
-            if !inert_quake && (!is_scroll || !self.term_mode().contains(TermMode::ALT_SCREEN)) {
+            // Pane-focus chords (Cmd/Ctrl+arrow) are no-ops on a single-pane tab —
+            // there they MUST fall through so the arrow reaches the child (e.g.
+            // Ctrl+Left = word-jump in a shell). Only swallow them when split.
+            let is_focus_pane = matches!(
+                action,
+                KeyAction::FocusPaneLeft
+                    | KeyAction::FocusPaneRight
+                    | KeyAction::FocusPaneUp
+                    | KeyAction::FocusPaneDown
+            );
+            let inert_focus_pane = is_focus_pane && !self.is_split();
+            if !inert_quake
+                && !inert_focus_pane
+                && (!is_scroll || !self.term_mode().contains(TermMode::ALT_SCREEN))
+            {
                 self.run_key_action(action, event_loop);
                 return;
             }
@@ -390,6 +439,10 @@ impl App {
                 // input is active (else just the focused pane).
                 self.write_input(bytes);
             }
+            // Power Mode (opt-in): burst particles from the cursor + grow the
+            // typing streak. A no-op when disabled, so the default path is
+            // unchanged; when on it schedules its own animation frames.
+            self.power_on_keystroke(event_loop);
             // The snap-to-bottom (and the cursor/selection reset above) are
             // visual changes even when the child emits nothing back — e.g.
             // typing while scrolled up into a paused/blocked program. Repaint
@@ -508,6 +561,23 @@ impl App {
                 self.quake_apply(crate::ipc::IpcCommand::Toggle, event_loop);
             }
             ToggleZoom => self.toggle_zoom(event_loop),
+            FocusPaneLeft => self.focus_pane(pane::Move::Left, event_loop),
+            FocusPaneRight => self.focus_pane(pane::Move::Right, event_loop),
+            FocusPaneUp => self.focus_pane(pane::Move::Up, event_loop),
+            FocusPaneDown => self.focus_pane(pane::Move::Down, event_loop),
+            RotatePanes => self.rotate_panes(event_loop),
+            EqualizePanes => self.equalize_panes(event_loop),
+            ViMode => self.vi_toggle(event_loop),
+            IncreaseOpacity => {
+                let o = (self.config.opacity + 0.05).clamp(0.0, 1.0);
+                self.apply_opacity(o, event_loop);
+            }
+            DecreaseOpacity => {
+                let o = (self.config.opacity - 0.05).clamp(0.0, 1.0);
+                self.apply_opacity(o, event_loop);
+            }
+            ToggleOpacity => self.toggle_opacity(event_loop),
+            SaveScrollback => self.save_scrollback_to_file(event_loop),
         }
     }
 

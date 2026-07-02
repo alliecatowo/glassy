@@ -181,15 +181,25 @@ pub(super) fn dispatch(
             }
             return;
         }
-        UserEvent::Notification(_id, text) => {
-            // OSC 9 / OSC 777: fire a desktop notification when the window is
-            // not focused so background jobs can alert the user. Also show an
-            // in-app toast so the user sees it even when focused.
+        UserEvent::Notify(_id, spec) => {
+            // OSC 9 / OSC 777: fire a rich desktop notification (icon/sound/
+            // urgency/actions) when the window is not focused so background jobs
+            // can alert the user. Also show an in-app toast so the user sees it
+            // even when focused.
             if !app.focused {
-                fire_desktop_notification("glassy", &text);
+                fire_notification(&spec);
             }
             // Always show an in-app toast for OSC 9/777 notifications.
-            app.push_toast(text);
+            app.push_toast(spec.toast_text());
+        }
+        UserEvent::Control(req) => {
+            // Kitty-style remote control over the IPC socket (`glassy @ <cmd>`):
+            // apply it to the running window and reply to the waiting client.
+            let dirty = app.apply_control(&req, event_loop);
+            if dirty {
+                app.mark_dirty(event_loop);
+            }
+            return;
         }
         UserEvent::ConfigReload => {
             // Config file changed; reload from disk and apply live-reloadable settings.
@@ -225,11 +235,35 @@ pub(super) fn dispatch(
             }
             return;
         }
+        UserEvent::SgrPixelMouse(id, on) => {
+            // DECSET/DECRST 1016 (SGR-Pixel mouse) toggled by the running app.
+            // Only the active focused pane's state applies (mouse reports route to
+            // self.pty). Not a visual change, so no repaint.
+            if id == app.active_focused_id() {
+                app.sgr_pixel_mouse = on;
+            }
+            return;
+        }
         UserEvent::CommandRun(_id, cmd) => {
             // OSC 133 command-zone capture: record the run command into the
             // history ring for the command palette (any pane's commands are
             // useful history). Not a visual change, so no repaint.
             app.record_command_history(cmd);
+            return;
+        }
+        UserEvent::CommandFinished {
+            id,
+            command,
+            exit,
+            duration,
+        } => {
+            // A tracked command finished. Fire a desktop notification when it ran
+            // long enough AND the window is unfocused, so a long background
+            // build/test alerts the user when it's done. The `id` is the session
+            // that finished it (logged for diagnostics); the notification itself
+            // is window-level. Not a visual change, so no repaint.
+            log::debug!("command finished in session {id}: {duration:?} exit={exit:?}");
+            app.notify_command_finished(command, exit, duration);
             return;
         }
         UserEvent::Progress(id, state) => {
@@ -284,6 +318,13 @@ pub(super) fn dispatch(
                 return;
             }
             // Repaint so any now-solid (formerly mid-blink-off) cells show.
+        }
+        UserEvent::MenuAction(action) => {
+            // A macOS global menu-bar item was clicked: run it through the exact
+            // same dispatch as the equivalent keychord, so the menu and the
+            // keyboard can never diverge. `run_key_action` marks dirty itself.
+            app.run_key_action(action, event_loop);
+            return;
         }
     }
     app.mark_dirty(event_loop);

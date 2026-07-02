@@ -33,6 +33,10 @@ impl App {
         // full height and no header is painted (hdr_h == 0 collapses the body inset).
         let pane_headers = self.config.pane_headers;
         let hdr_h = if pane_headers { Self::PANE_HEADER_H } else { 0 };
+        // Dim unfocused pane CONTENT when enabled and the tab is actually split
+        // (more than one tile). Zoom collapses to a single visible pane, so the
+        // n_panes>1 guard naturally suppresses the dim there too.
+        let dim_unfocused = self.config.dim_unfocused;
         // Each pane_spec carries: (id, full_rect, body_rect, cols, rows).
         // The body_rect is the full rect minus the PANE_HEADER_H header at the top;
         // `pane_grid` and `begin_pane` receive the body rect so the cell grid
@@ -94,6 +98,18 @@ impl App {
             .pty
             .as_ref()
             .and_then(|p| p.pane_info.git_branch.clone());
+        let sb_fg_process: Option<String> = self
+            .pty
+            .as_ref()
+            .and_then(|p| p.pane_info.process_name(None).map(str::to_owned));
+        let sb_exit_status: Option<i32> = self.pty.as_ref().and_then(|p| {
+            p.prompts
+                .lock()
+                .ok()
+                .and_then(|g| g.blocks.iter().rev().find_map(|b| b.exit_code))
+        });
+        let sb_time_format = self.config.status_bar_time_format.clone();
+        let sb_segments = self.config.status_bar_segments.clone();
         let sb_progress = self.active_progress;
 
         // Tab-bar state snapshot (owned data) for the pixel-overlay painter, taken
@@ -164,6 +180,15 @@ impl App {
         let pane_menu_open = self.pane_menu_open;
         let pane_menu_sel = self.pane_menu_sel;
         let mouse_px_f = (self.mouse_px.0 as f32, self.mouse_px.1 as f32);
+        // Pane drag-rearrange: the id being dragged (if the drag threshold was
+        // crossed) and the drop-target pane currently under the pointer, so the
+        // header paint can ghost the source and highlight the target tile.
+        let pane_drag_src = self.active_pane_drag_id();
+        let pane_drop_target = pane_drag_src.and_then(|src| {
+            self.pane_at(self.mouse_px.0, self.mouse_px.1)
+                .map(|(id, _)| id)
+                .filter(|&id| id != src)
+        });
         let divider = lighten(color::selection_bg(), 0.18);
         // The gutter to draw transiently emphasised (drag wins over mere hover).
         let active_gutter = self
@@ -202,6 +227,11 @@ impl App {
                 (self.mouse_px.0 as f32, self.mouse_px.1 as f32),
                 self.held_button == Some(0),
                 self.gui_click_edge,
+                self.settings_section,
+                self.settings_section_scroll,
+                self.custom_theme_swatches(),
+                self.settings_custom_editing,
+                self.settings_profiles.clone(),
             ))
         } else {
             None
@@ -352,8 +382,12 @@ impl App {
 
         // Each leaf pane, clipped to its body rect (below the header). Changed panes
         // are rebuilt; unchanged panes are re-emitted from cache (the typing-lag fix).
+        let n_panes = pane_specs.len();
         for (i, (id, _full_rect, body_rect, cols, prows)) in pane_specs.iter().enumerate() {
             let is_focused = *id == focused_pane;
+            // Dim a tile when it is unfocused, the feature is on, and the tab is
+            // really split (>1 visible pane).
+            let dimmed = dim_unfocused && !is_focused && n_panes > 1;
             if rebuild[i] || !renderer.has_cached_pane(*id) {
                 let pty = if is_focused {
                     focused_pty
@@ -361,7 +395,7 @@ impl App {
                     g.others.get(id)
                 };
                 let Some(pty) = pty else { continue };
-                renderer.begin_pane(*id, *body_rect, is_focused);
+                renderer.begin_pane_dimmed(*id, *body_rect, is_focused, dimmed);
                 Self::push_pane(
                     renderer,
                     pty,
@@ -485,6 +519,8 @@ impl App {
                 pane_menu_open,
                 pane_menu_sel,
                 mouse_px_f,
+                pane_drag_src,
+                pane_drop_target,
             );
         }
 
@@ -522,6 +558,10 @@ impl App {
                 sb_git_branch.as_deref(),
                 sb_progress,
                 sb_broadcast,
+                sb_fg_process.as_deref(),
+                &sb_time_format,
+                sb_exit_status,
+                sb_segments.as_deref(),
             );
         }
 
@@ -539,6 +579,11 @@ impl App {
             mouse,
             mouse_down,
             click_edge,
+            section,
+            section_scroll,
+            ref custom_swatches,
+            custom_editing,
+            ref profile_names,
         )) = settings_inputs
         {
             let font_px = renderer.font_px();
@@ -549,6 +594,8 @@ impl App {
                 font_feat_ms: &mut self.settings_font_feat_ms,
                 blink_on: self.blink_on,
                 double_click: self.gui_double_click,
+                theme_hex: &mut self.settings_theme_hex,
+                theme_hex_ms: &mut self.settings_theme_hex_ms,
             };
             settings_events = Some(Self::paint_settings(
                 renderer,
@@ -567,6 +614,11 @@ impl App {
                 &mut self.gui_focused,
                 &mut self.gui_anims,
                 &mut fields,
+                section,
+                section_scroll,
+                custom_swatches,
+                custom_editing,
+                profile_names,
             ));
         } else if self.help_open {
             // Real GUI help panel (§3.7) in split mode.
@@ -699,6 +751,8 @@ impl App {
         "Split vertical",
         "Split horizontal",
         "Zoom pane",
+        "Rotate panes",
+        "Equalize splits",
         "Close pane",
     ];
 
@@ -750,6 +804,8 @@ impl App {
         pane_menu_open: Option<usize>,
         pane_menu_sel: usize,
         mouse_px: (f32, f32),
+        drag_src: Option<usize>,
+        drop_target: Option<usize>,
     ) {
         let m = renderer.cell_metrics();
         let hdr_h = Self::PANE_HEADER_H as f32;
@@ -768,15 +824,26 @@ impl App {
 
         // ⋮ button: a square hit-target flush to the right edge of each header.
         let menu_btn_w = hdr_h; // square
+        // Drag grip: a square hit-target flush to the LEFT edge of each header,
+        // carrying a dotted ⠿ affordance. Same width as the menu button.
+        let grip_w = Self::PANE_GRIP_W;
 
         for (id, full_rect, _body_rect, _cols, _rows) in pane_specs {
             let is_focused = *id == focused_pane;
+            let is_drag_src = drag_src == Some(*id);
+            let is_drop_target = drop_target == Some(*id);
             let rx = full_rect.x as f32;
             let ry = full_rect.y as f32;
             let rw = full_rect.w as f32;
 
-            // Header fill: E2 (focused) or E1 (unfocused).
-            let fill = if is_focused { body_e2 } else { body_e1 };
+            // Header fill: E2 (focused) or E1 (unfocused). A drop target gets an
+            // accent-tinted fill, and the dragged source is ghosted (lower alpha).
+            let mut fill = if is_focused { body_e2 } else { body_e1 };
+            if is_drop_target {
+                fill = [accent[0], accent[1], accent[2], 0.30];
+            } else if is_drag_src {
+                fill = [fill[0], fill[1], fill[2], fill[3] * 0.5];
+            }
             renderer.push_overlay_px(rx, ry, rw, hdr_h, fill);
 
             // Soft accent crown on the focused header (low alpha, no harsh bright
@@ -786,9 +853,29 @@ impl App {
                 let crown = [accent[0], accent[1], accent[2], accent[3] * 0.5];
                 renderer.push_overlay_px(rx, ry, rw, 2.0, crown);
             }
+            // A drop target gets a full accent crown so the merge/swap reads clearly.
+            if is_drop_target {
+                renderer.push_overlay_px(rx, ry, rw, 2.0, accent);
+            }
 
             // Soft bottom seam separating header from cell body.
             renderer.push_overlay_px(rx, ry + hdr_h - 1.0, rw, 1.0, hairline);
+
+            // Drag grip (dotted handle) at the far left of the header. Brightens
+            // while this pane is being dragged or hovered as a grip affordance.
+            let grip_hovered = gui::hit(
+                gui::Rect::new(rx, ry, grip_w, hdr_h),
+                mouse_px.0,
+                mouse_px.1,
+            );
+            let grip_fg = if is_drag_src || grip_hovered {
+                accent
+            } else {
+                fg_dim
+            };
+            let grip_x = rx + (grip_w - m.width) * 0.5;
+            let grip_ty = (ry + (hdr_h - m.height) * 0.5).round();
+            renderer.push_overlay_glyph_px(grip_x.round(), grip_ty, '⠿', grip_fg);
 
             // Resolve the per-pane title from the snapshot.
             let title = titles
@@ -826,8 +913,8 @@ impl App {
                 })
                 .unwrap_or(0.0);
 
-            // Focus dot.
-            let mut tx = rx + pad;
+            // Focus dot (starts after the grip handle).
+            let mut tx = rx + grip_w;
             renderer.push_overlay_glyph_px(tx.round(), ty, dot, dot_fg);
             tx += m.width + 2.0;
 
@@ -986,6 +1073,16 @@ impl App {
         let selection = content.selection;
         let cursor_color = color::resolve(Color::Named(NamedColor::Cursor), colors);
 
+        // SGR 53 overline coverage for this pane (see the single-pane path in
+        // `render.rs`). Cloned out so the lock is not held across the cell loop.
+        let overline_cells: std::collections::HashSet<(i32, usize)> = pty
+            .overline
+            .lock()
+            .ok()
+            .filter(|o| o.any())
+            .map(|o| o.snapshot())
+            .unwrap_or_default();
+
         let cursor_shown = cursor.shape != CursorShape::Hidden;
         let cursor_row = cursor.point.line.0 + display_offset;
         let cursor_col = cursor.point.column.0 as i32;
@@ -1058,6 +1155,8 @@ impl App {
                 Decorations {
                     underline,
                     strikeout: cell.flags.contains(Flags::STRIKEOUT),
+                    overline: !overline_cells.is_empty()
+                        && overline_cells.contains(&(row, col as usize)),
                     color,
                 }
             };

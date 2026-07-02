@@ -391,10 +391,18 @@ const HELP_ACTION_ORDER: &[KeyAction] = &[
     // Split panes
     KeyAction::SplitVertical,
     KeyAction::SplitHorizontal,
+    KeyAction::ToggleZoom,
+    KeyAction::RotatePanes,
+    KeyAction::EqualizePanes,
     KeyAction::BroadcastInput,
+    KeyAction::FocusPaneLeft,
+    KeyAction::FocusPaneRight,
+    KeyAction::FocusPaneUp,
+    KeyAction::FocusPaneDown,
     // Edit
     KeyAction::Copy,
     KeyAction::Paste,
+    KeyAction::ViMode,
     // View
     KeyAction::FontIncrease,
     KeyAction::FontDecrease,

@@ -596,4 +596,117 @@ mod tests {
         let v = cross_overlap(0, 50, 100, 100);
         assert!(v <= 0, "disjoint intervals must have non-positive overlap");
     }
+
+    // ---- swap / rotate / equalize -----------------------------------------
+
+    #[test]
+    fn swap_exchanges_leaf_positions() {
+        let mut l = Layout::new(1);
+        l.split(Dir::Vertical, 2); // (1 | 2), focus 2
+        l.set_ratio(&[], 0.25); // first gets 25%
+        // Before: leaf 1 on the (narrow) left, leaf 2 on the (wide) right.
+        let before: std::collections::HashMap<usize, Rect> = l.rects(AREA, 0).into_iter().collect();
+        assert!(before[&1].w < before[&2].w);
+        // Swap ids: now 2 sits in the left slot, 1 in the right.
+        assert!(l.swap(1, 2));
+        let after: std::collections::HashMap<usize, Rect> = l.rects(AREA, 0).into_iter().collect();
+        assert_eq!(after[&2].x, before[&1].x); // 2 moved to 1's slot
+        assert_eq!(after[&1].x, before[&2].x); // 1 moved to 2's slot
+        // Focus follows the id, which now lives where 1 used to be.
+        assert_eq!(l.focused(), 2);
+        // Swapping unknown ids is a no-op (false).
+        assert!(!l.swap(1, 99));
+        assert!(!l.swap(7, 7));
+    }
+
+    #[test]
+    fn rotate_swaps_children_and_preserves_partition() {
+        let mut l = Layout::new(1);
+        l.split(Dir::Vertical, 2); // (1 | 2)
+        l.set_ratio(&[], 0.3);
+        let before: std::collections::HashMap<usize, Rect> = l.rects(AREA, 0).into_iter().collect();
+        assert!(l.rotate(&[]));
+        let after: std::collections::HashMap<usize, Rect> = l.rects(AREA, 0).into_iter().collect();
+        // The two leaves traded slots; geometry of each SLOT is unchanged.
+        assert_eq!(after[&2].x, before[&1].x);
+        assert_eq!(after[&2].w, before[&1].w);
+        assert_eq!(after[&1].x, before[&2].x);
+        assert_eq!(after[&1].w, before[&2].w);
+        // A leaf path can't be rotated.
+        assert!(!l.rotate(&[false]));
+    }
+
+    #[test]
+    fn rotate_focused_uses_parent_split() {
+        let mut l = Layout::new(1);
+        l.split(Dir::Vertical, 2); // (1 | 2), focus 2
+        l.split(Dir::Horizontal, 3); // (1 | (2 / 3)), focus 3
+        // 3's parent split is path [true]; rotating it swaps 2 and 3.
+        assert_eq!(l.parent_path_of(3), Some(vec![true]));
+        let before: std::collections::HashMap<usize, Rect> = l.rects(AREA, 0).into_iter().collect();
+        assert!(l.rotate_focused());
+        let after: std::collections::HashMap<usize, Rect> = l.rects(AREA, 0).into_iter().collect();
+        assert_eq!(after[&3].y, before[&2].y);
+        assert_eq!(after[&2].y, before[&3].y);
+    }
+
+    #[test]
+    fn rotate_focused_sole_leaf_is_noop() {
+        let mut l = Layout::new(1);
+        assert!(!l.rotate_focused());
+        assert_eq!(l.parent_path_of(1), None);
+    }
+
+    #[test]
+    fn reshape_applies_saved_shape_to_live_panes() {
+        // Save a 2-pane vertical shape at ratio 0.3.
+        let mut saved_src = Layout::new(1);
+        saved_src.split(Dir::Vertical, 2);
+        saved_src.set_ratio(&[], 0.3);
+        let leaves = saved_src.leaves();
+        let to_sess = |live: usize| leaves.iter().position(|&x| x == live).unwrap();
+        let desc = saved_src.to_desc(&to_sess);
+
+        // A DIFFERENT live 2-pane tab (ids 10, 11) at a different ratio.
+        let mut live = Layout::new(10);
+        live.split(Dir::Vertical, 11);
+        live.set_ratio(&[], 0.5);
+        assert!(live.reshape_from_desc(&desc));
+        // The saved 0.3 ratio is applied to the live panes (ids preserved by DFS).
+        let r = live.rects(AREA, 0);
+        assert_eq!(r[0].1.w, 300);
+        assert_eq!(r[0].0, 10);
+        assert_eq!(r[1].0, 11);
+    }
+
+    #[test]
+    fn reshape_rejects_mismatched_leaf_count() {
+        let mut saved_src = Layout::new(1);
+        saved_src.split(Dir::Vertical, 2);
+        saved_src.split(Dir::Horizontal, 3); // 3 leaves
+        let leaves = saved_src.leaves();
+        let to_sess = |live: usize| leaves.iter().position(|&x| x == live).unwrap();
+        let desc = saved_src.to_desc(&to_sess);
+
+        let mut live = Layout::new(10); // 1 leaf
+        assert!(!live.reshape_from_desc(&desc));
+        // Untouched: still a single leaf.
+        assert_eq!(live.leaves(), vec![10]);
+    }
+
+    #[test]
+    fn equalize_resets_all_ratios() {
+        let mut l = Layout::new(1);
+        l.split(Dir::Vertical, 2); // (1 | 2)
+        l.split(Dir::Horizontal, 3); // (1 | (2 / 3))
+        l.set_ratio(&[], 0.2);
+        l.set_ratio(&[true], 0.8);
+        l.equalize();
+        let map: std::collections::HashMap<usize, Rect> = l.rects(AREA, 0).into_iter().collect();
+        // Root even: left half is 500 wide.
+        assert_eq!(map[&1].w, 500);
+        // Inner even: each of 2 and 3 is half the right column's height.
+        assert_eq!(map[&2].h, 300);
+        assert_eq!(map[&3].h, 300);
+    }
 }

@@ -264,27 +264,13 @@ jobs:
             target/x86_64-apple-darwin/release/${{ env.BIN }} \
             target/aarch64-apple-darwin/release/${{ env.BIN }}
 
-      # Build a proper .icns from the PNG assets (iconutil needs an
-      # iconset directory with exact filenames).
-      - name: Build .icns icon
+      # Use the pre-built macOS depth/shadow .icns (glassy-pink.icns) as the
+      # app icon. This is the designed macOS-style icon with layers and glow,
+      # matching the dock icon shown at runtime (main.rs: include_bytes! glassy-pink.icns).
+      - name: Stage .icns icon
         run: |
-          ICONSET=dist/glassy.iconset
-          mkdir -p "$ICONSET"
-          # iconutil requires these exact filenames.
-          cp assets/icons/glassy-16.png   "$ICONSET/icon_16x16.png"
-          cp assets/icons/glassy-32.png   "$ICONSET/icon_16x16@2x.png"
-          cp assets/icons/glassy-32.png   "$ICONSET/icon_32x32.png"
-          cp assets/icons/glassy-64.png   "$ICONSET/icon_32x32@2x.png"
-          cp assets/icons/glassy-128.png  "$ICONSET/icon_128x128.png"
-          cp assets/icons/glassy-256.png  "$ICONSET/icon_128x128@2x.png"
-          cp assets/icons/glassy-256.png  "$ICONSET/icon_256x256.png"
-          cp assets/icons/glassy-512.png  "$ICONSET/icon_256x256@2x.png"
-          cp assets/icons/glassy-512.png  "$ICONSET/icon_512x512.png"
-          # @2x 512 requires a 1024px source; use 512 as a stand-in until
-          # a 1024px asset is added to assets/icons/.
-          cp assets/icons/glassy-512.png  "$ICONSET/icon_512x512@2x.png"
-          iconutil -c icns -o dist/glassy.icns "$ICONSET"
-          rm -rf "$ICONSET"
+          mkdir -p dist
+          cp assets/icons/glassy-pink.icns dist/glassy.icns
 
       # Assemble glassy.app following the macOS bundle layout.
       # The Info.plist declares the app as a Terminal Emulator so

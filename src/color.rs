@@ -310,6 +310,222 @@ const CATPPUCCIN_LATTE: Theme = Theme {
     ],
 };
 
+/// Everforest Dark (medium): a comfortable, low-saturation green-tinted dark
+/// theme. Special entries use fg / bg-dim-medium; cursor follows the foreground.
+const EVERFOREST_DARK: Theme = Theme {
+    fg: rgb(0xD3, 0xC6, 0xAA),
+    bg: rgb(0x2D, 0x35, 0x3B),
+    cursor: rgb(0xD3, 0xC6, 0xAA),
+    selection_bg: rgb(0x47, 0x52, 0x58),
+    ansi16: [
+        rgb(0x47, 0x4D, 0x4F), // 0  black
+        rgb(0xE6, 0x7E, 0x80), // 1  red
+        rgb(0xA7, 0xC0, 0x80), // 2  green
+        rgb(0xDB, 0xBC, 0x7F), // 3  yellow
+        rgb(0x7F, 0xBB, 0xB3), // 4  blue
+        rgb(0xD6, 0x99, 0xB6), // 5  magenta
+        rgb(0x83, 0xC0, 0x92), // 6  cyan
+        rgb(0xD3, 0xC6, 0xAA), // 7  white
+        rgb(0x5C, 0x63, 0x70), // 8  bright black
+        rgb(0xE6, 0x7E, 0x80), // 9  bright red
+        rgb(0xA7, 0xC0, 0x80), // 10 bright green
+        rgb(0xDB, 0xBC, 0x7F), // 11 bright yellow
+        rgb(0x7F, 0xBB, 0xB3), // 12 bright blue
+        rgb(0xD6, 0x99, 0xB6), // 13 bright magenta
+        rgb(0x83, 0xC0, 0x92), // 14 bright cyan
+        rgb(0xE9, 0xE3, 0xD0), // 15 bright white
+    ],
+};
+
+/// Everforest Light (medium): the warm off-white sibling of Everforest, soft on
+/// the eyes with the same muted accent family darkened for legibility on light.
+const EVERFOREST_LIGHT: Theme = Theme {
+    fg: rgb(0x5C, 0x6A, 0x72),
+    bg: rgb(0xFD, 0xF6, 0xE3),
+    cursor: rgb(0x5C, 0x6A, 0x72),
+    selection_bg: rgb(0xEA, 0xDF, 0xC4),
+    ansi16: [
+        rgb(0x5C, 0x6A, 0x72), // 0  black
+        rgb(0xF8, 0x55, 0x52), // 1  red
+        rgb(0x8D, 0xA1, 0x01), // 2  green
+        rgb(0xDF, 0xA0, 0x00), // 3  yellow
+        rgb(0x3A, 0x94, 0xC5), // 4  blue
+        rgb(0xDF, 0x69, 0xBA), // 5  magenta
+        rgb(0x35, 0xA7, 0x7C), // 6  cyan
+        rgb(0x93, 0x9F, 0x91), // 7  white
+        rgb(0xA6, 0xB0, 0xA0), // 8  bright black
+        rgb(0xF8, 0x55, 0x52), // 9  bright red
+        rgb(0x8D, 0xA1, 0x01), // 10 bright green
+        rgb(0xDF, 0xA0, 0x00), // 11 bright yellow
+        rgb(0x3A, 0x94, 0xC5), // 12 bright blue
+        rgb(0xDF, 0x69, 0xBA), // 13 bright magenta
+        rgb(0x35, 0xA7, 0x7C), // 14 bright cyan
+        rgb(0x5C, 0x6A, 0x72), // 15 bright white
+    ],
+};
+
+/// Kanagawa Wave: a dark theme inspired by Katsushika Hokusai's "The Great Wave",
+/// a deep desaturated indigo base with muted ink-wash accents. Cursor follows fg.
+const KANAGAWA: Theme = Theme {
+    fg: rgb(0xDC, 0xD7, 0xBA),
+    bg: rgb(0x1F, 0x1F, 0x28),
+    cursor: rgb(0xC8, 0xC0, 0x93),
+    selection_bg: rgb(0x2D, 0x4F, 0x67),
+    ansi16: [
+        rgb(0x16, 0x16, 0x1D), // 0  black
+        rgb(0xC3, 0x40, 0x43), // 1  red
+        rgb(0x76, 0x94, 0x6A), // 2  green
+        rgb(0xC0, 0xA3, 0x6E), // 3  yellow
+        rgb(0x7E, 0x9C, 0xD8), // 4  blue
+        rgb(0x95, 0x7F, 0xB8), // 5  magenta
+        rgb(0x6A, 0x95, 0x89), // 6  cyan
+        rgb(0xC8, 0xC0, 0x93), // 7  white
+        rgb(0x72, 0x71, 0x69), // 8  bright black
+        rgb(0xE8, 0x2C, 0x42), // 9  bright red
+        rgb(0x98, 0xBB, 0x6C), // 10 bright green
+        rgb(0xE6, 0xC3, 0x84), // 11 bright yellow
+        rgb(0x7F, 0xB4, 0xCA), // 12 bright blue
+        rgb(0x93, 0x8A, 0xA9), // 13 bright magenta
+        rgb(0x7A, 0xA8, 0x9F), // 14 bright cyan
+        rgb(0xDC, 0xD7, 0xBA), // 15 bright white
+    ],
+};
+
+/// One Dark: the Atom-derived modern classic — a balanced cool-gray base with
+/// crisp, slightly desaturated accents. Cursor follows the foreground.
+const ONE_DARK: Theme = Theme {
+    fg: rgb(0xAB, 0xB2, 0xBF),
+    bg: rgb(0x28, 0x2C, 0x34),
+    cursor: rgb(0x52, 0x8B, 0xFF),
+    selection_bg: rgb(0x3E, 0x44, 0x51),
+    ansi16: [
+        rgb(0x28, 0x2C, 0x34), // 0  black
+        rgb(0xE0, 0x6C, 0x75), // 1  red
+        rgb(0x98, 0xC3, 0x79), // 2  green
+        rgb(0xE5, 0xC0, 0x7B), // 3  yellow
+        rgb(0x61, 0xAF, 0xEF), // 4  blue
+        rgb(0xC6, 0x78, 0xDD), // 5  magenta
+        rgb(0x56, 0xB6, 0xC2), // 6  cyan
+        rgb(0xAB, 0xB2, 0xBF), // 7  white
+        rgb(0x54, 0x5B, 0x68), // 8  bright black
+        rgb(0xE0, 0x6C, 0x75), // 9  bright red
+        rgb(0x98, 0xC3, 0x79), // 10 bright green
+        rgb(0xE5, 0xC0, 0x7B), // 11 bright yellow
+        rgb(0x61, 0xAF, 0xEF), // 12 bright blue
+        rgb(0xC6, 0x78, 0xDD), // 13 bright magenta
+        rgb(0x56, 0xB6, 0xC2), // 14 bright cyan
+        rgb(0xC8, 0xCE, 0xD9), // 15 bright white
+    ],
+};
+
+/// One Light: the official light sibling of One Dark — a clean near-white base
+/// with the same accent family darkened for contrast on light. Cursor uses blue.
+const ONE_LIGHT: Theme = Theme {
+    fg: rgb(0x38, 0x3A, 0x42),
+    bg: rgb(0xFA, 0xFA, 0xFA),
+    cursor: rgb(0x40, 0x78, 0xF2),
+    selection_bg: rgb(0xE5, 0xE5, 0xE6),
+    ansi16: [
+        rgb(0x38, 0x3A, 0x42), // 0  black
+        rgb(0xE4, 0x50, 0x49), // 1  red
+        rgb(0x50, 0xA1, 0x4F), // 2  green
+        rgb(0xC1, 0x84, 0x01), // 3  yellow
+        rgb(0x40, 0x78, 0xF2), // 4  blue
+        rgb(0xA6, 0x26, 0xA4), // 5  magenta
+        rgb(0x01, 0x84, 0xBC), // 6  cyan
+        rgb(0xA0, 0xA1, 0xA7), // 7  white
+        rgb(0x69, 0x6C, 0x77), // 8  bright black
+        rgb(0xE4, 0x50, 0x49), // 9  bright red
+        rgb(0x50, 0xA1, 0x4F), // 10 bright green
+        rgb(0xC1, 0x84, 0x01), // 11 bright yellow
+        rgb(0x40, 0x78, 0xF2), // 12 bright blue
+        rgb(0xA6, 0x26, 0xA4), // 13 bright magenta
+        rgb(0x01, 0x84, 0xBC), // 14 bright cyan
+        rgb(0x38, 0x3A, 0x42), // 15 bright white
+    ],
+};
+
+/// Ayu Dark: a deep near-black slate base with warm amber accents — high
+/// legibility, low glare. Cursor uses the signature amber accent.
+const AYU_DARK: Theme = Theme {
+    fg: rgb(0xBF, 0xBD, 0xB6),
+    bg: rgb(0x0B, 0x0E, 0x14),
+    cursor: rgb(0xE6, 0xB4, 0x50),
+    selection_bg: rgb(0x1A, 0x23, 0x35),
+    ansi16: [
+        rgb(0x11, 0x15, 0x1C), // 0  black
+        rgb(0xEA, 0x6C, 0x73), // 1  red
+        rgb(0xAA, 0xD9, 0x4C), // 2  green
+        rgb(0xFF, 0xB4, 0x54), // 3  yellow
+        rgb(0x59, 0xC2, 0xFF), // 4  blue
+        rgb(0xD2, 0xA6, 0xFF), // 5  magenta
+        rgb(0x95, 0xE6, 0xCB), // 6  cyan
+        rgb(0xBF, 0xBD, 0xB6), // 7  white
+        rgb(0x3D, 0x42, 0x4D), // 8  bright black
+        rgb(0xF0, 0x71, 0x78), // 9  bright red
+        rgb(0xAA, 0xD9, 0x4C), // 10 bright green
+        rgb(0xFF, 0xB4, 0x54), // 11 bright yellow
+        rgb(0x73, 0xB8, 0xFF), // 12 bright blue
+        rgb(0xD2, 0xA6, 0xFF), // 13 bright magenta
+        rgb(0x95, 0xE6, 0xCB), // 14 bright cyan
+        rgb(0xFF, 0xFF, 0xFF), // 15 bright white
+    ],
+};
+
+/// Ayu Light: a warm off-white base with the same amber accent family darkened
+/// for contrast — the official light Ayu variant. Cursor uses amber-orange.
+const AYU_LIGHT: Theme = Theme {
+    fg: rgb(0x5C, 0x61, 0x66),
+    bg: rgb(0xFC, 0xFC, 0xFC),
+    cursor: rgb(0xFF, 0x9A, 0x40),
+    selection_bg: rgb(0xE7, 0xE8, 0xE9),
+    ansi16: [
+        rgb(0x68, 0x6B, 0x6E), // 0  black
+        rgb(0xE6, 0x5A, 0x4C), // 1  red
+        rgb(0x6C, 0xBF, 0x43), // 2  green
+        rgb(0xE6, 0xA8, 0x00), // 3  yellow
+        rgb(0x39, 0x9E, 0xE6), // 4  blue
+        rgb(0xA3, 0x7A, 0xCC), // 5  magenta
+        rgb(0x4C, 0xBF, 0x99), // 6  cyan
+        rgb(0x80, 0x83, 0x86), // 7  white
+        rgb(0x8A, 0x8D, 0x90), // 8  bright black
+        rgb(0xE6, 0x5A, 0x4C), // 9  bright red
+        rgb(0x6C, 0xBF, 0x43), // 10 bright green
+        rgb(0xE6, 0xA8, 0x00), // 11 bright yellow
+        rgb(0x39, 0x9E, 0xE6), // 12 bright blue
+        rgb(0xA3, 0x7A, 0xCC), // 13 bright magenta
+        rgb(0x4C, 0xBF, 0x99), // 14 bright cyan
+        rgb(0x5C, 0x61, 0x66), // 15 bright white
+    ],
+};
+
+/// Gruvbox Light (medium): the warm cream sibling of Gruvbox Dark — high-contrast
+/// retro accents on a paper-like base. Cursor follows the dark foreground.
+const GRUVBOX_LIGHT: Theme = Theme {
+    fg: rgb(0x3C, 0x38, 0x36),
+    bg: rgb(0xFB, 0xF1, 0xC7),
+    cursor: rgb(0x3C, 0x38, 0x36),
+    selection_bg: rgb(0xEB, 0xDB, 0xB2),
+    ansi16: [
+        rgb(0xFB, 0xF1, 0xC7), // 0  black (bg0)
+        rgb(0xCC, 0x24, 0x1D), // 1  red
+        rgb(0x98, 0x97, 0x1A), // 2  green
+        rgb(0xD7, 0x99, 0x21), // 3  yellow
+        rgb(0x45, 0x85, 0x88), // 4  blue
+        rgb(0xB1, 0x62, 0x86), // 5  magenta
+        rgb(0x68, 0x9D, 0x6A), // 6  cyan
+        rgb(0x7C, 0x6F, 0x64), // 7  white
+        rgb(0x92, 0x83, 0x74), // 8  bright black
+        rgb(0x9D, 0x00, 0x06), // 9  bright red
+        rgb(0x79, 0x74, 0x0E), // 10 bright green
+        rgb(0xB5, 0x76, 0x14), // 11 bright yellow
+        rgb(0x07, 0x66, 0x78), // 12 bright blue
+        rgb(0x8F, 0x3F, 0x71), // 13 bright magenta
+        rgb(0x42, 0x7B, 0x58), // 14 bright cyan
+        rgb(0x3C, 0x38, 0x36), // 15 bright white (fg)
+    ],
+};
+
 /// Resolve a theme by (case-insensitive, separator-insensitive) name. Returns
 /// `None` for an unknown name so the caller can warn and keep the default.
 pub fn theme_by_name(name: &str) -> Option<Theme> {
@@ -329,6 +545,14 @@ pub fn theme_by_name(name: &str) -> Option<Theme> {
         "rosepine" | "rose" => Some(ROSE_PINE),
         "rosepinedawn" | "dawn" => Some(ROSE_PINE_DAWN),
         "catppuccinlatte" | "latte" => Some(CATPPUCCIN_LATTE),
+        "everforestdark" | "everforest" => Some(EVERFOREST_DARK),
+        "everforestlight" => Some(EVERFOREST_LIGHT),
+        "kanagawa" | "kanagawawave" => Some(KANAGAWA),
+        "onedark" | "one" => Some(ONE_DARK),
+        "onelight" => Some(ONE_LIGHT),
+        "ayudark" | "ayu" => Some(AYU_DARK),
+        "ayulight" => Some(AYU_LIGHT),
+        "gruvboxlight" => Some(GRUVBOX_LIGHT),
         _ => None,
     }
 }
@@ -345,6 +569,14 @@ pub const THEME_NAMES: &[&str] = &[
     "rose-pine",
     "rose-pine-dawn",
     "catppuccin-latte",
+    "everforest-dark",
+    "everforest-light",
+    "kanagawa",
+    "one-dark",
+    "one-light",
+    "ayu-dark",
+    "ayu-light",
+    "gruvbox-light",
 ];
 
 /// Whether a named theme is a LIGHT theme (light background, dark text). Used to
@@ -352,7 +584,15 @@ pub const THEME_NAMES: &[&str] = &[
 /// are treated as dark (every original built-in is dark).
 #[allow(dead_code)]
 pub fn is_light(name: &str) -> bool {
-    matches!(canonical_name(name), "rose-pine-dawn" | "catppuccin-latte")
+    matches!(
+        canonical_name(name),
+        "rose-pine-dawn"
+            | "catppuccin-latte"
+            | "everforest-light"
+            | "one-light"
+            | "ayu-light"
+            | "gruvbox-light"
+    )
 }
 
 /// Map any accepted theme name/alias to its canonical [`THEME_NAMES`] entry,
@@ -373,6 +613,14 @@ pub fn canonical_name(input: &str) -> &'static str {
         "rosepine" | "rose" => "rose-pine",
         "rosepinedawn" | "dawn" => "rose-pine-dawn",
         "catppuccinlatte" | "latte" => "catppuccin-latte",
+        "everforestdark" | "everforest" => "everforest-dark",
+        "everforestlight" => "everforest-light",
+        "kanagawa" | "kanagawawave" => "kanagawa",
+        "onedark" | "one" => "one-dark",
+        "onelight" => "one-light",
+        "ayudark" | "ayu" => "ayu-dark",
+        "ayulight" => "ayu-light",
+        "gruvboxlight" => "gruvbox-light",
         _ => "tokyo-night",
     }
 }
@@ -445,6 +693,57 @@ pub fn danger() -> [f32; 4] {
 #[allow(dead_code)]
 pub fn success() -> [f32; 4] {
     to_f32(active().ansi16[2])
+}
+
+/// Format an `Rgb` as a `#rrggbb` hex string (used by the custom-theme editor to
+/// seed its text fields from a base theme + serialize edits back to config).
+pub fn rgb_to_hex(c: Rgb) -> String {
+    format!("#{:02x}{:02x}{:02x}", c.r, c.g, c.b)
+}
+
+/// The current active theme (a copy), so the custom-theme editor can seed its
+/// fields from whatever palette is live (named theme, wallpaper, or overrides).
+pub fn active_theme() -> Theme {
+    *active()
+}
+
+/// Construct a [`Theme`] directly from raw `Rgb` parts: the four specials plus the
+/// 16 ANSI entries. Used by the custom-theme editor to build a live preview from
+/// the edited hex fields without going through the config parser.
+pub fn theme_from_parts(
+    fg: Rgb,
+    bg: Rgb,
+    cursor: Rgb,
+    selection_bg: Rgb,
+    ansi16: [Rgb; 16],
+) -> Theme {
+    Theme {
+        fg,
+        bg,
+        cursor,
+        selection_bg,
+        ansi16,
+    }
+}
+
+/// Accessors for a [`Theme`]'s component colors, exposed so the custom-theme
+/// editor can read a base theme's entries to seed its fields.
+impl Theme {
+    pub fn fg(&self) -> Rgb {
+        self.fg
+    }
+    pub fn bg(&self) -> Rgb {
+        self.bg
+    }
+    pub fn cursor(&self) -> Rgb {
+        self.cursor
+    }
+    pub fn selection_bg(&self) -> Rgb {
+        self.selection_bg
+    }
+    pub fn ansi(&self, i: usize) -> Rgb {
+        self.ansi16[i.min(15)]
+    }
 }
 
 /// Resolve a terminal `Color` (named / indexed / direct) to RGBA in [0, 1].
@@ -580,7 +879,16 @@ mod query_index_tests {
     fn light_themes_are_light_and_named() {
         // Both light themes resolve and are flagged light; every dark built-in is
         // flagged dark.
-        for name in ["rose-pine-dawn", "dawn", "catppuccin-latte", "latte"] {
+        for name in [
+            "rose-pine-dawn",
+            "dawn",
+            "catppuccin-latte",
+            "latte",
+            "everforest-light",
+            "one-light",
+            "ayu-light",
+            "gruvbox-light",
+        ] {
             assert!(theme_by_name(name).is_some(), "{name} should resolve");
             assert!(is_light(name), "{name} should be light");
         }

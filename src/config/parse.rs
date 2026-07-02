@@ -17,6 +17,123 @@ const DEFAULT_SCROLLBACK: usize = 10_000;
 /// Default number of recently-run commands retained for the command palette's
 /// history source (OSC 133 `B`..`C` capture). 0 disables it.
 const DEFAULT_COMMAND_HISTORY: usize = 200;
+/// Default minimum command duration (ms) that triggers a command-finish desktop
+/// notification when the window is unfocused. 10 s avoids spamming for quick
+/// commands while still catching long builds/tests.
+const DEFAULT_NOTIFY_COMMAND_THRESHOLD_MS: u64 = 10_000;
+
+/// A single entry in the `font_symbol_map` config key: a Unicode range mapped
+/// to a specific font family. The shaper routes codepoints in `[start, end]`
+/// (inclusive) to the named family instead of the primary font.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SymbolMapEntry {
+    /// First codepoint of the range (inclusive).
+    pub start: u32,
+    /// Last codepoint of the range (inclusive; equal to `start` for a single
+    /// codepoint mapping).
+    pub end: u32,
+    /// Font family name (or absolute file path) to route this range to.
+    pub family: String,
+}
+
+/// Parse the `font_symbol_map` value into a `Vec<SymbolMapEntry>`.
+///
+/// Each entry is `"RANGE:Family"` where RANGE is `U+XXXX` or `U+XXXX-U+YYYY`
+/// (hex codepoints). Multiple entries are separated by commas. Entries that
+/// cannot be parsed are logged at warn level and skipped.
+///
+/// Examples:
+/// ```text
+/// U+E000-U+F8FF : Symbols Nerd Font Mono
+/// U+2500-U+257F : FiraCode Nerd Font Mono, U+1F600-U+1F64F : Noto Color Emoji
+/// ```
+pub fn parse_symbol_map(value: &str) -> Vec<SymbolMapEntry> {
+    let mut out = Vec::new();
+    // Split on commas first (entries), then parse each.
+    for entry in value.split(',') {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+        // The colon separator between range and family. Use rfind so a family
+        // name containing ':' (unlikely but safe) doesn't confuse the split.
+        // Actually we need the FIRST colon that appears after a codepoint range.
+        // Ranges look like "U+XXXX" or "U+XXXX-U+YYYY" — find the colon after
+        // the range token.
+        //
+        // Strategy: split on ':' and reconstruct family from tail parts.
+        let parts: Vec<&str> = entry.splitn(2, ':').collect();
+        if parts.len() != 2 {
+            log::warn!("glassy: font_symbol_map: expected 'RANGE:Family', got '{entry}'; skipping");
+            continue;
+        }
+        let range_str = parts[0].trim();
+        let family = parts[1].trim().to_string();
+        if family.is_empty() {
+            log::warn!("glassy: font_symbol_map: empty family in '{entry}'; skipping");
+            continue;
+        }
+        // Parse "U+XXXX" or "U+XXXX-U+YYYY".
+        let (start, end) = if let Some((lo, hi)) = range_str.split_once('-') {
+            // "U+XXXX-U+YYYY" — note the split_once('-') will split at the
+            // first dash, which could be the dash between U+XXXX and U+YYYY.
+            // But "U+E000-U+F8FF" splits as lo="U+E000" hi="U+F8FF". Correct.
+            let s = parse_codepoint(lo.trim());
+            let e = parse_codepoint(hi.trim());
+            match (s, e) {
+                (Some(s), Some(e)) => (s, e.max(s)),
+                _ => {
+                    log::warn!("glassy: font_symbol_map: invalid range '{range_str}'; skipping");
+                    continue;
+                }
+            }
+        } else {
+            match parse_codepoint(range_str) {
+                Some(cp) => (cp, cp),
+                None => {
+                    log::warn!(
+                        "glassy: font_symbol_map: invalid codepoint '{range_str}'; skipping"
+                    );
+                    continue;
+                }
+            }
+        };
+        out.push(SymbolMapEntry { start, end, family });
+    }
+    out
+}
+
+/// Parse a `U+XXXX` (or bare `XXXX` hex) codepoint string to a `u32`.
+fn parse_codepoint(s: &str) -> Option<u32> {
+    let hex = s
+        .strip_prefix("U+")
+        .or_else(|| s.strip_prefix("u+"))
+        .unwrap_or(s);
+    u32::from_str_radix(hex.trim(), 16).ok()
+}
+
+/// Parse a `font_variations` value into a `Vec<String>` of `"axis=value"` entries.
+///
+/// Accepts comma or space separation. Each token is either:
+///   - `"axis=value"` (e.g. `"wght=450"`, `"wdth=75"`)
+///   - A bare 4-char tag (treated as "enable", same as feature tags) — not
+///     meaningful for axes; warned and kept for forward-compat.
+pub fn parse_font_variations(value: &str) -> Vec<String> {
+    value
+        .split([',', ' '])
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|token| {
+            let tag = token.split('=').next().unwrap_or(token).trim();
+            if tag.len() != 4 || !tag.is_ascii() {
+                log::warn!(
+                    "glassy: font_variations: axis tag '{tag}' is not 4 ASCII chars; skipping"
+                );
+            }
+            token.to_string()
+        })
+        .collect()
+}
 
 /// Accumulated raw configuration before validation/finalization. Every field is
 /// optional so the file and CLI layers can each set a subset.
@@ -64,6 +181,9 @@ pub(super) struct RawConfig {
     pub wallpaper_theme: Option<String>,
     pub cursor_trail: Option<bool>,
     pub crt_effect: Option<bool>,
+    /// Window post-process effect mode (none|frosted|acrylic|crt|scanlines|grain|
+    /// vignette|bloom). Supersedes the legacy `crt_effect` bool when present.
+    pub window_effect: Option<String>,
     pub show_tab_bar: Option<String>,
     pub title_show_cwd: Option<bool>,
     pub title_show_count: Option<bool>,
@@ -72,6 +192,37 @@ pub(super) struct RawConfig {
     pub quake_height: Option<f32>,
     pub quake_animation_ms: Option<u64>,
     pub command_history: Option<usize>,
+    pub dim_unfocused: Option<bool>,
+    /// Also place a rich-text (HTML) flavor on the clipboard alongside the plain
+    /// text on copy, so apps that prefer HTML get a monospace-preserving paste.
+    pub copy_html: Option<bool>,
+    pub status_bar_segments: Option<Vec<crate::app::StatusBarSegment>>,
+    pub status_bar_time_format: Option<String>,
+    // --- FONTS stream additions ---
+    /// Per-style font family overrides. When set, the named family is used
+    /// for bold / italic / bold-italic text instead of synthesizing from the
+    /// primary family. Value is a font family name or an absolute file path.
+    pub font_bold: Option<String>,
+    pub font_italic: Option<String>,
+    pub font_bold_italic: Option<String>,
+    /// Codepoint / Unicode-range → font-family routing map.
+    /// Each entry is `"RANGE:Family"` where RANGE is one of:
+    ///   - A single scalar:  `U+E000`
+    ///   - An inclusive range: `U+E000-U+F8FF`
+    ///     Example: `"U+E000-U+F8FF:Symbols Nerd Font Mono"`.
+    ///     Multiple entries are separated by commas or newlines.
+    pub font_symbol_map: Option<Vec<SymbolMapEntry>>,
+    /// OpenType variable-font axis settings, e.g. `["wght=450", "wdth=75"]`.
+    /// `wght` maps to `Weight` in cosmic-text; `wdth` maps to `Stretch`.
+    /// Other axis tags are accepted in config but are currently no-ops
+    /// (cosmic-text 0.19 does not expose arbitrary axis APIs at the Attrs
+    /// level — they log a warning). Comma or space separated.
+    pub font_variations: Option<Vec<String>>,
+    pub notify_command_finish: Option<bool>,
+    pub notify_command_threshold_ms: Option<u64>,
+    pub command_fold: Option<bool>,
+    pub power_mode: Option<bool>,
+    pub power_mode_intensity: Option<f32>,
 }
 
 impl RawConfig {
@@ -143,6 +294,10 @@ impl RawConfig {
         } else {
             DEFAULT_FONT_SIZE
         };
+        // Split the `[keybindings]` overrides into single-chord binds (merged onto
+        // the flat keymap) and multi-chord "leader" sequences (their own map).
+        let (single_binds, key_sequences) =
+            super::keymap::split_overrides(&self.keybinding_overrides);
         let config = Config {
             font_family: self.font_family,
             font_size,
@@ -168,10 +323,8 @@ impl RawConfig {
             initial_cwd: self.cwd.filter(|s| !s.is_empty()).map(PathBuf::from),
             restore_session: self.restore_session.unwrap_or(false),
             copy_on_select: self.copy_on_select.unwrap_or(false),
-            keymap: build_keymap(
-                default_keymap(Platform::current()),
-                &self.keybinding_overrides,
-            ),
+            keymap: build_keymap(default_keymap(Platform::current()), &single_binds),
+            key_sequences,
             cursor_style: parse_cursor_style_config(self.cursor_style.as_deref()),
             cursor_blink: self.cursor_blink.unwrap_or(false),
             wallpaper_theme: self
@@ -180,6 +333,23 @@ impl RawConfig {
                 .map(PathBuf::from),
             cursor_trail: self.cursor_trail.unwrap_or(false),
             crt_effect: self.crt_effect.unwrap_or(false),
+            // Custom-effect channel intensities [curvature, scanline, glow,
+            // vignette, grain, tint]. A pleasant retro-glass default; the
+            // Appearance → Custom sliders tune it live.
+            custom_effect: [0.12, 0.35, 0.22, 0.30, 0.15, 0.25],
+            // Resolve the window effect: an explicit `window_effect` wins; else the
+            // legacy `crt_effect = true` maps to the CRT mode; else None. This keeps
+            // old configs working while exposing the full mode set.
+            window_effect: match self.window_effect.as_deref() {
+                Some(s) => crate::renderer::WindowEffect::parse(s),
+                None => {
+                    if self.crt_effect == Some(true) {
+                        crate::renderer::WindowEffect::Crt
+                    } else {
+                        crate::renderer::WindowEffect::None
+                    }
+                }
+            },
             show_tab_bar: parse_tab_bar_mode(self.show_tab_bar.as_deref()),
             title_show_cwd: self.title_show_cwd.unwrap_or(true),
             title_show_count: self.title_show_count.unwrap_or(false),
@@ -200,6 +370,32 @@ impl RawConfig {
             },
             quake_animation_ms: self.quake_animation_ms.unwrap_or(180).min(5_000),
             command_history: self.command_history.unwrap_or(DEFAULT_COMMAND_HISTORY),
+            dim_unfocused: self.dim_unfocused.unwrap_or(true),
+            copy_html: self.copy_html.unwrap_or(false),
+            status_bar_segments: self.status_bar_segments,
+            status_bar_time_format: self
+                .status_bar_time_format
+                .unwrap_or_else(|| "%H:%M".to_string()),
+            // FONTS stream
+            font_bold: self.font_bold,
+            font_italic: self.font_italic,
+            font_bold_italic: self.font_bold_italic,
+            font_symbol_map: self.font_symbol_map.unwrap_or_default(),
+            font_variations: self.font_variations.unwrap_or_default(),
+            notify_command_finish: self.notify_command_finish.unwrap_or(true),
+            notify_command_threshold_ms: self
+                .notify_command_threshold_ms
+                .unwrap_or(DEFAULT_NOTIFY_COMMAND_THRESHOLD_MS),
+            command_fold: self.command_fold.unwrap_or(true),
+            power_mode: self.power_mode.unwrap_or(false),
+            power_mode_intensity: {
+                let i = self.power_mode_intensity.unwrap_or(0.6);
+                if i.is_finite() {
+                    i.clamp(0.0, 1.0)
+                } else {
+                    0.6
+                }
+            },
         };
 
         Ok(super::Settings { config, theme })
@@ -365,6 +561,26 @@ pub(super) fn parse_config_file(text: &str, raw: &mut RawConfig) -> Result<()> {
     Ok(())
 }
 
+/// Extract the `[profile.NAME]` section names from raw config text, lower-cased and
+/// in first-seen order (the parser's `HashMap` doesn't preserve order, and the
+/// runtime switcher wants a stable list). Duplicates are de-duplicated.
+pub(super) fn profile_names_from_text(text: &str) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with('[') && line.ends_with(']') {
+            let inner = line[1..line.len() - 1].trim();
+            if let Some(profile_name) = inner.strip_prefix("profile.") {
+                let n = profile_name.trim().to_ascii_lowercase();
+                if !n.is_empty() && !names.contains(&n) {
+                    names.push(n);
+                }
+            }
+        }
+    }
+    names
+}
+
 /// Strip one layer of matching single or double quotes from `s`, if present.
 fn unquote(s: &str) -> &str {
     let bytes = s.as_bytes();
@@ -405,7 +621,23 @@ pub(super) fn apply_kv(key: &str, value: &str, raw: &mut RawConfig) -> Result<()
         }
         "theme" => {
             if !value.is_empty() {
-                raw.theme = Some(value.to_string());
+                // Split-theme syntax: `theme = light:X, dark:Y` turns on
+                // follow_system and pins the per-scheme themes. A bare name keeps
+                // the legacy single-theme behaviour. Either half may be omitted.
+                if let Some((light, dark)) = parse_split_theme(value) {
+                    raw.follow_system = Some(true);
+                    if let Some(l) = light {
+                        raw.theme_light = Some(l);
+                    }
+                    if let Some(d) = dark {
+                        raw.theme_dark = Some(d.clone());
+                        // Seed the active theme to the dark half so a first paint
+                        // before the OS scheme is known is sensible.
+                        raw.theme = Some(d);
+                    }
+                } else {
+                    raw.theme = Some(value.to_string());
+                }
             }
         }
         "opacity" => {
@@ -476,6 +708,18 @@ pub(super) fn apply_kv(key: &str, value: &str, raw: &mut RawConfig) -> Result<()
                 .with_context(|| format!("command_history: invalid integer '{value}'"))?;
             raw.command_history = Some(n.clamp(0, 10_000));
         }
+        "notify_command_finish" => {
+            raw.notify_command_finish = Some(parse_bool(value, "notify_command_finish")?);
+        }
+        "notify_command_threshold_ms" => {
+            let ms: u64 = value.parse().with_context(|| {
+                format!("notify_command_threshold_ms: invalid integer '{value}'")
+            })?;
+            raw.notify_command_threshold_ms = Some(ms.min(86_400_000)); // cap at 24h
+        }
+        "command_fold" => {
+            raw.command_fold = Some(parse_bool(value, "command_fold")?);
+        }
         "bell_visual" => {
             raw.bell_visual = Some(parse_bool(value, "bell_visual")?);
         }
@@ -500,6 +744,9 @@ pub(super) fn apply_kv(key: &str, value: &str, raw: &mut RawConfig) -> Result<()
         }
         "pane_headers" => {
             raw.pane_headers = Some(parse_bool(value, "pane_headers")?);
+        }
+        "dim_unfocused" => {
+            raw.dim_unfocused = Some(parse_bool(value, "dim_unfocused")?);
         }
         "word_separator" => {
             raw.word_separator = Some(value.to_string());
@@ -537,11 +784,23 @@ pub(super) fn apply_kv(key: &str, value: &str, raw: &mut RawConfig) -> Result<()
         "copy_on_select" => {
             raw.copy_on_select = Some(parse_bool(value, "copy_on_select")?);
         }
+        "copy_html" => {
+            raw.copy_html = Some(parse_bool(value, "copy_html")?);
+        }
         "cursor_trail" => {
             raw.cursor_trail = Some(parse_bool(value, "cursor_trail")?);
         }
         "crt_effect" => {
             raw.crt_effect = Some(parse_bool(value, "crt_effect")?);
+        }
+        "window_effect" => {
+            // Accept ANY value here and let `WindowEffect::parse` resolve it at
+            // finalization (unknown → `none`). Per this key's long-standing
+            // contract, a typo — or a mode word this build predates — must never
+            // abort config load; validating with a hardcoded allowlist here was a
+            // latent bug (it rejected `custom` and killed startup). The single
+            // source of truth for the mode set is `WindowEffect::parse`.
+            raw.window_effect = Some(value.to_ascii_lowercase());
         }
         "show_tab_bar" => {
             // Accepts the three policy words plus the usual bool spellings
@@ -588,6 +847,18 @@ pub(super) fn apply_kv(key: &str, value: &str, raw: &mut RawConfig) -> Result<()
                 .parse()
                 .with_context(|| format!("quake_animation_ms: invalid integer '{value}'"))?;
             raw.quake_animation_ms = Some(ms.min(5_000));
+        }
+        "power_mode" => {
+            raw.power_mode = Some(parse_bool(value, "power_mode")?);
+        }
+        "power_mode_intensity" => {
+            let i: f32 = value
+                .parse()
+                .with_context(|| format!("power_mode_intensity: invalid number '{value}'"))?;
+            if !(i.is_finite() && (0.0..=1.0).contains(&i)) {
+                bail!("power_mode_intensity must be between 0.0 and 1.0, got {i}");
+            }
+            raw.power_mode_intensity = Some(i);
         }
         "color.fg" => {
             parse_hex_color(value)?;
@@ -641,6 +912,70 @@ pub(super) fn apply_kv(key: &str, value: &str, raw: &mut RawConfig) -> Result<()
                 raw.wallpaper_theme = Some(value.to_string());
             }
         }
+        "status_bar_segments" => {
+            use crate::app::StatusBarSegment;
+            if value.is_empty() {
+                raw.status_bar_segments = None;
+            } else {
+                let segs: Vec<StatusBarSegment> = value
+                    .split([',', ' '])
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .filter_map(|s| match s.to_ascii_lowercase().as_str() {
+                        "cwd" => Some(StatusBarSegment::Cwd),
+                        "git_branch" | "git" => Some(StatusBarSegment::GitBranch),
+                        "process" | "fg_process" => Some(StatusBarSegment::Process),
+                        "time" | "clock" => Some(StatusBarSegment::Time),
+                        "mode" => Some(StatusBarSegment::Mode),
+                        "broadcast" | "bcast" => Some(StatusBarSegment::Broadcast),
+                        "selection" | "sel" => Some(StatusBarSegment::Selection),
+                        "scroll" => Some(StatusBarSegment::Scroll),
+                        "encoding" | "enc" => Some(StatusBarSegment::Encoding),
+                        "progress" => Some(StatusBarSegment::Progress),
+                        "exit_status" | "exit" => Some(StatusBarSegment::ExitStatus),
+                        "key_hints" | "hints" => Some(StatusBarSegment::KeyHints),
+                        other => {
+                            log::warn!(
+                                "glassy: ignoring unknown status_bar_segments entry '{other}'"
+                            );
+                            None
+                        }
+                    })
+                    .collect();
+                raw.status_bar_segments = Some(segs);
+            }
+        }
+        "status_bar_time_format" => {
+            if !value.is_empty() {
+                raw.status_bar_time_format = Some(value.to_string());
+            }
+        }
+        // --- FONTS stream ---
+        "font_bold" => {
+            if !value.is_empty() {
+                raw.font_bold = Some(value.to_string());
+            }
+        }
+        "font_italic" => {
+            if !value.is_empty() {
+                raw.font_italic = Some(value.to_string());
+            }
+        }
+        "font_bold_italic" => {
+            if !value.is_empty() {
+                raw.font_bold_italic = Some(value.to_string());
+            }
+        }
+        "font_symbol_map" => {
+            if !value.is_empty() {
+                raw.font_symbol_map = Some(parse_symbol_map(value));
+            }
+        }
+        "font_variations" => {
+            if !value.is_empty() {
+                raw.font_variations = Some(parse_font_variations(value));
+            }
+        }
         other => {
             log::warn!("glassy: ignoring unknown config key '{other}'");
         }
@@ -686,6 +1021,40 @@ pub(super) fn parse_tab_bar_mode(value: Option<&str>) -> crate::app::TabBarMode 
         Some("never") => TabBarMode::Never,
         _ => TabBarMode::Auto,
     }
+}
+
+/// Parse the split-theme syntax `light:NAME, dark:NAME` (either half optional,
+/// order-independent, comma-separated). Returns `Some((light, dark))` only when at
+/// least one `light:`/`dark:` token is present; a bare theme name returns `None`
+/// so the caller falls back to the single-theme path. Whitespace around tokens and
+/// names is tolerated.
+pub(super) fn parse_split_theme(value: &str) -> Option<(Option<String>, Option<String>)> {
+    let mut light = None;
+    let mut dark = None;
+    let mut saw_tag = false;
+    for part in value.split(',') {
+        let part = part.trim();
+        if let Some(rest) = part
+            .strip_prefix("light:")
+            .or_else(|| part.strip_prefix("Light:"))
+        {
+            let n = rest.trim();
+            if !n.is_empty() {
+                light = Some(n.to_string());
+            }
+            saw_tag = true;
+        } else if let Some(rest) = part
+            .strip_prefix("dark:")
+            .or_else(|| part.strip_prefix("Dark:"))
+        {
+            let n = rest.trim();
+            if !n.is_empty() {
+                dark = Some(n.to_string());
+            }
+            saw_tag = true;
+        }
+    }
+    saw_tag.then_some((light, dark))
 }
 
 /// Split a `shell` value (a whitespace-separated program + args) into a `Shell`.

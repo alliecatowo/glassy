@@ -31,7 +31,15 @@ impl App {
         position: winit::dpi::PhysicalPosition<f64>,
         event_loop: &ActiveEventLoop,
     ) {
-        self.mouse_px = (position.x, position.y);
+        // Under the CRT barrel effect the whole scene is bulged by the GPU, so a
+        // raw pointer pixel no longer lines up with the un-warped layout the hit
+        // tests use. Map it through the SAME warp as the shader (screen → scene)
+        // once here; storing the scene-space coord in `mouse_px` fixes every
+        // downstream consumer (hover, links, menus, and — via `mouse_px` — clicks)
+        // in one place. Identity for all other effects.
+        let (wx, wy) = self.warp_mouse(position.x, position.y);
+        let position = winit::dpi::PhysicalPosition::new(wx, wy);
+        self.mouse_px = (wx, wy);
         // Any open GUI overlay (settings, dropdown/context menu, help panel,
         // pane ⋮ menu) owns the pointer: its immediate-mode widgets compute
         // hover / press / slider-drag from `mouse_px` during paint, so every
@@ -80,6 +88,16 @@ impl App {
         let moved = cell != self.mouse_cell;
         self.mouse_cell = cell;
 
+        // Drag-rearrange a pane: while a pane grip is held, repaint on motion so the
+        // ghosted source + the drop-target tile under the pointer track live. The
+        // swap itself resolves on release (finish_pane_drag). Takes priority over
+        // selection/hover so a header drag never leaks into a text selection.
+        if self.dragging_pane.is_some() {
+            self.force_full_redraw = true;
+            self.mark_dirty(event_loop);
+            return;
+        }
+
         // Drag-to-reorder a tab: while a tab chip is held, move it under
         // the pointer's pixel position and lift it as a drag-ghost. Takes
         // priority over selection/hover; repaint on any motion so the ghost
@@ -115,7 +133,14 @@ impl App {
         {
             let new_gutter = self.gutter_at(position.x, position.y);
             if new_gutter != self.hovered_gutter {
-                self.apply_gutter_cursor(new_gutter.as_ref());
+                if new_gutter.is_some() {
+                    // Resize cursor while over a divider.
+                    self.apply_gutter_cursor(new_gutter.as_ref());
+                } else {
+                    // Leaving the gutter: restore the content-area cursor so the
+                    // pointer does not remain a resize arrow over terminal text.
+                    self.apply_content_cursor();
+                }
                 self.hovered_gutter = new_gutter;
                 self.mark_dirty(event_loop);
             }
@@ -141,10 +166,12 @@ impl App {
 
         // Tab-bar hover highlighting: track the item under the pointer (only
         // while over the bar's pixel band), repaint when it changes.
+        let over_tab_bar;
         {
             // 0 when the strip is hidden, so the top band routes to the terminal.
             let bar_h = self.effective_tab_bar_h() as f64;
-            let new_hover = if position.y < bar_h {
+            over_tab_bar = position.y < bar_h && bar_h > 0.0;
+            let new_hover = if over_tab_bar {
                 self.strip_item_at_px(position.x as f32, position.y as f32)
             } else {
                 None
@@ -175,11 +202,75 @@ impl App {
                 let link = self
                     .cell_hyperlink(c, r)
                     .or_else(|| self.plain_link_at(c, r));
-                if link != self.hovered_link {
+                let link_changed = link != self.hovered_link;
+                if link_changed {
                     self.hovered_link = link;
                     self.mark_dirty(event_loop);
                 }
             }
+            // Update the OS cursor icon on every cell move (cheap: winit deduplicates
+            // repeated set_cursor calls on most backends). Rules:
+            //   • Pointer  — over a hoverable link (Ctrl+click opens it)
+            //   • Default  — the normal arrow everywhere else (owner prefers the
+            //     arrow over the grid, not an I-beam). Gutter hover sets a resize
+            //     cursor separately.
+            if let Some(window) = self.window.as_ref() {
+                use winit::window::CursorIcon;
+                let _ = over_tab_bar;
+                let icon = if self.hovered_link.is_some() {
+                    CursorIcon::Pointer
+                } else {
+                    CursorIcon::Default
+                };
+                window.set_cursor(icon);
+            }
+        }
+    }
+
+    /// Map a raw screen-space pixel into scene space when the CRT barrel bulge is
+    /// active, mirroring `crt_warp` in `shader.wgsl` exactly so hover / click hit
+    /// tests (which run in the flat, un-warped layout) line up with the visually
+    /// bulged chrome. Identity for every other window effect (or if the renderer
+    /// isn't up yet), so the common path pays nothing.
+    fn warp_mouse(&self, x: f64, y: f64) -> (f64, f64) {
+        use crate::renderer::WindowEffect;
+        // Curvature is active for the CRT preset and for a Custom effect whose
+        // curvature channel is dialed up. Match the amount the shader uses.
+        let amt = match self.config.window_effect {
+            WindowEffect::Crt => WindowEffect::Crt.params()[0] as f64,
+            WindowEffect::Custom => self.config.custom_effect[0] as f64,
+            _ => return (x, y),
+        };
+        if amt <= 0.0 {
+            return (x, y);
+        }
+        let Some(r) = self.renderer.as_ref() else {
+            return (x, y);
+        };
+        let (w, h) = r.surface_size();
+        let (w, h) = (w as f64, h as f64);
+        if w <= 0.0 || h <= 0.0 {
+            return (x, y);
+        }
+        let cx = (x / w) * 2.0 - 1.0;
+        let cy = (y / h) * 2.0 - 1.0;
+        let wx = cx * (1.0 + cy * cy * amt);
+        let wy = cy * (1.0 + cx * cx * amt);
+        ((wx * 0.5 + 0.5) * w, (wy * 0.5 + 0.5) * h)
+    }
+
+    /// Restore the OS cursor to the normal arrow over the content area (Pointer
+    /// over a link). Called when leaving a gutter (resize cursor) back into
+    /// regular content.
+    pub(crate) fn apply_content_cursor(&self) {
+        use winit::window::CursorIcon;
+        let icon = if self.hovered_link.is_some() {
+            CursorIcon::Pointer
+        } else {
+            CursorIcon::Default
+        };
+        if let Some(window) = self.window.as_ref() {
+            window.set_cursor(icon);
         }
     }
 }
