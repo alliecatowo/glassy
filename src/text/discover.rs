@@ -332,9 +332,9 @@ fn load_style_override_fonts_macos(
             .and_then(|f| f.families.first().map(|(n, _)| n.clone()))
     };
     StyleFamilies {
-        bold: overrides.bold.as_deref().and_then(|n| resolve(n)),
-        italic: overrides.italic.as_deref().and_then(|n| resolve(n)),
-        bold_italic: overrides.bold_italic.as_deref().and_then(|n| resolve(n)),
+        bold: overrides.bold.as_deref().and_then(&mut resolve),
+        italic: overrides.italic.as_deref().and_then(&mut resolve),
+        bold_italic: overrides.bold_italic.as_deref().and_then(resolve),
     }
 }
 
