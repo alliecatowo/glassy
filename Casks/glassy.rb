@@ -33,9 +33,33 @@ cask "glassy" do
   app "glassy.app"
   binary "#{appdir}/glassy.app/Contents/MacOS/glassy"
 
+  # glassy is ad-hoc signed (needed just to execute at all on Apple Silicon)
+  # but not notarized — no paid Apple Developer Program account behind this
+  # project. Without this, Gatekeeper blocks first launch with "Apple could
+  # not verify 'glassy' is free of malware", since brew --cask (unlike brew
+  # install of a plain Formula) deliberately quarantines installed apps.
+  # Scoped to glassy.app only — this has no effect on Gatekeeper's handling
+  # of anything else on the system.
+  postflight do
+    system_command "/usr/bin/xattr",
+                   args: ["-dr", "com.apple.quarantine", "#{appdir}/glassy.app"]
+  end
+
   zap trash: [
     "~/.local/state/glassy",
     "~/Library/Application Support/glassy",
     "~/Library/Caches/glassy",
   ]
+
+  caveats do
+    <<~EOS
+      glassy is ad-hoc signed but not notarized by Apple (no paid Developer
+      Program account behind this project yet). This cask clears the
+      com.apple.quarantine flag on #{appdir}/glassy.app during install so
+      Gatekeeper doesn't block first launch with "Apple could not verify
+      'glassy' is free of malware". If you'd rather see that warning and
+      decide for yourself, download the .dmg from the Releases page instead:
+        https://github.com/alliecatowo/glassy/releases
+    EOS
+  end
 end
