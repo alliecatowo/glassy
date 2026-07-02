@@ -346,6 +346,19 @@ jobs:
           # PkgInfo (optional but conventional).
           printf 'APPL????' > "$CONTENTS/PkgInfo"
 
+      # Rust's linker ad-hoc-signs the raw binary, but that signature only
+      # covers the executable itself — it doesn't know about Info.plist or
+      # Resources/ added above. Without re-signing the ASSEMBLED bundle,
+      # `spctl` reports "code has no resources but signature indicates they
+      # must be present" and Gatekeeper refuses to launch it as "damaged"
+      # (not just the milder "unidentified developer" prompt). This ad-hoc
+      # pass runs unconditionally (needs no certificate); the optional
+      # Developer ID signing step below layers on top of it when configured.
+      - name: Ad-hoc sign glassy.app (seal bundle resources)
+        run: |
+          codesign --force --deep --sign - dist/glassy.app
+          codesign --verify --deep --strict dist/glassy.app
+
       # create-dmg produces a drag-to-Applications installer image.
       # The volume name and window geometry follow macOS conventions.
       - name: Create .dmg installer
@@ -520,21 +533,36 @@ jobs:
           prerelease: ${{ contains(steps.meta.outputs.tag, '-') }}
 
   # -------------------------------------------------------------------------
-  # Homebrew formula bump (this repo IS its own tap — Formula/glassy.rb).
+  # Homebrew formula/cask bump (this repo IS its own tap — Formula/glassy.rb,
+  # Casks/glassy.rb).
   #
-  # After the release publishes, patch Formula/glassy.rb's CI sentinels with
-  # the real version + per-arch sha256s, then commit it straight back to the
+  # After the release publishes, render Formula/glassy.rb, Casks/glassy.rb,
+  # and packaging/homebrew/glassy.rb from their .tmpl siblings with the real
+  # version + sha256s, then commit the rendered files straight back to the
   # default branch with [skip ci]. That makes a plain `brew install glassy`
-  # (after `brew tap alliecatowo/glassy https://github.com/alliecatowo/glassy`)
-  # install the just-released version.
+  # / `brew install --cask glassy` (after `brew tap alliecatowo/glassy
+  # https://github.com/alliecatowo/glassy`) install the just-released version.
   #
-  # Formula/glassy.rb's stable path now downloads the prebuilt per-arch
-  # binaries that build-macos already uploads (glassy-aarch64-macos /
-  # glassy-x86_64-macos) instead of running `cargo install` — that used to
-  # mean a multi-minute local compile (lto=fat + codegen-units=1) on every
-  # `brew install`; a straight binary download is seconds. `--HEAD` installs
-  # still build from source since there's no prebuilt asset for an arbitrary
-  # main commit. packaging/homebrew/glassy.rb is intentionally left as a
+  # IMPORTANT: this renders from the .tmpl files every time — it does NOT
+  # sed-patch the previously-rendered Formula/glassy.rb etc. in place. The
+  # original version of this job did exactly that, sed-replacing literal
+  # GLASSY_* sentinel tokens directly in the committed file: it worked once,
+  # then silently stopped, because after the tokens are replaced with real
+  # values they no longer exist for the next release's sed to find. That's
+  # exactly how packaging/homebrew/glassy.rb ended up permanently stuck on
+  # v0.2.0-rc2 through three subsequent releases before anyone noticed
+  # (continue-on-error below swallowed the no-op). Rendering fresh from an
+  # untouched .tmpl on every run avoids that trap for good.
+  #
+  # Casks/glassy.rb installs glassy.app into /Applications AND symlinks the
+  # CLI binary embedded in the bundle onto PATH (see Casks/glassy.rb.tmpl) —
+  # the recommended macOS install path. Formula/glassy.rb's stable path
+  # downloads the same prebuilt per-arch binary instead of running
+  # `cargo install` — that used to mean a multi-minute local compile
+  # (lto=fat + codegen-units=1) on every `brew install`; a straight binary
+  # download is seconds. `--HEAD` installs still build from source since
+  # there's no prebuilt asset for an arbitrary main commit.
+  # packaging/homebrew/glassy.rb is intentionally left as a
   # build-from-source-only formula (for a future homebrew-core submission,
   # which requires building from source) and keeps using the source-tarball
   # sha computed below.
@@ -543,7 +571,7 @@ jobs:
   # workflow's built-in GITHUB_TOKEN (permissions: contents: write, set above).
   # -------------------------------------------------------------------------
   update-homebrew:
-    name: Update Homebrew formula
+    name: Update Homebrew formula + cask
     needs: [resolve-version, publish]
     if: always() && needs.publish.result == 'success'
     runs-on: ubuntu-latest
@@ -561,7 +589,7 @@ jobs:
           name: linux-x86_64
           path: artifacts/linux-x86_64
 
-      - name: Download macOS per-arch binaries for sha256
+      - name: Download macOS per-arch binaries + dmgs for sha256
         uses: actions/download-artifact@v4
         with:
           pattern: macos-*
@@ -573,56 +601,71 @@ jobs:
         run: |
           VERSION="${{ needs.resolve-version.outputs.version }}"
           SRC_FILE="artifacts/linux-x86_64/${{ env.BIN }}-${VERSION}-src.tar.gz"
-          AARCH64_FILE="artifacts/${{ env.BIN }}-aarch64-macos"
-          X86_64_FILE="artifacts/${{ env.BIN }}-x86_64-macos"
-          echo "sha256=$(sha256sum "$SRC_FILE" | awk '{print $1}')" >> "$GITHUB_OUTPUT"
-          echo "sha256_aarch64=$(sha256sum "$AARCH64_FILE" | awk '{print $1}')" >> "$GITHUB_OUTPUT"
-          echo "sha256_x86_64=$(sha256sum "$X86_64_FILE" | awk '{print $1}')" >> "$GITHUB_OUTPUT"
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          AARCH64_BIN="artifacts/${{ env.BIN }}-aarch64-macos"
+          X86_64_BIN="artifacts/${{ env.BIN }}-x86_64-macos"
+          AARCH64_DMG="artifacts/${{ env.BIN }}-${VERSION}-macos-aarch64.dmg"
+          X86_64_DMG="artifacts/${{ env.BIN }}-${VERSION}-macos-x86_64.dmg"
+          {
+            echo "version=${VERSION}"
+            echo "sha256=$(sha256sum "$SRC_FILE" | awk '{print $1}')"
+            echo "sha256_aarch64=$(sha256sum "$AARCH64_BIN" | awk '{print $1}')"
+            echo "sha256_x86_64=$(sha256sum "$X86_64_BIN" | awk '{print $1}')"
+            echo "sha256_dmg_aarch64=$(sha256sum "$AARCH64_DMG" | awk '{print $1}')"
+            echo "sha256_dmg_x86_64=$(sha256sum "$X86_64_DMG" | awk '{print $1}')"
+          } >> "$GITHUB_OUTPUT"
 
-      - name: Patch Formula/glassy.rb with real version + sha256
+      - name: Render Formula/glassy.rb, Casks/glassy.rb, packaging/homebrew/glassy.rb from their .tmpl
         run: |
           VERSION="${{ steps.sha.outputs.version }}"
           SHA="${{ steps.sha.outputs.sha256 }}"
           SHA_AARCH64="${{ steps.sha.outputs.sha256_aarch64 }}"
           SHA_X86_64="${{ steps.sha.outputs.sha256_x86_64 }}"
+          SHA_DMG_AARCH64="${{ steps.sha.outputs.sha256_dmg_aarch64 }}"
+          SHA_DMG_X86_64="${{ steps.sha.outputs.sha256_dmg_x86_64 }}"
           # Order matters: replace the longer GLASSY_VERSION_PLAIN sentinel
           # BEFORE GLASSY_VERSION (which is a prefix of it) so we don't corrupt
           # the longer token. GLASSY_VERSION becomes the tag (v-prefixed).
-          # GLASSY_SHA256 is the source-tarball sha — it's the top-level (Linux)
-          # sentinel in Formula/glassy.rb AND the only sentinel in
-          # packaging/homebrew/glassy.rb. GLASSY_SHA256_AARCH64/_X86_64 are the
-          # prebuilt-binary sentinels, only present in Formula/glassy.rb's
-          # macOS-only stanza — sed no-ops on tokens absent from a given file.
-          for f in Formula/glassy.rb packaging/homebrew/glassy.rb; do
-            sed -i \
+          # Each sed runs against ALL three templates; a sentinel absent from
+          # a given template is simply a no-op there (e.g. only Casks/glassy.rb.tmpl
+          # has GLASSY_SHA256_DMG_*, only Formula/glassy.rb.tmpl has
+          # GLASSY_SHA256_AARCH64/_X86_64, and GLASSY_SHA256 — the source
+          # tarball hash — appears in both Formula/glassy.rb.tmpl's top-level
+          # Linux stanza and packaging/homebrew/glassy.rb.tmpl).
+          render() {
+            local tmpl="$1" out="$2"
+            sed \
               -e "s|GLASSY_VERSION_PLAIN|${VERSION}|g" \
               -e "s|GLASSY_VERSION|v${VERSION}|g" \
+              -e "s|GLASSY_SHA256_DMG_AARCH64|${SHA_DMG_AARCH64}|g" \
+              -e "s|GLASSY_SHA256_DMG_X86_64|${SHA_DMG_X86_64}|g" \
               -e "s|GLASSY_SHA256_AARCH64|${SHA_AARCH64}|g" \
               -e "s|GLASSY_SHA256_X86_64|${SHA_X86_64}|g" \
               -e "s|GLASSY_SHA256|${SHA}|g" \
-              "$f"
-          done
+              "$tmpl" > "$out"
+          }
+          render Formula/glassy.rb.tmpl Formula/glassy.rb
+          render Casks/glassy.rb.tmpl Casks/glassy.rb
+          render packaging/homebrew/glassy.rb.tmpl packaging/homebrew/glassy.rb
 
-      - name: Show patched formula (debug)
-        run: cat Formula/glassy.rb
+      - name: Show rendered formula + cask (debug)
+        run: cat Formula/glassy.rb Casks/glassy.rb
 
-      - name: Commit bumped formula back to the default branch
+      - name: Commit bumped formula + cask back to the default branch
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          # If the formula is unchanged (re-run on an already-bumped version),
-          # this is a no-op and we exit cleanly.
-          if git diff --quiet -- Formula/glassy.rb packaging/homebrew/glassy.rb; then
-            echo "Formula already up to date; nothing to commit."
+          # If nothing changed (re-run on an already-bumped version), this is
+          # a no-op and we exit cleanly.
+          if git diff --quiet -- Formula/glassy.rb Casks/glassy.rb packaging/homebrew/glassy.rb; then
+            echo "Formula/cask already up to date; nothing to commit."
             exit 0
           fi
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add Formula/glassy.rb packaging/homebrew/glassy.rb
+          git add Formula/glassy.rb Casks/glassy.rb packaging/homebrew/glassy.rb
           # [skip ci] keeps this commit from re-triggering the main-push release.
-          git commit -m "chore(release): bump Homebrew formula to ${{ steps.sha.outputs.version }} [skip ci]"
+          git commit -m "chore(release): bump Homebrew formula + cask to ${{ steps.sha.outputs.version }} [skip ci]"
           git push origin "HEAD:${{ github.event.repository.default_branch }}"
 
   # -------------------------------------------------------------------------

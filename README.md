@@ -185,26 +185,36 @@ yay -S glassy
 yay -S glassy-bin
 ```
 
-**macOS — .dmg installer** *(macOS 11+; separate Apple Silicon / Intel builds)*
-
-Download `glassy-<version>-macos-aarch64.dmg` (Apple Silicon) or `glassy-<version>-macos-x86_64.dmg` (Intel) from the [Releases page](https://github.com/alliecatowo/glassy/releases), open it, drag **glassy.app** to Applications. macOS may show a security warning on first launch — right-click the app and choose Open to bypass it (the binary is not yet notarized).
-
-> macOS is a fully supported, CI-built target: every release ships per-arch `.app`/`.dmg` pairs (no fat universal binary — that would double the download for no benefit, since each user only runs one arch). Notarization is the only remaining polish item.
-
-**macOS / Linux — Homebrew** — this repo is its own tap (no separate `homebrew-*` repo needed):
+**macOS — Homebrew Cask (recommended)** — this repo is its own tap (no separate `homebrew-*` repo needed):
 
 ```sh
 brew tap alliecatowo/glassy https://github.com/alliecatowo/glassy
-brew install glassy          # the latest tagged release (prebuilt binary, no local build)
+brew install --cask glassy
+```
+
+This installs **glassy.app** into `/Applications` and symlinks the CLI binary embedded in the bundle onto `PATH`, so one install gets you both the GUI app (Spotlight/Launchpad/Dock) and the `glassy` command in a terminal — no separate Formula install needed.
+
+**macOS — .dmg installer** *(manual alternative; separate Apple Silicon / Intel builds)*
+
+Download `glassy-<version>-macos-aarch64.dmg` (Apple Silicon) or `glassy-<version>-macos-x86_64.dmg` (Intel) from the [Releases page](https://github.com/alliecatowo/glassy/releases), open it, drag **glassy.app** to Applications. The app is ad-hoc signed but not notarized, so macOS will refuse to open it as "unverified" on first launch — go to System Settings → Privacy & Security and click **Open Anyway** (older macOS: right-click the app and choose Open instead).
+
+> macOS is a fully supported, CI-built target: every release ships per-arch `.app`/`.dmg` pairs (no fat universal binary — that would double the download for no benefit, since each user only runs one arch). Notarization is the only remaining polish item.
+
+**macOS / Linux — Homebrew Formula** *(CLI-only, no GUI app)*
+
+```sh
+brew tap alliecatowo/glassy https://github.com/alliecatowo/glassy
+brew install glassy          # the latest tagged release (prebuilt binary on macOS, no local build)
 # or:
 brew install --HEAD glassy   # bleeding edge: build from latest main (requires Rust)
 ```
 
 > `brew install glassy` uses `Formula/glassy.rb`, which on macOS downloads the
-> prebuilt per-arch binary the release workflow already ships (no local
-> compile) and on Linux builds from source; the release workflow fills in the
-> version/sha256 sentinels and commits back on every tagged release. `--HEAD`
-> ignores the version and builds `main`.
+> same prebuilt per-arch binary as the Cask (no local compile, but nothing
+> goes into `/Applications`) and on Linux builds from source. Both
+> `Formula/glassy.rb` and `Casks/glassy.rb` are rendered from their `.tmpl`
+> siblings by the release workflow on every tagged release. `--HEAD` ignores
+> the version and builds `main`.
 
 **Flatpak** *(not yet on Flathub; local build from the manifest)*
 
