@@ -7,6 +7,31 @@
 
 use super::*;
 
+/// Decode the embedded flat dot icon (256px PNG) into a winit window icon for
+/// the taskbar / switcher. Returns `None` on any decode error (the window just
+/// falls back to the platform default — never fatal). Non-macOS only.
+#[cfg(not(target_os = "macos"))]
+fn load_window_icon() -> Option<winit::window::Icon> {
+    const ICON_PNG: &[u8] = include_bytes!("../../assets/icons/glassy-256.png");
+    let decoder = png::Decoder::new(std::io::Cursor::new(ICON_PNG));
+    let mut reader = decoder.read_info().ok()?;
+    let mut buf = vec![0u8; reader.output_buffer_size()];
+    let info = reader.next_frame(&mut buf).ok()?;
+    // Our asset is 8-bit; normalise RGB→RGBA so winit always gets 4 channels.
+    let rgba = match info.color_type {
+        png::ColorType::Rgba => {
+            buf.truncate(info.buffer_size());
+            buf
+        }
+        png::ColorType::Rgb => buf[..info.buffer_size()]
+            .chunks_exact(3)
+            .flat_map(|p| [p[0], p[1], p[2], 255])
+            .collect(),
+        _ => return None,
+    };
+    winit::window::Icon::from_rgba(rgba, info.width, info.height).ok()
+}
+
 impl ApplicationHandler<UserEvent> for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
@@ -22,6 +47,27 @@ impl ApplicationHandler<UserEvent> for App {
             // this is a harmless no-op and the window stays opaque.
             .with_transparent(true)
             .with_visible(false); // shown after the first frame to avoid a flash
+
+        // Non-macOS: hand winit a window icon so the X11 taskbar / Alt-Tab
+        // switcher / any WM that reads _NET_WM_ICON shows the flat dot icon (the
+        // same art the hicolor PNGs + .desktop install use), instead of a
+        // stale/blue or generic fallback. macOS ignores window icons — it uses
+        // the bundled .icns (set separately via the dock-icon path), so skip it
+        // there. Wayland ignores it too but the call is a harmless no-op.
+        #[cfg(not(target_os = "macos"))]
+        let attrs = attrs.with_window_icon(load_window_icon());
+
+        // Wayland has no per-window icon in the core protocol — GNOME/KDE resolve
+        // the dock + switcher icon by matching the surface's app_id against an
+        // installed .desktop file. Pin it to "glassy" so it matches
+        // glassy.desktop (Icon=glassy → the hicolor PNGs) instead of winit's
+        // derived default, which is what made the dock icon differ from the
+        // Applications-grid icon.
+        #[cfg(all(unix, not(target_os = "macos")))]
+        let attrs = {
+            use winit::platform::wayland::WindowAttributesExtWayland;
+            WindowAttributesExtWayland::with_name(attrs, "glassy", "glassy")
+        };
 
         // macOS: drop the separate OS title bar and let glassy's own content fill
         // the whole window (ghostty-style). The traffic-light buttons float over
@@ -75,12 +121,19 @@ impl ApplicationHandler<UserEvent> for App {
         let font_px = self.config.font_size * scale;
         self.base_font_px = Some(font_px);
 
-        let mut renderer = match Renderer::new(
+        let mut renderer = match Renderer::new_with_fonts(
             window.clone(),
-            self.config.font_family.clone(),
-            font_px,
+            crate::renderer::RendererFontConfig {
+                font_family: self.config.font_family.clone(),
+                font_px,
+                font_features: self.config.font_features.clone(),
+                font_bold: self.config.font_bold.clone(),
+                font_italic: self.config.font_italic.clone(),
+                font_bold_italic: self.config.font_bold_italic.clone(),
+                font_symbol_map: self.config.font_symbol_map.clone(),
+                font_variations: self.config.font_variations.clone(),
+            },
             self.config.opacity,
-            self.config.font_features.clone(),
         ) {
             Ok(r) => r,
             Err(e) => {
@@ -124,9 +177,26 @@ impl ApplicationHandler<UserEvent> for App {
         // capture verification regardless of the config.
         let cursor_trail =
             self.config.cursor_trail || std::env::var_os("GLASSY_CURSOR_TRAIL").is_some();
-        let crt_effect = self.config.crt_effect || std::env::var_os("GLASSY_CRT").is_some();
         renderer.set_cursor_trail(cursor_trail);
-        renderer.set_crt(crt_effect);
+
+        // Window effect: GLASSY_EFFECT=<mode> overrides the config (headless capture
+        // hook). The legacy GLASSY_CRT=1 still forces the CRT look. Otherwise the
+        // resolved config `window_effect` (which already folds in `crt_effect`).
+        let window_effect = if let Some(s) = std::env::var_os("GLASSY_EFFECT") {
+            crate::renderer::WindowEffect::parse(&s.to_string_lossy())
+        } else if std::env::var_os("GLASSY_CRT").is_some() {
+            crate::renderer::WindowEffect::Crt
+        } else {
+            self.config.window_effect
+        };
+        self.config.window_effect = window_effect;
+        renderer.set_window_effect_resolved(window_effect, self.config.custom_effect);
+
+        // Power Mode (opt-in typing effect, OFF by default). GLASSY_POWER=1 forces
+        // it on for headless capture verification regardless of the config.
+        if std::env::var_os("GLASSY_POWER").is_some() {
+            self.set_power_mode(true);
+        }
 
         let size = window.inner_size();
         renderer.resize(size.width, size.height);
@@ -201,9 +271,12 @@ impl ApplicationHandler<UserEvent> for App {
 
         // Headless input/resize harness (used with GLASSY_CAPTURE for autonomous
         // verification of the custom PTY loop's write + resize paths):
-        //   GLASSY_INPUT  - bytes to write through the real input channel; `\n`
-        //                   and `\t` escapes are honored. Exercises the loop's
-        //                   `write_all` on the blocking master fd round-trip.
+        //   GLASSY_INPUT  - bytes to write through the real input channel; `\n`,
+        //                   `\t`, `\e`/`\x1b` (ESC) escapes are honored, so a
+        //                   capture can drive raw VT sequences (e.g. SGR 53
+        //                   overline, OSC 1337 inline images, DECSET 1016 SGR-Pixel
+        //                   mouse) end-to-end. Exercises the loop's `write_all` on
+        //                   the blocking master fd round-trip.
         //   GLASSY_RESIZE - "COLSxROWS" to drive a grid resize (LoopMsg::Resize
         //                   -> on_resize) before the capture deadline.
         if let Some(pty) = &self.pty {
@@ -218,7 +291,7 @@ impl ApplicationHandler<UserEvent> for App {
                 self.force_full_redraw = true;
             }
             if let Ok(input) = std::env::var("GLASSY_INPUT") {
-                let bytes = input.replace("\\n", "\n").replace("\\t", "\t").into_bytes();
+                let bytes = super::headless_input::decode_input_escapes(&input);
                 pty.write(bytes);
             }
         }
@@ -248,7 +321,26 @@ impl ApplicationHandler<UserEvent> for App {
             self.force_full_redraw = true;
         }
         if std::env::var_os("GLASSY_SETTINGS").is_some() {
-            self.settings_open = true;
+            // Use the real open path so the sectioned window's custom-theme palette
+            // and profile list are seeded for capture. GLASSY_SETTINGS_SECTION picks
+            // the starting sidebar section (0=General .. 5=Advanced, or a name).
+            self.open_settings();
+            if let Ok(sec) = std::env::var("GLASSY_SETTINGS_SECTION") {
+                let idx = sec.parse::<usize>().ok().unwrap_or_else(|| {
+                    crate::gui::SettingsSection::ALL
+                        .iter()
+                        .position(|s| s.label().eq_ignore_ascii_case(sec.trim()))
+                        .unwrap_or(0)
+                });
+                self.settings_set_section(idx);
+            }
+            // Headless: pre-select a custom-theme color so the editor card is
+            // captured. GLASSY_SETTINGS_CUSTOM=<entry index 0..20>.
+            if let Ok(idx) = std::env::var("GLASSY_SETTINGS_CUSTOM")
+                && let Ok(i) = idx.parse::<usize>()
+            {
+                self.select_custom_color(i);
+            }
             self.force_full_redraw = true;
         }
         // Headless: open settings with the cursor-cfg fields visible so the
@@ -329,6 +421,14 @@ impl ApplicationHandler<UserEvent> for App {
                 self.new_tab(event_loop);
             }
         }
+        // Headless: arm the modifier-HOLD numbered tab overlay so the number
+        // badges can be captured without holding ⌘/Ctrl. Seeds the hold start far
+        // enough in the past to be already past the dwell.
+        if std::env::var_os("GLASSY_TAB_NUMBERS").is_some() {
+            self.mod_hold_since =
+                Some(Instant::now() - super::modhold::MOD_HOLD_DWELL - Duration::from_millis(1));
+            self.force_full_redraw = true;
+        }
         // Headless: inject a fake foreground process name on every open tab so the
         // process-aware tab label + window title can be captured without launching
         // a real child. Value = the comm to show (e.g. "vim"); empty falls back to
@@ -358,6 +458,27 @@ impl ApplicationHandler<UserEvent> for App {
             self.push_toast(text);
             self.force_full_redraw = true;
         }
+        // Headless: apply one or more remote-control requests at startup so the
+        // `glassy @ <cmd>` surface can be exercised without a second process +
+        // socket round-trip. GLASSY_REMOTE holds `;`-separated request lines
+        // (e.g. "open-tab;split horizontal;send-text echo hi\\n;ls"); each is
+        // parsed + applied via the same `apply_control` path the IPC listener
+        // uses, and the reply is surfaced as a toast so it is capturable.
+        if let Ok(spec) = std::env::var("GLASSY_REMOTE") {
+            for line in spec.split(';').map(str::trim).filter(|l| !l.is_empty()) {
+                match crate::ipc::control::parse_request(line) {
+                    Ok(command) => {
+                        let (req, rx) = crate::ipc::control::ControlRequest::new(command);
+                        self.apply_control(&req, event_loop);
+                        if let Ok(reply) = rx.try_recv() {
+                            self.push_toast(reply.to_wire());
+                        }
+                    }
+                    Err(e) => self.push_toast(format!("remote parse error: {e}")),
+                }
+            }
+            self.force_full_redraw = true;
+        }
 
         // Headless: open hints mode at startup so the labelled-overlay can be
         // captured (GLASSY_HINTS=1). Scans the visible grid for URLs/paths/SHAs/IPs
@@ -366,6 +487,11 @@ impl ApplicationHandler<UserEvent> for App {
             self.open_hints(event_loop);
             self.force_full_redraw = true;
         }
+
+        // Headless: enter keyboard copy-mode ("vi mode") at startup with a visual
+        // selection so the keyboard cursor + range can be captured (GLASSY_VIMODE
+        // =1 → charwise; =line / =block pick the other visual kinds).
+        self.maybe_headless_vimode(event_loop);
 
         // Headless: enable the scrollback minimap strip and seed enough scrollback
         // that the downsampled overview has content to draw. GLASSY_MINIMAP=1
@@ -400,6 +526,16 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 _ => {}
             }
+        }
+        // Headless: split the active tab (vertical) with dim-unfocused forced on, so
+        // the dimmed-content path (subtle dark overlay over the non-focused tile)
+        // can be captured. Splits first if needed so there is something to dim.
+        if std::env::var_os("GLASSY_DIM").is_some() {
+            self.config.dim_unfocused = true;
+            if !self.is_split() {
+                self.split_pane(pane::Dir::Vertical, event_loop);
+            }
+            self.force_full_redraw = true;
         }
         // Headless: split the active tab and zoom the focused pane at startup so
         // the pane-zoom path (focused pane maximized, others hidden, ZOOM badge)
@@ -451,6 +587,17 @@ impl ApplicationHandler<UserEvent> for App {
         // a real shell-integration script. GLASSY_CMDBLOCK=1 seeds a few blocks.
         if std::env::var_os("GLASSY_CMDBLOCK").is_some() {
             self.inject_demo_command_blocks();
+            self.force_full_redraw = true;
+        }
+
+        // Headless: inject a synthetic kitty inline image into the active pane's
+        // image store so the kitty-graphics renderer path can be captured without a
+        // real image-producing program. GLASSY_IMGDEMO=1 synthesises a small RGBA
+        // colour swatch (8×8, rainbow gradient) and places it at grid row 2, col 2.
+        // This exercises the full render path (ImageStore -> renderer draw quads)
+        // without touching the PTY byte stream. Hook name: GLASSY_IMGDEMO.
+        if std::env::var_os("GLASSY_IMGDEMO").is_some() {
+            self.inject_demo_inline_image();
             self.force_full_redraw = true;
         }
 
@@ -553,6 +700,10 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::ModifiersChanged(mods) => {
                 self.mods = mods.state();
+                // Arm/disarm the modifier-hold numbered tab overlay (⌘-hold on
+                // macOS / Ctrl-hold elsewhere). Idle-safe: only schedules a single
+                // dwell wake; cleared on release or any non-modifier key.
+                self.update_mod_hold(event_loop);
             }
             WindowEvent::KeyboardInput {
                 event,
@@ -597,6 +748,25 @@ impl ApplicationHandler<UserEvent> for App {
                 self.quake_refresh_geometry(event_loop);
             }
             WindowEvent::RedrawRequested => self.render(),
+
+            // Window moved to a different position (e.g. dragged to another
+            // monitor). In quake mode the drop anchor is tied to the current
+            // monitor's top-left; re-derive + reposition so a window dragged
+            // across monitors doesn't slide off the wrong monitor edge.
+            // In normal mode this is a no-op (quake is None).
+            WindowEvent::Moved(_) => {
+                self.quake_refresh_geometry(event_loop);
+            }
+
+            // The compositor reveals the window after it was fully hidden.
+            // Force a full repaint so the restored content is fresh. When the
+            // window is hidden (occluded=true) we do nothing — the 0%-idle
+            // `Wait` path already suppresses GPU submits.
+            WindowEvent::Occluded(false) => {
+                self.force_full_redraw = true;
+                self.mark_dirty(event_loop);
+            }
+
             _ => {}
         }
     }
@@ -671,6 +841,14 @@ impl ApplicationHandler<UserEvent> for App {
                 // before the capture render) so the composition overlay is present
                 // in the captured frame, anchored at the now-settled cursor.
                 self.reassert_headless_preedit();
+                // Headless tab-number overlay: winit's initial empty
+                // ModifiersChanged clears the GLASSY_TAB_NUMBERS-armed hold, so
+                // re-arm it (past the dwell) right before the capture render.
+                if std::env::var_os("GLASSY_TAB_NUMBERS").is_some() {
+                    self.mod_hold_since = Some(
+                        Instant::now() - super::modhold::MOD_HOLD_DWELL - Duration::from_millis(1),
+                    );
+                }
                 let split = self.is_split();
                 self.render();
                 if let (Some(renderer), Some(path)) =
@@ -732,6 +910,14 @@ impl ApplicationHandler<UserEvent> for App {
         } else {
             false
         };
+
+        // Power Mode (opt-in): while particles are alive or the screen shake is
+        // still settling, advance the simulation and keep the frame dirty so the
+        // burst repaints. Like the GUI anims + quake slide it runs the loop on
+        // `Poll`; the instant the last particle dies and the shake reaches zero
+        // `step_power` returns false and we fall back to `Wait` (0% idle). Fully
+        // dormant when the feature is off or idle (the resting frame is untouched).
+        let power_active = self.step_power(now);
 
         // Cursor blink: only runs while focused and the child asked for a blinking
         // cursor. When that holds, advance the phase at each `blink_at` deadline and
@@ -841,17 +1027,29 @@ impl ApplicationHandler<UserEvent> for App {
             self.dirty = true;
         }
 
+        // Modifier-hold numbered tab overlay: while armed-but-not-yet-shown we
+        // wake at the dwell deadline to paint the badges once. `mod_hold_deadline`
+        // returns None the moment it becomes visible, so this is a single finite
+        // wake; idle returns to `Wait`.
+        let mod_hold_deadline = self.mod_hold_deadline();
+        if self.mod_hold_since.is_some() && mod_hold_deadline.is_none() {
+            // Just crossed the dwell: the overlay is now visible — repaint it.
+            self.force_full_redraw = true;
+            self.dirty = true;
+        }
+
         if !self.dirty {
             // Idle: stay parked on `Wait` (0% CPU) unless a blink flip, a flash
             // boundary, or a spinner frame is pending — then wake at the earliest.
-            // A live GUI animation or quake slide overrides everything with `Poll`
-            // until it settles.
-            if gui_active || quake_active {
+            // A live GUI animation, quake slide, or Power-Mode burst overrides
+            // everything with `Poll` until it settles.
+            if gui_active || quake_active || power_active {
                 event_loop.set_control_flow(ControlFlow::Poll);
             } else {
                 let wake = [
                     self.next_wake(blink_active, flash_active, spin_active),
                     toast_deadline,
+                    mod_hold_deadline,
                 ]
                 .into_iter()
                 .flatten()
@@ -884,9 +1082,9 @@ impl ApplicationHandler<UserEvent> for App {
             // RedrawRequested will clear `dirty`. Keep a wakeup scheduled for the
             // next blink flip, flash boundary, or spinner frame; else wait for an
             // event. A live GUI animation, an in-flight cursor trail, OR a quake
-            // slide keeps us on `Poll` until it settles (all hard-stop to `Wait`
-            // once done).
-            if gui_active || trail_active || quake_active {
+            // slide (or a Power-Mode burst) keeps us on `Poll` until it settles
+            // (all hard-stop to `Wait` once done).
+            if gui_active || trail_active || quake_active || power_active {
                 event_loop.set_control_flow(ControlFlow::Poll);
             } else {
                 match self.next_wake(blink_active, flash_active, spin_active) {

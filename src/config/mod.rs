@@ -9,7 +9,10 @@
 //! font_family = FiraCode Nerd Font Mono
 //! font_size   = 14
 //! theme       = tokyo-night            # or: catppuccin-mocha
-//! opacity     = 0.92                   # 0.0 (clear) .. 1.0 (opaque)
+//!                                       # split form: theme = light:one-light, dark:tokyo-night
+//!                                       # (turns on follow_system + pins per-scheme themes)
+//! opacity     = 0.92                   # 0.0 (clear) .. 1.0 (opaque); perceptual curve
+//! window_effect = none                 # none|frosted|acrylic|crt|scanlines|grain|vignette|bloom
 //! padding     = 6                      # logical px grid inset (all sides)
 //! padding_top = 8                      # per-side overrides (optional, override padding)
 //! padding_bottom = 6
@@ -25,6 +28,7 @@
 //! theme_dark  = tokyo-night            # theme used in system Dark mode
 //! status_bar  = false                  # show status bar at the bottom (default off)
 //! pane_headers= false                  # show per-pane title bars + accent rail in splits (default off)
+//! dim_unfocused = true                 # dim unfocused pane content in a split (default on)
 //! ligatures   = false                  # enable OpenType ligature shaping across cells (default off)
 //! font_features = ss01, calt=0         # OpenType feature tags to force on/off (comma or space separated)
 //! cwd         = /home/me/projects      # working directory for the first tab's shell
@@ -39,6 +43,10 @@
 //! quake       = false                  # quake/dropdown mode: borderless slide-down window
 //! quake_height = 0.5                   # fraction of the monitor height (0.1..1.0)
 //! quake_animation_ms = 180             # slide duration in ms (0 = instant)
+//! copy_on_select = false               # copy a selection to the clipboard as soon as it is made
+//! copy_html   = false                  # also place a rich-text (HTML) flavor on the clipboard on copy
+//! power_mode  = false                  # fun typing effect: cursor particle bursts + streak shake
+//! power_mode_intensity = 0.6           # power-mode strength: 0.0 (subtle) .. 1.0 (max)
 //! ```
 //!
 //! Quake / dropdown mode (see `docs/quake-mode.md`): with `quake = true` glassy
@@ -74,10 +82,21 @@
 //! `scroll_up`, `scroll_down`, `scroll_top`, `scroll_bottom`,
 //! `jump_prev_prompt`, `jump_next_prompt` (OSC 133 prompt navigation),
 //! `move_tab_left`, `move_tab_right`, `go_to_tab_1` .. `go_to_tab_9`,
-//! `broadcast_input`, `hints`, `toggle_fold`, `toggle_minimap`, `quake_toggle`.
+//! `broadcast_input`, `hints`, `toggle_fold`, `toggle_minimap`, `quake_toggle`,
+//! `toggle_zoom`, `focus_pane_left`, `focus_pane_right`, `focus_pane_up`,
+//! `focus_pane_down` (move focus between tiled split panes), `rotate_panes`,
+//! `equalize_panes`, `vi_mode` (keyboard copy-mode; default `Ctrl+Shift+Space`).
 //!
 //! Default chords are platform-aware: macOS uses ⌘-based chords (⌘C/⌘V/⌘T/⌘W,
-//! ⌘1-9, ⌘, for settings, ⌘F for find); Linux/Windows use Ctrl / Ctrl+Shift.
+//! ⌘1-9, ⌘, for settings, ⌘F for find, ⌘arrow for pane focus); Linux/Windows use
+//! Ctrl / Ctrl+Shift (Ctrl+arrow for pane focus). Pane-focus chords fall through
+//! to the child on a single-pane tab. Holding the primary modifier (⌘ / Ctrl)
+//! alone briefly overlays each tab chip with its jump number.
+//!
+//! Multi-key chord *sequences* ("leader" binds) are written with a space between
+//! chords, e.g. `ctrl+a n = next_tab` (press Ctrl+A, then N). The first chord is
+//! the leader/prefix; it must not itself be a single-key bind. Sequences live in
+//! the same `[keybindings]` section.
 //!
 //! A `[keybindings]` entry overrides the built-in default for that action; to
 //! disable a built-in bind entirely, set the action to `none`.
@@ -110,7 +129,7 @@ pub mod theme_import;
 
 use anyhow::{Context, Result};
 
-pub use keymap::{Chord, KeyAction, KeyMap};
+pub use keymap::{Chord, KeyAction, KeyMap, SequenceMap};
 pub use parse::{path, save};
 pub use platform::Platform;
 
@@ -156,6 +175,38 @@ impl Settings {
         // 5. Convert accumulated raw config into final settings.
         raw.into_settings().map(Some)
     }
+
+    /// Re-resolve settings from the on-disk config file with the named profile
+    /// activated, for the LIVE runtime profile switch (palette / keybind). Unlike
+    /// [`Settings::resolve`] this skips CLI parsing (there is none at runtime) and
+    /// ignores the originally-passed `--profile`. Returns an error if the file is
+    /// missing or the profile is unknown.
+    pub fn resolve_with_profile(profile: &str) -> Result<Settings> {
+        let mut raw = parse::RawConfig::default();
+        if let Some(path) = parse::path()
+            && let Ok(text) = std::fs::read_to_string(&path)
+        {
+            parse::parse_config_file(&text, &mut raw)
+                .with_context(|| format!("parsing {}", path.display()))?;
+        }
+        raw.activate_profile(profile)?;
+        raw.into_settings()
+    }
+}
+
+/// Read the names of every `[profile.NAME]` section defined in the on-disk config
+/// file, in first-seen order, for the runtime profile switcher (palette +
+/// settings). Returns an empty list when no config file exists or it defines no
+/// profiles. Errors in parsing are swallowed (returns what was collected) so the
+/// switcher never blocks on a malformed file.
+pub fn profile_names() -> Vec<String> {
+    let Some(path) = parse::path() else {
+        return Vec::new();
+    };
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    parse::profile_names_from_text(&text)
 }
 
 #[cfg(test)]
@@ -270,6 +321,40 @@ opacity = 0.80
     fn activate_unknown_profile_errors() {
         let mut raw = RawConfig::default();
         assert!(raw.activate_profile("nope").is_err());
+    }
+
+    #[test]
+    fn split_theme_sets_follow_system_and_per_scheme() {
+        let mut raw = RawConfig::default();
+        parse_config_file("theme = light:one-light, dark:tokyo-night\n", &mut raw).unwrap();
+        assert_eq!(raw.follow_system, Some(true));
+        assert_eq!(raw.theme_light.as_deref(), Some("one-light"));
+        assert_eq!(raw.theme_dark.as_deref(), Some("tokyo-night"));
+        let s = raw.into_settings().unwrap();
+        assert!(s.config.follow_system);
+        assert_eq!(s.config.theme_light, "one-light");
+        assert_eq!(s.config.theme_dark, "tokyo-night");
+    }
+
+    #[test]
+    fn split_theme_order_independent_and_partial() {
+        let mut raw = RawConfig::default();
+        parse_config_file("theme = dark:dracula\n", &mut raw).unwrap();
+        assert_eq!(raw.follow_system, Some(true));
+        assert_eq!(raw.theme_dark.as_deref(), Some("dracula"));
+        // Bare names still use the single-theme path (no follow_system flip).
+        let mut bare = RawConfig::default();
+        parse_config_file("theme = dracula\n", &mut bare).unwrap();
+        assert_eq!(bare.follow_system, None);
+        assert_eq!(bare.theme.as_deref(), Some("dracula"));
+    }
+
+    #[test]
+    fn profile_names_from_text_preserves_order() {
+        use super::parse::profile_names_from_text;
+        let text = "[profile.work]\nfont_size=16\n[profile.home]\nfont_size=12\n[profile.work]\ntheme=nord\n";
+        let names = profile_names_from_text(text);
+        assert_eq!(names, vec!["work".to_string(), "home".to_string()]);
     }
 
     #[test]
@@ -409,6 +494,19 @@ opacity = 0.80
         parse_config_file("pane_headers = on\n", &mut raw_on).unwrap();
         let settings_on = raw_on.into_settings().unwrap();
         assert!(settings_on.config.pane_headers);
+    }
+
+    #[test]
+    fn dim_unfocused_parses_and_defaults_on() {
+        // Default (unset) is ON — the focused pane should stand out by default.
+        let settings = RawConfig::default().into_settings().unwrap();
+        assert!(settings.config.dim_unfocused);
+        // Explicitly disabling works.
+        let mut raw_off = RawConfig::default();
+        parse_config_file("dim_unfocused = false\n", &mut raw_off).unwrap();
+        assert_eq!(raw_off.dim_unfocused, Some(false));
+        let settings_off = raw_off.into_settings().unwrap();
+        assert!(!settings_off.config.dim_unfocused);
     }
 
     #[test]
@@ -648,6 +746,46 @@ f11 = none\n\
         // ctrl+shift+n added.
         let new_chord = parse_chord("ctrl+shift+n").unwrap();
         assert_eq!(s.config.keymap.get(&new_chord), Some(&KeyAction::NewTab));
+    }
+
+    #[test]
+    fn keybindings_section_splits_single_and_sequence_binds() {
+        // A `[keybindings]` section with a normal chord AND a space-separated
+        // leader sequence: the single bind lands in the flat keymap and the
+        // sequence lands in `key_sequences` (and NOT in the flat keymap).
+        let text = "\
+[keybindings]\n\
+ctrl+shift+n = new_tab\n\
+ctrl+a n = next_tab\n\
+ctrl+a g g = scroll_top\n\
+";
+        let mut raw = RawConfig::default();
+        parse_config_file(text, &mut raw).unwrap();
+        let s = raw.into_settings().unwrap();
+        // Single bind in the flat map.
+        let n = parse_chord("ctrl+shift+n").unwrap();
+        assert_eq!(s.config.keymap.get(&n), Some(&KeyAction::NewTab));
+        // The two sequences are in key_sequences.
+        let seq_n = vec![parse_chord("ctrl+a").unwrap(), parse_chord("n").unwrap()];
+        assert_eq!(
+            s.config.key_sequences.get(&seq_n),
+            Some(&KeyAction::NextTab)
+        );
+        let seq_gg = vec![
+            parse_chord("ctrl+a").unwrap(),
+            parse_chord("g").unwrap(),
+            parse_chord("g").unwrap(),
+        ];
+        assert_eq!(
+            s.config.key_sequences.get(&seq_gg),
+            Some(&KeyAction::ScrollTop)
+        );
+        // The leader chord itself is NOT a flat bind.
+        assert!(
+            !s.config
+                .keymap
+                .contains_key(&parse_chord("ctrl+a").unwrap())
+        );
     }
 
     #[test]
@@ -1036,5 +1174,294 @@ f11 = none\n\
 
         assert_eq!(raw_dev.font_size, Some(14.0));
         assert_eq!(raw_present.font_size, Some(18.0));
+    }
+
+    // -----------------------------------------------------------------------
+    // Status-bar segments config tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn status_bar_segments_none_by_default() {
+        let settings = RawConfig::default().into_settings().unwrap();
+        assert!(settings.config.status_bar_segments.is_none());
+    }
+
+    #[test]
+    fn status_bar_segments_parse_known_tokens() {
+        use crate::app::StatusBarSegment;
+        let mut raw = RawConfig::default();
+        parse_config_file(
+            "status_bar_segments = cwd, git_branch, mode, time, encoding\n",
+            &mut raw,
+        )
+        .unwrap();
+        let segs = raw.status_bar_segments.as_ref().expect("segments set");
+        assert_eq!(
+            segs,
+            &[
+                StatusBarSegment::Cwd,
+                StatusBarSegment::GitBranch,
+                StatusBarSegment::Mode,
+                StatusBarSegment::Time,
+                StatusBarSegment::Encoding,
+            ]
+        );
+    }
+
+    #[test]
+    fn status_bar_segments_space_separated() {
+        use crate::app::StatusBarSegment;
+        let mut raw = RawConfig::default();
+        parse_config_file("status_bar_segments = mode broadcast selection\n", &mut raw).unwrap();
+        let segs = raw.status_bar_segments.as_ref().expect("segments set");
+        assert_eq!(
+            segs,
+            &[
+                StatusBarSegment::Mode,
+                StatusBarSegment::Broadcast,
+                StatusBarSegment::Selection,
+            ]
+        );
+    }
+
+    #[test]
+    fn status_bar_segments_empty_clears() {
+        let mut raw = RawConfig::default();
+        parse_config_file("status_bar_segments = \n", &mut raw).unwrap();
+        assert!(raw.status_bar_segments.is_none());
+    }
+
+    #[test]
+    fn status_bar_time_format_default() {
+        let settings = RawConfig::default().into_settings().unwrap();
+        assert_eq!(settings.config.status_bar_time_format, "%H:%M");
+    }
+
+    #[test]
+    fn status_bar_time_format_custom() {
+        let mut raw = RawConfig::default();
+        parse_config_file("status_bar_time_format = %I:%M %p\n", &mut raw).unwrap();
+        let settings = raw.into_settings().unwrap();
+        assert_eq!(settings.config.status_bar_time_format, "%I:%M %p");
+    }
+
+    // -----------------------------------------------------------------------
+    // New KeyAction variants parse correctly
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn opacity_keybinding_actions_parse() {
+        use super::keymap::parse_action;
+        assert!(matches!(
+            parse_action("increase_opacity"),
+            Ok(Some(KeyAction::IncreaseOpacity))
+        ));
+        assert!(matches!(
+            parse_action("decrease_opacity"),
+            Ok(Some(KeyAction::DecreaseOpacity))
+        ));
+        assert!(matches!(
+            parse_action("toggle_opacity"),
+            Ok(Some(KeyAction::ToggleOpacity))
+        ));
+    }
+
+    #[test]
+    fn save_scrollback_action_parses() {
+        use super::keymap::parse_action;
+        assert!(matches!(
+            parse_action("save_scrollback"),
+            Ok(Some(KeyAction::SaveScrollback))
+        ));
+        assert!(matches!(
+            parse_action("scrollback_to_file"),
+            Ok(Some(KeyAction::SaveScrollback))
+        ));
+    }
+
+    // -----------------------------------------------------------------------
+    // FONTS stream: symbol map + per-style overrides + variations
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn font_bold_italic_bold_italic_parse() {
+        use super::parse::parse_config_file;
+        let mut raw = RawConfig::default();
+        parse_config_file(
+            "font_bold = MyFont Bold\nfont_italic = MyFont Italic\nfont_bold_italic = MyFont Bold Italic\n",
+            &mut raw,
+        )
+        .unwrap();
+        assert_eq!(raw.font_bold.as_deref(), Some("MyFont Bold"));
+        assert_eq!(raw.font_italic.as_deref(), Some("MyFont Italic"));
+        assert_eq!(raw.font_bold_italic.as_deref(), Some("MyFont Bold Italic"));
+        // Values must flow through into_settings.
+        let s = raw.into_settings().unwrap();
+        assert_eq!(s.config.font_bold.as_deref(), Some("MyFont Bold"));
+        assert_eq!(s.config.font_italic.as_deref(), Some("MyFont Italic"));
+        assert_eq!(
+            s.config.font_bold_italic.as_deref(),
+            Some("MyFont Bold Italic")
+        );
+    }
+
+    #[test]
+    fn font_bold_italic_defaults_none() {
+        let s = RawConfig::default().into_settings().unwrap();
+        assert!(
+            s.config.font_bold.is_none(),
+            "font_bold must default to None"
+        );
+        assert!(
+            s.config.font_italic.is_none(),
+            "font_italic must default to None"
+        );
+        assert!(
+            s.config.font_bold_italic.is_none(),
+            "font_bold_italic must default to None"
+        );
+    }
+
+    #[test]
+    fn parse_symbol_map_single_range() {
+        use super::parse::parse_symbol_map;
+        let entries = parse_symbol_map("U+E000-U+F8FF : Symbols Nerd Font Mono");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].start, 0xE000);
+        assert_eq!(entries[0].end, 0xF8FF);
+        assert_eq!(entries[0].family, "Symbols Nerd Font Mono");
+    }
+
+    #[test]
+    fn parse_symbol_map_single_codepoint() {
+        use super::parse::parse_symbol_map;
+        let entries = parse_symbol_map("U+2764:Noto Emoji");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].start, 0x2764);
+        assert_eq!(entries[0].end, 0x2764);
+    }
+
+    #[test]
+    fn parse_symbol_map_multiple_entries() {
+        use super::parse::parse_symbol_map;
+        let entries = parse_symbol_map("U+E000-U+F8FF:Nerd Font, U+2500-U+257F:Box Drawing Font");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].start, 0xE000);
+        assert_eq!(entries[1].family, "Box Drawing Font");
+    }
+
+    #[test]
+    fn parse_symbol_map_invalid_entries_skipped() {
+        use super::parse::parse_symbol_map;
+        // "garbage" has no colon separator — must be skipped, not panicked.
+        let entries = parse_symbol_map("garbage, U+0041:My Font");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].start, 0x0041);
+    }
+
+    #[test]
+    fn parse_symbol_map_empty() {
+        use super::parse::parse_symbol_map;
+        assert!(parse_symbol_map("").is_empty());
+        assert!(parse_symbol_map("   ").is_empty());
+    }
+
+    #[test]
+    fn font_symbol_map_config_key_parses() {
+        use super::parse::parse_config_file;
+        let mut raw = RawConfig::default();
+        parse_config_file(
+            "font_symbol_map = U+E000-U+F8FF:Nerd Font Symbols\n",
+            &mut raw,
+        )
+        .unwrap();
+        let entries = raw.font_symbol_map.as_ref().expect("should be set");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].family, "Nerd Font Symbols");
+        let s = raw.into_settings().unwrap();
+        assert_eq!(s.config.font_symbol_map.len(), 1);
+    }
+
+    #[test]
+    fn font_symbol_map_defaults_empty() {
+        let s = RawConfig::default().into_settings().unwrap();
+        assert!(
+            s.config.font_symbol_map.is_empty(),
+            "font_symbol_map must default to empty"
+        );
+    }
+
+    #[test]
+    fn parse_font_variations_wght_and_wdth() {
+        use super::parse::parse_font_variations;
+        let v = parse_font_variations("wght=450, wdth=75");
+        assert_eq!(v.len(), 2);
+        assert!(v.contains(&"wght=450".to_string()));
+        assert!(v.contains(&"wdth=75".to_string()));
+    }
+
+    #[test]
+    fn parse_font_variations_space_separated() {
+        use super::parse::parse_font_variations;
+        let v = parse_font_variations("wght=700 slnt=-5");
+        assert_eq!(v.len(), 2);
+    }
+
+    #[test]
+    fn font_variations_config_key_parses() {
+        use super::parse::parse_config_file;
+        let mut raw = RawConfig::default();
+        parse_config_file("font_variations = wght=450\n", &mut raw).unwrap();
+        let vars = raw.font_variations.as_ref().expect("should be set");
+        assert_eq!(vars.len(), 1);
+        assert_eq!(vars[0], "wght=450");
+        let s = raw.into_settings().unwrap();
+        assert_eq!(s.config.font_variations.len(), 1);
+    }
+
+    #[test]
+    fn font_variations_defaults_empty() {
+        let s = RawConfig::default().into_settings().unwrap();
+        assert!(
+            s.config.font_variations.is_empty(),
+            "font_variations must default to empty"
+        );
+    }
+
+    #[test]
+    fn symbol_map_lookup_finds_range() {
+        use crate::config::parse::SymbolMapEntry;
+        use crate::text::shape::lookup_symbol_family;
+        let mut map = vec![
+            SymbolMapEntry {
+                start: 0xE000,
+                end: 0xF8FF,
+                family: "Nerd Font".to_string(),
+            },
+            SymbolMapEntry {
+                start: 0x2500,
+                end: 0x257F,
+                family: "Box Font".to_string(),
+            },
+        ];
+        // Sort by start for binary search (normally done in load_with_config).
+        map.sort_unstable_by_key(|e| e.start);
+
+        // Inside first range.
+        assert_eq!(lookup_symbol_family(&map, '\u{E001}'), Some("Nerd Font"));
+        // Start of second range.
+        assert_eq!(lookup_symbol_family(&map, '\u{2500}'), Some("Box Font"));
+        // End of second range.
+        assert_eq!(lookup_symbol_family(&map, '\u{257F}'), Some("Box Font"));
+        // Just past the end of the second range.
+        assert_eq!(lookup_symbol_family(&map, '\u{2580}'), None);
+        // ASCII is not covered.
+        assert_eq!(lookup_symbol_family(&map, 'A'), None);
+    }
+
+    #[test]
+    fn symbol_map_lookup_empty_map() {
+        use crate::text::shape::lookup_symbol_family;
+        assert_eq!(lookup_symbol_family(&[], 'A'), None);
     }
 }

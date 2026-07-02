@@ -145,14 +145,22 @@ impl Renderer {
         if (font_px - self.font_px).abs() < 0.01 {
             return;
         }
-        let (text, metrics) =
-            match Text::load(self.font_family.as_deref(), font_px, &self.font_features) {
-                Ok(loaded) => loaded,
-                Err(e) => {
-                    log::warn!("glassy: font resize to {font_px:.1}px failed: {e:#}");
-                    return;
-                }
-            };
+        let (text, metrics) = match Text::load_with_config(crate::text::shape::FontConfig {
+            family: self.font_family.as_deref(),
+            font_px,
+            font_features: &self.font_features,
+            bold_family: self.font_bold.as_deref(),
+            italic_family: self.font_italic.as_deref(),
+            bold_italic_family: self.font_bold_italic.as_deref(),
+            symbol_map: self.font_symbol_map.clone(),
+            font_variations: &self.font_variations,
+        }) {
+            Ok(loaded) => loaded,
+            Err(e) => {
+                log::warn!("glassy: font resize to {font_px:.1}px failed: {e:#}");
+                return;
+            }
+        };
         self.text = text;
         self.metrics = metrics;
         self.pad = self.pad_override.unwrap_or_else(|| pad_for(metrics.height));
@@ -173,6 +181,65 @@ impl Renderer {
 
         // Pre-warm printable ASCII (regular + bold) at the new size for a
         // rasterize-free first frame after a font-size change.
+        for byte in 0x20u8..=0x7E {
+            self.ensure_glyphs(byte as char, false, false);
+            self.ensure_glyphs(byte as char, true, false);
+        }
+    }
+
+    /// Reload the whole font stack (family + OpenType features) at the CURRENT
+    /// font size, rebuilding the glyph atlas and refreshing the cached cell
+    /// metrics. This is the font-*family* analogue of [`Renderer::set_font_size`]:
+    /// where that swaps only the px size, this swaps the resolved family (and any
+    /// feature overrides) so a live Settings → font-family change is visible
+    /// without a restart.
+    ///
+    /// `family = None` restores the discovery default font (same sentinel the
+    /// startup path uses). On failure the previous font is retained (the error is
+    /// logged) so a bad family never breaks rendering.
+    ///
+    /// The caller is responsible for re-querying `cell_metrics()`/`pad()` and
+    /// reflowing the PTY grid afterward (the renderer does not know the grid) —
+    /// exactly as after `set_font_size`, because the new face's cell box differs.
+    pub fn reload_fonts(&mut self, family: Option<&str>, font_features: &[String]) {
+        // Reload at the current px size; only the family/features change here.
+        let (text, metrics) = match Text::load(family, self.font_px, font_features) {
+            Ok(loaded) => loaded,
+            Err(e) => {
+                log::warn!(
+                    "glassy: font reload to family {family:?} failed: {e:#}; keeping current font"
+                );
+                return;
+            }
+        };
+        self.text = text;
+        self.metrics = metrics;
+        // Cell-derived padding tracks the (new) cell height unless an explicit
+        // override is pinned — mirrors set_font_size.
+        self.pad = self.pad_override.unwrap_or_else(|| pad_for(metrics.height));
+        // Remember the new family/features so a later font-size resize reloads the
+        // same face rather than reverting to the old family.
+        self.font_family = family.map(str::to_string);
+        self.font_features = font_features.to_vec();
+
+        // The atlases hold glyphs rasterized from the OLD font; reset both packers
+        // and every per-glyph cache so glyphs are re-rasterized from the new face
+        // on demand and no row keeps stale UVs. Flag the reset so the app forces a
+        // full row rebuild next frame (same contract as an atlas overflow repack).
+        self.packer.reset();
+        self.color_packer.reset();
+        self.glyph_cache.clear();
+        self.cluster_cache.clear();
+        self.ligature_run_cache.clear();
+        self.wide_char_set.clear();
+        self.atlas_reset = true;
+
+        // Re-probe ligature support: the new font file may or may not carry an
+        // OpenType GSUB `liga` feature, which gates run-shaping.
+        self.font_has_ligatures = self.text.has_ligatures();
+
+        // Pre-warm printable ASCII (regular + bold) from the new face for a
+        // rasterize-free first frame after the family change.
         for byte in 0x20u8..=0x7E {
             self.ensure_glyphs(byte as char, false, false);
             self.ensure_glyphs(byte as char, true, false);
@@ -258,7 +325,10 @@ impl Renderer {
         if !self.transparent {
             return color;
         }
-        let a = color[3] * self.opacity;
+        // Map the stored linear opacity through the perceptual curve so the dense
+        // high-opacity band (the glass looks people actually run at) gets the most
+        // granularity. Identity at the endpoints, so 0.0/1.0 are unchanged.
+        let a = color[3] * super::opacity::perceptual(self.opacity);
         if self.premultiplied_surface {
             [color[0] * a, color[1] * a, color[2] * a, a]
         } else {
@@ -364,7 +434,7 @@ impl Renderer {
         // Grid origin of this cell, offset by the window padding (inset) and the
         // GUI tab-bar inset (`grid_origin_y`, zero in the multi-pane path where
         // each pane carries its own pixel origin).
-        let origin_x = col as f32 * cell_w + pad_l;
+        let origin_x = col as f32 * cell_w + pad_l + self.grid_origin_x;
         let origin_y = row as f32 * cell_h + pad + self.grid_origin_y;
 
         // A double-width (CJK / wide-emoji) cell occupies two columns: its advance
@@ -525,7 +595,7 @@ impl Renderer {
 
         for i in 0..run_len {
             let cell = &cells[i];
-            let origin_x = cell.col as f32 * cell_w + pad;
+            let origin_x = cell.col as f32 * cell_w + pad + self.grid_origin_x;
             let origin_y = row as f32 * cell_h + pad + self.grid_origin_y;
             let box_w = if cell.wide { cell_w * 2.0 } else { cell_w };
 

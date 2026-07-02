@@ -31,6 +31,7 @@ use crate::input::ModifyOtherKeys;
 
 pub mod cmdzone;
 pub mod r#loop;
+pub mod overline;
 mod scan;
 
 // ---- Terminfo availability check ------------------------------------------------
@@ -517,9 +518,16 @@ pub enum UserEvent {
     /// [`PromptTracker`] and forwards this event so the UI can repaint the
     /// command-block badges and update jump-to-prompt state.
     SemanticMark(usize, char, Option<i32>),
-    /// OSC 9 or OSC 777 desktop notification from the shell. Forwarded to the UI
-    /// thread so it can fire a native notification when the window is unfocused.
-    Notification(usize, String),
+    /// OSC 9 or OSC 777 desktop notification from the shell. Carries a structured
+    /// [`crate::image::NotifySpec`] (title/body/icon/sound/urgency/actions).
+    /// Forwarded to the UI thread so it can fire a rich native notification when
+    /// the window is unfocused (and always show an in-app toast).
+    Notify(usize, crate::image::NotifySpec),
+    /// A remote-control request arrived over the IPC socket (`glassy @ <cmd>` /
+    /// `glassy msg …`): open a tab, split, send text, set theme, list, etc. The
+    /// UI thread applies it and replies over the one-shot `reply` channel. See
+    /// [`crate::ipc::control`]. Carries no session id (window-level command).
+    Control(crate::ipc::control::ControlRequest),
     /// OSC 9;4 progress report from the running application. The UI thread stores
     /// the latest state per-session and renders a subtle progress indicator.
     Progress(usize, crate::image::ProgressState),
@@ -543,6 +551,11 @@ pub enum UserEvent {
     /// `CSI > 4 ; N m`. The UI thread updates `App::modify_other_keys` so
     /// subsequent key events are encoded with the correct form.
     ModifyOtherKeys(usize, ModifyOtherKeys),
+    /// The running application toggled SGR-Pixel mouse reporting (DECSET/DECRST
+    /// 1016). alacritty_terminal does not model mode 1016, so the PTY loop scans
+    /// for it and forwards the new state (`true` = on). The UI thread updates
+    /// `App::sgr_pixel_mouse` so `report_mouse` encodes pixel coordinates.
+    SgrPixelMouse(usize, bool),
     /// A single-instance IPC control command (`glassy toggle/show/hide`) arrived
     /// over the Unix socket from a second invocation. Drives the quake / dropdown
     /// window's slide animation. Carries no session id — it's a window-level
@@ -554,6 +567,25 @@ pub enum UserEvent {
     /// per-app command-history ring so the command palette can offer it for
     /// re-run. See [`cmdzone`].
     CommandRun(usize, String),
+    /// A macOS global menu-bar item was selected. Carries the [`KeyAction`] the
+    /// menu item maps to (New Tab / Split / Copy / Paste / Settings / Quit etc.);
+    /// the UI thread runs it through the same `run_key_action` path as a keychord.
+    /// Window-level, no session id. Only emitted on macOS (see `app::mac_menu`);
+    /// the variant is still matched everywhere, so it is `dead_code` off-macOS.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    MenuAction(crate::config::KeyAction),
+    /// An OSC 133-tracked command FINISHED (a `D` mark closed its block) in the
+    /// session `usize`. Carries the (best-effort) command text, the exit code, and
+    /// how long it ran. The UI thread fires a desktop notification when the
+    /// command ran longer than the configured threshold while the window was
+    /// unfocused — so a long background build/test alerts the user when it's done.
+    /// See `config.notify_command_*`.
+    CommandFinished {
+        id: usize,
+        command: Option<String>,
+        exit: Option<i32>,
+        duration: Duration,
+    },
 }
 
 /// Wraps the `ClipboardLoad` reply-builder closure so `UserEvent` can keep its
@@ -858,6 +890,11 @@ pub struct Pty {
     /// against the live `display_offset` and issues a `scroll_display(Scroll::Delta)`
     /// to jump there.
     pub prompts: Arc<Mutex<PromptTracker>>,
+    /// SGR 53/55 overline coverage for this session. The PTY loop records which
+    /// cells were printed while overline was active (alacritty_terminal has no
+    /// overline flag); the render path reads it via `overline.lock()` to set the
+    /// per-cell `Decorations::overline` bit. See [`overline::OverlineTracker`].
+    pub overline: Arc<Mutex<overline::OverlineTracker>>,
     /// PID of the spawned shell process. Used to read `/proc/<shell_pid>/cwd`
     /// and the tty foreground pgid for the pane header and status bar.
     pub shell_pid: u32,
@@ -987,11 +1024,13 @@ impl Pty {
         let poller = Arc::new(Poller::new()?);
         let images = Arc::new(FairMutex::new(ImageStore::new()));
         let prompts = Arc::new(Mutex::new(PromptTracker::new()));
+        let overline = Arc::new(Mutex::new(overline::OverlineTracker::new()));
 
         let loop_term = term.clone();
         let loop_poller = poller.clone();
         let loop_images = images.clone();
         let loop_prompts = prompts.clone();
+        let loop_overline = overline.clone();
         // 256 KiB stack: the PTY read/parse loop has no deep recursion (only a
         // fixed read buffer + a handful of local variables), so the default
         // 8 MiB OS stack is wasteful. See `r#loop::PTY_THREAD_STACK`.
@@ -1007,6 +1046,7 @@ impl Pty {
                     loop_poller,
                     loop_images,
                     loop_prompts,
+                    loop_overline,
                 );
             })?;
 
@@ -1020,6 +1060,7 @@ impl Pty {
             term,
             images,
             prompts,
+            overline,
             shell_pid,
             shell_comm,
             pane_info,
@@ -1095,6 +1136,32 @@ impl Pty {
         };
         self.send(LoopMsg::Resize(window_size));
         self.term.lock().resize(GridSize { cols, rows });
+    }
+
+    /// Update the terminal's DEFAULT cursor style (shape + blink) live, e.g. from
+    /// the settings cursor picker. Rebuilds the Term `Config` exactly as `spawn`
+    /// did (same scrollback + word separators) with the new cursor default and
+    /// applies it via `Term::set_options`, which preserves the grid/scrollback and
+    /// just re-damages. Takes effect immediately unless the child has pushed its
+    /// own DECSCUSR style (that override wins, as it should).
+    pub fn set_default_cursor(
+        &self,
+        shape: alacritty_terminal::vte::ansi::CursorShape,
+        blinking: bool,
+        scrollback: usize,
+        word_separator: &str,
+    ) {
+        let semantic_escape_chars = merge_word_separators(
+            alacritty_terminal::term::SEMANTIC_ESCAPE_CHARS,
+            word_separator,
+        );
+        let config = Config {
+            scrolling_history: scrollback,
+            semantic_escape_chars,
+            default_cursor_style: alacritty_terminal::vte::ansi::CursorStyle { shape, blinking },
+            ..Config::default()
+        };
+        self.term.lock().set_options(config);
     }
 
     /// Ask the PTY loop to shut down cleanly.

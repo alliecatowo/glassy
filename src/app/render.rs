@@ -109,6 +109,21 @@ impl App {
         let tab_pane_counts = self.tab_pane_counts();
         let tab_active_pos = self.active_pos();
         let tab_left_inset = self.chrome_left_inset();
+        // Modifier-HOLD numbered overlay: when the primary modifier has been held
+        // alone past the dwell, collect the visible tab chip rects + positions so
+        // the painter can stamp a number badge on each (drawn after the cached bar
+        // so it composites on top). Empty when the overlay is inactive.
+        let tab_hold_numbers: Vec<(gui::Rect, usize)> = if self.mod_overlay_active(Instant::now()) {
+            self.tab_layout()
+                .into_iter()
+                .filter_map(|s| match s.item {
+                    StripItem::Tab(i) => Some((s.rect, i)),
+                    _ => None,
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         // Tab-bar incremental decision (single-pane path): rebuild only when the
         // painter's inputs changed or a full redraw is forced (e.g. theme), else
         // replay the cached overlay instead of re-shaping every tab title glyph.
@@ -170,6 +185,20 @@ impl App {
             .pty
             .as_ref()
             .and_then(|p| p.pane_info.git_branch.clone());
+        // Foreground process name (best-effort from PaneInfo).
+        let sb_fg_process: Option<String> = self
+            .pty
+            .as_ref()
+            .and_then(|p| p.pane_info.process_name(None).map(str::to_owned));
+        // Last command exit status from the OSC 133 block store (most recent block).
+        let sb_exit_status: Option<i32> = self.pty.as_ref().and_then(|p| {
+            p.prompts
+                .lock()
+                .ok()
+                .and_then(|g| g.blocks.iter().rev().find_map(|b| b.exit_code))
+        });
+        let sb_time_format = self.config.status_bar_time_format.clone();
+        let sb_segments = self.config.status_bar_segments.clone();
         let sb_progress = self.active_progress;
         let sb_broadcast = self.broadcast_input;
 
@@ -226,6 +255,11 @@ impl App {
                 (self.mouse_px.0 as f32, self.mouse_px.1 as f32),
                 self.held_button == Some(0),
                 self.gui_click_edge,
+                self.settings_section,
+                self.settings_section_scroll,
+                self.custom_theme_swatches(),
+                self.settings_custom_editing,
+                self.settings_profiles.clone(),
             ))
         } else {
             None
@@ -293,6 +327,12 @@ impl App {
         // inside the renderer borrow). `None` when hints mode is closed.
         let hints_inputs = self.hints_snapshot();
 
+        // Power Mode "screen rock": a transient decaying jitter added to the grid
+        // content origin (never the OS window). `(0, 0)` at rest, so the resting
+        // frame is byte-identical to before. Snapshotted here (under `&self`) before
+        // the disjoint renderer/pty borrows below.
+        let (shake_x, shake_y) = self.power_shake_offset();
+
         // Take the minimap cache out into a local so the strip painter can read it
         // while `&mut self.renderer` is borrowed below (both are `self` fields);
         // it is moved back at the end of the frame. Cheap (a Vec pointer swap).
@@ -303,9 +343,18 @@ impl App {
             return;
         };
         renderer.set_flash(flash);
+        let shaking = shake_x != 0.0 || shake_y != 0.0;
         // The single-pane terminal grid is inset below the GUI tab bar in PIXELS
         // (zero when the strip is hidden, so the grid reclaims the band).
-        renderer.set_grid_origin_y(tab_strip_h);
+        renderer.set_grid_origin_y(tab_strip_h + shake_y);
+        renderer.set_grid_origin_x(shake_x);
+        // A live shake moves EVERY row's pixel origin, so partial per-row damage
+        // would leave un-repainted rows at the previous offset (tearing). Force a
+        // full rebuild while shaking so the whole grid re-lands at the new origin;
+        // a no-op at rest (`shaking == false`), preserving the incremental path.
+        if shaking {
+            self.force_full_redraw = true;
+        }
 
         // Hold the terminal lock only long enough to copy out renderable state.
         let mut term = pty.term.lock();
@@ -343,6 +392,19 @@ impl App {
         let cursor = content.cursor;
         let selection = content.selection;
         let cursor_color = color::resolve(Color::Named(NamedColor::Cursor), colors);
+
+        // Snapshot SGR 53 overline coverage for this frame. alacritty_terminal has
+        // no overline flag, so the PTY loop records overlined cells (absolute
+        // `(row, col)`) in a side table; we look them up by the same absolute `row`
+        // the loop below computes. Cloned into a local so the lock is not held
+        // across the (long) cell loop; empty/cheap in the common no-overline case.
+        let overline_cells: std::collections::HashSet<(i32, usize)> = pty
+            .overline
+            .lock()
+            .ok()
+            .filter(|o| o.any())
+            .map(|o| o.snapshot())
+            .unwrap_or_default();
 
         // The cursor is suppressed only when Hidden, or mid-blink off-phase. It is
         // still drawn (as a hollow outline) when the window is unfocused. The block
@@ -551,6 +613,10 @@ impl App {
                 Decorations {
                     underline,
                     strikeout: cell.flags.contains(Flags::STRIKEOUT),
+                    // SGR 53 overline (tracked in the side table, keyed by the
+                    // absolute grid row + column this cell occupies).
+                    overline: !overline_cells.is_empty()
+                        && overline_cells.contains(&(row, col as usize)),
                     color,
                 }
             };
@@ -593,11 +659,21 @@ impl App {
             // squished into one cell.
             let wide = wide || consumed >= 2;
 
+            // Whether the (shown) cursor sits on this exact cell. A ligature run
+            // must not span the cursor cell: while editing, the character under the
+            // cursor has to render as its own glyph (not be swallowed into a wider
+            // ligature like `=>` → `⇒`), so the user sees and edits the real char.
+            // This holds for EVERY cursor shape (not just the inverting block):
+            // a beam/underline cursor over the middle of a ligature is just as
+            // misleading. Independent of fg/bg inversion, which only the block does.
+            let is_cursor_cell = cursor_shown && cur_cursor_cell == Some((col as usize, srow));
+
             // Determine whether this cell is eligible for ligature run accumulation.
             // A cell is ineligible if it has combiners, is wide, is hidden, is a
-            // space/null (blank), or falls in the box-drawing / block-element ranges
+            // space/null (blank), falls in the box-drawing / block-element ranges
             // (those take the procedural path in push_cell and must not be shaped as
-            // part of a text run).
+            // part of a text run), or carries the cursor (so it splits out as an
+            // individual glyph — see `is_cursor_cell`).
             let cp = ch as u32;
             let is_box_or_block = (0x2500..=0x259F).contains(&cp);
             let liga_eligible = use_liga
@@ -606,19 +682,18 @@ impl App {
                 && !wide
                 && ch != ' '
                 && ch != '\0'
-                && !is_box_or_block;
+                && !is_box_or_block
+                && !is_cursor_cell;
 
             if liga_eligible {
                 // Check if this cell is compatible with the current open run.
-                // A run break occurs on: row change, style change, or cursor
-                // inversion (cursor-inverted cells must not join a ligature because
-                // their fg/bg are swapped individually).
-                let is_cursor_cell = invert_block && row == cursor_row && col == cursor_col;
+                // A run break occurs on row change or style change. (The cursor cell
+                // itself is already excluded from `liga_eligible` above, so it never
+                // reaches here — it takes the individual `push_cell` path below.)
                 let run_continues = !run_cells.is_empty()
                     && run_row == srow
                     && run_bold == bold
-                    && run_italic == italic
-                    && !is_cursor_cell;
+                    && run_italic == italic;
 
                 if !run_continues {
                     // Flush any open run before starting a new one.
@@ -843,6 +918,12 @@ impl App {
             Self::paint_tab_rename(renderer, *rect, buf, *caret, *sel);
         }
 
+        // Modifier-HOLD numbered tab overlay: stamped over the (cached) tab bar
+        // each frame the overlay is active, so it never invalidates the bar cache.
+        if tab_strip_visible && !tab_hold_numbers.is_empty() {
+            Self::paint_tab_hold_numbers(renderer, &tab_hold_numbers);
+        }
+
         // Status bar (§3.4): E1 bar at the very bottom, always above the terminal
         // content because it is an overlay (drawn last, not a reserved cell row).
         // Only painted when enabled in the config.
@@ -859,6 +940,10 @@ impl App {
                 sb_git_branch.as_deref(),
                 sb_progress,
                 sb_broadcast,
+                sb_fg_process.as_deref(),
+                &sb_time_format,
+                sb_exit_status,
+                sb_segments.as_deref(),
             );
         }
 
@@ -935,6 +1020,11 @@ impl App {
             mouse,
             mouse_down,
             click_edge,
+            section,
+            section_scroll,
+            ref custom_swatches,
+            custom_editing,
+            ref profile_names,
         )) = settings_inputs
         {
             let font_px = renderer.font_px();
@@ -945,6 +1035,8 @@ impl App {
                 font_feat_ms: &mut self.settings_font_feat_ms,
                 blink_on: self.blink_on,
                 double_click: self.gui_double_click,
+                theme_hex: &mut self.settings_theme_hex,
+                theme_hex_ms: &mut self.settings_theme_hex_ms,
             };
             settings_events = Some(Self::paint_settings(
                 renderer,
@@ -963,6 +1055,11 @@ impl App {
                 &mut self.gui_focused,
                 &mut self.gui_anims,
                 &mut fields,
+                section,
+                section_scroll,
+                custom_swatches,
+                custom_editing,
+                profile_names,
             ));
         } else if self.help_open {
             // Real GUI help panel (§3.7): scrollable two-column keybindings over
@@ -1051,6 +1148,14 @@ impl App {
             };
             Self::paint_peek(renderer, peek, area);
         }
+
+        // Power Mode particle burst: soft glow dots flying out of the cursor,
+        // painted above the terminal content but below the toasts/modals. A no-op
+        // (zero overlay quads) when there are no live particles, so the common
+        // resting frame is untouched. `self.power` is a disjoint field from
+        // `self.renderer` (borrowed as `renderer`), so this coexists with the
+        // active renderer borrow.
+        self.power.paint(renderer, Instant::now());
 
         // In-app toast notifications: painted above the terminal chrome but below
         // any modal (settings/help). Toasts are transient overlays that do not block

@@ -349,10 +349,17 @@ pub struct MouseReport {
     pub pressed: bool,
     /// True when this is a motion (drag) event.
     pub motion: bool,
+    /// Pixel coordinates for SGR-Pixel mode 1016, relative to the terminal content
+    /// origin (0-based). `Some` only when the application has enabled DECSET 1016
+    /// AND SGR mouse mode; reported (1-based) in place of the cell col/row. `None`
+    /// for the ordinary cell-based report.
+    pub pixel: Option<(u32, u32)>,
 }
 
 /// Encode a mouse event as a terminal report. Uses SGR (1006) form when `sgr`
-/// is set (no coordinate limit), otherwise the legacy X10 (1000) form.
+/// is set (no coordinate limit), otherwise the legacy X10 (1000) form. When
+/// `report.pixel` is set (SGR-Pixel mode 1016), the SGR form reports 1-based pixel
+/// coordinates instead of cell col/row; the legacy form always uses cells.
 pub fn encode_mouse(report: MouseReport, mods: ModifiersState, sgr: bool) -> Vec<u8> {
     let mut cb = report.button as u32;
     if report.motion {
@@ -370,7 +377,12 @@ pub fn encode_mouse(report: MouseReport, mods: ModifiersState, sgr: bool) -> Vec
 
     if sgr {
         let kind = if report.pressed { 'M' } else { 'm' };
-        return format!("\x1b[<{};{};{}{}", cb, report.col + 1, report.row + 1, kind).into_bytes();
+        // SGR-Pixel (1016): report 1-based pixel x/y; otherwise 1-based cell col/row.
+        let (cx, cy) = match report.pixel {
+            Some((px, py)) => (px as usize + 1, py as usize + 1),
+            None => (report.col + 1, report.row + 1),
+        };
+        return format!("\x1b[<{};{};{}{}", cb, cx, cy, kind).into_bytes();
     }
 
     // Legacy X10: ESC [ M  Cb  Cx  Cy, each offset by 32.
@@ -523,6 +535,7 @@ mod tests {
             row,
             pressed,
             motion,
+            pixel: None,
         }
     }
 
@@ -568,6 +581,28 @@ mod tests {
             encode_mouse(rep(0, 0, 0, true, false), m, true),
             b"\x1b[<16;1;1M"
         );
+    }
+
+    #[test]
+    fn sgr_pixel_mode_reports_pixels_one_based() {
+        // SGR-Pixel (1016): the col/row are ignored in favor of the 1-based pixel
+        // coords. Cell (4,2) but pixel (37,19) => reports 38;20.
+        let m = ModifiersState::empty();
+        let mut r = rep(0, 4, 2, true, false);
+        r.pixel = Some((37, 19));
+        assert_eq!(encode_mouse(r, m, true), b"\x1b[<0;38;20M");
+    }
+
+    #[test]
+    fn legacy_mode_ignores_pixel_field() {
+        // Pixel coordinates only apply to the SGR form; the legacy X10 report stays
+        // cell-based even when `pixel` is set.
+        let m = ModifiersState::empty();
+        let mut r = rep(0, 4, 2, true, false);
+        r.pixel = Some((37, 19));
+        let enc = encode_mouse(r, m, false);
+        // ESC [ M Cb Cx Cy with cells offset by 33 (32 + cell + 1).
+        assert_eq!(enc, vec![0x1b, b'[', b'M', 32, 32 + 5, 32 + 3]);
     }
 
     #[test]

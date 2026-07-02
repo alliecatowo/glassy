@@ -35,29 +35,39 @@ use crate::renderer::{CursorOverlay, Decorations, LigatureCell, Renderer, Underl
 mod chrome;
 mod command_blocks;
 mod event_loop;
+mod headless_input;
 mod helpers;
 mod hints;
 mod ime;
 mod input;
 mod keys;
+mod keyseq;
+#[cfg(target_os = "macos")]
+pub(crate) mod mac_menu;
 mod minimap;
+mod modhold;
 mod mouse;
 mod multipane;
 mod palette;
+mod pane_ops;
 mod panes;
 pub(crate) mod peek;
+mod power;
 mod quake;
+mod remote;
 mod render;
 mod script;
 mod search;
 mod selection;
 mod settings;
 mod settings_fields;
+mod settings_themes;
 mod strip;
 mod tab_paint;
 mod tabs;
 pub(crate) mod toast;
 mod user_event;
+mod vi_mode;
 
 pub(crate) use helpers::*;
 pub(crate) use palette::PaletteState;
@@ -166,10 +176,11 @@ pub struct Config {
     /// instead of jumping instantly. Default false. Strictly idle-safe — only
     /// schedules frames while the cursor is mid-glide.
     pub cursor_trail: bool,
-    /// gpu-fx: enable the CRT / glow / scanline fullscreen post-process. Default
-    /// false. Adds real GPU cost (an offscreen pass), so it MUST stay off by
-    /// default to preserve the 0%-idle + perf numbers; when off it is a complete
-    /// no-op (no offscreen pass, no allocation).
+    /// gpu-fx: legacy CRT toggle. SUPERSEDED by [`Self::window_effect`] (a
+    /// `crt_effect = true` config is folded into `window_effect = crt` at parse
+    /// time). Retained on the struct so old configs still round-trip; the renderer
+    /// is now driven entirely by `window_effect`.
+    #[allow(dead_code)]
     pub crt_effect: bool,
     /// When to show the tab strip. `Auto` (default) hides it while only one tab
     /// is open and shows it once a second tab is spawned; `Always` keeps it; and
@@ -212,6 +223,120 @@ pub struct Config {
     /// history source (captured from OSC 133 `B`..`C` zones). 0 disables capture.
     /// Default 200.
     pub command_history: usize,
+    /// Multi-key chord *sequences* ("leader" binds), e.g. `ctrl+a` then `n`.
+    /// Built from `[keybindings]` entries whose chord token contains a space
+    /// (`"ctrl+a n" = next_tab`). Empty by default. The keyboard handler tracks a
+    /// pending prefix and fires the bound action when the full sequence completes.
+    pub key_sequences: crate::config::SequenceMap,
+    /// Window post-process effect (`none` by default). Selects ONE of the
+    /// fullscreen effects (frosted / acrylic / crt / scanlines / grain / vignette /
+    /// bloom). `None` is a complete no-op (no offscreen pass, zero idle cost);
+    /// every other mode routes the grid through the shared CRT post pass. Supersedes
+    /// the legacy `crt_effect` bool. Config key `window_effect`; env override
+    /// `GLASSY_EFFECT=<mode>`.
+    pub window_effect: crate::renderer::WindowEffect,
+    /// Per-channel intensities for the `Custom` window effect, in the order
+    /// `[curvature, scanline, glow, vignette, grain, tint]` (each 0..1). Driven
+    /// live by the Appearance → Custom sliders and pushed to the post shader when
+    /// `window_effect == Custom`. (File persistence is a fast-follow; today these
+    /// are runtime-live with a pleasant default.)
+    pub custom_effect: [f32; 6],
+    /// Dim the CONTENT of unfocused panes in a split with a subtle dark overlay,
+    /// so the focused pane reads as foreground. Default true. Independent of
+    /// `pane_headers` (the header always dims its own text regardless). Toggle via
+    /// `dim_unfocused = false` in the config or the command palette.
+    pub dim_unfocused: bool,
+    /// Also place a rich-text (HTML) flavor on the clipboard alongside the plain
+    /// text whenever a terminal selection is copied. Lets HTML-preferring apps
+    /// paste a monospace-preserving block; plain text remains the fidelity-correct
+    /// fallback. Default false. Opt in via `copy_html = true`.
+    pub copy_html: bool,
+    /// Which segments appear in the status bar, and in what order.
+    /// When `None` the bar shows its built-in default set (cwd, git branch, mode,
+    /// broadcast, selection, scroll, encoding). When `Some`, only the listed
+    /// segments are shown in the listed order.
+    pub status_bar_segments: Option<Vec<StatusBarSegment>>,
+    /// `strftime`-style format string for the `Time` status-bar segment. Defaults
+    /// to `"%H:%M"` (24-hour clock). Example: `"%I:%M %p"` for 12-hour.
+    pub status_bar_time_format: String,
+    // --- FONTS stream additions (appended after stable fields) ---
+    /// Explicit font family for **bold** text. When set, glassy loads this
+    /// family (or file path) instead of using the synthesised bold weight of
+    /// the primary font. `None` uses the primary family at `Weight::BOLD`.
+    pub font_bold: Option<String>,
+    /// Explicit font family for *italic* text. `None` synthesises italic from
+    /// the primary family.
+    pub font_italic: Option<String>,
+    /// Explicit font family for ***bold-italic*** text. `None` synthesises from
+    /// the primary family.
+    pub font_bold_italic: Option<String>,
+    /// Codepoint-range → font-family routing entries (from `font_symbol_map`).
+    /// An empty vec means no routing (all codepoints use the primary font or
+    /// cosmic-text's per-glyph fallback). Sorted by `start` at load time for
+    /// O(log n) lookup during shaping.
+    pub font_symbol_map: Vec<crate::config::parse::SymbolMapEntry>,
+    /// Variable-font axis settings (e.g. `["wght=450"]`). Applied at shaping
+    /// time: `wght` drives `Weight` in `Attrs`, `wdth` drives `Stretch`. Other
+    /// axes are stored but currently ignored (logged at debug level) because
+    /// cosmic-text 0.19 does not expose them in `Attrs`.
+    pub font_variations: Vec<String>,
+    /// Fire a desktop notification when an OSC 133-tracked command finishes after
+    /// running longer than [`notify_command_threshold_ms`](Self::notify_command_threshold_ms)
+    /// while the window is unfocused. Requires shell integration (OSC 133 marks).
+    /// Default true. Config key `notify_command_finish`.
+    pub notify_command_finish: bool,
+    /// Minimum command duration (milliseconds) that triggers the command-finish
+    /// notification. Commands faster than this never notify (avoids spamming for
+    /// quick `ls`/`cd`). Default 10000 (10 s). Config key
+    /// `notify_command_threshold_ms`.
+    pub notify_command_threshold_ms: u64,
+    /// Allow command output to be collapsed (folded) under its OSC 133 prompt.
+    /// Gates the `ToggleFold` action + fold caret. Default true (a no-op until a
+    /// shell-integration script emits OSC 133). Config key `command_fold`.
+    pub command_fold: bool,
+    /// Power Mode: a fun, opt-in typing effect — keystrokes burst glow particles
+    /// out of the cursor and a rapid streak makes the terminal content shake.
+    /// Default false. Strictly idle-safe: entirely inert when off or idle, so the
+    /// 0%-idle invariant is preserved. Config key `power_mode`; also runtime-
+    /// togglable via the command palette. See [`crate::app::power`].
+    pub power_mode: bool,
+    /// Power Mode effect strength in `[0, 1]` (particle count/size/speed + shake).
+    /// Default 0.6. Config key `power_mode_intensity`.
+    pub power_mode_intensity: f32,
+}
+
+/// Configurable segments for the status bar (config key `status_bar_segments`).
+/// The default set (when `status_bar_segments` is `None`) is:
+///   cwd, git_branch, mode, broadcast, selection, scroll, encoding.
+///
+/// Config string accepted by `apply_kv`: a comma- or space-separated list of
+/// segment names, e.g. `"cwd git_branch mode time encoding"`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+pub enum StatusBarSegment {
+    /// Last two path components of the current working directory.
+    Cwd,
+    /// Git branch name (best-effort, nf-pl glyph prefix).
+    GitBranch,
+    /// Foreground process name of the focused pane.
+    Process,
+    /// Clock; format controlled by `status_bar_time_format`.
+    Time,
+    /// `ALT` (alt-screen) / `MOUSE` (mouse-reporting) terminal-mode flag.
+    Mode,
+    /// `BCAST` broadcast-input indicator.
+    Broadcast,
+    /// Glyph count of the active text selection.
+    Selection,
+    /// `⇡N%` scroll-history position.
+    Scroll,
+    /// `UTF-8` encoding (always UTF-8 for now).
+    Encoding,
+    /// OSC 9;4 progress bar (thin 1-px bar at the very bottom of the status bar).
+    Progress,
+    /// Last exit status indicator (from OSC 133 command blocks).
+    ExitStatus,
+    /// Key-binding hint (shows the current mode's most useful bindings).
+    KeyHints,
 }
 
 /// The three user-facing default cursor shapes.
@@ -476,6 +601,16 @@ pub struct App {
     pane_menu_open: Option<usize>,
     /// Currently-highlighted row in the open pane menu (0-based, keyboard nav).
     pane_menu_sel: usize,
+    /// User-saved split layouts, keyed by name. Each value is the SHAPE (the split
+    /// tree, ratios, and leaf ids in session-relative DFS order) of a split at save
+    /// time; restoring re-applies that shape onto the live panes (same pane count)
+    /// via [`pane::Layout::reshape_from_desc`]. Empty until the first `save_layout`.
+    /// In-memory for the session (not persisted to disk in this iteration).
+    named_layouts: std::collections::HashMap<String, pane::LayoutDesc>,
+    /// While a pane header is being dragged to rearrange: the source pane id and the
+    /// pointer position at press, so a small drag threshold distinguishes a click
+    /// (focus) from a drag (rearrange). `None` when no header drag is in progress.
+    dragging_pane: Option<(usize, (f64, f64))>,
 
     // Mouse reporting state.
     /// Last known cursor cell (col, row), clamped to the grid.
@@ -612,6 +747,13 @@ pub struct App {
     /// emit the CSI 27 ; mods ; code ~ form expected by legacy-mode TUIs.
     modify_other_keys: ModifyOtherKeys,
 
+    /// SGR-Pixel mouse reporting (DECSET 1016) state for the active session.
+    /// alacritty_terminal does not model mode 1016; the PTY loop scans for the
+    /// toggle and forwards it via `UserEvent::SgrPixelMouse`. When `true` AND the
+    /// app has SGR mouse mode on, `report_mouse` reports pixel coordinates
+    /// (relative to the pane's content origin) instead of cell col/row.
+    sgr_pixel_mouse: bool,
+
     /// In-terminal find bar (Ctrl+Shift+F). `Some` exactly while it is open; it
     /// owns the keyboard and paints a bottom bar + match highlights. See
     /// [`search`].
@@ -645,6 +787,14 @@ pub struct App {
     /// Active toast stack (most-recent at back). Each toast fades in, stays
     /// ~4 s, then fades out. Painted by `toast.rs`.
     toasts: Vec<crate::app::toast::Toast>,
+
+    // --- Power Mode (opt-in typing effect) -----------------------------------
+    /// Particle-burst + screen-shake typing effect. Seeded from `config.power_mode`
+    /// / `config.power_mode_intensity` and runtime-togglable via the command
+    /// palette. Entirely dormant (no particles, no shake, no wakeups) unless a
+    /// keystroke spawns a burst while enabled — so the 0%-idle invariant holds.
+    /// Advanced in `about_to_wait`, painted in the render path. See [`power`].
+    power: power::PowerState,
 
     // --- Inline file peek ----------------------------------------------------
     /// Active inline-preview card, if any. Set when the shell emits an
@@ -724,6 +874,54 @@ pub struct App {
     /// the most-recent unique paths win. Bounded by [`CWD_HISTORY_CAP`]. The
     /// command palette offers these to `cd` into.
     cwd_history: std::collections::VecDeque<std::path::PathBuf>,
+
+    // --- settings-themes stream: sectioned window + custom theme + profiles ---
+    /// Active left-sidebar section of the revamped settings window (index into
+    /// [`gui::SettingsSection::ALL`]).
+    settings_section: usize,
+    /// Vertical scroll offset (px) of the active settings section's right pane.
+    settings_section_scroll: f32,
+    /// The working custom-theme palette being edited in the Themes section: the
+    /// four specials (fg/bg/cursor/selection) followed by the 16 ANSI entries, all
+    /// as `Rgb`. Seeded from the active theme when settings open; mutated by the
+    /// hex editor; applied/saved on the editor's Apply / Save buttons.
+    settings_custom: [alacritty_terminal::vte::ansi::Rgb; 20],
+    /// Which custom-theme entry index is currently being edited (0..20), or
+    /// `usize::MAX` when no swatch is selected.
+    settings_custom_editing: usize,
+    /// Editable hex model + drag state for the selected custom-theme color.
+    settings_theme_hex: gui::TextEdit,
+    settings_theme_hex_ms: gui::TextInputMouse,
+    /// Cached runtime profile names (`[profile.*]` sections), refreshed when the
+    /// settings window opens. Empty when the config defines no profiles.
+    settings_profiles: Vec<String>,
+
+    // --- Leader / multi-key chord sequences ----------------------------------
+    /// Pending leader-sequence state: the chords typed so far that are a live
+    /// prefix of one or more `config.key_sequences` binds, plus the deadline
+    /// after which an incomplete sequence is abandoned. `None` when no leader is
+    /// armed (the common case — every standard chord path runs untouched). See
+    /// [`keyseq`].
+    key_seq_pending: Option<keyseq::PendingSeq>,
+
+    // --- Modifier-hold tab overlay (Cmd/Super-hold tab numbers) --------------
+    /// Instant the primary modifier (⌘ on macOS, Super elsewhere) began being
+    /// held with no other key pressed since. Drives the numbered tab-jump
+    /// overlay: after a short dwell, each tab chip shows its 1-based number so it
+    /// can be jumped to with modifier+digit. `None` when the modifier is up or a
+    /// non-modifier key was pressed during the hold (which cancels the overlay).
+    mod_hold_since: Option<Instant>,
+    /// Keyboard copy-mode ("vi mode") state: whether it is active and the
+    /// in-flight visual-selection kind. The authoritative cursor + selection
+    /// live in the terminal (`Term::vi_mode_cursor` / `Term::selection`); this
+    /// only mirrors the on/off + visual-kind + pending-`g` bits. See [`vi_mode`].
+    vi: vi_mode::ViState,
+
+    // --- Opacity toggle -------------------------------------------------------
+    /// The opacity value before the last `ToggleOpacity` action that moved it
+    /// TO 1.0. Used to restore transparency on the next toggle. `None` until the
+    /// first toggle-to-opaque fires; initialised lazily from the config opacity.
+    opacity_before_toggle: Option<f32>,
 }
 
 /// Direction + progress of the quake window's slide animation.

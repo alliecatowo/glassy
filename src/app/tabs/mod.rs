@@ -9,6 +9,8 @@ mod session;
 
 impl App {
     pub fn new(proxy: EventLoopProxy<UserEvent>, config: Config) -> Self {
+        // Seed Power Mode from the config before `config` is moved into the struct.
+        let power = power::PowerState::new(config.power_mode, config.power_mode_intensity);
         Self {
             proxy,
             config,
@@ -63,6 +65,8 @@ impl App {
             hovered_pane_header: None,
             pane_menu_open: None,
             pane_menu_sel: 0,
+            named_layouts: std::collections::HashMap::new(),
+            dragging_pane: None,
             mouse_cell: (0, 0),
             mouse_px: (0.0, 0.0),
             held_button: None,
@@ -99,6 +103,7 @@ impl App {
             overlay_opened_by_press: false,
             gui_anim_last: Instant::now(),
             modify_other_keys: ModifyOtherKeys::default(),
+            sgr_pixel_mouse: false,
             search: None,
             palette: None,
             palette_rows: Vec::new(),
@@ -107,6 +112,7 @@ impl App {
             text_blink_at: Instant::now() + BLINK_INTERVAL,
             text_blink_active: false,
             toasts: Vec::new(),
+            power,
             peek: None,
             confirm_close: None,
             pending_confirm_execute: false,
@@ -121,6 +127,17 @@ impl App {
             preedit: None,
             cmd_history: std::collections::VecDeque::new(),
             cwd_history: std::collections::VecDeque::new(),
+            settings_section: 0,
+            settings_section_scroll: 0.0,
+            settings_custom: [alacritty_terminal::vte::ansi::Rgb { r: 0, g: 0, b: 0 }; 20],
+            settings_custom_editing: usize::MAX,
+            settings_theme_hex: gui::TextEdit::default(),
+            settings_theme_hex_ms: gui::TextInputMouse::default(),
+            settings_profiles: Vec::new(),
+            key_seq_pending: None,
+            mod_hold_since: None,
+            vi: Default::default(),
+            opacity_before_toggle: None,
         }
     }
 
@@ -323,6 +340,7 @@ impl App {
         self.hovered_link = None;
         self.last_click = None;
         self.dragging_tab = None;
+        self.dragging_pane = None;
         // Drop any gutter drag/hover (layout may have changed) and restore the
         // default OS cursor; the next CursorMoved re-arms feedback if warranted.
         if self.dragging_gutter.take().is_some() || self.hovered_gutter.take().is_some() {
@@ -662,6 +680,15 @@ impl App {
 
     /// Horizontal inner padding for the pane header text (px).
     pub(crate) const PANE_HEADER_PAD: f32 = 8.0;
+
+    /// Width (px) of the dotted drag-grip handle at the LEFT edge of each pane
+    /// header. Pressing inside it starts a pane drag-rearrange (drop onto another
+    /// pane to swap). Square-ish, matching the right-edge ⋮ button.
+    pub(crate) const PANE_GRIP_W: f32 = 22.0;
+
+    /// Pixel distance the pointer must travel from the press point before a pane
+    /// header drag is treated as a rearrange rather than a plain focus click.
+    pub(crate) const PANE_DRAG_THRESHOLD: f64 = 6.0;
 }
 
 /// Whether a `file://` URL's path (the part after the scheme, still possibly

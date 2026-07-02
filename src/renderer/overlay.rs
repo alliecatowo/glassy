@@ -239,6 +239,14 @@ impl Renderer {
         self.grid_origin_y
     }
 
+    /// Set a transient horizontal shake offset (physical px) added to every grid
+    /// cell + the cursor. Used by Power Mode's "screen rock"; pass 0 to reset (the
+    /// default resting value). Chrome/overlays are unaffected — only the terminal
+    /// content shifts, so the tab bar/status bar stay pinned during a shake.
+    pub fn set_grid_origin_x(&mut self, px: f32) {
+        self.grid_origin_x = px;
+    }
+
     /// Push a single solid-color rectangle as a [`BgInstance`]. Coordinates are
     /// physical pixels. Because the bg pass draws instances in insertion order
     /// with no depth test, a quad pushed here after a cell's background quad
@@ -270,7 +278,7 @@ impl Renderer {
     pub fn push_cursor(&mut self, col: usize, row: usize, overlay: CursorOverlay, color: [f32; 4]) {
         let cell_w = self.metrics.width;
         let cell_h = self.metrics.height;
-        let ox = (col as f32 * cell_w + self.pad).round();
+        let ox = (col as f32 * cell_w + self.pad + self.grid_origin_x).round();
         let oy = (row as f32 * cell_h + self.pad + self.grid_origin_y).round();
         let w = cell_w.round();
         let h = cell_h.round();
@@ -294,7 +302,7 @@ impl Renderer {
     /// `CellMetrics`. Straight strokes are solid rectangles in the bg pass; the
     /// curly underline is a foreground decoration instance (procedural coverage).
     pub(crate) fn draw_decorations(&mut self, ox: f32, oy: f32, dec: Decorations) {
-        if dec.underline == UnderlineStyle::None && !dec.strikeout {
+        if dec.underline == UnderlineStyle::None && !dec.strikeout && !dec.overline {
             return;
         }
         let c = dec.color;
@@ -306,6 +314,14 @@ impl Renderer {
         if dec.strikeout {
             let y = (oy + self.metrics.strikeout_y).round();
             self.push_solid(x, y, w, th, c);
+        }
+
+        // SGR 53 overline: a stroke along the cell's TOP edge. Mirrors the
+        // double-underline's top rail but anchored to the top of the cell box so
+        // contiguous overlined runs join into one continuous line. Drawn in the
+        // decoration color, like the underline/strikeout strokes.
+        if dec.overline {
+            self.push_solid(x, oy.round(), w, th, c);
         }
 
         // Underline baseline y, clamped to stay inside the cell.

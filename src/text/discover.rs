@@ -121,6 +121,33 @@ pub(super) struct LoadedFont {
     /// run so the GSUB ZWJ ligature can be resolved — shaping across font boundaries
     /// silently drops the ZWJ join.
     pub(super) emoji_family: Option<String>,
+    /// Resolved per-style family overrides (may be all `None` if no overrides
+    /// were configured). The shaper uses these to pick the right family name
+    /// when rendering bold / italic / bold-italic cells.
+    pub(super) style_families: StyleFamilies,
+}
+
+/// Per-style font family overrides from config (`font_bold`, `font_italic`,
+/// `font_bold_italic`). Each field is an optional family name or absolute file
+/// path. When present, the named face is loaded into the fontdb in addition to
+/// the primary font's synthesized style faces. `None` in any field falls back to
+/// the synthesized style (or the fontconfig-resolved style face, if available).
+#[derive(Default)]
+pub(super) struct StyleOverrides {
+    pub bold: Option<String>,
+    pub italic: Option<String>,
+    pub bold_italic: Option<String>,
+}
+
+/// A resolved per-style family, stored in `LoadedFont` so the shaper can pick
+/// the right family name for each (bold, italic, bold-italic) combination.
+pub(super) struct StyleFamilies {
+    /// Family name for bold text. `None` → use the primary family at `Weight::BOLD`.
+    pub bold: Option<String>,
+    /// Family name for italic text. `None` → use the primary family at `Style::Italic`.
+    pub italic: Option<String>,
+    /// Family name for bold-italic text. `None` → primary + `Weight::BOLD + Style::Italic`.
+    pub bold_italic: Option<String>,
 }
 
 /// Build a `FontSystem` from a single primary font's raw bytes, then enrich the
@@ -137,6 +164,11 @@ pub(super) struct LoadedFont {
 /// `primary_path` is the file the primary bytes were read from, if known; it
 /// seeds the de-dup set so the fallback chain never reloads the primary file.
 ///
+/// `style_overrides` provides optional explicit families for bold / italic /
+/// bold-italic; when set the named family (or file) is loaded into the same
+/// fontdb so cosmic-text resolves styled text with the override instead of
+/// synthesising it from the primary.
+///
 /// We deliberately avoid `FontSystem::new()` (a full system scan) here — only a
 /// handful of fontconfig-resolved fallback files are loaded.
 ///
@@ -144,6 +176,7 @@ pub(super) struct LoadedFont {
 pub(super) fn build_font_system(
     bytes: Vec<u8>,
     primary_path: Option<PathBuf>,
+    style_overrides: &StyleOverrides,
 ) -> Option<LoadedFont> {
     let mut db = fontdb::Database::new();
     let ids = db.load_font_source(fontdb::Source::Binary(Arc::new(bytes)));
@@ -168,6 +201,27 @@ pub(super) fn build_font_system(
     // the real monospace face rather than falling back to a proportional font.
     #[cfg(target_os = "linux")]
     load_primary_styles(&mut db, &family_name, primary_path.as_deref(), &fc_cache);
+
+    // Load per-style override fonts (font_bold / font_italic / font_bold_italic).
+    // Each override is an explicit family name or absolute file path. We resolve
+    // it into the fontdb so the shaper can address it by family name.
+    #[cfg(target_os = "linux")]
+    let style_families =
+        load_style_override_fonts(&mut db, style_overrides, primary_path.as_deref(), &fc_cache);
+    #[cfg(target_os = "macos")]
+    let style_families = {
+        let cache = macos_font_cache_load();
+        load_style_override_fonts_macos(&mut db, style_overrides, primary_path.as_deref(), &cache)
+    };
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    let style_families = {
+        let _ = style_overrides;
+        StyleFamilies {
+            bold: None,
+            italic: None,
+            bold_italic: None,
+        }
+    };
 
     // Enrich the database with fallback faces (best-effort; failures are skipped).
     #[cfg(target_os = "linux")]
@@ -198,7 +252,90 @@ pub(super) fn build_font_system(
         family: FamilyOwned::Named(family_name),
         is_monospaced,
         emoji_family,
+        style_families,
     })
+}
+
+/// Load the per-style override fonts (`font_bold`, `font_italic`, `font_bold_italic`)
+/// into `db` on Linux. Each override is either an absolute file path or a family
+/// name resolved via fontconfig. Returns the resolved family names so the shaper
+/// can address each style.
+#[cfg(target_os = "linux")]
+fn load_style_override_fonts(
+    db: &mut fontdb::Database,
+    overrides: &StyleOverrides,
+    primary_path: Option<&Path>,
+    cache: &std::collections::HashMap<String, String>,
+) -> StyleFamilies {
+    let mut seen: HashSet<PathBuf> = HashSet::new();
+    if let Some(p) = primary_path {
+        seen.insert(canonical_or_owned(p));
+    }
+    let mut resolve = |name: &str| -> Option<String> {
+        // Allow explicit file paths.
+        let as_path = Path::new(name);
+        if as_path.is_file() {
+            let key = canonical_or_owned(as_path);
+            if seen.insert(key) {
+                load_font_file(db, as_path);
+            }
+            // Read the family name from the newly-loaded face.
+            return db
+                .faces()
+                .last()
+                .and_then(|f| f.families.first().map(|(n, _)| n.clone()));
+        }
+        // Otherwise treat as a family name and resolve via fontconfig.
+        if let Some(path) = fc_match_family_cached(name, cache) {
+            if !cache.contains_key(&format!("family:{name}")) {
+                fc_cache_insert(&format!("family:{name}"), &path);
+            }
+            let key = canonical_or_owned(Path::new(&path));
+            if seen.insert(key) && load_font_file(db, Path::new(&path)) {
+                log::debug!("glassy: loaded style override '{name}': {path}");
+            }
+            // The family name from fc-match could differ from `name`; re-query the db.
+            return db
+                .faces()
+                .last()
+                .and_then(|f| f.families.first().map(|(n, _)| n.clone()));
+        }
+        log::warn!("glassy: font style override '{name}' not found; using primary style");
+        None
+    };
+    StyleFamilies {
+        bold: overrides.bold.as_deref().and_then(&mut resolve),
+        italic: overrides.italic.as_deref().and_then(&mut resolve),
+        bold_italic: overrides.bold_italic.as_deref().and_then(&mut resolve),
+    }
+}
+
+/// macOS variant: resolve style override fonts from the macOS font cache.
+#[cfg(target_os = "macos")]
+fn load_style_override_fonts_macos(
+    db: &mut fontdb::Database,
+    overrides: &StyleOverrides,
+    primary_path: Option<&Path>,
+    cache: &std::collections::HashMap<String, String>,
+) -> StyleFamilies {
+    let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    if let Some(p) = primary_path {
+        seen.insert(p.to_path_buf());
+    }
+    let mut resolve = |name: &str| -> Option<String> {
+        let path = find_macos_font_file(name, cache)?;
+        if seen.insert(path.clone()) {
+            load_font_file_macos(db, &path);
+        }
+        db.faces()
+            .last()
+            .and_then(|f| f.families.first().map(|(n, _)| n.clone()))
+    };
+    StyleFamilies {
+        bold: overrides.bold.as_deref().and_then(&mut resolve),
+        italic: overrides.italic.as_deref().and_then(&mut resolve),
+        bold_italic: overrides.bold_italic.as_deref().and_then(resolve),
+    }
 }
 
 /// Fallback families to resolve via fontconfig and add to the database, in order.
@@ -795,7 +932,7 @@ fn macos_font_cache_path() -> Option<PathBuf> {
 
 /// Load the macOS font cache into a `HashMap<family, file_path>`.
 #[cfg(target_os = "macos")]
-fn macos_font_cache_load() -> std::collections::HashMap<String, String> {
+pub(super) fn macos_font_cache_load() -> std::collections::HashMap<String, String> {
     let mut map = std::collections::HashMap::new();
     let path = match macos_font_cache_path() {
         Some(p) => p,
@@ -931,7 +1068,7 @@ fn coretext_monospace_path() -> Option<PathBuf> {
 /// miss, directories are scanned: first pass prefers Regular-weight stems,
 /// second accepts any weight. A successful scan result is written to the cache.
 #[cfg(target_os = "macos")]
-fn find_macos_font_file(
+pub(super) fn find_macos_font_file(
     family: &str,
     cache: &std::collections::HashMap<String, String>,
 ) -> Option<PathBuf> {

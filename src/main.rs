@@ -33,6 +33,20 @@ fn main() -> anyhow::Result<()> {
         return run_control_client(cmd);
     }
 
+    // Kitty-style remote control: `glassy @ <cmd> …` (or `glassy msg <cmd> …`) is
+    // a thin CLIENT that forwards a rich command (open-tab, split, send-text,
+    // set-theme, ls, …) to the running instance over the same Unix socket and
+    // prints its reply, then exits. See `ipc::control` + `docs`.
+    if let Some(first) = std::env::args().nth(1)
+        && (first == "@" || first == "msg")
+    {
+        // Re-join the remaining args into a single request line (preserving the
+        // user's quoting as the shell already resolved it).
+        let rest: Vec<String> = std::env::args().skip(2).collect();
+        let line = rest.join(" ");
+        return run_remote_client(&line);
+    }
+
     // Resolve configuration: config file first, then CLI overrides. `--help`
     // prints usage and exits; a parse error is reported and aborts startup.
     let settings = match config::Settings::resolve(std::env::args().skip(1)) {
@@ -62,12 +76,22 @@ fn main() -> anyhow::Result<()> {
         Err(e) => log::warn!("ipc: failed to start control server: {e}"),
     }
 
+    // Clone a proxy for the macOS menu bar before `proxy` is moved into the app.
+    #[cfg(target_os = "macos")]
+    let menu_proxy = proxy.clone();
+
     let mut app = app::App::new(proxy, settings.config);
 
     // Set dock + Cmd-Tab icon after EventLoop::build() so winit has already
     // initialised NSApplication — our call then updates the existing singleton.
     #[cfg(target_os = "macos")]
     set_macos_app_icon();
+
+    // Install the global macOS menu bar (glassy/File/Edit/View/Window) wired to
+    // glassy's key actions via the event-loop proxy. Done after NSApplication
+    // exists; menu clicks post `UserEvent::MenuAction` back into the loop.
+    #[cfg(target_os = "macos")]
+    app::mac_menu::install_menu_bar(menu_proxy);
 
     event_loop.run_app(&mut app)?;
     ipc::cleanup();
@@ -81,7 +105,7 @@ fn set_macos_app_icon() {
     use objc2_app_kit::{NSApplication, NSImage};
     use objc2_foundation::NSData;
 
-    let icon_bytes = include_bytes!("../assets/icons/glassy.icns");
+    let icon_bytes = include_bytes!("../assets/icons/glassy-pink.icns");
     unsafe {
         objc2::rc::autoreleasepool(|_| {
             let mtm = objc2_foundation::MainThreadMarker::new().unwrap();
@@ -112,6 +136,34 @@ fn run_control_client(cmd: ipc::IpcCommand) -> anyhow::Result<()> {
         }
         Err(e) => {
             eprintln!("glassy: control command failed: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Run a kitty-style remote-control request (`glassy @ <cmd> …`) as a client:
+/// forward the request line to the running instance over the IPC socket, print
+/// the reply, and exit. Exits non-zero on an `ERR` reply, a missing instance, or
+/// an I/O failure so it composes cleanly in shell scripts.
+fn run_remote_client(line: &str) -> anyhow::Result<()> {
+    use ipc::control::ControlReply;
+    match ipc::send_control(line) {
+        Ok(Some(ControlReply::Ok(text))) => {
+            if !text.is_empty() {
+                println!("{text}");
+            }
+            Ok(())
+        }
+        Ok(Some(ControlReply::Err(msg))) => {
+            eprintln!("glassy: {msg}");
+            std::process::exit(1);
+        }
+        Ok(None) => {
+            eprintln!("glassy: no running instance for 'glassy @ {line}'. Start glassy first.");
+            std::process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("glassy: remote control failed: {e}");
             std::process::exit(1);
         }
     }

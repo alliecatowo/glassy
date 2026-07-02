@@ -16,9 +16,11 @@ use std::collections::HashMap;
 
 use alacritty_terminal::sync::FairMutex;
 
+mod notify;
 mod parser;
 mod store;
 
+pub use notify::*;
 pub use parser::*;
 pub use store::*;
 
@@ -361,7 +363,7 @@ mod tests {
                 TapEvent::Delete(_) => "delete",
                 TapEvent::Cwd(_) => "cwd",
                 TapEvent::SemanticMark(_, _) => "mark",
-                TapEvent::Notification(_) => "notification",
+                TapEvent::Notify(_) => "notification",
                 TapEvent::Progress(_) => "progress",
                 TapEvent::Peek(_) => "peek",
             })
@@ -658,10 +660,10 @@ mod tests {
     // OSC 9 / OSC 777 / OSC 133 shell-integration tests
     // -----------------------------------------------------------------------
 
-    /// Helper: extract the first Notification body, if any.
+    /// Helper: extract the first Notify body, if any.
     fn first_notification(events: &[TapEvent]) -> Option<String> {
         events.iter().find_map(|e| match e {
-            TapEvent::Notification(s) => Some(s.clone()),
+            TapEvent::Notify(s) => Some(s.toast_text()),
             _ => None,
         })
     }
@@ -687,36 +689,25 @@ mod tests {
 
     #[test]
     fn osc9_notification_parsed() {
-        // `parse_osc9_notification` should extract the body after "9;".
-        use super::store::parse_osc9_notification;
-        let ev = parse_osc9_notification(b"9;build finished").expect("parsed");
-        match ev {
-            TapEvent::Notification(s) => assert_eq!(s, "build finished"),
-            _ => panic!("expected Notification"),
-        }
+        // `parse_osc9` should extract the body after "9;".
+        let spec = super::parse_osc9(b"9;build finished").expect("parsed");
+        assert_eq!(spec.body, "build finished");
         // Empty body is rejected.
-        assert!(parse_osc9_notification(b"9;").is_none());
+        assert!(super::parse_osc9(b"9;").is_none());
         // Wrong OSC code is rejected.
-        assert!(parse_osc9_notification(b"0;something").is_none());
+        assert!(super::parse_osc9(b"0;something").is_none());
     }
 
     #[test]
     fn osc777_notification_parsed() {
-        use super::store::parse_osc777_notification;
         // Full form: title + body.
-        let ev = parse_osc777_notification(b"777;notify;My App;Task done").expect("parsed");
-        match ev {
-            TapEvent::Notification(s) => assert_eq!(s, "My App \u{2014} Task done"),
-            _ => panic!("expected Notification"),
-        }
+        let spec = super::parse_osc777(b"777;notify;My App;Task done").expect("parsed");
+        assert_eq!(spec.toast_text(), "My App \u{2014} Task done");
         // Body only (empty title).
-        let ev = parse_osc777_notification(b"777;notify;;Just body").expect("parsed");
-        match ev {
-            TapEvent::Notification(s) => assert_eq!(s, "Just body"),
-            _ => panic!("expected Notification"),
-        }
+        let spec = super::parse_osc777(b"777;notify;;Just body").expect("parsed");
+        assert_eq!(spec.toast_text(), "Just body");
         // Wrong prefix rejected.
-        assert!(parse_osc777_notification(b"9;hello").is_none());
+        assert!(super::parse_osc777(b"9;hello").is_none());
     }
 
     #[test]
@@ -736,6 +727,86 @@ mod tests {
         assert!(parse_osc1337_peek(b"1337;Peek=").is_none());
         assert!(parse_osc1337_peek(b"1337;SetMark").is_none());
         assert!(parse_osc1337_peek(b"9;hello").is_none());
+    }
+
+    /// Minimal standard-base64 encoder for the OSC 1337 File= test (no dependency).
+    fn b64_encode(data: &[u8]) -> String {
+        const TBL: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut out = String::new();
+        for chunk in data.chunks(3) {
+            let b = [
+                chunk[0],
+                *chunk.get(1).unwrap_or(&0),
+                *chunk.get(2).unwrap_or(&0),
+            ];
+            let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
+            out.push(TBL[((n >> 18) & 63) as usize] as char);
+            out.push(TBL[((n >> 12) & 63) as usize] as char);
+            out.push(if chunk.len() > 1 {
+                TBL[((n >> 6) & 63) as usize] as char
+            } else {
+                '='
+            });
+            out.push(if chunk.len() > 2 {
+                TBL[(n & 63) as usize] as char
+            } else {
+                '='
+            });
+        }
+        out
+    }
+
+    #[test]
+    fn osc1337_file_decodes_inline_png() {
+        use super::store::parse_osc1337_file;
+        // Encode a 2x1 RGBA PNG (red, green), then wrap it in an OSC 1337 File=
+        // body and confirm it decodes back to the same pixels (imgcat path).
+        let mut png_bytes = Vec::new();
+        {
+            let mut enc = png::Encoder::new(&mut png_bytes, 2, 1);
+            enc.set_color(png::ColorType::Rgba);
+            enc.set_depth(png::BitDepth::Eight);
+            let mut w = enc.write_header().unwrap();
+            w.write_image_data(&[255, 0, 0, 255, 0, 255, 0, 255])
+                .unwrap();
+        }
+        let body = format!("1337;File=name=Zm9v;inline=1:{}", b64_encode(&png_bytes));
+        let img = parse_osc1337_file(body.as_bytes()).expect("decoded inline PNG");
+        assert_eq!((img.width, img.height), (2, 1));
+        assert_eq!(img.rgba, vec![255, 0, 0, 255, 0, 255, 0, 255]);
+    }
+
+    #[test]
+    fn osc1337_file_rejects_non_image_and_other_keys() {
+        use super::store::parse_osc1337_file;
+        // Non-PNG payload (garbage base64) yields no image.
+        assert!(parse_osc1337_file(b"1337;File=inline=1:Zm9vYmFy").is_none());
+        // A different OSC 1337 key is not a File= and is rejected.
+        assert!(parse_osc1337_file(b"1337;Peek=/tmp/x").is_none());
+        // Missing the args:payload separator.
+        assert!(parse_osc1337_file(b"1337;File=name=Zm9v").is_none());
+    }
+
+    #[test]
+    fn osc1337_file_routed_to_display_through_tap() {
+        use alacritty_terminal::sync::FairMutex;
+        // End-to-end: feed an OSC 1337 File= sequence through the StreamTap and
+        // confirm it produces a Display event AND stores the decoded image.
+        let mut png_bytes = Vec::new();
+        {
+            let mut enc = png::Encoder::new(&mut png_bytes, 1, 1);
+            enc.set_color(png::ColorType::Rgba);
+            enc.set_depth(png::BitDepth::Eight);
+            let mut w = enc.write_header().unwrap();
+            w.write_image_data(&[1, 2, 3, 255]).unwrap();
+        }
+        let seq = format!("\x1b]1337;File=inline=1:{}\x07", b64_encode(&png_bytes));
+        let store = FairMutex::new(ImageStore::new());
+        let mut tap = StreamTap::new();
+        let events = tap.process(seq.as_bytes(), &store);
+        let has_display = events.iter().any(|e| matches!(e, TapEvent::Display(_)));
+        assert!(has_display, "OSC 1337 File= should emit a Display event");
+        assert_eq!(store.lock().len(), 1, "decoded image should be stored");
     }
 
     #[test]
@@ -863,18 +934,13 @@ mod tests {
     #[test]
     fn osc9_4_not_confused_with_osc9_notification() {
         // OSC 9;4;1;50 must not be parsed as a notification.
-        use super::store::{parse_osc9_notification, parse_osc9_progress};
+        use super::store::parse_osc9_progress;
         // Progress check must match.
         assert!(parse_osc9_progress(b"9;4;1;50").is_some());
-        // Notification check: "9;4;1;50" starts with "9;" but NOT with "9;4;".
-        // parse_osc9_notification requires the body after "9;" to be non-empty text.
-        // But parse_osc9_progress takes priority in finish_osc, so verify they don't
-        // collide: the notification parser would parse body as "4;1;50" which looks
-        // like a valid notification. The ordering in finish_osc ensures 9;4;... is
-        // always handled as progress.
-        let notif = parse_osc9_notification(b"9;4;1;50");
-        // We DON'T assert it's None here — the ordering in finish_osc is what matters.
-        // This just documents the relationship.
+        // The notification parser would parse the body as "4;1;50" (a valid plain
+        // notification), but parse_osc9_progress takes priority in finish_osc, so
+        // 9;4;... is always handled as progress. This documents the relationship.
+        let notif = super::parse_osc9(b"9;4;1;50");
         let _ = notif;
         assert!(parse_osc9_progress(b"9;4;1;50").is_some());
         // A plain notification ("9;build ok") must NOT be parsed as progress.

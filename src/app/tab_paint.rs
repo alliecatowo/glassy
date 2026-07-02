@@ -43,7 +43,8 @@ impl App {
             );
         }
 
-        let press_fill = |base: [f32; 4]| [base[0] * 0.85, base[1] * 0.85, base[2] * 0.85, base[3]];
+        // Softened press darkening (matches the full tab bar's gentler press).
+        let press_fill = |base: [f32; 4]| [base[0] * 0.92, base[1] * 0.92, base[2] * 0.92, base[3]];
 
         for seg in &segs {
             let r = seg.rect;
@@ -154,7 +155,9 @@ impl App {
         let multi = descs.len() > 1;
         let spin = SPINNER_FRAMES[spinner_frame % SPINNER_FRAMES.len()];
 
-        let press_fill = |base: [f32; 4]| [base[0] * 0.85, base[1] * 0.85, base[2] * 0.85, base[3]];
+        // Softened press darkening (was ×0.85, which gave icon buttons a heavy
+        // click "thunk"); ×0.92 keeps tactility without the slam.
+        let press_fill = |base: [f32; 4]| [base[0] * 0.92, base[1] * 0.92, base[2] * 0.92, base[3]];
         let hover_fill = |base: [f32; 4]| gui::state_fill(base, 0.7, false);
 
         // Track a held tab so we can defer its drag-ghost to the very top.
@@ -306,6 +309,53 @@ impl App {
         }
     }
 
+    /// Paint the modifier-HOLD numbered overlay: a small accent number badge
+    /// centered on each visible tab chip (1-based, only 1..=9 are jumpable via the
+    /// modifier+digit chord). Drawn on TOP of the (possibly cached) tab bar each
+    /// frame the overlay is active, mirroring the rename-editor's draw-after-cache
+    /// pattern. `chips` is the list of `(rect, position)` for visible Tab segs.
+    pub(crate) fn paint_tab_hold_numbers(renderer: &mut Renderer, chips: &[(gui::Rect, usize)]) {
+        let m = renderer.cell_metrics();
+        let accent = color::accent();
+        let radius = gui_radius(m.height);
+        // Scrim under the badge so the number reads over any chip title.
+        let scrim = {
+            let g = gui::glass_float();
+            [g[0], g[1], g[2], (g[3] * 0.92).min(1.0)]
+        };
+        for (r, pos) in chips {
+            // Only 1..=9 are reachable via the modifier+digit chord; number the
+            // rest with no badge (they remain clickable).
+            let n = pos + 1;
+            if n > 9 {
+                continue;
+            }
+            let label = n.to_string();
+            let bw = (m.width + 8.0).max(m.height);
+            let bh = (m.height + 4.0).min(r.h);
+            let bx = (r.center_x() - bw * 0.5).round();
+            let by = (r.center_y() - bh * 0.5).round();
+            renderer.push_overlay_rrect_px(bx, by, bw, bh, radius, scrim);
+            // Accent ring for a chip-like badge.
+            let ring = [accent[0], accent[1], accent[2], 0.6];
+            renderer.push_overlay_rrect_px(bx, by, bw, bh, radius, ring);
+            let inset = 1.5;
+            if bw > 2.0 * inset && bh > 2.0 * inset {
+                renderer.push_overlay_rrect_px(
+                    bx + inset,
+                    by + inset,
+                    bw - 2.0 * inset,
+                    bh - 2.0 * inset,
+                    (radius - inset).max(0.0),
+                    scrim,
+                );
+            }
+            let gx = (r.center_x() - m.width * 0.5).round();
+            let gy = (r.center_y() - m.height * 0.5).round();
+            renderer.push_overlay_glyph_px_str(gx, gy, &label, accent);
+        }
+    }
+
     /// Paint one tab chip's surface (connector + rail for active, recess for
     /// inactive) and its label. Split out so the drag-ghost can reuse the label
     /// pass without the surface.
@@ -381,8 +431,11 @@ impl App {
             }
         } else {
             let rr = gui::Rect::new(r.x, r.y + 3.0, r.w, r.h - 5.0);
+            // Softened press: the held fill is only a touch above hover (was a hard
+            // 0.55→0.70 jump that read as a heavy "thunk" on click). The chip now
+            // settles into focus rather than slamming.
             let fill = if held {
-                [surface[0], surface[1], surface[2], surface[3] * 0.70]
+                [surface[0], surface[1], surface[2], surface[3] * 0.60]
             } else if hover {
                 [surface[0], surface[1], surface[2], surface[3] * 0.55]
             } else {
