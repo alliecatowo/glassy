@@ -985,7 +985,7 @@ impl App {
             let (sw, sh) = renderer.surface_size();
             let mouse = (self.mouse_px.0 as f32, self.mouse_px.1 as f32);
             let row_refs: Vec<(&str, Option<&str>)> =
-                rows.iter().map(|(l, h)| (l.as_str(), *h)).collect();
+                rows.iter().map(|(l, h)| (l.as_str(), h.as_deref())).collect();
             self.palette_rows = Self::paint_palette(
                 renderer,
                 (sw as f32, sh as f32),
