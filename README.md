@@ -76,12 +76,32 @@ Type fast enough and the cursor throws a particle trail. Pure vanity, zero cost 
 
 </td>
 </tr>
+<tr>
+<td width="50%">
+
+**Split panes**
+
+`Ctrl+Shift+E`/`Cmd+D` (vertical) or `Ctrl+Shift+O`/`Cmd+Shift+D` (horizontal) — unfocused panes dim automatically so it's always obvious where input goes.
+
+<img src="docs/screenshots/split-panes.png" width="100%" alt="glassy with two vertically split panes, the unfocused one dimmed"/>
+
+</td>
+<td width="50%">
+
+**Tabs**
+
+Drag to reorder, double-click to rename; a spinner marks a tab actively producing output.
+
+<img src="docs/screenshots/tabs.png" width="100%" alt="glassy tab strip showing three tabs with process labels"/>
+
+</td>
+</tr>
 </table>
 
-Every action — tabs, panes, themes, toggles — is also reachable from the command palette (`Ctrl+Shift+P`) or the hamburger menu, top-right:
+Every action — tabs, panes, themes, toggles — is reachable from the fuzzy-searchable command palette (`Ctrl+Shift+P` / `Cmd+Shift+P`), which also filters live as you type:
 
 <div align="center">
-<img src="docs/screenshots/menu.png" width="500" alt="glassy hamburger menu showing tab actions"/>
+<img src="docs/screenshots/command-palette.gif" width="600" alt="glassy command palette: opening it, typing 'split' to filter the action list, and selecting Split vertical"/>
 </div>
 
 ---
