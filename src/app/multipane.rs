@@ -688,8 +688,10 @@ impl App {
         // Command palette (Ctrl+Shift+P) in split mode: topmost modal.
         if let Some((query, caret, selection, rows, sel)) = &palette_inputs {
             let (sw, sh) = renderer.surface_size();
-            let row_refs: Vec<(&str, Option<&str>)> =
-                rows.iter().map(|(l, h)| (l.as_str(), *h)).collect();
+            let row_refs: Vec<(&str, Option<&str>)> = rows
+                .iter()
+                .map(|(l, h)| (l.as_str(), h.as_deref()))
+                .collect();
             self.palette_rows = Self::paint_palette(
                 renderer,
                 (sw as f32, sh as f32),

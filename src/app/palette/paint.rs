@@ -11,11 +11,11 @@ impl App {
     /// `(label, hint)` pairs, and the selected row. Returns `None` when closed.
     pub(crate) fn palette_snapshot(&self) -> Option<PaletteSnapshot> {
         let p = self.palette.as_ref()?;
-        let rows: Vec<(String, Option<&'static str>)> = p
+        let rows: Vec<(String, Option<String>)> = p
             .filtered
             .iter()
             .filter_map(|&i| p.all.get(i))
-            .map(|e| (e.display.clone(), e.hint))
+            .map(|e| (e.display.clone(), e.hint.clone()))
             .collect();
         Some((p.query(), p.edit.caret(), p.edit.selection(), rows, p.sel))
     }

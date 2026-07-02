@@ -1,31 +1,21 @@
 <div align="center">
 
+<img src="docs/icon.png" width="128" height="128" alt="glassy icon"/>
+
 # glassy
 
 **A minimal, blazing-fast, GPU-accelerated terminal emulator in Rust.**
 
 [![CI](https://github.com/alliecatowo/glassy/actions/workflows/ci.yml/badge.svg)](https://github.com/alliecatowo/glassy/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Made with Rust](https://img.shields.io/badge/Made%20with-Rust-dea584?logo=rust&logoColor=white)](https://www.rust-lang.org)
+[![Latest release](https://img.shields.io/github/v/release/alliecatowo/glassy?label=release&color=success)](https://github.com/alliecatowo/glassy/releases)
+[![License: MIT](https://img.shields.io/badge/license-MIT-yellow.svg)](LICENSE)
+[![Made with Rust](https://img.shields.io/badge/made%20with-Rust-dea584?logo=rust&logoColor=white)](https://www.rust-lang.org)
+[![Homebrew tap](https://img.shields.io/badge/homebrew-tap-fbb040?logo=homebrew&logoColor=white)](https://github.com/alliecatowo/glassy)
+[![Platforms](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-blue)](#install)
 
 <br/>
 
-<img src="docs/screenshot.png" alt="glassy terminal" width="820"/>
-
-<br/>
-<br/>
-
-<img src="docs/demo.gif" alt="glassy live demo" width="820"/>
-
-<br/>
-<br/>
-
-<img src="docs/inline-images.png" alt="glassy rendering images inline" width="820"/>
-
-<br/>
-<br/>
-
-<img src="docs/settings.png" alt="glassy in-app settings overlay" width="820"/>
+<img src="docs/screenshots/hero.png" width="820" alt="glassy rendering a Rust file with syntax highlighting and a starship prompt"/>
 
 </div>
 
@@ -43,6 +33,79 @@ glassy is small and quiet on purpose. It does the work the GPU is good at, and n
 
 ---
 
+## A closer look
+
+<table>
+<tr>
+<td width="50%">
+
+**In-app settings, live**
+
+Font, opacity, padding, bell, and more — every change previews instantly, `Enter`/Save writes it to the config file.
+
+<img src="docs/screenshots/settings.png" width="100%" alt="glassy settings overlay showing font, window, and bell controls"/>
+
+</td>
+<td width="50%">
+
+**18 built-in themes, one editor**
+
+Pick a preset or open the swatch editor and hand-tune fg/bg/cursor/ANSI colors — changes apply live before you save.
+
+<img src="docs/screenshots/theme-picker.png" width="100%" alt="glassy theme picker showing 18 built-in themes and a custom color swatch editor"/>
+
+</td>
+</tr>
+<tr>
+<td width="50%">
+
+**Window effects**
+
+Frosted, acrylic, CRT, scanlines, grain, vignette, bloom — stack them or pick one, all GPU post-processing, no perf cliff.
+
+<img src="docs/screenshots/effect-crt.png" width="100%" alt="glassy with the CRT window effect applied, showing barrel-warp distortion"/>
+
+</td>
+<td width="50%">
+
+**Power Mode** *(opt-in)*
+
+Type fast enough and the cursor throws a particle trail. Pure vanity, zero cost when off.
+
+<img src="docs/screenshots/power-mode.gif" width="100%" alt="glassy Power Mode particle trail effect while typing rapidly"/>
+
+</td>
+</tr>
+<tr>
+<td width="50%">
+
+**Split panes**
+
+`Ctrl+Shift+E`/`Cmd+D` (vertical) or `Ctrl+Shift+O`/`Cmd+Shift+D` (horizontal) — unfocused panes dim automatically so it's always obvious where input goes.
+
+<img src="docs/screenshots/split-panes.png" width="100%" alt="glassy with two vertically split panes, the unfocused one dimmed"/>
+
+</td>
+<td width="50%">
+
+**Tabs**
+
+Drag to reorder, double-click to rename; a spinner marks a tab actively producing output.
+
+<img src="docs/screenshots/tabs.png" width="100%" alt="glassy tab strip showing three tabs with process labels"/>
+
+</td>
+</tr>
+</table>
+
+Every action — tabs, panes, themes, toggles — is reachable from the fuzzy-searchable command palette (`Ctrl+Shift+P` / `Cmd+Shift+P`), which also filters live as you type:
+
+<div align="center">
+<img src="docs/screenshots/command-palette.gif" width="600" alt="glassy command palette: opening it, typing 'split' to filter the action list, and selecting Split vertical"/>
+</div>
+
+---
+
 ## Features
 
 ### Rendering
@@ -50,6 +113,7 @@ glassy is small and quiet on purpose. It does the work the GPU is good at, and n
 - **Gamma-correct** antialiasing for crisp, correctly-weighted text
 - **Render-on-demand** + **damage-based** redraw (0% idle CPU)
 - **Inline images** — kitty graphics protocol (PNG incl. 8/16-bit and palette, raw RGBA, chunked transfers, `c=`/`r=` cell sizing, aspect-aware, `a=d` delete) and **sixel**, drawn on a dedicated GPU atlas; cleared on screen-clear / reset
+- **Window effects** — frosted, acrylic, CRT, scanlines, grain, vignette, bloom; stackable via `window_effect = custom`
 
 ### Color and text
 - Full **24-bit truecolor** and **256-color** support
@@ -58,7 +122,7 @@ glassy is small and quiet on purpose. It does the work the GPU is good at, and n
 - **Procedural box-drawing** (light / heavy / double / rounded) and block elements, rendered as crisp pixel-exact geometry
 - Text decorations: **underline, double, curly, dotted, dashed, strikethrough** with **SGR 58** colored underlines
 - **Ligatures** — opt-in OpenType GSUB `liga` shaping across cell runs; individual features overridable via `font_features`
-- Cursor **shapes** (block / bar / underline) + **blink**
+- Cursor **shapes** (block / bar / underline), **blink**, and an optional **trail**
 
 ### Tabs and panes
 - **Tabs** with a slim title/tab bar — drag tabs to reorder, double-click to rename
@@ -70,7 +134,7 @@ glassy is small and quiet on purpose. It does the work the GPU is good at, and n
 - **Close pane** — `Ctrl+Shift+W` closes the focused pane; falls back to closing the whole tab when only one pane remains
 
 ### GUI chrome
-- **Settings overlay** (`Ctrl+,`) — form with font size, opacity, bell, theme, font family, scrollback, status bar, pane headers; changes apply live; Enter saves to the config file
+- **Settings overlay** (`Ctrl+,`) — sectioned (General, Appearance, Themes, Keys, Panes, Advanced); changes apply live; Enter/Save writes the config file
 - **Command palette** (`Ctrl+Shift+P`) — fuzzy-searchable list of every action (tabs, panes, font, themes, toggles); type to filter, arrow/Enter to run
 - **In-terminal search** (`Ctrl+Shift+F`) — regex find bar at the bottom; all matches highlighted; `Enter`/`Shift+Enter` jump next/prev
 - **Help overlay** (`F1`) — scrollable two-column keybinding cheat-sheet
@@ -78,22 +142,15 @@ glassy is small and quiet on purpose. It does the work the GPU is good at, and n
 - **Hamburger menu** (`#` button) — top-right; same actions as the palette
 - **Fullscreen** (`F11`) — borderless fullscreen toggle
 - **Maximize** (`F10`) — window maximize toggle
+- **Power Mode** *(opt-in)* — cursor particle burst + streak shake while typing fast; `power_mode = true`
 
-### Themes (10 built-in, live-switchable)
-- Tokyo Night (default)
-- Catppuccin Mocha
-- Catppuccin Macchiato
-- Catppuccin Latte *(light)*
-- Gruvbox Dark
-- Dracula
-- Nord
-- Solarized Dark
-- Rosé Pine
-- Rosé Pine Dawn *(light)*
+### Themes (18 built-in, live-switchable)
 
-Switch live in the settings overlay, the command palette, or by editing the config. Two light themes are included. `follow_system = true` tracks the OS light/dark preference automatically.
+Tokyo Night · Catppuccin Mocha · Catppuccin Macchiato · Catppuccin Latte *(light)* · Gruvbox Dark · Gruvbox Light *(light)* · Dracula · Nord · Solarized Dark · Rosé Pine · Rosé Pine Dawn *(light)* · Everforest Dark · Everforest Light *(light)* · Kanagawa · One Dark · One Light *(light)* · Ayu Dark · Ayu Light *(light)*
 
-**Custom colors** — override any theme color inline (`color.fg`, `color.bg`, `color.cursor`, `color.selection_bg`, `color.ansi0`–`color.ansi15`).
+Switch live in the settings overlay, the command palette, or by editing the config. Six light themes are included. `follow_system = true` tracks the OS light/dark preference automatically.
+
+**Custom colors** — override any theme color inline (`color.fg`, `color.bg`, `color.cursor`, `color.selection_bg`, `color.ansi0`–`color.ansi15`), or use the in-app swatch editor.
 
 **Import themes** — load an Alacritty TOML or base16 YAML file with `--import-theme <path>`.
 
@@ -124,19 +181,45 @@ Switch live in the settings overlay, the command palette, or by editing the conf
 
 ## Install
 
-### One-liner (Linux / macOS)
+<details open>
+<summary><strong>macOS</strong></summary>
+<br/>
 
-Downloads the latest pre-built binary, verifies its SHA-256 checksum, and installs to `~/.local/bin` (no sudo required):
+**Homebrew Cask (recommended)** — this repo is its own tap (no separate `homebrew-*` repo needed):
+
+```sh
+brew tap alliecatowo/glassy https://github.com/alliecatowo/glassy
+brew install --cask glassy
+```
+
+This installs **glassy.app** into `/Applications` and symlinks the CLI binary embedded in the bundle onto `PATH`, so one install gets you both the GUI app (Spotlight/Launchpad/Dock) and the `glassy` command in a terminal — no separate Formula install needed. glassy isn't notarized (no paid Apple Developer account behind this project), so the cask clears the quarantine flag on install to skip Gatekeeper's warning; see the printed caveat for the manual `.dmg` alternative if you'd rather review that yourself.
+
+**.dmg installer** *(manual alternative; separate Apple Silicon / Intel builds)*
+
+Download `glassy-<version>-macos-aarch64.dmg` (Apple Silicon) or `glassy-<version>-macos-x86_64.dmg` (Intel) from the [Releases page](https://github.com/alliecatowo/glassy/releases), open it, drag **glassy.app** to Applications. The app is ad-hoc signed but not notarized, so macOS will refuse to open it as "unverified" on first launch — go to System Settings → Privacy & Security and click **Open Anyway**.
+
+**Homebrew Formula** *(CLI-only, no GUI app)*
+
+```sh
+brew tap alliecatowo/glassy https://github.com/alliecatowo/glassy
+brew install glassy          # the latest tagged release (prebuilt binary, no local build)
+# or:
+brew install --HEAD glassy   # bleeding edge: build from main (requires Rust)
+```
+
+</details>
+
+<details>
+<summary><strong>Linux</strong></summary>
+<br/>
+
+**One-liner** — downloads the latest pre-built binary, verifies its SHA-256 checksum, installs to `~/.local/bin` (no sudo required):
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/alliecatowo/glassy/main/scripts/install.sh | bash
 ```
 
 Make sure `~/.local/bin` is on your `PATH`. The script prints a reminder if it isn't. To install system-wide: `INSTALL_DIR=/usr/local/bin curl … | bash` (requires sudo for that directory).
-
----
-
-### Package managers
 
 **Fedora / RHEL / openSUSE — dnf repo** *(GPG-signed; gets updates via `dnf upgrade`)*
 
@@ -148,10 +231,8 @@ sudo dnf config-manager addrepo --from-repofile=https://alliecatowo.github.io/gl
 sudo dnf install glassy
 ```
 
-> openSUSE:
-> `sudo zypper addrepo https://alliecatowo.github.io/glassy/rpm/glassy.repo && sudo zypper install glassy`.
-> _Copr alternative_ (once the project is mirrored there):
-> `sudo dnf copr enable alliecatowo/glassy && sudo dnf install glassy`.
+> openSUSE: `sudo zypper addrepo https://alliecatowo.github.io/glassy/rpm/glassy.repo && sudo zypper install glassy`.
+> _Copr alternative_ (once the project is mirrored there): `sudo dnf copr enable alliecatowo/glassy && sudo dnf install glassy`.
 
 **Debian / Ubuntu — apt repo** *(GPG-signed; gets updates via `apt upgrade`)*
 
@@ -164,8 +245,7 @@ echo "deb [signed-by=/etc/apt/keyrings/glassy.asc] https://alliecatowo.github.io
 sudo apt update && sudo apt install glassy
 ```
 
-> A Launchpad PPA (`add-apt-repository ppa:alliecatowo/glassy`) is a possible
-> future alternative; the signed repo above is the working default.
+> A Launchpad PPA (`add-apt-repository ppa:alliecatowo/glassy`) is a possible future alternative; the signed repo above is the working default.
 
 **Manual .deb / .rpm download** *(no repo; one-off install, no auto-updates)*
 
@@ -185,36 +265,12 @@ yay -S glassy
 yay -S glassy-bin
 ```
 
-**macOS — Homebrew Cask (recommended)** — this repo is its own tap (no separate `homebrew-*` repo needed):
+**Homebrew (Linuxbrew)**
 
 ```sh
 brew tap alliecatowo/glassy https://github.com/alliecatowo/glassy
-brew install --cask glassy
+brew install glassy          # builds from source
 ```
-
-This installs **glassy.app** into `/Applications` and symlinks the CLI binary embedded in the bundle onto `PATH`, so one install gets you both the GUI app (Spotlight/Launchpad/Dock) and the `glassy` command in a terminal — no separate Formula install needed.
-
-**macOS — .dmg installer** *(manual alternative; separate Apple Silicon / Intel builds)*
-
-Download `glassy-<version>-macos-aarch64.dmg` (Apple Silicon) or `glassy-<version>-macos-x86_64.dmg` (Intel) from the [Releases page](https://github.com/alliecatowo/glassy/releases), open it, drag **glassy.app** to Applications. The app is ad-hoc signed but not notarized, so macOS will refuse to open it as "unverified" on first launch — go to System Settings → Privacy & Security and click **Open Anyway** (older macOS: right-click the app and choose Open instead).
-
-> macOS is a fully supported, CI-built target: every release ships per-arch `.app`/`.dmg` pairs (no fat universal binary — that would double the download for no benefit, since each user only runs one arch). Notarization is the only remaining polish item.
-
-**macOS / Linux — Homebrew Formula** *(CLI-only, no GUI app)*
-
-```sh
-brew tap alliecatowo/glassy https://github.com/alliecatowo/glassy
-brew install glassy          # the latest tagged release (prebuilt binary on macOS, no local build)
-# or:
-brew install --HEAD glassy   # bleeding edge: build from latest main (requires Rust)
-```
-
-> `brew install glassy` uses `Formula/glassy.rb`, which on macOS downloads the
-> same prebuilt per-arch binary as the Cask (no local compile, but nothing
-> goes into `/Applications`) and on Linux builds from source. Both
-> `Formula/glassy.rb` and `Casks/glassy.rb` are rendered from their `.tmpl`
-> siblings by the release workflow on every tagged release. `--HEAD` ignores
-> the version and builds `main`.
 
 **Flatpak** *(not yet on Flathub; local build from the manifest)*
 
@@ -222,15 +278,19 @@ brew install --HEAD glassy   # bleeding edge: build from latest main (requires R
 flatpak-builder build packaging/flatpak/io.github.alliecatowo.glassy.yaml --install
 ```
 
+</details>
+
+<details>
+<summary><strong>Any platform — cargo / build from source</strong></summary>
+<br/>
+
 **cargo install** (builds from latest main; slower but cross-platform):
 
 ```sh
 cargo install --git https://github.com/alliecatowo/glassy --locked
 ```
 
----
-
-### Build from source
+**Build from source:**
 
 ```sh
 git clone https://github.com/alliecatowo/glassy
@@ -247,6 +307,8 @@ For the audible bell (needs ALSA dev libs — `alsa-lib-devel` / `libasound2-dev
 ```sh
 cargo build --release --features bell-audio
 ```
+
+</details>
 
 ---
 
@@ -286,6 +348,11 @@ pane_headers   = true                    # pane title bars in splits (on by defa
 ligatures      = false                   # OpenType liga shaping (opt-in)
 font_features  = ss01, calt=0            # force-on/off specific OT feature tags
 
+# Window effects and fun
+window_effect  = none                    # none|frosted|acrylic|crt|scanlines|grain|vignette|bloom|custom
+power_mode     = false                   # fun typing effect: cursor particle bursts + streak shake
+power_mode_intensity = 0.6               # power-mode strength: 0.0 (subtle) .. 1.0 (max)
+
 # Behavior
 cwd            = /home/me/projects       # working dir for the first tab
 restore_session = false                  # restore previous tabs/splits/cwds on launch
@@ -293,18 +360,21 @@ restore_session = false                  # restore previous tabs/splits/cwds on 
 
 ### Themes
 
-| Name | Style |
-| --- | --- |
-| `tokyo-night` | dark (default) |
-| `catppuccin-mocha` | dark |
-| `catppuccin-macchiato` | dark |
-| `gruvbox-dark` | dark |
-| `dracula` | dark |
-| `nord` | dark |
-| `solarized-dark` | dark |
-| `rose-pine` | dark |
-| `rose-pine-dawn` | light |
-| `catppuccin-latte` | light |
+18 built-in themes — 12 dark, 6 light:
+
+| Name | Style | Name | Style |
+| --- | --- | --- | --- |
+| `tokyo-night` | dark (default) | `everforest-dark` | dark |
+| `catppuccin-mocha` | dark | `everforest-light` | light |
+| `catppuccin-macchiato` | dark | `kanagawa` | dark |
+| `catppuccin-latte` | light | `one-dark` | dark |
+| `gruvbox-dark` | dark | `one-light` | light |
+| `gruvbox-light` | light | `ayu-dark` | dark |
+| `dracula` | dark | `ayu-light` | light |
+| `nord` | dark | | |
+| `solarized-dark` | dark | | |
+| `rose-pine` | dark | | |
+| `rose-pine-dawn` | light | | |
 
 ### Custom colors
 
@@ -320,11 +390,21 @@ color.ansi1        = #f7768e   # red
 # ... color.ansi2 through color.ansi15
 ```
 
+Or open the swatch editor in the settings overlay (`Ctrl+,` → Themes → click a swatch) to pick colors visually.
+
 Import an Alacritty-compatible TOML or base16 YAML theme at startup:
 
 ```sh
 glassy --import-theme ~/.config/alacritty/themes/my-theme.toml
 ```
+
+### Window effects
+
+```ini
+window_effect = crt   # none|frosted|acrylic|crt|scanlines|grain|vignette|bloom|custom
+```
+
+All effects are GPU post-processing passes over the rendered frame — no extra CPU work, no measurable input-latency cost. `custom` stacks multiple effects with per-channel sliders (settings overlay → Appearance → Effects).
 
 ### Named profiles
 

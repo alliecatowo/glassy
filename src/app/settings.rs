@@ -812,8 +812,10 @@ impl App {
     /// renderer, recompute the grid for the new cell box + padding, and resize the
     /// PTY. A no-op before the renderer/PTY exist.
     pub(crate) fn resize_font(&mut self, step: FontStep) {
-        // Read visibility before the mutable renderer borrow below.
+        // Read visibility (and the chrome inset — see effective_tab_bar_h's doc
+        // comment) before the mutable renderer borrow below.
         let strip_visible = self.tab_bar_visible();
+        let chrome_inset = self.chrome_top_inset();
         let base_font_px = self.base_font_px;
         let (Some(renderer), Some(pty)) = (self.renderer.as_mut(), self.pty.as_ref()) else {
             return;
@@ -827,12 +829,15 @@ impl App {
 
         // Recompute the grid for the new cell metrics + padding against the
         // current surface, and inform the PTY. The strip height tracks the (new)
-        // cell height, so re-derive it here from the post-resize metrics.
+        // cell height, so re-derive it here from the post-resize metrics. Without
+        // .max(chrome_inset), a hidden tab bar under-reserves the top band by the
+        // traffic-light inset, computing one row too many (see handle_resize).
         let strip_h = if strip_visible {
             tab_bar_h(renderer.cell_metrics().height)
         } else {
             0.0
-        };
+        }
+        .max(chrome_inset);
         if let Some(window) = self.window.as_ref() {
             let size = window.inner_size();
             let m = renderer.cell_metrics();
@@ -887,6 +892,12 @@ impl App {
             return;
         }
         let strip_visible = self.tab_bar_visible();
+        // Read before the mutable renderer borrow below — see effective_tab_bar_h's
+        // doc comment. Without this .max(), a hidden tab bar under-reserves the top
+        // band by the traffic-light inset, so grid_for computes one row too many
+        // and the last line (e.g. the shell prompt) renders partly below the
+        // window's bottom edge.
+        let chrome_inset = self.chrome_top_inset();
         let Some(renderer) = self.renderer.as_mut() else {
             return;
         };
@@ -896,7 +907,8 @@ impl App {
             tab_bar_h(m.height)
         } else {
             0.0
-        };
+        }
+        .max(chrome_inset);
         let (cols, rows) = Self::grid_for(
             size,
             m.width,

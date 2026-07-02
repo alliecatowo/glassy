@@ -433,27 +433,9 @@ const HELP_ACTION_ORDER: &[KeyAction] = &[
 /// (user may have set it to `none`). Static extras (pane nav, right-click) are
 /// appended at the end.
 fn help_rows_from_keymap(keymap: &KeyMap, platform: Platform) -> Vec<HelpRow<'static>> {
-    // Build action → first chord mapping. Sort entries for determinism:
-    // prefer shorter display strings (fewer modifier bits) so "Ctrl+T" wins
-    // over "Ctrl+Shift+Ctrl+T" if the map somehow has duplicates.
-    let mut action_chord: std::collections::HashMap<KeyAction, String> =
-        std::collections::HashMap::new();
-
-    // Collect all chords, sort them so output is deterministic.
-    let mut entries: Vec<(crate::config::Chord, KeyAction)> =
-        keymap.iter().map(|(c, &a)| (c.clone(), a)).collect();
-    // Sort: fewer modifiers first, then alphabetical key name.
-    entries.sort_by_key(|(c, _)| {
-        let mods = (c.ctrl as u8) + (c.alt as u8) + (c.meta as u8) + (c.shift as u8);
-        (mods, c.key.clone())
-    });
-    for (chord, action) in entries {
-        // Keep the first (fewest-modifier) chord per action, rendered for the
-        // host platform (⌘-symbol run on macOS, `+`-joined elsewhere).
-        action_chord
-            .entry(action)
-            .or_insert_with(|| chord.display_for(platform));
-    }
+    // action → chord display string, shared with the command palette so both
+    // reflect the live keymap (see action_chord_display_map's doc comment).
+    let action_chord = crate::config::keymap::action_chord_display_map(keymap, platform);
 
     let mut rows: Vec<HelpRow<'static>> = Vec::new();
     let mut last_section: &'static str = "";

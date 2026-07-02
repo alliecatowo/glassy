@@ -8,6 +8,7 @@
 
 use super::*;
 
+use crate::config::KeyAction;
 use fuzzy::fuzzy_score;
 use history::{compact_home, shell_quote};
 
@@ -218,35 +219,47 @@ impl PaletteCmd {
         }
     }
 
-    /// Optional right-aligned shortcut hint (dim), mirroring the menus.
-    fn hint(self) -> Option<&'static str> {
+    /// The [`KeyAction`] this command corresponds to, if any — used to look up
+    /// its live, platform-correct chord in the keymap (see [`PaletteCmd::hint`]).
+    /// `F11`/`F12`/`Ctrl+,`-style chords are shared across platforms and are
+    /// still resolved through the keymap rather than hardcoded, so a user
+    /// override is reflected here too.
+    fn key_action(self) -> Option<KeyAction> {
         use PaletteCmd::*;
-        match self {
-            NewTab => Some("Ctrl+Shift+T"),
-            CloseTab => Some("Ctrl+Shift+W"),
-            NextTab => Some("Ctrl+Tab"),
-            PrevTab => Some("Ctrl+Shift+Tab"),
-            SplitVertical => Some("Ctrl+Shift+E"),
-            SplitHorizontal => Some("Ctrl+Shift+O"),
-            OpenSettings => Some("Ctrl+,"),
-            OpenHelp => Some("F1"),
-            OpenSearch => Some("Ctrl+Shift+F"),
-            Copy => Some("Ctrl+Shift+C"),
-            Paste => Some("Ctrl+Shift+V"),
-            ToggleBroadcastInput => Some("Ctrl+Shift+I"),
-            ToggleZoom => Some("Ctrl+Shift+Enter"),
-            ToggleFullscreen => Some("F11"),
-            ToggleQuake => Some("F12"),
-            FontIncrease => Some("Ctrl++"),
-            FontDecrease => Some("Ctrl+-"),
-            FontReset => Some("Ctrl+0"),
-            ToggleStatusBar => Some("Ctrl+Shift+B"),
-            ToggleFold => Some("Ctrl+Shift+Z"),
-            ToggleMinimap => Some("Ctrl+Shift+M"),
-            IncreaseOpacity => Some("Ctrl+Shift+]"),
-            DecreaseOpacity => Some("Ctrl+Shift+["),
-            _ => None,
-        }
+        Some(match self {
+            NewTab => KeyAction::NewTab,
+            CloseTab => KeyAction::ClosePane,
+            NextTab => KeyAction::NextTab,
+            PrevTab => KeyAction::PrevTab,
+            SplitVertical => KeyAction::SplitVertical,
+            SplitHorizontal => KeyAction::SplitHorizontal,
+            OpenSettings => KeyAction::Settings,
+            OpenHelp => KeyAction::Help,
+            OpenSearch => KeyAction::Search,
+            Copy => KeyAction::Copy,
+            Paste => KeyAction::Paste,
+            ToggleBroadcastInput => KeyAction::BroadcastInput,
+            ToggleZoom => KeyAction::ToggleZoom,
+            ToggleFullscreen => KeyAction::ToggleFullscreen,
+            ToggleQuake => KeyAction::QuakeToggle,
+            FontIncrease => KeyAction::FontIncrease,
+            FontDecrease => KeyAction::FontDecrease,
+            FontReset => KeyAction::FontReset,
+            ToggleStatusBar => KeyAction::ToggleStatusBar,
+            ToggleFold => KeyAction::ToggleFold,
+            ToggleMinimap => KeyAction::ToggleMinimap,
+            IncreaseOpacity => KeyAction::IncreaseOpacity,
+            DecreaseOpacity => KeyAction::DecreaseOpacity,
+            _ => return None,
+        })
+    }
+
+    /// Optional right-aligned shortcut hint (dim), mirroring the menus. Looked
+    /// up from the live keymap (via `chord_map`) instead of hardcoded, so it
+    /// always matches the actual bound chord on the current platform — and any
+    /// user override — rather than a stale Ctrl-based guess shown on macOS too.
+    fn hint(self, chord_map: &std::collections::HashMap<KeyAction, String>) -> Option<String> {
+        self.key_action().and_then(|a| chord_map.get(&a)).cloned()
     }
 }
 
@@ -257,7 +270,7 @@ pub(crate) type PaletteSnapshot = (
     String,
     usize,
     Option<(usize, usize)>,
-    Vec<(String, Option<&'static str>)>,
+    Vec<(String, Option<String>)>,
     usize,
 );
 
@@ -269,7 +282,10 @@ pub(crate) struct PaletteEntry {
     pub display: String,
     /// Lower-cased haystack for case-insensitive matching (cached).
     pub haystack: String,
-    pub hint: Option<&'static str>,
+    /// The live, platform-correct chord display string (e.g. "⌘⇧T" on macOS,
+    /// "Ctrl+Shift+T" elsewhere), resolved from the keymap at registry-build
+    /// time — see [`PaletteCmd::hint`].
+    pub hint: Option<String>,
     /// Owned action data for dynamic entries: the command text for
     /// [`PaletteCmd::RunCommand`] or the directory for [`PaletteCmd::CdTo`].
     /// `None` for the static action/setting/theme rows.
@@ -368,6 +384,12 @@ impl App {
         for i in 0..color::THEME_NAMES.len() {
             cmds.push(SetTheme(i));
         }
+        // Resolved once from the live keymap so hints show the actual bound
+        // chord (⌘-based on macOS) instead of a hardcoded Ctrl-based guess.
+        let chord_map = crate::config::keymap::action_chord_display_map(
+            &self.config.keymap,
+            crate::config::Platform::display_override(),
+        );
         let mut entries: Vec<PaletteEntry> = cmds
             .into_iter()
             .map(|cmd| {
@@ -381,7 +403,7 @@ impl App {
                     cmd,
                     display,
                     haystack,
-                    hint: cmd.hint(),
+                    hint: cmd.hint(&chord_map),
                     payload: None,
                 }
             })

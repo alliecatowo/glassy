@@ -485,6 +485,30 @@ pub fn default_keymap(platform: Platform) -> KeyMap {
     map
 }
 
+/// For each [`KeyAction`] bound in `keymap`, the display string of its
+/// shortest-modifier chord, rendered for `platform` (⌘-symbol runs on macOS,
+/// `+`-joined labels elsewhere via [`Chord::display_for`]). Shared by the help
+/// panel and the command palette so both reflect the live keymap — including
+/// user overrides — instead of a hardcoded chord string that silently drifts
+/// from whatever the actual per-platform default (or user override) is.
+pub fn action_chord_display_map(keymap: &KeyMap, platform: Platform) -> HashMap<KeyAction, String> {
+    let mut action_chord: HashMap<KeyAction, String> = HashMap::new();
+    let mut entries: Vec<(Chord, KeyAction)> =
+        keymap.iter().map(|(c, &a)| (c.clone(), a)).collect();
+    // Prefer the chord with fewest modifiers per action (deterministic when a
+    // user override adds a second chord for the same action).
+    entries.sort_by_key(|(c, _)| {
+        let mods = (c.ctrl as u8) + (c.alt as u8) + (c.meta as u8) + (c.shift as u8);
+        (mods, c.key.clone())
+    });
+    for (chord, action) in entries {
+        action_chord
+            .entry(action)
+            .or_insert_with(|| chord.display_for(platform));
+    }
+    action_chord
+}
+
 /// Platform-agnostic default binds shared by every platform: function-key
 /// toggles, Shift+Page scrollback navigation, and OSC 133 prompt jumps.
 fn shared_default_binds() -> &'static [(&'static str, KeyAction)] {
