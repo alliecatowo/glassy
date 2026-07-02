@@ -215,22 +215,35 @@ jobs:
           path: dist/
 
   # -------------------------------------------------------------------------
-  # macOS — universal .app bundle + .dmg (first-class artifact)
+  # macOS — .app bundle + .dmg, built PER ARCHITECTURE (first-class artifact)
   #
-  # Builds x86_64 + aarch64-apple-darwin universal binary with arboard
-  # target-gated to exclude Wayland/X11 dependencies. Produces .app bundle
-  # with Info.plist + .icns icon, then creates drag-to-Applications .dmg.
+  # Ships separate Apple Silicon (aarch64) and Intel (x86_64) .app/.dmg pairs
+  # instead of lipo-merging into one universal binary. A universal Mach-O
+  # embeds both arch slices and is ~2x the size of either alone; almost every
+  # user only runs one arch, so a universal binary means everyone downloads
+  # code they never execute. Each matrix leg also uploads its bare binary as
+  # glassy-<arch>-macos, which is what scripts/install.sh already expects
+  # (detect_target() builds exactly that asset name) and what the Homebrew
+  # formula's update-homebrew job below downloads for prebuilt installs.
   # Optional code signing supported via APPLE_CERTIFICATE + APPLE_IDENTITY
   # secrets. Notarization not yet configured.
   # -------------------------------------------------------------------------
   build-macos:
-    name: Build — macOS (.app + .dmg)
+    name: Build — macOS (.app + .dmg, ${{ matrix.arch }})
     needs: [resolve-version]
     runs-on: macos-latest
     # macOS CI is green, so this is a required job (no continue-on-error): the
-    # universal .app/.dmg ship as first-class release assets. If a future macOS
+    # .app/.dmg pairs ship as first-class release assets. If a future macOS
     # runner image regresses this, re-add `continue-on-error: true` here and the
     # publish job will still go out with the Linux assets.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            arch: aarch64
+          - target: x86_64-apple-darwin
+            arch: x86_64
     steps:
       - uses: actions/checkout@v4
 
@@ -240,9 +253,11 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-apple-darwin,aarch64-apple-darwin
+          targets: ${{ matrix.target }}
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.arch }}
 
       # macOS build deps via Homebrew.
       # fontconfig + pkg-config are needed by cosmic-text's fontdb.
@@ -251,18 +266,17 @@ jobs:
         run: |
           brew install pkg-config fontconfig create-dmg
 
-      - name: Build x86_64
-        run: cargo build --release --locked --target x86_64-apple-darwin
+      - name: Build release
+        run: cargo build --release --locked --target ${{ matrix.target }}
 
-      - name: Build aarch64 (Apple Silicon)
-        run: cargo build --release --locked --target aarch64-apple-darwin
-
-      - name: Create universal binary with lipo
+      # Bare binary, named to match scripts/install.sh's detect_target()
+      # (asset = "${BINARY_NAME}-${target}" where target is "<arch>-macos").
+      - name: Stage bare binary
         run: |
           mkdir -p dist
-          lipo -create -output dist/${{ env.BIN }}-macos-universal \
-            target/x86_64-apple-darwin/release/${{ env.BIN }} \
-            target/aarch64-apple-darwin/release/${{ env.BIN }}
+          cp target/${{ matrix.target }}/release/${{ env.BIN }} \
+            dist/${{ env.BIN }}-${{ matrix.arch }}-macos
+          chmod 755 dist/${{ env.BIN }}-${{ matrix.arch }}-macos
 
       # Use the pre-built macOS depth/shadow .icns (glassy-pink.icns) as the
       # app icon. This is the designed macOS-style icon with layers and glow,
@@ -286,7 +300,7 @@ jobs:
           mkdir -p "$MACOS" "$RESOURCES"
 
           # Binary.
-          cp dist/${{ env.BIN }}-macos-universal "$MACOS/glassy"
+          cp dist/${{ env.BIN }}-${{ matrix.arch }}-macos "$MACOS/glassy"
           chmod 755 "$MACOS/glassy"
 
           # Icon.
@@ -337,10 +351,10 @@ jobs:
       - name: Create .dmg installer
         run: |
           VERSION="${{ steps.meta.outputs.version }}"
-          DMG="dist/glassy-${VERSION}-macos.dmg"
+          DMG="dist/${{ env.BIN }}-${VERSION}-macos-${{ matrix.arch }}.dmg"
 
           create-dmg \
-            --volname "glassy ${VERSION}" \
+            --volname "glassy ${VERSION} (${{ matrix.arch }})" \
             --volicon dist/glassy.icns \
             --window-pos 200 120 \
             --window-size 600 400 \
@@ -367,7 +381,7 @@ jobs:
           APPLE_IDENTITY: ${{ secrets.APPLE_IDENTITY }}
         run: |
           VERSION="${{ steps.meta.outputs.version }}"
-          DMG="dist/glassy-${VERSION}-macos.dmg"
+          DMG="dist/${{ env.BIN }}-${VERSION}-macos-${{ matrix.arch }}.dmg"
           # Import certificate into a temporary keychain.
           KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain"
           KEYCHAIN_PASS="$(openssl rand -base64 32)"
@@ -388,19 +402,12 @@ jobs:
           # Apple ID secrets (APPLE_TEAM_ID, APPLE_ID, APPLE_APP_PASSWORD)
           # are configured.
 
-      - name: Stage macOS artifacts
-        run: |
-          VERSION="${{ steps.meta.outputs.version }}"
-          # Keep the bare universal binary alongside the .dmg for users
-          # who prefer to install manually.
-          cp dist/${{ env.BIN }}-macos-universal dist/${{ env.BIN }}-macos-universal-bare
-
       - uses: actions/upload-artifact@v4
         with:
-          name: macos
+          name: macos-${{ matrix.arch }}
           path: |
-            dist/glassy-*-macos.dmg
-            dist/${{ env.BIN }}-macos-universal-bare
+            dist/${{ env.BIN }}-*-macos-${{ matrix.arch }}.dmg
+            dist/${{ env.BIN }}-${{ matrix.arch }}-macos
 
   # -------------------------------------------------------------------------
   # Windows (scaffolded; TODO: not yet green)
@@ -498,8 +505,10 @@ jobs:
             | Fedora/RHEL/openSUSE | `glassy-${{ steps.meta.outputs.version }}-*.rpm` |
             | Linux x86_64 (binary) | `glassy-x86_64-linux` |
             | Linux aarch64 (binary) | `glassy-aarch64-linux` _(if green)_ |
-            | macOS (drag-to-Applications .dmg) | `glassy-${{ steps.meta.outputs.version }}-macos.dmg` _(if green)_ |
-            | macOS (bare universal binary) | `glassy-macos-universal-bare` _(if green)_ |
+            | macOS Apple Silicon (.dmg) | `glassy-${{ steps.meta.outputs.version }}-macos-aarch64.dmg` |
+            | macOS Apple Silicon (bare binary) | `glassy-aarch64-macos` |
+            | macOS Intel (.dmg) | `glassy-${{ steps.meta.outputs.version }}-macos-x86_64.dmg` |
+            | macOS Intel (bare binary) | `glassy-x86_64-macos` |
             | Windows | `glassy-x86_64-windows.exe` _(if green)_ |
 
             Verify any download against `SHA256SUMS`.
@@ -513,17 +522,22 @@ jobs:
   # -------------------------------------------------------------------------
   # Homebrew formula bump (this repo IS its own tap — Formula/glassy.rb).
   #
-  # After the release publishes, patch Formula/glassy.rb's CI sentinels with the
-  # real version + sha256 of the RELEASE-UPLOADED source tarball asset, then
-  # commit it straight back to the default branch with [skip ci]. That makes a
-  # plain `brew install glassy` (after `brew tap alliecatowo/glassy
-  # https://github.com/alliecatowo/glassy`) install the just-released version.
+  # After the release publishes, patch Formula/glassy.rb's CI sentinels with
+  # the real version + per-arch sha256s, then commit it straight back to the
+  # default branch with [skip ci]. That makes a plain `brew install glassy`
+  # (after `brew tap alliecatowo/glassy https://github.com/alliecatowo/glassy`)
+  # install the just-released version.
   #
-  # The url in the formula points at the release asset
-  #   releases/download/v<ver>/glassy-<ver>-src.tar.gz
-  # which is EXACTLY the tarball whose sha256 we compute here — so url and sha
-  # always match (the old formula hashed this CI tarball but pointed url at
-  # GitHub's auto-archive tarball, a guaranteed mismatch; that's now fixed).
+  # Formula/glassy.rb's stable path now downloads the prebuilt per-arch
+  # binaries that build-macos already uploads (glassy-aarch64-macos /
+  # glassy-x86_64-macos) instead of running `cargo install` — that used to
+  # mean a multi-minute local compile (lto=fat + codegen-units=1) on every
+  # `brew install`; a straight binary download is seconds. `--HEAD` installs
+  # still build from source since there's no prebuilt asset for an arbitrary
+  # main commit. packaging/homebrew/glassy.rb is intentionally left as a
+  # build-from-source-only formula (for a future homebrew-core submission,
+  # which requires building from source) and keeps using the source-tarball
+  # sha computed below.
   #
   # No external tap repo or HOMEBREW_TAP_TOKEN is needed — the commit uses the
   # workflow's built-in GITHUB_TOKEN (permissions: contents: write, set above).
@@ -547,26 +561,45 @@ jobs:
           name: linux-x86_64
           path: artifacts/linux-x86_64
 
-      - name: Compute source tarball sha256
+      - name: Download macOS per-arch binaries for sha256
+        uses: actions/download-artifact@v4
+        with:
+          pattern: macos-*
+          path: artifacts
+          merge-multiple: true
+
+      - name: Compute checksums
         id: sha
         run: |
           VERSION="${{ needs.resolve-version.outputs.version }}"
           SRC_FILE="artifacts/linux-x86_64/${{ env.BIN }}-${VERSION}-src.tar.gz"
-          SHA=$(sha256sum "$SRC_FILE" | awk '{print $1}')
-          echo "sha256=$SHA" >> "$GITHUB_OUTPUT"
+          AARCH64_FILE="artifacts/${{ env.BIN }}-aarch64-macos"
+          X86_64_FILE="artifacts/${{ env.BIN }}-x86_64-macos"
+          echo "sha256=$(sha256sum "$SRC_FILE" | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+          echo "sha256_aarch64=$(sha256sum "$AARCH64_FILE" | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+          echo "sha256_x86_64=$(sha256sum "$X86_64_FILE" | awk '{print $1}')" >> "$GITHUB_OUTPUT"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
       - name: Patch Formula/glassy.rb with real version + sha256
         run: |
           VERSION="${{ steps.sha.outputs.version }}"
           SHA="${{ steps.sha.outputs.sha256 }}"
+          SHA_AARCH64="${{ steps.sha.outputs.sha256_aarch64 }}"
+          SHA_X86_64="${{ steps.sha.outputs.sha256_x86_64 }}"
           # Order matters: replace the longer GLASSY_VERSION_PLAIN sentinel
           # BEFORE GLASSY_VERSION (which is a prefix of it) so we don't corrupt
           # the longer token. GLASSY_VERSION becomes the tag (v-prefixed).
+          # GLASSY_SHA256 is the source-tarball sha — it's the top-level (Linux)
+          # sentinel in Formula/glassy.rb AND the only sentinel in
+          # packaging/homebrew/glassy.rb. GLASSY_SHA256_AARCH64/_X86_64 are the
+          # prebuilt-binary sentinels, only present in Formula/glassy.rb's
+          # macOS-only stanza — sed no-ops on tokens absent from a given file.
           for f in Formula/glassy.rb packaging/homebrew/glassy.rb; do
             sed -i \
               -e "s|GLASSY_VERSION_PLAIN|${VERSION}|g" \
               -e "s|GLASSY_VERSION|v${VERSION}|g" \
+              -e "s|GLASSY_SHA256_AARCH64|${SHA_AARCH64}|g" \
+              -e "s|GLASSY_SHA256_X86_64|${SHA_X86_64}|g" \
               -e "s|GLASSY_SHA256|${SHA}|g" \
               "$f"
           done

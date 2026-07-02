@@ -12,7 +12,10 @@ class Glassy < Formula
   # CI fills these in via sed before the PR to the tap; keep the sentinel values.
   # url points at the release-uploaded source tarball asset so it matches the
   # sha256 the workflow computes (the GitHub auto-archive tarball has a different
-  # hash). See Formula/glassy.rb (this repo's own tap) for the canonical copy.
+  # hash). Unlike Formula/glassy.rb (this repo's own tap, which installs a
+  # prebuilt binary for speed), this formula deliberately always builds from
+  # source — that's the point of it: a homebrew-core submission requires a
+  # build-from-source formula, since core disallows vendored binaries.
   url "https://github.com/alliecatowo/glassy/releases/download/v0.2.0-rc2/glassy-0.2.0-rc2-src.tar.gz"
   sha256 "971b314d888e172029b1f55213d02a23b4a4d045fea8254c460e2a0d4cf48970"
   version "0.2.0-rc2"

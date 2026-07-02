@@ -1,4 +1,5 @@
 /target
+/dist
 /assets/fonts/
 *.ppm
 .glassy-wf-*.js
