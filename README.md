@@ -185,24 +185,26 @@ yay -S glassy
 yay -S glassy-bin
 ```
 
-**macOS — .dmg installer** *(macOS 11+; universal x86_64 + Apple Silicon)*
+**macOS — .dmg installer** *(macOS 11+; separate Apple Silicon / Intel builds)*
 
-Download `glassy-<version>-macos.dmg` from the [Releases page](https://github.com/alliecatowo/glassy/releases), open it, drag **glassy.app** to Applications. macOS may show a security warning on first launch — right-click the app and choose Open to bypass it (the binary is not yet notarized).
+Download `glassy-<version>-macos-aarch64.dmg` (Apple Silicon) or `glassy-<version>-macos-x86_64.dmg` (Intel) from the [Releases page](https://github.com/alliecatowo/glassy/releases), open it, drag **glassy.app** to Applications. macOS may show a security warning on first launch — right-click the app and choose Open to bypass it (the binary is not yet notarized).
 
-> macOS is a fully supported, CI-built target: every release ships a universal (Intel + Apple Silicon) `.app`/`.dmg`. Notarization is the only remaining polish item.
+> macOS is a fully supported, CI-built target: every release ships per-arch `.app`/`.dmg` pairs (no fat universal binary — that would double the download for no benefit, since each user only runs one arch). Notarization is the only remaining polish item.
 
 **macOS / Linux — Homebrew** — this repo is its own tap (no separate `homebrew-*` repo needed):
 
 ```sh
 brew tap alliecatowo/glassy https://github.com/alliecatowo/glassy
-brew install glassy          # the latest tagged release (build from source)
+brew install glassy          # the latest tagged release (prebuilt binary, no local build)
 # or:
-brew install --HEAD glassy   # bleeding edge: build from latest main
+brew install --HEAD glassy   # bleeding edge: build from latest main (requires Rust)
 ```
 
-> `brew install glassy` uses `Formula/glassy.rb`, whose url + sha256 the release
-> workflow fills in (pointing at the release's source tarball asset) and commits
-> back on every tagged release. `--HEAD` ignores the version and builds `main`.
+> `brew install glassy` uses `Formula/glassy.rb`, which on macOS downloads the
+> prebuilt per-arch binary the release workflow already ships (no local
+> compile) and on Linux builds from source; the release workflow fills in the
+> version/sha256 sentinels and commits back on every tagged release. `--HEAD`
+> ignores the version and builds `main`.
 
 **Flatpak** *(not yet on Flathub; local build from the manifest)*
 
