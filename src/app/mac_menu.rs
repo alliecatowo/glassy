@@ -75,6 +75,10 @@ declare_class!(
         fn paste(&self, _sender: Option<&AnyObject>) {
             self.fire(KeyAction::Paste);
         }
+        #[method(glassySelectAll:)]
+        fn select_all(&self, _sender: Option<&AnyObject>) {
+            self.fire(KeyAction::SelectAll);
+        }
         #[method(glassyFind:)]
         fn find(&self, _sender: Option<&AnyObject>) {
             self.fire(KeyAction::Search);
@@ -102,6 +106,18 @@ declare_class!(
         #[method(glassyZoom:)]
         fn zoom(&self, _sender: Option<&AnyObject>) {
             self.fire(KeyAction::ToggleZoom);
+        }
+        #[method(glassyFontIncrease:)]
+        fn font_increase(&self, _sender: Option<&AnyObject>) {
+            self.fire(KeyAction::FontIncrease);
+        }
+        #[method(glassyFontDecrease:)]
+        fn font_decrease(&self, _sender: Option<&AnyObject>) {
+            self.fire(KeyAction::FontDecrease);
+        }
+        #[method(glassyFontReset:)]
+        fn font_reset(&self, _sender: Option<&AnyObject>) {
+            self.fire(KeyAction::FontReset);
         }
         #[method(glassyHelp:)]
         fn help(&self, _sender: Option<&AnyObject>) {
@@ -214,7 +230,10 @@ pub fn install_menu_bar(proxy: EventLoopProxy<UserEvent>) {
             // Uppercase "D" → ⌘⇧D (no NSEvent feature needed for the mask).
             item(mtm, t, "Split Horizontally", sel!(glassySplitH:), "D"),
             sep(mtm),
-            item(mtm, t, "Close", sel!(glassyClosePane:), "w"),
+            // Titled "Close Tab" (not the generic "Close") since it maps to
+            // glassyClosePane: — closing the focused pane, or the tab itself
+            // when it's the tab's only pane.
+            item(mtm, t, "Close Tab", sel!(glassyClosePane:), "w"),
         ];
         submenu(mtm, &bar, "File", &file_items);
 
@@ -222,6 +241,7 @@ pub fn install_menu_bar(proxy: EventLoopProxy<UserEvent>) {
         let edit_items = [
             item(mtm, t, "Copy", sel!(glassyCopy:), "c"),
             item(mtm, t, "Paste", sel!(glassyPaste:), "v"),
+            item(mtm, t, "Select All", sel!(glassySelectAll:), "a"),
             sep(mtm),
             item(mtm, t, "Find…", sel!(glassyFind:), "f"),
             item(mtm, t, "Command Palette…", sel!(glassyPalette:), "P"),
@@ -233,12 +253,21 @@ pub fn install_menu_bar(proxy: EventLoopProxy<UserEvent>) {
             item(mtm, t, "Enter Full Screen", sel!(glassyFullscreen:), ""),
             item(mtm, t, "Zoom Pane", sel!(glassyZoom:), ""),
             sep(mtm),
+            item(mtm, t, "Increase Font Size", sel!(glassyFontIncrease:), "="),
+            item(mtm, t, "Decrease Font Size", sel!(glassyFontDecrease:), "-"),
+            item(mtm, t, "Reset Font Size", sel!(glassyFontReset:), "0"),
+            sep(mtm),
             item(mtm, t, "Glassy Help", sel!(glassyHelp:), "?"),
         ];
         submenu(mtm, &bar, "View", &view_items);
 
-        // Window menu (tab navigation).
+        // Window menu: standard AppKit window controls first (Minimize/Zoom,
+        // routed via the nil-target responder chain exactly like Quit's
+        // terminate:), then glassy's tab navigation.
         let window_items = [
+            responder_item(mtm, "Minimize", sel!(performMiniaturize:), "m"),
+            responder_item(mtm, "Zoom", sel!(performZoom:), ""),
+            sep(mtm),
             item(mtm, t, "Next Tab", sel!(glassyNextTab:), "}"),
             item(mtm, t, "Previous Tab", sel!(glassyPrevTab:), "{"),
         ];
@@ -268,6 +297,31 @@ fn quit_item(mtm: MainThreadMarker) -> Retained<NSMenuItem> {
             &title,
             Some(sel!(terminate:)),
             &key,
+        )
+    }
+}
+
+/// A standard AppKit window-management item (e.g. `performMiniaturize:`,
+/// `performZoom:`) with no explicit target, the same nil-target pattern
+/// [`quit_item`] uses for `terminate:`: AppKit routes the action up the
+/// responder chain to the key window, so no glassy-specific handler is needed.
+fn responder_item(
+    mtm: MainThreadMarker,
+    title: &str,
+    selector: Sel,
+    key: &str,
+) -> Retained<NSMenuItem> {
+    let ns_title = NSString::from_str(title);
+    let ns_key = NSString::from_str(key);
+    // SAFETY: standard NSMenuItem construction with valid NSStrings + selector;
+    // nil target lets AppKit route the action up the responder chain (mirrors
+    // `quit_item`'s `terminate:`).
+    unsafe {
+        NSMenuItem::initWithTitle_action_keyEquivalent(
+            mtm.alloc(),
+            &ns_title,
+            Some(selector),
+            &ns_key,
         )
     }
 }
