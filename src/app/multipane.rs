@@ -1092,108 +1092,125 @@ impl App {
         // always treated as "containing" the cursor (focus is window-level here).
         let invert_block = cursor_shown && win_focused && cursor.shape == CursorShape::Block;
 
-        let cells: Vec<_> = content.display_iter.collect();
+        // Read cells straight from the grid one row at a time instead of
+        // materializing the whole pane viewport. A pane rebuild is always a full
+        // rebuild (no row-level damage here), so every row 0..rows is visited in
+        // order — the win is the smaller allocation + better cache behaviour, not
+        // fewer rows. Each display row is self-contained (see the single-pane path
+        // in `render.rs`), so per-row buffers preserve every grapheme/wide-char
+        // lookahead. `grid` shares `content`'s immutable term borrow.
+        let grid = term.grid();
+        // `row_started` is still needed by the cursor overlay below to decide
+        // begin_row vs set_cur_row for the cursor's row.
         let mut row_started = vec![false; rows];
-        let mut ci = 0;
-        while ci < cells.len() {
-            let indexed = &cells[ci];
-            let cell = indexed.cell;
-            if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
-                ci += 1;
+        // Per-row cell buffer, reused across rows via `.clear()`; borrows the lock.
+        let mut row_buf: Vec<Indexed<&Cell>> = Vec::new();
+        for row_u in 0..rows {
+            if !collect_display_row(grid, row_u, display_offset, &mut row_buf) {
                 continue;
             }
-            let row = indexed.point.line.0 + display_offset;
-            let col = indexed.point.column.0 as i32;
-            if row < 0 || row >= rows as i32 || col < 0 || col >= cols as i32 {
-                ci += 1;
-                continue;
-            }
-            let row_u = row as usize;
-            if !row_started[row_u] {
-                renderer.begin_row(row_u);
-                row_started[row_u] = true;
-            }
-
-            let mut fg = color::resolve(cell.fg, colors);
-            let mut bg = color::resolve(cell.bg, colors);
-            if cell.flags.contains(Flags::INVERSE) {
-                std::mem::swap(&mut fg, &mut bg);
-            }
-            if cell.flags.contains(Flags::DIM) {
-                fg = [fg[0] * 0.66, fg[1] * 0.66, fg[2] * 0.66, fg[3]];
-            }
-            if selection.is_some_and(|range| range.contains(indexed.point)) {
-                bg = color::selection_bg();
-            }
-            if invert_block && row == cursor_row && col == cursor_col {
-                std::mem::swap(&mut fg, &mut bg);
-            }
-            let hidden = cell.flags.contains(Flags::HIDDEN);
-            let bold = cell.flags.contains(Flags::BOLD) || cell.flags.contains(Flags::BOLD_ITALIC);
-            let italic =
-                cell.flags.contains(Flags::ITALIC) || cell.flags.contains(Flags::BOLD_ITALIC);
-            let wide = cell.flags.contains(Flags::WIDE_CHAR);
-
-            let mut decorations = if hidden {
-                Decorations::default()
-            } else {
-                let underline = if cell.flags.contains(Flags::UNDERCURL) {
-                    UnderlineStyle::Curl
-                } else if cell.flags.contains(Flags::DOTTED_UNDERLINE) {
-                    UnderlineStyle::Dotted
-                } else if cell.flags.contains(Flags::DASHED_UNDERLINE) {
-                    UnderlineStyle::Dashed
-                } else if cell.flags.contains(Flags::DOUBLE_UNDERLINE) {
-                    UnderlineStyle::Double
-                } else if cell.flags.contains(Flags::UNDERLINE) {
-                    UnderlineStyle::Single
-                } else {
-                    UnderlineStyle::None
-                };
-                let color = cell
-                    .underline_color()
-                    .map(|c| color::resolve(c, colors))
-                    .unwrap_or(fg);
-                Decorations {
-                    underline,
-                    strikeout: cell.flags.contains(Flags::STRIKEOUT),
-                    overline: !overline_cells.is_empty()
-                        && overline_cells.contains(&(row, col as usize)),
-                    color,
+            let mut ci = 0;
+            while ci < row_buf.len() {
+                let indexed = &row_buf[ci];
+                let cell = indexed.cell;
+                if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                    ci += 1;
+                    continue;
                 }
-            };
-            if !hidden
-                && matches!(decorations.underline, UnderlineStyle::None)
-                && let Some(hov) = hovered_link
-                && cell.hyperlink().is_some_and(|h| h.uri() == hov)
-            {
-                decorations.underline = UnderlineStyle::Single;
-            }
+                let row = indexed.point.line.0 + display_offset;
+                let col = indexed.point.column.0 as i32;
+                if row < 0 || row >= rows as i32 || col < 0 || col >= cols as i32 {
+                    ci += 1;
+                    continue;
+                }
+                let row_u = row as usize;
+                if !row_started[row_u] {
+                    renderer.begin_row(row_u);
+                    row_started[row_u] = true;
+                }
 
-            let ch = if hidden || cell.c == '\0' {
-                ' '
-            } else {
-                cell.c
-            };
-            let (combiners, consumed) = if hidden {
-                (Vec::new(), unit_len(&cells, ci))
-            } else {
-                build_grapheme(&cells, ci, indexed.point.line.0)
-            };
-            let wide = wide || consumed >= 2;
-            renderer.push_cell(
-                col as usize,
-                row_u,
-                ch,
-                &combiners,
-                fg,
-                bg,
-                bold,
-                italic,
-                wide,
-                decorations,
-            );
-            ci += consumed;
+                let mut fg = color::resolve(cell.fg, colors);
+                let mut bg = color::resolve(cell.bg, colors);
+                if cell.flags.contains(Flags::INVERSE) {
+                    std::mem::swap(&mut fg, &mut bg);
+                }
+                if cell.flags.contains(Flags::DIM) {
+                    fg = [fg[0] * 0.66, fg[1] * 0.66, fg[2] * 0.66, fg[3]];
+                }
+                if selection.is_some_and(|range| range.contains(indexed.point)) {
+                    bg = color::selection_bg();
+                }
+                if invert_block && row == cursor_row && col == cursor_col {
+                    std::mem::swap(&mut fg, &mut bg);
+                }
+                let hidden = cell.flags.contains(Flags::HIDDEN);
+                let bold =
+                    cell.flags.contains(Flags::BOLD) || cell.flags.contains(Flags::BOLD_ITALIC);
+                let italic =
+                    cell.flags.contains(Flags::ITALIC) || cell.flags.contains(Flags::BOLD_ITALIC);
+                let wide = cell.flags.contains(Flags::WIDE_CHAR);
+
+                let mut decorations = if hidden {
+                    Decorations::default()
+                } else {
+                    let underline = if cell.flags.contains(Flags::UNDERCURL) {
+                        UnderlineStyle::Curl
+                    } else if cell.flags.contains(Flags::DOTTED_UNDERLINE) {
+                        UnderlineStyle::Dotted
+                    } else if cell.flags.contains(Flags::DASHED_UNDERLINE) {
+                        UnderlineStyle::Dashed
+                    } else if cell.flags.contains(Flags::DOUBLE_UNDERLINE) {
+                        UnderlineStyle::Double
+                    } else if cell.flags.contains(Flags::UNDERLINE) {
+                        UnderlineStyle::Single
+                    } else {
+                        UnderlineStyle::None
+                    };
+                    let color = cell
+                        .underline_color()
+                        .map(|c| color::resolve(c, colors))
+                        .unwrap_or(fg);
+                    Decorations {
+                        underline,
+                        strikeout: cell.flags.contains(Flags::STRIKEOUT),
+                        overline: !overline_cells.is_empty()
+                            && overline_cells.contains(&(row, col as usize)),
+                        color,
+                    }
+                };
+                if !hidden
+                    && matches!(decorations.underline, UnderlineStyle::None)
+                    && let Some(hov) = hovered_link
+                    && cell.hyperlink().is_some_and(|h| h.uri() == hov)
+                {
+                    decorations.underline = UnderlineStyle::Single;
+                }
+
+                let ch = if hidden || cell.c == '\0' {
+                    ' '
+                } else {
+                    cell.c
+                };
+                let (combiners, consumed) = if hidden {
+                    (Vec::new(), unit_len(&row_buf, ci))
+                } else {
+                    build_grapheme(&row_buf, ci, indexed.point.line.0)
+                };
+                let wide = wide || consumed >= 2;
+                renderer.push_cell(
+                    col as usize,
+                    row_u,
+                    ch,
+                    &combiners,
+                    fg,
+                    bg,
+                    bold,
+                    italic,
+                    wide,
+                    decorations,
+                );
+                ci += consumed;
+            }
         }
 
         // Cursor overlay (same precedence as the single-pane path).

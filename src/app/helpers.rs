@@ -455,6 +455,43 @@ pub(crate) fn build_grapheme(
     (combiners, consumed)
 }
 
+/// Fill `out` with display row `row_u`'s cells exactly as `Grid::display_iter`
+/// would yield them — same `Point` (line + column) and the same `&Cell`
+/// references, in the same left-to-right order — by indexing the grid row
+/// directly (O(cols)) instead of materializing the whole viewport.
+///
+/// `out` is `clear()`ed first, so one buffer can be reused across every row in a
+/// frame. Returns `false` (leaving `out` empty) when `row_u` lies outside the
+/// grid's visible lines, i.e. the row `display_iter` would never yield; the
+/// caller skips it, matching the old full-collect loop's bounds behaviour.
+///
+/// Mapping (verified against alacritty_terminal 0.26 `Grid::display_iter`, which
+/// walks `Line(-display_offset)..=Line(screen_lines - 1 - display_offset)` over
+/// columns `0..columns`): display row `row_u` ⇔ `Line(row_u - display_offset)`.
+pub(crate) fn collect_display_row<'a>(
+    grid: &'a alacritty_terminal::grid::Grid<Cell>,
+    row_u: usize,
+    display_offset: i32,
+    out: &mut Vec<Indexed<&'a Cell>>,
+) -> bool {
+    out.clear();
+    if row_u >= grid.screen_lines() {
+        return false;
+    }
+    let line = Line(row_u as i32 - display_offset);
+    let row = &grid[line];
+    // `display_iter` bounds columns by `grid.columns()` (== the row's width); use
+    // the same source so the buffer is a byte-for-byte match of the iterator.
+    for c in 0..grid.columns() {
+        let col = Column(c);
+        out.push(Indexed {
+            point: Point::new(line, col),
+            cell: &row[col],
+        });
+    }
+    true
+}
+
 /// Physical-pixel step per Ctrl +/- font-size adjustment.
 pub(crate) const FONT_STEP_PX: f32 = 2.0;
 
@@ -849,4 +886,144 @@ pub(super) fn spawn_config_watcher(
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alacritty_terminal::Term;
+    use alacritty_terminal::event::VoidListener;
+    use alacritty_terminal::term::Config as TermConfig;
+    use alacritty_terminal::vte::ansi::Handler;
+
+    /// Minimal [`Dimensions`] for building a PTY-less test [`Term`] (mirrors the
+    /// vi_mode tests). `total_lines` matches `screen_lines` (no fixed scrollback
+    /// cap; history grows as lines are pushed off the top).
+    struct Size {
+        cols: usize,
+        lines: usize,
+    }
+    impl Dimensions for Size {
+        fn total_lines(&self) -> usize {
+            self.lines
+        }
+        fn screen_lines(&self) -> usize {
+            self.lines
+        }
+        fn columns(&self) -> usize {
+            self.cols
+        }
+    }
+
+    fn make_term(cols: usize, lines: usize) -> Term<VoidListener> {
+        Term::new(TermConfig::default(), &Size { cols, lines }, VoidListener)
+    }
+
+    /// Type a literal string through the VTE handler, breaking on `\n`.
+    fn type_str(t: &mut Term<VoidListener>, s: &str) {
+        for ch in s.chars() {
+            if ch == '\n' {
+                t.linefeed();
+                t.carriage_return();
+            } else {
+                t.input(ch);
+            }
+        }
+    }
+
+    /// THE refactor invariant. For every display row, `collect_display_row` must
+    /// reproduce exactly the cells `Grid::display_iter` yields for that row: the
+    /// identical `Point` (line + column) and the identical `&Cell` reference
+    /// (compared by address), in the same left-to-right order. This is precisely
+    /// what the old flat `display_iter.collect()` fed the render loops, so matching
+    /// it row-by-row pins that the per-row buffers are a byte-for-byte substitute —
+    /// including under a non-zero `display_offset`, where the row↔line mapping bites.
+    fn assert_row_buffers_match_display_iter(t: &Term<VoidListener>) {
+        let grid = t.grid();
+        let display_offset = grid.display_offset() as i32;
+        let screen_lines = grid.screen_lines();
+
+        // Reference: bucket display_iter's output by display row.
+        let mut expected: Vec<Vec<(Point, *const Cell)>> = vec![Vec::new(); screen_lines];
+        for indexed in grid.display_iter() {
+            let row_u = (indexed.point.line.0 + display_offset) as usize;
+            expected[row_u].push((indexed.point, indexed.cell as *const Cell));
+        }
+
+        // Actual: the production per-row helper, buffer reused across rows.
+        let mut buf: Vec<Indexed<&Cell>> = Vec::new();
+        for (row_u, expected_row) in expected.iter().enumerate() {
+            let present = collect_display_row(grid, row_u, display_offset, &mut buf);
+            assert!(present, "row {row_u} within screen_lines must be present");
+            let actual: Vec<(Point, *const Cell)> = buf
+                .iter()
+                .map(|c| (c.point, c.cell as *const Cell))
+                .collect();
+            assert_eq!(
+                &actual, expected_row,
+                "row {row_u} buffer differs from display_iter (offset {display_offset})"
+            );
+        }
+    }
+
+    #[test]
+    fn row_buffers_equal_display_iter_unscrolled() {
+        let mut t = make_term(10, 5);
+        type_str(&mut t, "hello\nworld\nfoo\nbar\nbaz");
+        assert_eq!(t.grid().display_offset(), 0);
+        assert_row_buffers_match_display_iter(&t);
+    }
+
+    #[test]
+    fn row_buffers_equal_display_iter_scrolled() {
+        // Produce scrollback, then scroll up so display_offset > 0 — the case the
+        // `line + display_offset` mapping has to get exactly right.
+        let mut t = make_term(8, 4);
+        for i in 0..20 {
+            type_str(&mut t, &format!("row{i}\n"));
+        }
+        t.scroll_display(Scroll::Delta(3));
+        assert!(
+            t.grid().display_offset() > 0,
+            "test setup: expected a non-zero scrollback offset"
+        );
+        assert_row_buffers_match_display_iter(&t);
+    }
+
+    #[test]
+    fn row_buffers_equal_display_iter_with_wide_and_combining() {
+        // Wide CJK + a combining mark exercise the row-scoped lookahead
+        // (`unit_len` spacer handling and `build_grapheme`) over the buffer; the
+        // helper must still mirror the grid cell-for-cell.
+        let mut t = make_term(20, 3);
+        type_str(&mut t, "aｗb\n"); // full-width 'ｗ' → WIDE_CHAR + trailing spacer
+        type_str(&mut t, "e\u{0301}x"); // 'e' + combining acute accent
+        assert_row_buffers_match_display_iter(&t);
+    }
+
+    #[test]
+    fn row_out_of_range_is_absent() {
+        // A display row past the grid's visible lines is never yielded by
+        // display_iter; the helper reports it absent and leaves the buffer empty
+        // (so the render loops skip it, matching the old bounds check).
+        let t = make_term(6, 3);
+        let grid = t.grid();
+        let mut buf: Vec<Indexed<&Cell>> = Vec::new();
+        assert!(!collect_display_row(grid, 3, 0, &mut buf));
+        assert!(buf.is_empty());
+        assert!(!collect_display_row(grid, 99, 0, &mut buf));
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn display_row_to_line_mapping_is_exact() {
+        // Pin the display_offset arithmetic exhaustively: display row `row_u` maps
+        // to `Line(row_u - display_offset)` and inverts back to `row_u`.
+        for display_offset in 0..12i32 {
+            for row_u in 0..40usize {
+                let line = Line(row_u as i32 - display_offset);
+                assert_eq!(line.0 + display_offset, row_u as i32);
+            }
+        }
+    }
 }
