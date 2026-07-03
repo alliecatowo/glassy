@@ -223,6 +223,16 @@ pub(super) struct RawConfig {
     pub command_fold: Option<bool>,
     pub power_mode: Option<bool>,
     pub power_mode_intensity: Option<f32>,
+    /// Custom window-effect channel intensities (0..1), one field per
+    /// `gui::settings_panel::CUSTOM_FX_SLIDERS` entry. Only meaningful when
+    /// `window_effect = custom`; unset channels fall back to the built-in
+    /// "pleasant retro-glass" defaults in [`RawConfig::into_settings`].
+    pub fx_curvature: Option<f32>,
+    pub fx_scanline: Option<f32>,
+    pub fx_glow: Option<f32>,
+    pub fx_vignette: Option<f32>,
+    pub fx_grain: Option<f32>,
+    pub fx_tint: Option<f32>,
 }
 
 impl RawConfig {
@@ -334,8 +344,16 @@ impl RawConfig {
             crt_effect: self.crt_effect.unwrap_or(false),
             // Custom-effect channel intensities [curvature, scanline, glow,
             // vignette, grain, tint]. A pleasant retro-glass default; the
-            // Appearance → Custom sliders tune it live.
-            custom_effect: [0.12, 0.35, 0.22, 0.30, 0.15, 0.25],
+            // Appearance → Custom sliders tune it live and `save_settings`
+            // persists it via the `fx_*` keys below.
+            custom_effect: [
+                self.fx_curvature.unwrap_or(0.12),
+                self.fx_scanline.unwrap_or(0.35),
+                self.fx_glow.unwrap_or(0.22),
+                self.fx_vignette.unwrap_or(0.30),
+                self.fx_grain.unwrap_or(0.15),
+                self.fx_tint.unwrap_or(0.25),
+            ],
             // Resolve the window effect: an explicit `window_effect` wins; else the
             // legacy `crt_effect = true` maps to the CRT mode; else None. This keeps
             // old configs working while exposing the full mode set.
@@ -870,6 +888,24 @@ pub(super) fn apply_kv(key: &str, value: &str, raw: &mut RawConfig) -> Result<()
             }
             raw.power_mode_intensity = Some(i);
         }
+        "fx_curvature" => {
+            raw.fx_curvature = Some(parse_unit_f32(value, "fx_curvature")?);
+        }
+        "fx_scanline" => {
+            raw.fx_scanline = Some(parse_unit_f32(value, "fx_scanline")?);
+        }
+        "fx_glow" => {
+            raw.fx_glow = Some(parse_unit_f32(value, "fx_glow")?);
+        }
+        "fx_vignette" => {
+            raw.fx_vignette = Some(parse_unit_f32(value, "fx_vignette")?);
+        }
+        "fx_grain" => {
+            raw.fx_grain = Some(parse_unit_f32(value, "fx_grain")?);
+        }
+        "fx_tint" => {
+            raw.fx_tint = Some(parse_unit_f32(value, "fx_tint")?);
+        }
         "color.fg" => {
             parse_hex_color(value)?;
             raw.color_fg = Some(value.to_string());
@@ -1018,6 +1054,18 @@ pub(super) fn parse_pos_f32(value: &str, field: &str) -> Result<f32> {
         .with_context(|| format!("{field}: invalid number '{value}'"))?;
     if !(v.is_finite() && v > 0.0) {
         bail!("{field} must be a positive number, got {value}");
+    }
+    Ok(v)
+}
+
+/// Parse a float clamped to `[0.0, 1.0]` for a named field (the Custom-effect
+/// channel intensities and other unit-range config knobs).
+fn parse_unit_f32(value: &str, field: &str) -> Result<f32> {
+    let v: f32 = value
+        .parse()
+        .with_context(|| format!("{field}: invalid number '{value}'"))?;
+    if !(v.is_finite() && (0.0..=1.0).contains(&v)) {
+        bail!("{field} must be between 0.0 and 1.0, got {value}");
     }
     Ok(v)
 }
