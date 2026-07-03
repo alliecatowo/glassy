@@ -34,6 +34,7 @@ use crate::renderer::{CursorOverlay, Decorations, LigatureCell, Renderer, Underl
 
 mod chrome;
 mod command_blocks;
+mod dragdrop;
 mod event_loop;
 mod headless_input;
 mod helpers;
@@ -922,6 +923,19 @@ pub struct App {
     /// TO 1.0. Used to restore transparency on the next toggle. `None` until the
     /// first toggle-to-opaque fires; initialised lazily from the config opacity.
     opacity_before_toggle: Option<f32>,
+
+    // --- File drag-and-drop ---------------------------------------------------
+    /// Paths queued from `WindowEvent::DroppedFile` since the last flush.
+    /// winit delivers one `DroppedFile` per file in a multi-file drop with no
+    /// batch-end marker, so each path is queued here and the whole batch is
+    /// flushed as a single paste in `about_to_wait` by `flush_dropped_files`
+    /// (see [`dragdrop`]). Always empty between drops.
+    pending_drop_files: Vec<std::path::PathBuf>,
+    /// True while a file is being dragged over the window (`HoveredFile`),
+    /// cleared on drop (`DroppedFile`) or a cancelled drag
+    /// (`HoveredFileCancelled`). Drives the drop-hover overlay painted over the
+    /// focused pane's content rect. See [`dragdrop`].
+    drop_hover: bool,
 }
 
 /// Direction + progress of the quake window's slide animation.

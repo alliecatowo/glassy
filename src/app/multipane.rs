@@ -543,6 +543,15 @@ impl App {
             Self::paint_peek(renderer, peek, *body);
         }
 
+        // File drag-and-drop hover affordance: drawn over the focused pane's
+        // body rect, mirroring the single-pane path (see `dragdrop.rs`).
+        if self.drop_hover
+            && let Some((_, _full, body, _, _)) =
+                pane_specs.iter().find(|(id, ..)| *id == focused_pane)
+        {
+            Self::paint_drop_hover(renderer, *body);
+        }
+
         // Status bar (§3.4): same as the single-pane path.
         // Only painted when enabled in the config.
         if self.config.status_bar {
