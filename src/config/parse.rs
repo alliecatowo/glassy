@@ -279,8 +279,7 @@ impl RawConfig {
         let theme_dark =
             color::canonical_name(self.theme_dark.as_deref().unwrap_or(&theme_name)).to_string();
         let theme_light =
-            color::canonical_name(self.theme_light.as_deref().unwrap_or("rose-pine-dawn"))
-                .to_string();
+            color::canonical_name(self.theme_light.as_deref().unwrap_or("one-light")).to_string();
 
         let opacity = self.opacity.unwrap_or(DEFAULT_OPACITY);
         let opacity = if opacity.is_finite() {
