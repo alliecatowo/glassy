@@ -6,178 +6,193 @@ not started. **Later** is directionally right but not scoped. **Ideas** are
 things worth wanting, not yet things worth promising.
 
 This is a snapshot, not a contract — see [CHANGELOG.md](CHANGELOG.md) for
-what's actually shipped.
+what's actually shipped. The w14 wave (theme registry + 42 themes, full
+settings exposure, profiles UI, per-dirty-row rendering, drag-and-drop,
+macOS menu, automation IPC) is in the changelog now, not here.
 
 ---
 
-## Now (w14 wave, in flight)
+## Now (w15 wave, in flight)
 
-### Themes and chrome
+### Split view and glass correctness
 
-- **Single-source theme registry + user themes dir.** Themes currently
-  resolve through a hardcoded `theme_by_name` lookup in `src/color.rs`.
-  This wave consolidates built-ins and user themes behind one registry that
-  also checks `~/.config/glassy/themes/` before falling back to the
-  built-ins — drop a theme file there and `theme = <name>` picks it up, no
-  rebuild required. Details in [docs/plugins.md](docs/plugins.md#install-a-theme-without-code-the-user-themes-dir).
-- **~40 new built-in themes, including true light themes.** Today's 18
-  (12 dark, 6 light) grow substantially, with more attention paid to light
-  variants specifically — see the chrome fix below for why that matters.
-- **Light-mode chrome fix.** The glass chrome fills (`glass_body`,
-  `glass_raised`, `glass_active_tab`, `glass_float` in `src/gui/mod.rs`) are
-  built by additively lightening the theme background (`lighten(bg, 0.12)`,
-  `0.22`, etc.). On a near-white light-theme background that math clips at
-  white, so raised surfaces, active-tab chips, and floating panels all
-  collapse to the same flat white and lose their separation. The fix changes
-  how those surfaces derive their fill on light backgrounds so the layering
-  survives near-white themes instead of washing out.
+- **Unfocused-pane dim actually dims now.** The dim overlay was drawn
+  through the blend-less bg pipeline, which *replaced* the pane's pixels
+  with `rgba(0,0,0,0.28)` — erasing glyphs and punching the framebuffer
+  alpha down so compositors rendered the pane as a see-through hole. It now
+  composites in the premultiplied overlay layer, with a new `unfocused_dim`
+  strength key (0–0.9, live-settable).
+- **`opacity_scope = background | text`.** Window opacity historically only
+  applied to backgrounds (text composites opaque for crispness). The new
+  `text` scope folds opacity into terminal foreground colors too — glyphs,
+  box/block/powerline cells, underlines — for the full-glass look, as an
+  explicit opt-in. Chrome text and the cursor stay opaque.
+- **Persistent row-line artifact fix.** When the cursor/IME-preedit row was
+  skipped by the per-row content loop, the overlay fallback called
+  `begin_row` — which wipes the row's cached instances — and repopulated
+  nothing, leaving a blank row (or a bare cursor bar) that survived until
+  unrelated output re-dirtied it. Effects made it more likely only by
+  forcing more frames. The fallback now never destroys content it won't
+  rebuild.
 
-### Settings
+### Following the desktop
 
-- **Save no longer drops live-toggled keys.** `save_settings` in
-  `src/app/settings.rs` currently writes a fixed, hand-maintained list of
-  ~17 keys (`font_size`, `opacity`, `theme`, `cursor_style`, …) to
-  `glassy.conf`. Config has 40+ fields, and several of them — reachable and
-  live-previewable from the settings overlay — quietly weren't in that list,
-  so toggling them and hitting Save didn't persist the change. This wave
-  replaces the fixed list with a declarative `SAVED_KEYS` table so "settable
-  live" and "saved on Save" can't drift apart again; ~11 keys that were
-  silently dropped are now written.
-- **Every config key gets a settings-UI home.** The overlay's sections today
-  are General / Appearance / Themes / Keys / Panes / Advanced
-  (`SettingsSection` in `src/gui/settings_panel.rs`); Effects already exists
-  as a heading tucked inside Appearance (minimap toggle, window-effect
-  dropdown, custom sliders). Quake (`quake`, `quake_height`,
-  `quake_animation_ms`) and notifications (`notify_command_finish`,
-  `notify_command_threshold_ms`) have no settings UI at all today —
-  config-file-only. This wave promotes Effects to its own top-level section
-  and adds new Terminal, Quake, and Notifications sections so those
-  previously config-file-only keys get a UI home too.
-- **Profiles UI gets an active indicator and duplicate-as-profile.** The
-  Advanced section already lists `[profile.NAME]` sections as clickable rows
-  (`RowKind::Profile`, wired to `profile_pick`), but doesn't currently
-  highlight which profile is active or offer a one-click way to fork the
-  current settings into a new named profile. Both land this wave.
+- **Live GNOME/Linux light↔dark follow.** winit never delivers
+  `ThemeChanged` on Linux and `Window::theme()` doesn't reflect GNOME's
+  preference, so `follow_system` silently resolved to `theme_dark` there.
+  A watcher thread now reads and subscribes to the XDG desktop portal's
+  `color-scheme` setting over D-Bus — using the `dbus` crate that
+  notify-rust already links, so zero new dependencies — and feeds the
+  existing live theme-apply path, at startup and on every switch.
+- **Own the window chrome everywhere (kill the white border).** glassy
+  never draws a window-edge border — the thin light line (and the
+  system-themed title bar that ignores glassy's theme) is the OS/WM
+  client-side decoration, since decorations were only ever disabled in
+  quake mode. This wave goes borderless on all platforms: glassy's own
+  chrome becomes the only chrome, with window drag extended beyond macOS,
+  edge drag-resize, and close/min/max controls in the top bar on
+  Linux/Windows. A `decorations = true` escape hatch stays for people who
+  want their WM's frame back.
 
-### Rendering and panes
+### Status bar as the first plugin surface
 
-- **Per-dirty-row cell collection.** The single-pane render path
-  (`src/app/render.rs`) walks every visible cell in the grid each frame and
-  checks a per-row `dirty[]` flag to decide whether to push it — the skip is
-  cheap, but the walk itself is still O(total cells), not O(dirty cells).
-  This wave changes collection to iterate only the dirty rows' ranges
-  directly.
-- **Multipane allocation fix.** The split-pane render path
-  (`src/app/multipane.rs`) currently `.collect()`s a fresh `Vec` of the
-  entire grid's display cells per pane, per frame (and a second `Vec` for
-  live pane IDs) — this wave removes the avoidable per-frame allocations.
-  Note this is independent of per-row damage for splits, which multipane
-  still doesn't have — see **Next**.
+- **Data-driven segments.** The 12 hand-coded match-arm segments in
+  `paint_status_bar` become a declarative segment table, plus new built-ins
+  (tab count, pane zoom, active profile, shell-integration busy state,
+  hostname) that all come from data glassy already has.
+- **`glassy @ set-segment` / `clear-segment`.** External scripts can push
+  custom status-bar segments over the existing control socket — the first
+  real Phase-1 plugin surface from [docs/plugins.md](docs/plugins.md).
 
-### Input and files
+### Command palette power
 
-- **File drag-and-drop.** Not implemented at all today (no `DroppedFile`
-  handling anywhere in the event loop) — this wave adds it: dropped paths
-  are shell-quoted before insertion, multi-file drops batch into one paste,
-  and the paste goes through bracketed-paste so shells and TUIs that care
-  don't misinterpret it as typed input.
+- **Quake mode is discoverable.** The palette only registered its quake
+  entry when the window already *was* the quake window, and the F12 bind
+  was silently inert otherwise — the exact "I can't find quake anywhere"
+  trap. Palette entries now exist unconditionally, and an inert F12 gets an
+  explanatory toast instead of nothing.
+- **Run-command scratchpad.** `>` or `$`-prefixed palette input runs the
+  command in a transient PTY session that shows output and closes on
+  keypress — a quick one-off runner without committing a whole tab.
 
-### macOS
+### Panes
 
-- **Menu bar expansion.** The current `NSMenu` (`src/app/mac_menu.rs`) covers
-  the essentials (New Tab, Split, Copy/Paste, Find, Palette, Fullscreen, Zoom
-  Pane, tab navigation, Quit) but is missing **Select All**, **font
-  size** (in/out/reset), and the standard **Minimize** / **Zoom** window
-  controls under the Window menu. This wave adds them so the menu bar covers
-  what a native macOS app is expected to.
+- **Headers stop taxing the grid.** Pane headers cost 22px of PTY rows per
+  pane, which is why nobody enables them; they become an overlay strip
+  (no grid theft), with a `compact` style, an optional single-pane header,
+  a pane-index ordinal, and clamped cwd/command annotations.
+  (Drag-to-resize dividers and pane swap already exist and stay as-is.)
+- **Layout preset cycle.** A `cycle_layout` action steps the current tab's
+  split tree through presets (rows / columns / main-vertical / grid),
+  kitty-style, preserving pane order.
 
-### Theme import
+### Command blocks (Warp-adjacent, the glassy way)
 
-- **New formats: iTerm2 (`.itermcolors`), Kitty, Ghostty.** Import currently
-  covers Alacritty-compatible TOML and base16 YAML
-  (`src/config/theme_import.rs`); `.itermcolors` is actually an XML property
-  list (not YAML, despite what the current doc comment implies), so it needs
-  its own parser, as do Kitty's and Ghostty's own theme file formats.
-- **Silent-default bugfix.** An unresolvable theme name
-  (`src/config/parse.rs`) already logs a warning and falls back to Tokyo
-  Night, but a `log::warn!` line most users never see is effectively silent
-  in practice — you get the wrong theme with no visible signal why. This
-  wave surfaces the fallback somewhere a user will actually notice it.
+- **Prompt-aware output selection** (select a command's whole output as one
+  unit), **OSC 633 support** as a second mark source alongside the existing
+  OSC 133 stack, and an opt-in **`command_blocks = cards`** presentation
+  that draws subtle glass bands behind completed commands — presentation
+  over the existing CommandBlock data, no new plumbing.
 
-### Automation (plugin Phase 1)
+### Memory, robustness, benchmarks
 
-- **Extended `glassy @` remote control + the user themes dir above** are
-  Phase 1 of glassy's plugin story: script glassy from the outside via
-  `get-config` / `set-config` / `list-themes` / `reload-config` /
-  `run-action`, no code loaded into the process. Full writeup, including why
-  this explicitly isn't a plugin runtime, in
-  **[docs/plugins.md](docs/plugins.md)**.
+- **Scrollback memory bounding** without touching alacritty's Term/Grid
+  internals (the config allows 1M lines/pane; every pane keeps a fully
+  resident grid today), plus a FairMutex `lock()` vs `lock_unfair()` audit
+  on the render hot path.
+- **Config save integrity.** Saves preserve inline trailing comments, save
+  failures surface as toasts instead of log lines, and a save that races a
+  fresh external edit re-reads and re-applies instead of clobbering it.
+  GPU `device_lost` gets a graceful-rebuild callback.
+- **A real benchmark suite.** A `[lib]` target so internals are
+  bench-reachable at all, criterion micro-benches for the hot paths
+  (`collect_display_row`, config parse, theme lookup, damage reads), a
+  self-checking `scripts/bench.sh` vtebench harness for glassy vs alacritty
+  vs ghostty, honest numbers in [docs/benchmarks.md](docs/benchmarks.md),
+  and the unused `serde` feature dropped from alacritty_terminal.
+
+### GUI design system (from the w15 design audit)
+
+The audit found a good token/animation foundation that only ~40% of
+surfaces use: two parallel design systems, 9+ corner radii, hand-rolled
+card colors that break on light themes (toasts, peek), an invisible
+pane divider on light themes, zero shadows anywhere, hover states that
+never fade outside `Ui` widgets, a focus ring that overpaints accent
+buttons, and a stale 20-item keyboard tab order for an 11-section
+settings window. This wave lands the fix in phases: correctness (light
+themes, focus ring, single luma), token adoption (spacing/radius/elevation
+scales, one menu implementation), motion (duration+easing on the existing
+event-driven `Anim`, hover fades everywhere, enter animations), and depth
+(a soft-shadow SDF primitive under floating surfaces) — all without
+touching the 0%-idle `ControlFlow::Wait` invariant. Settings rows for
+every new w15 key land alongside, and `chrome.rs` / `settings_panel.rs`
+get split by responsibility at the end of the wave.
 
 ---
 
 ## Next
 
-- **Per-row damage for split panes.** Multipane's render loop
-  (`src/app/multipane.rs`) still rebuilds the entire visible pane every
-  frame — deliberately, per its own comment, to keep the fast single-pane
-  path untouched while splits stay a less-optimized secondary path. Worth
-  revisiting once the single-pane per-dirty-row work above has settled.
-- **In-app keybinding rebind UI.** The Keys settings section is display-only
-  today; you can see your bindings but changing one still means hand-editing
-  `glassy.conf`.
-- **Import-theme writes into the user themes dir.** `--import-theme` parses
-  a theme file and applies it for that session; it doesn't yet drop a copy
-  into `~/.config/glassy/themes/` so it shows up in `list-themes` /
-  the theme picker on the next launch without re-importing.
-- **Theme dir hot-reload.** The config file already hot-reloads
-  (`notify`-watched); `~/.config/glassy/themes/` doesn't yet get the same
-  treatment, so a new or edited theme file needs a restart (or `glassy @
-  reload-config`, once that lands) to be picked up.
-- **Settings search.** The overlay's sections are browsable but not
-  searchable — useful once Terminal/Effects/Quake/Notifications push the
-  section count up.
-- **Color-picker widget for the custom-theme editor.** Custom colors are
-  currently edited as a swatch + hex input; a real HSV/wheel picker is a
-  natural next step.
-- **Pane-at-drop-position routing for drag-drop.** This wave's file
-  drag-and-drop always targets the focused pane; routing to whichever pane
-  the cursor is actually over when a file is dropped is a follow-up.
-- **Scrollback search perf.** In-terminal search (`Ctrl+Shift+F`) works
-  today; making it fast on very large scrollback buffers is unaddressed.
-- **Windows CI target promotion.** `.github/workflows/release.yml` already
-  has a `build-windows` job, but it's `continue-on-error: true` and labeled
-  "TODO: not yet green" — Vulkan SDK / fontconfig-windows deps aren't wired
-  up yet, and the CI test matrix (`ci.yml`) doesn't run on Windows at all
-  (`ubuntu-latest` + `macos-latest` only). Promoting Windows to a required,
-  tested target is gated on it actually being a supported platform, which it
-  isn't yet (see [README.md](README.md) install matrix: macOS + Linux only).
+- **Criterion CI job with saved baselines.** The bench suite lands this
+  wave; wiring a ubuntu-runner regression gate (workflow_dispatch or
+  nightly, not per-PR) is the follow-up.
+- **Per-row damage for split panes.** Multipane still rebuilds a changed
+  pane fully (deliberately, to keep the single-pane fast path simple);
+  worth revisiting now that per-dirty-row collection has settled.
+- **In-app keybinding rebind UI.** The Keys settings section is
+  display-only today.
+- **Window fade-on-blur.** Optionally dim/fade the whole window when it
+  loses focus (kitty/wezterm have this) — distinct from per-pane dim, and
+  cheap now that the dim path composites correctly.
+- **Tab tear-off / New Window.** Dragging a tab out into its own OS window
+  (kitty/wezterm) — gated on the multi-window scoping pass under **Later**,
+  but called out here because it keeps coming up.
+- **Import-theme writes into the user themes dir**, **theme dir
+  hot-reload**, **settings search**, **color-picker widget**,
+  **pane-at-drop-position routing**, **scrollback search perf** — all
+  carried from w14, still right, still next.
+- **Drag-and-drop preview.** A small thumbnail/name chip while a file drag
+  hovers, before drop (wezterm shows one; we show a plain overlay today).
+- **Command snippet library.** Saved, named, parameterized commands
+  surfaced through the palette (Warp's "workflows") — the palette registry
+  and the run-command scratchpad landing this wave are the substrate.
+- **Windows CI target promotion** — unchanged from w14: not a supported
+  platform until the release job is green and tested.
 
 ---
 
 ## Later
 
-- **Multi-window support.** glassy is single-window today (tabs and splits
-  live inside one OS window); this blocks a true "New Window" macOS menu
-  item, among other things. A real scoping pass (window-to-instance model,
-  IPC implications for the existing single-instance socket) needs to happen
-  before this is a "Next," not a "Later."
-- **Plugin Phase 2 — config-declared event hooks.** `[hooks]` section
-  (`on_command_finish`, `on_theme_change`, `on_tab_open`, …) shelling out to
-  user commands with substitution, no embedded interpreter. Scoped in
-  [docs/plugins.md](docs/plugins.md#phase-2--config-declared-hooks-next).
-- **Global menu / DBusMenu on Linux desktops.** macOS gets a native menu bar
-  (`src/app/mac_menu.rs`); an equivalent global-menu integration for
-  GNOME/KDE via DBusMenu doesn't exist and isn't scoped.
-- **Sixel/kitty-image large-image streaming.** The OSC 1337 path is capped
-  by the 1 MiB observation buffer (`src/image/store.rs`), which covers
-  typical `imgcat`-sized icons/screenshots but not very large inline images;
-  kitty/sixel remain the path for those today, but true streaming support
-  for large images isn't designed yet.
-- **Shared I/O reactor**, if hundreds-of-panes-per-window ever becomes an
-  actual target. Today it's one OS thread per PTY (with a capped 256 KiB
-  stack, see [docs/benchmarks.md](docs/benchmarks.md)), which is fine at the
-  scale glassy is actually used at (a handful of tabs/splits) and not worth
-  the complexity of a shared reactor until that stops being true.
+- **Multi-window support.** Still the prerequisite for tab tear-off and a
+  true macOS "New Window"; needs a real scoping pass (window-to-instance
+  model, single-instance socket implications).
+- **Alacritty-replacement doctrine (from the w15 usage audit).** glassy
+  uses alacritty_terminal 0.26 across 31 files; the PTY event loop is
+  already in-house, and VT gaps are patched by byte-stream scanning rather
+  than forking. The standing position: **never** rewrite the vte parser /
+  Handler, `tty` spawn, Selection, or RegexSearch (large, fuzzed,
+  correctness-critical, not bottlenecks). Do consider, in order and only
+  with measurements in hand: (1) scrollback memory bounding — landing this
+  wave; (2) a combined-damage layer *on top of* TermDamage if profiling
+  shows damage merging matters; (3) a page-based scrollback store with
+  style dedup (ghostty-style, ~12 vs ~24 bytes/cell) only if real-world
+  memory numbers demand it. The `OverlineTracker` side-table pattern is the
+  standard mechanism for new per-cell attributes without forking.
+- **True row elision.** The prerequisite for real block-collapse and a
+  Warp-style transient prompt: rendering a scrollback where folded rows
+  occupy zero height. Explicitly flagged in-code as unbuilt; the
+  `command_blocks = cards` work this wave is presentation-only and does not
+  attempt it.
+- **tmux positioning.** Running tmux *inside* a pane is the supported path;
+  a tmux control-mode (`-CC`) integration is deliberately out of core. If
+  demand materializes it belongs behind the plugin layer, not in the
+  renderer. Session persistence beyond layout restore (true
+  detach-and-keep-running) would require a daemon architecture glassy does
+  not have and is not currently worth it.
+- **SSH/remote domains.** A wezterm-style "local render, remote shell"
+  domain abstraction. Big, real, unscoped.
+- **Plugin Phase 2 — config-declared event hooks**, **global menu/DBusMenu
+  on Linux**, **large-image streaming**, **shared I/O reactor** — unchanged
+  from w14.
 
 ---
 
@@ -185,22 +200,11 @@ what's actually shipped.
 
 Not scoped, not promised — things worth having a position on:
 
-- **Plugin Phase 3 — WASM component plugins.** `wasmtime`/`wasmi` behind an
-  opt-in Cargo feature, with read access to damage/cell events and an
-  overlay-primitive push surface. Explicitly flagged as a major departure
-  from the ~10 MB stripped-binary target, so it stays opt-in rather than
-  default, and stays speculative until Phase 1/2 usage data says it's worth
-  designing in detail. See
-  [docs/plugins.md](docs/plugins.md#phase-3--wasm-component-plugins-speculative).
-- **Ligature-aware selection.** Selecting inside a shaped ligature run
-  currently operates on the underlying cell grid, not the shaped glyph runs;
-  making selection ligature-aware is a real but fiddly correctness question.
-- **GPU-accelerated scrollback minimap zoom.** The minimap (`minimap` config
-  key, `src/app/minimap.rs`) already renders an incrementally-cached,
-  downsampled overview strip of the whole buffer without breaking the
-  0%-idle invariant; it has no zoom interaction today. A zoomable minimap is
-  an idea, not a plan.
-- **Session sync across machines.** `restore_session` persists tabs/splits/
-  cwds locally (`$XDG_STATE_HOME/glassy/session.json`); syncing that across
-  machines is a different, much bigger feature with real design questions
-  (transport, auth, conflict resolution) that haven't been thought through.
+- **Workspaces / session concept spanning windows** (kitty os-windows,
+  wezterm workspaces) — only meaningful after multi-window.
+- **Auto-update / version check.** ghostty and wezterm ship one; glassy
+  installs via Homebrew/package managers today, so a low-key "new version
+  available" toast (opt-in, no self-update) is the most this should ever be.
+- **Plugin Phase 3 — WASM component plugins**, **ligature-aware
+  selection**, **minimap zoom**, **session sync across machines** —
+  unchanged from w14.
