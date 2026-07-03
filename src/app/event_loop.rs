@@ -156,17 +156,32 @@ impl ApplicationHandler<UserEvent> for App {
         {
             renderer.set_pad(pad * scale);
         }
-        // Apply per-side padding overrides if configured.
-        if let Some(pad_top) = self.config.padding_top {
+        // Apply per-side padding overrides if configured. Mirrors the uniform
+        // `padding` guard just above: `0` is the "no override" sentinel (the
+        // settings-form per-side steppers, like the uniform one, always write an
+        // explicit numeric value once touched — see `App::adjust_padding_side` in
+        // settings.rs) — without this guard, a Save right after opening the
+        // Advanced section (before ever touching a per-side stepper) would pin
+        // every side at literal zero padding via `padding_top = 0` etc. in the
+        // saved config, instead of leaving them at the cell-derived default.
+        if let Some(pad_top) = self.config.padding_top
+            && pad_top > 0.0
+        {
             renderer.set_pad_top(pad_top * scale);
         }
-        if let Some(pad_bottom) = self.config.padding_bottom {
+        if let Some(pad_bottom) = self.config.padding_bottom
+            && pad_bottom > 0.0
+        {
             renderer.set_pad_bottom(pad_bottom * scale);
         }
-        if let Some(pad_left) = self.config.padding_left {
+        if let Some(pad_left) = self.config.padding_left
+            && pad_left > 0.0
+        {
             renderer.set_pad_left(pad_left * scale);
         }
-        if let Some(pad_right) = self.config.padding_right {
+        if let Some(pad_right) = self.config.padding_right
+            && pad_right > 0.0
+        {
             renderer.set_pad_right(pad_right * scale);
         }
         // Enable ligature run-shaping if the config requests it.

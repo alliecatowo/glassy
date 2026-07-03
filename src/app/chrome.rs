@@ -123,6 +123,19 @@ const CONFIG_TOGGLES: &[(&str, ConfigToggleField)] = &[
     ("settings/command_badges", |c| &mut c.command_badges),
     ("settings/title_show_cwd", |c| &mut c.title_show_cwd),
     ("settings/title_show_count", |c| &mut c.title_show_count),
+    ("settings/dim_unfocused", |c| &mut c.dim_unfocused),
+    ("settings/copy_html", |c| &mut c.copy_html),
+    ("settings/notify_command_finish", |c| {
+        &mut c.notify_command_finish
+    }),
+    // Quake mode is armed once in `App::init_quake`, called only from
+    // `resumed()` at startup — flipping `config.quake` after the window
+    // already exists has no live effect (no quake window is created/torn
+    // down). It is still a plain flip: no OTHER live side effect exists to
+    // replicate (the Settings UI labels this "(restart required)" — see
+    // `SettingsSection::Quake` in `settings_panel.rs`), and the value is
+    // still persisted on Save for the next launch.
+    ("settings/quake", |c| &mut c.quake),
 ];
 
 impl App {
@@ -567,6 +580,34 @@ impl App {
         // Custom-theme editor view data + the runtime profile names.
         let custom_labels: Vec<&str> = crate::app::settings_themes::CUSTOM_THEME_LABELS.to_vec();
         let profile_refs: Vec<&str> = profile_names.iter().map(|s| s.as_str()).collect();
+
+        // settings-sections stream: Terminal / Effects / Quake / Notifications /
+        // Advanced display strings + per-side padding (0 = unset, same sentinel
+        // convention as the uniform `padding_px` above).
+        let font_symbol_map_str = symbol_map_display(&config.font_symbol_map);
+        let font_variations_str = config.font_variations.join(" ");
+        let status_bar_segments_str =
+            status_bar_segments_display(config.status_bar_segments.as_deref());
+        let shell_str = shell_display(&config.shell);
+        let cwd_str = config
+            .initial_cwd
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default();
+        let hints_chars_str = config.hints_chars.clone().unwrap_or_default();
+        let font_bold_str = config.font_bold.clone().unwrap_or_default();
+        let font_italic_str = config.font_italic.clone().unwrap_or_default();
+        let font_bold_italic_str = config.font_bold_italic.clone().unwrap_or_default();
+        let wallpaper_theme_str = config
+            .wallpaper_theme
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default();
+        let padding_top_px = config.padding_top.unwrap_or(0.0).round().max(0.0) as u32;
+        let padding_bottom_px = config.padding_bottom.unwrap_or(0.0).round().max(0.0) as u32;
+        let padding_left_px = config.padding_left.unwrap_or(0.0).round().max(0.0) as u32;
+        let padding_right_px = config.padding_right.unwrap_or(0.0).round().max(0.0) as u32;
+
         let view = gui::SettingsView {
             font_px,
             opacity: config.opacity,
@@ -609,6 +650,31 @@ impl App {
             custom_editing,
             profile_names: &profile_refs,
             active_profile,
+            power_mode: config.power_mode,
+            power_mode_intensity: config.power_mode_intensity,
+            dim_unfocused: config.dim_unfocused,
+            copy_html: config.copy_html,
+            quake: config.quake,
+            quake_height: config.quake_height,
+            quake_animation_ms: config.quake_animation_ms,
+            notify_command_finish: config.notify_command_finish,
+            notify_command_threshold_ms: config.notify_command_threshold_ms,
+            command_fold: config.command_fold,
+            hints_chars: &hints_chars_str,
+            font_bold: &font_bold_str,
+            font_italic: &font_italic_str,
+            font_bold_italic: &font_bold_italic_str,
+            font_symbol_map: &font_symbol_map_str,
+            font_variations: &font_variations_str,
+            shell_display: &shell_str,
+            cwd_display: &cwd_str,
+            status_bar_segments: &status_bar_segments_str,
+            status_bar_time_format: &config.status_bar_time_format,
+            padding_top: padding_top_px,
+            padding_bottom: padding_bottom_px,
+            padding_left: padding_left_px,
+            padding_right: padding_right_px,
+            wallpaper_theme: &wallpaper_theme_str,
         };
         ui.build_settings((sw as f32, sh as f32), &view, fields)
     }
@@ -697,6 +763,45 @@ impl App {
             self.adjust_padding(ev.padding_delta);
             changed = true;
         }
+        if ev.padding_top_delta != 0 {
+            self.adjust_padding_top(ev.padding_top_delta);
+            changed = true;
+        }
+        if ev.padding_bottom_delta != 0 {
+            self.adjust_padding_bottom(ev.padding_bottom_delta);
+            changed = true;
+        }
+        if ev.padding_left_delta != 0 {
+            self.adjust_padding_left(ev.padding_left_delta);
+            changed = true;
+        }
+        if ev.padding_right_delta != 0 {
+            self.adjust_padding_right(ev.padding_right_delta);
+            changed = true;
+        }
+        if ev.quake_animation_delta != 0 {
+            self.adjust_quake_animation_ms(ev.quake_animation_delta);
+            changed = true;
+        }
+        if ev.notify_threshold_delta != 0 {
+            self.adjust_notify_threshold_ms(ev.notify_threshold_delta);
+            changed = true;
+        }
+        if let Some(h) = ev.quake_height {
+            self.config.quake_height = h.clamp(
+                crate::config::parse::QUAKE_HEIGHT_MIN,
+                crate::config::parse::QUAKE_HEIGHT_MAX,
+            );
+            self.settings_saved = false;
+            changed = true;
+        }
+        if let Some(i) = ev.power_mode_intensity {
+            let i = i.clamp(0.0, 1.0);
+            self.config.power_mode_intensity = i;
+            self.power.set_intensity(i);
+            self.settings_saved = false;
+            changed = true;
+        }
         if let Some(cs_idx) = ev.cursor_style {
             self.set_cursor_style_index(cs_idx);
             changed = true;
@@ -739,6 +844,29 @@ impl App {
                     self.config.cursor_trail = !self.config.cursor_trail;
                     if let Some(r) = self.renderer.as_mut() {
                         r.set_cursor_trail(self.config.cursor_trail);
+                    }
+                    self.settings_saved = false;
+                }
+                "settings/power_mode" => {
+                    // Runtime `PowerState::enabled` is separate from
+                    // `config.power_mode` (seeded from it once at `App::new`, then
+                    // independently runtime-toggled by the command palette) — flip
+                    // both so a live settings toggle and Save agree with the
+                    // palette's own toggle. `set_power_mode` also clears any live
+                    // particles/shake when turning off.
+                    self.config.power_mode = !self.config.power_mode;
+                    self.set_power_mode(self.config.power_mode);
+                    self.settings_saved = false;
+                }
+                "settings/command_fold" => {
+                    // Mirrors `apply_config_reload`'s (helpers.rs) `command_fold`
+                    // side effect: clearing an active fold state when the feature
+                    // is turned off, so the view reverts to fully-expanded output
+                    // instead of leaving stale folds the user can no longer toggle.
+                    self.config.command_fold = !self.config.command_fold;
+                    if !self.config.command_fold && self.fold_state.any() {
+                        self.fold_state = command_blocks::FoldState::default();
+                        self.force_full_redraw = true;
                     }
                     self.settings_saved = false;
                 }

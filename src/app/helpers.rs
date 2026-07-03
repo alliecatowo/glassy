@@ -198,6 +198,44 @@ pub(crate) fn config_display_path() -> String {
         .unwrap_or_else(|| "~/.config/glassy/glassy.conf".to_string())
 }
 
+/// Render `font_symbol_map` entries back to the `RANGE:Family[, RANGE:Family…]`
+/// text a user would type, for the Terminal section's editable field. Inverse
+/// of [`crate::config::parse::parse_symbol_map`] (round-trips through it).
+pub(crate) fn symbol_map_display(entries: &[crate::config::parse::SymbolMapEntry]) -> String {
+    entries
+        .iter()
+        .map(|e| {
+            if e.start == e.end {
+                format!("U+{:04X}:{}", e.start, e.family)
+            } else {
+                format!("U+{:04X}-U+{:04X}:{}", e.start, e.end, e.family)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Render `status_bar_segments` back to its space-joined display text for the
+/// Advanced section's editable field. `None` (built-in default set) displays
+/// as empty, matching `apply_kv`'s "empty clears the override" contract.
+/// Inverse of [`crate::config::parse::parse_status_bar_segments`].
+pub(crate) fn status_bar_segments_display(segs: Option<&[StatusBarSegment]>) -> String {
+    segs.map(|segs| segs.iter().map(|s| s.token()).collect::<Vec<_>>().join(" "))
+        .unwrap_or_default()
+}
+
+/// Render the resolved `shell` config value for the Terminal section's
+/// read-only info row. `alacritty_terminal::tty::Shell`'s `program`/`args`
+/// fields are `pub(crate)` to that crate (not visible here), so this falls
+/// back to its derived `Debug` output — still a faithful "resolved value"
+/// even though it isn't as clean as hand-formatted `program arg1 arg2`.
+pub(crate) fn shell_display(shell: &Option<alacritty_terminal::tty::Shell>) -> String {
+    match shell {
+        Some(s) => format!("{s:?}"),
+        None => "(default shell)".to_string(),
+    }
+}
+
 /// Lighten an RGB color toward white by `amount`, keeping alpha. Used for the
 /// raised help-panel surface.
 /// Percent-encode a filesystem path for embedding in a `file://` URI. Keeps the

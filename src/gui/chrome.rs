@@ -22,6 +22,33 @@ pub struct SettingsFields<'a> {
     /// "New profile" name field model + its mouse drag state (Profiles section).
     pub profile_name: &'a mut TextEdit,
     pub profile_name_ms: &'a mut TextInputMouse,
+    /// Terminal section: "Hint chars" field model + drag state.
+    pub hints_chars: &'a mut TextEdit,
+    pub hints_chars_ms: &'a mut TextInputMouse,
+    /// Terminal section: "Bold font" field model + drag state.
+    pub font_bold: &'a mut TextEdit,
+    pub font_bold_ms: &'a mut TextInputMouse,
+    /// Terminal section: "Italic font" field model + drag state.
+    pub font_italic: &'a mut TextEdit,
+    pub font_italic_ms: &'a mut TextInputMouse,
+    /// Terminal section: "Bold-italic font" field model + drag state.
+    pub font_bold_italic: &'a mut TextEdit,
+    pub font_bold_italic_ms: &'a mut TextInputMouse,
+    /// Terminal section: "Symbol map" field model + drag state.
+    pub font_symbol_map: &'a mut TextEdit,
+    pub font_symbol_map_ms: &'a mut TextInputMouse,
+    /// Terminal section: "Font variations" field model + drag state.
+    pub font_variations: &'a mut TextEdit,
+    pub font_variations_ms: &'a mut TextInputMouse,
+    /// Advanced section: "Status bar segments" field model + drag state.
+    pub status_bar_segments: &'a mut TextEdit,
+    pub status_bar_segments_ms: &'a mut TextInputMouse,
+    /// Advanced section: "Time format" field model + drag state.
+    pub status_bar_time_format: &'a mut TextEdit,
+    pub status_bar_time_format_ms: &'a mut TextInputMouse,
+    /// Themes section: "Wallpaper theme" path field model + drag state.
+    pub wallpaper_theme: &'a mut TextEdit,
+    pub wallpaper_theme_ms: &'a mut TextInputMouse,
 }
 
 impl<'r> Ui<'r> {

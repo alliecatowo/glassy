@@ -170,6 +170,108 @@ pub(crate) const SAVED_KEYS: &[SavedKey] = &[
         key: "fx_tint",
         get: |c| format!("{:.2}", c.custom_effect[5]),
     },
+    // --- settings-sections stream: Terminal / Effects / Quake / Notifications /
+    // Advanced additions --------------------------------------------------------
+    SavedKey {
+        key: "padding_top",
+        get: |c| format!("{:.0}", c.padding_top.unwrap_or(0.0)),
+    },
+    SavedKey {
+        key: "padding_bottom",
+        get: |c| format!("{:.0}", c.padding_bottom.unwrap_or(0.0)),
+    },
+    SavedKey {
+        key: "padding_left",
+        get: |c| format!("{:.0}", c.padding_left.unwrap_or(0.0)),
+    },
+    SavedKey {
+        key: "padding_right",
+        get: |c| format!("{:.0}", c.padding_right.unwrap_or(0.0)),
+    },
+    // Quake mode is restart-only (the window is armed once in `App::init_quake`
+    // at startup — see `chrome.rs`'s CONFIG_TOGGLES entry doc), but the toggle
+    // still writes through `Config` live so Save persists it for the next launch.
+    SavedKey {
+        key: "quake",
+        get: |c| c.quake.to_string(),
+    },
+    SavedKey {
+        key: "quake_height",
+        get: |c| format!("{:.2}", c.quake_height),
+    },
+    SavedKey {
+        key: "quake_animation_ms",
+        get: |c| c.quake_animation_ms.to_string(),
+    },
+    SavedKey {
+        key: "power_mode",
+        get: |c| c.power_mode.to_string(),
+    },
+    SavedKey {
+        key: "power_mode_intensity",
+        get: |c| format!("{:.2}", c.power_mode_intensity),
+    },
+    SavedKey {
+        key: "dim_unfocused",
+        get: |c| c.dim_unfocused.to_string(),
+    },
+    SavedKey {
+        key: "copy_html",
+        get: |c| c.copy_html.to_string(),
+    },
+    SavedKey {
+        key: "status_bar_segments",
+        get: |c| status_bar_segments_display(c.status_bar_segments.as_deref()),
+    },
+    SavedKey {
+        key: "status_bar_time_format",
+        get: |c| c.status_bar_time_format.clone(),
+    },
+    SavedKey {
+        key: "font_bold",
+        get: |c| c.font_bold.clone().unwrap_or_default(),
+    },
+    SavedKey {
+        key: "font_italic",
+        get: |c| c.font_italic.clone().unwrap_or_default(),
+    },
+    SavedKey {
+        key: "font_bold_italic",
+        get: |c| c.font_bold_italic.clone().unwrap_or_default(),
+    },
+    SavedKey {
+        key: "font_symbol_map",
+        get: |c| symbol_map_display(&c.font_symbol_map),
+    },
+    SavedKey {
+        key: "font_variations",
+        get: |c| c.font_variations.join(" "),
+    },
+    SavedKey {
+        key: "notify_command_finish",
+        get: |c| c.notify_command_finish.to_string(),
+    },
+    SavedKey {
+        key: "notify_command_threshold_ms",
+        get: |c| c.notify_command_threshold_ms.to_string(),
+    },
+    SavedKey {
+        key: "command_fold",
+        get: |c| c.command_fold.to_string(),
+    },
+    SavedKey {
+        key: "hints_chars",
+        get: |c| c.hints_chars.clone().unwrap_or_default(),
+    },
+    SavedKey {
+        key: "wallpaper_theme",
+        get: |c| {
+            c.wallpaper_theme
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default()
+        },
+    },
 ];
 
 #[cfg(test)]
@@ -219,6 +321,29 @@ mod tests {
         "fx_vignette",
         "fx_grain",
         "fx_tint",
+        "padding_top",
+        "padding_bottom",
+        "padding_left",
+        "padding_right",
+        "quake",
+        "quake_height",
+        "quake_animation_ms",
+        "power_mode",
+        "power_mode_intensity",
+        "dim_unfocused",
+        "copy_html",
+        "status_bar_segments",
+        "status_bar_time_format",
+        "font_bold",
+        "font_italic",
+        "font_bold_italic",
+        "font_symbol_map",
+        "font_variations",
+        "notify_command_finish",
+        "notify_command_threshold_ms",
+        "command_fold",
+        "hints_chars",
+        "wallpaper_theme",
     ];
 
     #[test]

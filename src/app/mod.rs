@@ -341,6 +341,29 @@ pub enum StatusBarSegment {
     KeyHints,
 }
 
+impl StatusBarSegment {
+    /// The canonical config token for this segment (the first alias
+    /// `config::parse::parse_status_bar_segments` accepts for it). Used by
+    /// `settings_save::SAVED_KEYS` to serialize `status_bar_segments` back to a
+    /// string the parser round-trips exactly.
+    pub(crate) fn token(self) -> &'static str {
+        match self {
+            StatusBarSegment::Cwd => "cwd",
+            StatusBarSegment::GitBranch => "git_branch",
+            StatusBarSegment::Process => "process",
+            StatusBarSegment::Time => "time",
+            StatusBarSegment::Mode => "mode",
+            StatusBarSegment::Broadcast => "broadcast",
+            StatusBarSegment::Selection => "selection",
+            StatusBarSegment::Scroll => "scroll",
+            StatusBarSegment::Encoding => "encoding",
+            StatusBarSegment::Progress => "progress",
+            StatusBarSegment::ExitStatus => "exit_status",
+            StatusBarSegment::KeyHints => "key_hints",
+        }
+    }
+}
+
 /// The three user-facing default cursor shapes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum CursorStyleConfig {
@@ -910,6 +933,52 @@ pub struct App {
     /// after a successful create.
     settings_profile_new: gui::TextEdit,
     settings_profile_new_ms: gui::TextInputMouse,
+
+    // --- settings-sections stream: Terminal / Effects / Quake / Notifications /
+    // Advanced text fields -----------------------------------------------------
+    /// Editable model + drag state for the Terminal section's "Hint chars"
+    /// field. Seeded from `config.hints_chars` on open; normalized on commit via
+    /// [`crate::config::parse::normalize_hints_chars`].
+    settings_hints_chars: gui::TextEdit,
+    settings_hints_chars_ms: gui::TextInputMouse,
+    /// Editable model + drag state for the Terminal section's "Bold font" field
+    /// (`config.font_bold`).
+    settings_font_bold: gui::TextEdit,
+    settings_font_bold_ms: gui::TextInputMouse,
+    /// Editable model + drag state for the Terminal section's "Italic font"
+    /// field (`config.font_italic`).
+    settings_font_italic: gui::TextEdit,
+    settings_font_italic_ms: gui::TextInputMouse,
+    /// Editable model + drag state for the Terminal section's "Bold-italic
+    /// font" field (`config.font_bold_italic`).
+    settings_font_bold_italic: gui::TextEdit,
+    settings_font_bold_italic_ms: gui::TextInputMouse,
+    /// Editable model + drag state for the Terminal section's "Symbol map"
+    /// field (`config.font_symbol_map`), displayed/parsed as `RANGE:Family`
+    /// entries via [`crate::config::parse::parse_symbol_map`].
+    settings_font_symbol_map: gui::TextEdit,
+    settings_font_symbol_map_ms: gui::TextInputMouse,
+    /// Editable model + drag state for the Terminal section's "Font variations"
+    /// field (`config.font_variations`), parsed via
+    /// [`crate::config::parse::parse_font_variations`].
+    settings_font_variations: gui::TextEdit,
+    settings_font_variations_ms: gui::TextInputMouse,
+    /// Editable model + drag state for the Advanced section's "Status bar
+    /// segments" field (`config.status_bar_segments`), parsed via
+    /// [`crate::config::parse::parse_status_bar_segments`].
+    settings_status_bar_segments: gui::TextEdit,
+    settings_status_bar_segments_ms: gui::TextInputMouse,
+    /// Editable model + drag state for the Advanced section's "Time format"
+    /// field (`config.status_bar_time_format`).
+    settings_status_bar_time_format: gui::TextEdit,
+    settings_status_bar_time_format_ms: gui::TextInputMouse,
+    /// Editable model + drag state for the Themes section's "Wallpaper theme"
+    /// path field (`config.wallpaper_theme`). Committing only updates the
+    /// config path; it does NOT re-run theme generation on every keystroke —
+    /// use the existing "Generate theme from wallpaper" palette action (or a
+    /// restart) to regenerate from the new path.
+    settings_wallpaper_theme: gui::TextEdit,
+    settings_wallpaper_theme_ms: gui::TextInputMouse,
 
     // --- Leader / multi-key chord sequences ----------------------------------
     /// Pending leader-sequence state: the chords typed so far that are a live

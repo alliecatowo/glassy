@@ -513,6 +513,66 @@ pub struct SettingsView<'a> {
     /// base (no-profile) config is active. Drives the active-row indicator in
     /// the Profiles section (see `App::active_profile`).
     pub active_profile: Option<&'a str>,
+
+    // --- settings-sections stream: Terminal / Effects / Quake / Notifications /
+    // Advanced additions --------------------------------------------------------
+    /// Power Mode (typing particle-burst effect) enabled.
+    pub power_mode: bool,
+    /// Power Mode effect strength (0..1).
+    pub power_mode_intensity: f32,
+    /// Dim unfocused pane content in a split.
+    pub dim_unfocused: bool,
+    /// Also place an HTML flavor on the clipboard on copy.
+    pub copy_html: bool,
+    /// Quake/dropdown mode enabled. Restart-only: the quake window is armed
+    /// once in `App::init_quake` at startup, so flipping this live only takes
+    /// effect after relaunch (labeled as such in the UI).
+    pub quake: bool,
+    /// Fraction of the monitor height the quake window occupies (0.1..1.0).
+    pub quake_height: f32,
+    /// Quake slide animation duration in ms (0..5000).
+    pub quake_animation_ms: u64,
+    /// Fire a desktop notification when a long-running command finishes.
+    pub notify_command_finish: bool,
+    /// Minimum command duration (ms) that triggers the notification.
+    pub notify_command_threshold_ms: u64,
+    /// Allow command output to be folded under its prompt.
+    pub command_fold: bool,
+    /// The label alphabet for hints mode, display text (empty = built-in default).
+    pub hints_chars: &'a str,
+    /// Explicit bold-text font family override, display text.
+    pub font_bold: &'a str,
+    /// Explicit italic-text font family override, display text.
+    pub font_italic: &'a str,
+    /// Explicit bold-italic-text font family override, display text.
+    pub font_bold_italic: &'a str,
+    /// `font_symbol_map` rendered back to its `RANGE:Family[, RANGE:Family…]`
+    /// display text.
+    pub font_symbol_map: &'a str,
+    /// `font_variations` rendered back to its space-joined display text.
+    pub font_variations: &'a str,
+    /// The resolved shell program + args, display text (Debug-formatted — the
+    /// `alacritty_terminal::tty::Shell` fields are crate-private upstream, so
+    /// this is the most detail glassy can surface without reimplementing the
+    /// type). `"(default shell)"` when unset.
+    pub shell_display: &'a str,
+    /// The configured startup working directory, display text. Empty when
+    /// unset (the shell's own default/inherited cwd is used).
+    pub cwd_display: &'a str,
+    /// `status_bar_segments` rendered back to its space-joined display text.
+    /// Empty means "use the built-in default segment set".
+    pub status_bar_segments: &'a str,
+    /// `strftime`-style format string for the status bar's Time segment.
+    pub status_bar_time_format: &'a str,
+    /// Per-side padding overrides in logical px (0 = unset/inherit), display
+    /// values for the Advanced section's steppers.
+    pub padding_top: u32,
+    pub padding_bottom: u32,
+    pub padding_left: u32,
+    pub padding_right: u32,
+    /// Path to the wallpaper-theme source image, display text (empty =
+    /// disabled).
+    pub wallpaper_theme: &'a str,
 }
 
 /// The left-sidebar sections of the revamped settings window, in display order.
@@ -521,8 +581,12 @@ pub enum SettingsSection {
     General,
     Appearance,
     Themes,
-    Keys,
+    Effects,
+    Terminal,
     Panes,
+    Quake,
+    Notifications,
+    Keys,
     Advanced,
     /// Runtime `[profile.*]` switching + "duplicate current as a new profile".
     /// Split out of `Advanced` (profiles-ui stream) into its own section so the
@@ -538,8 +602,12 @@ impl SettingsSection {
         SettingsSection::General,
         SettingsSection::Appearance,
         SettingsSection::Themes,
-        SettingsSection::Keys,
+        SettingsSection::Effects,
+        SettingsSection::Terminal,
         SettingsSection::Panes,
+        SettingsSection::Quake,
+        SettingsSection::Notifications,
+        SettingsSection::Keys,
         SettingsSection::Advanced,
         SettingsSection::Profiles,
     ];
@@ -549,8 +617,12 @@ impl SettingsSection {
             SettingsSection::General => "General",
             SettingsSection::Appearance => "Appearance",
             SettingsSection::Themes => "Themes",
-            SettingsSection::Keys => "Keys",
+            SettingsSection::Effects => "Effects",
+            SettingsSection::Terminal => "Terminal",
             SettingsSection::Panes => "Panes",
+            SettingsSection::Quake => "Quake",
+            SettingsSection::Notifications => "Notifications",
+            SettingsSection::Keys => "Keys",
             SettingsSection::Advanced => "Advanced",
             SettingsSection::Profiles => "Profiles",
         }
@@ -656,6 +728,25 @@ pub struct SettingsEvents {
     /// `SettingsFields::profile_name` (App-owned, like the other editable text
     /// fields).
     pub profile_create: bool,
+
+    // --- settings-sections stream: Terminal / Effects / Quake / Notifications /
+    // Advanced additions --------------------------------------------------------
+    /// New Power-Mode intensity if the Effects slider moved this frame.
+    pub power_mode_intensity: Option<f32>,
+    /// New quake-height fraction if the Quake slider moved this frame.
+    pub quake_height: Option<f32>,
+    /// Quake-animation-ms stepper delta in clicks (-1 / 0 / +1; scaled to a
+    /// 20ms step by the caller).
+    pub quake_animation_delta: i32,
+    /// Notify-command-threshold stepper delta in clicks (-1 / 0 / +1; scaled to
+    /// a 1000ms step by the caller).
+    pub notify_threshold_delta: i32,
+    /// Per-side padding stepper deltas in clicks (-1 / 0 / +1; scaled to a 2px
+    /// step by the caller), Advanced section.
+    pub padding_top_delta: i32,
+    pub padding_bottom_delta: i32,
+    pub padding_left_delta: i32,
+    pub padding_right_delta: i32,
 }
 
 // ---------------------------------------------------------------------------
