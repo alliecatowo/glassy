@@ -305,7 +305,10 @@ impl Renderer {
         if dec.underline == UnderlineStyle::None && !dec.strikeout && !dec.overline {
             return;
         }
-        let c = dec.color;
+        // Straight strokes go through the bg pass (premultiplied form under
+        // `opacity_scope = text`); the curl is a fg-pipeline decoration and takes
+        // the straight-alpha form below.
+        let c = self.text_fg_solid(dec.color);
         let w = self.metrics.width;
         let th = self.metrics.decoration_thickness;
         let x = ox.round();
@@ -366,7 +369,8 @@ impl Renderer {
                 let band_h = (th * 3.0).max(4.0).min(cell_h - 1.0);
                 let cy = uy + th * 0.5;
                 let top = (cy - band_h * 0.5).max(oy).min(oy + cell_h - band_h);
-                self.push_undercurl(x, top, w, band_h, c);
+                let curl = self.text_fg(dec.color);
+                self.push_undercurl(x, top, w, band_h, curl);
             }
         }
     }

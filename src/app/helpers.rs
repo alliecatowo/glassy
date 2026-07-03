@@ -578,6 +578,17 @@ impl App {
             self.dirty = true;
         }
 
+        // Opacity scope bakes into cached per-row glyph instances at push time,
+        // so flipping it needs a full repaint, not just a redraw.
+        if new_config.opacity_text != self.config.opacity_text {
+            self.config.opacity_text = new_config.opacity_text;
+            if let Some(r) = &mut self.renderer {
+                r.set_text_opacity(self.config.opacity_text);
+            }
+            self.dirty = true;
+            self.force_full_redraw = true;
+        }
+
         // Window effect changes hot-swap the post-process mode. Switching to/from
         // None toggles the offscreen pass; the renderer rebuilds resources lazily.
         if new_config.window_effect != self.config.window_effect {

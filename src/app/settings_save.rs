@@ -220,6 +220,16 @@ pub(crate) const SAVED_KEYS: &[SavedKey] = &[
         get: |c| format!("{:.2}", c.unfocused_dim),
     },
     SavedKey {
+        key: "opacity_scope",
+        get: |c| {
+            if c.opacity_text {
+                "text".to_string()
+            } else {
+                "background".to_string()
+            }
+        },
+    },
+    SavedKey {
         key: "copy_html",
         get: |c| c.copy_html.to_string(),
     },
@@ -336,6 +346,7 @@ mod tests {
         "power_mode_intensity",
         "dim_unfocused",
         "unfocused_dim",
+        "opacity_scope",
         "copy_html",
         "status_bar_segments",
         "status_bar_time_format",

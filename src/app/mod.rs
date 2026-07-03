@@ -254,6 +254,12 @@ pub struct Config {
     /// the 0.9 ceiling keeps a misconfigured value from blacking a pane out.
     /// Default [`crate::renderer::DEFAULT_PANE_DIM`] (0.28).
     pub unfocused_dim: f32,
+    /// Whether window opacity also applies to terminal TEXT
+    /// (`opacity_scope = text`; the file key takes `background` | `text`).
+    /// Default false: glyphs composite opaque so text stays crisp over the
+    /// translucent backdrop; `text` makes the whole terminal — glyphs included —
+    /// inherit the glass look. Chrome/GUI text is never affected.
+    pub opacity_text: bool,
     /// Also place a rich-text (HTML) flavor on the clipboard alongside the plain
     /// text whenever a terminal selection is copied. Lets HTML-preferring apps
     /// paste a monospace-preserving block; plain text remains the fidelity-correct

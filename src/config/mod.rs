@@ -36,6 +36,7 @@
 //! pane_headers= false                  # show per-pane title bars + accent rail in splits (default off)
 //! dim_unfocused = true                 # dim unfocused pane content in a split (default on)
 //! unfocused_dim = 0.28                 # dim strength 0..0.9 (0 = invisible; needs dim_unfocused)
+//! opacity_scope = background           # what window opacity affects: background | text (text = glyphs too)
 //! ligatures   = false                  # enable OpenType ligature shaping across cells (default off)
 //! font_features = ss01, calt=0         # OpenType feature tags to force on/off (comma or space separated)
 //! cwd         = /home/me/projects      # working directory for the first tab's shell
@@ -566,6 +567,25 @@ mod tests {
             raw_nan.into_settings().unwrap().config.unfocused_dim,
             crate::renderer::DEFAULT_PANE_DIM
         );
+    }
+
+    #[test]
+    fn opacity_scope_parses_and_defaults_to_background() {
+        // Default (unset) keeps text opaque.
+        let settings = RawConfig::default().into_settings().unwrap();
+        assert!(!settings.config.opacity_text);
+        // 'text' opts the glyphs into the window opacity.
+        let mut raw = RawConfig::default();
+        parse_config_file("opacity_scope = text\n", &mut raw).unwrap();
+        assert_eq!(raw.opacity_text, Some(true));
+        assert!(raw.into_settings().unwrap().config.opacity_text);
+        // 'background' is the explicit default spelling.
+        let mut raw_bg = RawConfig::default();
+        parse_config_file("opacity_scope = background\n", &mut raw_bg).unwrap();
+        assert_eq!(raw_bg.opacity_text, Some(false));
+        // Anything else is a config error, not a silent fallback.
+        let mut raw_bad = RawConfig::default();
+        assert!(parse_config_file("opacity_scope = both\n", &mut raw_bad).is_err());
     }
 
     #[test]

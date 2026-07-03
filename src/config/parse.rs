@@ -256,6 +256,7 @@ pub(super) struct RawConfig {
     pub command_history: Option<usize>,
     pub dim_unfocused: Option<bool>,
     pub unfocused_dim: Option<f32>,
+    pub opacity_text: Option<bool>,
     /// Also place a rich-text (HTML) flavor on the clipboard alongside the plain
     /// text on copy, so apps that prefer HTML get a monospace-preserving paste.
     pub copy_html: Option<bool>,
@@ -463,6 +464,7 @@ impl RawConfig {
                     crate::renderer::DEFAULT_PANE_DIM
                 }
             },
+            opacity_text: self.opacity_text.unwrap_or(false),
             copy_html: self.copy_html.unwrap_or(false),
             status_bar_segments: self.status_bar_segments,
             status_bar_time_format: self
@@ -1022,6 +1024,13 @@ pub(super) fn apply_kv(key: &str, value: &str, raw: &mut RawConfig) -> Result<()
                 .parse()
                 .with_context(|| format!("unfocused_dim: invalid number '{value}'"))?;
             raw.unfocused_dim = Some(d);
+        }
+        "opacity_scope" => {
+            raw.opacity_text = Some(match value {
+                "background" => false,
+                "text" => true,
+                other => bail!("opacity_scope must be 'background' or 'text', got '{other}'"),
+            });
         }
         "word_separator" => {
             raw.word_separator = Some(value.to_string());

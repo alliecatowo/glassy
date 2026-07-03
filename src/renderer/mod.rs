@@ -518,6 +518,11 @@ pub struct Renderer {
     /// `unfocused_dim`; see [`Renderer::set_pane_dim`].
     pane_dim: f32,
 
+    /// Whether window opacity also applies to terminal text
+    /// (`opacity_scope = text`). Default false: glyphs composite opaque so text
+    /// stays crisp over the translucent backdrop. See [`Renderer::set_text_opacity`].
+    text_opacity: bool,
+
     /// Whether the surface alpha mode actually composites alpha (a transparent
     /// window). When false we keep backgrounds fully opaque so a compositor that
     /// can't do translucency doesn't darken the window via premultiplied RGB.

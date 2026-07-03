@@ -147,6 +147,7 @@ impl ApplicationHandler<UserEvent> for App {
             ms(self.started)
         );
         renderer.set_pane_dim(self.config.unfocused_dim);
+        renderer.set_text_opacity(self.config.opacity_text);
         // Apply an explicit padding override (logical px scaled to physical). A
         // value of 0 means "use the cell-derived default" (matching the settings
         // form, where 0 is the default sentinel) — without this guard, a config

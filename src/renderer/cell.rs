@@ -134,6 +134,55 @@ impl Renderer {
         self.opacity = opacity.clamp(0.0, 1.0);
     }
 
+    /// Set whether the window opacity also applies to terminal TEXT (the
+    /// `opacity_scope = text` config). Default false: glyphs composite opaque
+    /// over the translucent backdrop so text stays crisp. The caller must force
+    /// a full redraw afterward — glyph colors are baked into the cached per-row
+    /// instances at push time.
+    pub fn set_text_opacity(&mut self, text: bool) {
+        self.text_opacity = text;
+    }
+
+    /// Scale a straight-RGBA terminal-text color by the window opacity for the
+    /// `opacity_scope = text` mode. `premultiply` selects the consumer:
+    ///
+    /// * `false` — fg-pipeline glyphs/undercurl: the shader treats `color.a` as
+    ///   a coverage multiplier and premultiplies itself, so only alpha scales.
+    /// * `true` — bg-pass solids (box/block/powerline segments, underline and
+    ///   strikeout strokes): the bg pipeline has `blend: None` and writes raw
+    ///   values to a premultiplied surface, so the color must be premultiplied
+    ///   here (exactly like `glass_bg` does for cell backgrounds) — a straight
+    ///   translucent color on that path would render too bright AND punch the
+    ///   surface alpha down.
+    fn text_glass_color(color: [f32; 4], premultiply: bool, opacity: f32) -> [f32; 4] {
+        let a = color[3] * opacity;
+        if premultiply {
+            [color[0] * a, color[1] * a, color[2] * a, a]
+        } else {
+            [color[0], color[1], color[2], a]
+        }
+    }
+
+    /// Apply `opacity_scope = text` to a fg-pipeline glyph color (straight RGBA,
+    /// alpha = coverage multiplier). No-op when the scope is background-only or
+    /// the surface can't composite alpha.
+    pub(crate) fn text_fg(&self, color: [f32; 4]) -> [f32; 4] {
+        if !self.text_opacity || !self.transparent {
+            return color;
+        }
+        Self::text_glass_color(color, false, super::opacity::perceptual(self.opacity))
+    }
+
+    /// Apply `opacity_scope = text` to a bg-pass solid drawn in the foreground
+    /// color (procedural box/block/powerline cells, underline/strikeout rects).
+    /// Premultiplied variant of [`Renderer::text_fg`]; same no-op conditions.
+    pub(crate) fn text_fg_solid(&self, color: [f32; 4]) -> [f32; 4] {
+        if !self.text_opacity || !self.transparent {
+            return color;
+        }
+        Self::text_glass_color(color, true, super::opacity::perceptual(self.opacity))
+    }
+
     /// Reload the font at a new physical pixel size, recomputing the cell metrics
     /// and padding and rebuilding the glyph atlas. On failure the previous font
     /// is retained (the error is logged) so a bad size never breaks rendering.
@@ -427,6 +476,13 @@ impl Renderer {
         wide: bool,
         decorations: Decorations,
     ) {
+        // `opacity_scope = text`: fold the window opacity into the foreground
+        // color up front — the straight variant for atlas glyphs (fg pipeline),
+        // the premultiplied variant for procedural solids (bg pass). No-ops in
+        // the default background-only scope.
+        let fg_solid = self.text_fg_solid(fg);
+        let fg = self.text_fg(fg);
+
         let cell_w = self.metrics.width;
         let cell_h = self.metrics.height;
         let pad = self.pad;
@@ -515,18 +571,18 @@ impl Renderer {
         // overdrawn by our scanlines). This is correct: the bg quads are opaque.
         let is_powerline = matches!(cp, 0xE0B0..=0xE0B3);
         if is_block {
-            self.draw_block(ch, origin_x, origin_y, fg, bg);
+            self.draw_block(ch, origin_x, origin_y, fg_solid, bg);
             return;
         }
         if is_box {
             // `draw_box` returns false for code points it does not handle, in
             // which case we fall through to the normal glyph path so nothing
             // renders blank.
-            if self.draw_box(ch, origin_x, origin_y, fg) {
+            if self.draw_box(ch, origin_x, origin_y, fg_solid) {
                 return;
             }
         }
-        if is_powerline && self.draw_powerline(ch, origin_x, origin_y, fg, bg) {
+        if is_powerline && self.draw_powerline(ch, origin_x, origin_y, fg_solid, bg) {
             return;
         }
 
@@ -615,11 +671,12 @@ impl Renderer {
             let baseline = origin_y + self.metrics.ascent;
             let glyphs = &cached[i];
             if !glyphs.is_empty() {
+                let fg = self.text_fg(cell.fg);
                 let cur = self.cur_row;
                 Self::place_glyphs(
                     &mut self.rows[cur].fg,
                     glyphs,
-                    cell.fg,
+                    fg,
                     origin_x,
                     baseline,
                     cell_w,
@@ -711,5 +768,33 @@ impl Renderer {
                 _pad: [0; 3],
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod text_opacity_tests {
+    use super::*;
+
+    #[test]
+    fn straight_variant_scales_only_alpha() {
+        // fg-pipeline glyphs: the shader premultiplies, so RGB must stay straight.
+        let c = Renderer::text_glass_color([0.8, 0.6, 0.4, 1.0], false, 0.5);
+        assert_eq!(c, [0.8, 0.6, 0.4, 0.5]);
+    }
+
+    #[test]
+    fn premultiplied_variant_scales_rgb_and_alpha() {
+        // bg-pass solids: blend None writes raw values to a premultiplied
+        // surface, so RGB must carry the alpha or the solid renders too bright.
+        let c = Renderer::text_glass_color([0.8, 0.6, 0.4, 1.0], true, 0.5);
+        assert_eq!(c, [0.4, 0.3, 0.2, 0.5]);
+    }
+
+    #[test]
+    fn existing_translucency_compounds() {
+        // A color that already carries alpha (e.g. dim text) compounds with the
+        // window opacity rather than replacing it.
+        let c = Renderer::text_glass_color([1.0, 1.0, 1.0, 0.5], false, 0.5);
+        assert_eq!(c[3], 0.25);
     }
 }
