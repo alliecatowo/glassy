@@ -202,17 +202,12 @@ pub(super) fn dispatch(
             return;
         }
         UserEvent::ConfigReload => {
-            // Config file changed; reload from disk and apply live-reloadable settings.
-            match crate::config::Settings::resolve(std::iter::empty()) {
-                Ok(Some(settings)) => {
-                    app.apply_config_reload(&settings.config);
-                }
-                Ok(None) => {
-                    log::debug!("config reload: --help/--version");
-                }
-                Err(e) => {
-                    log::warn!("config reload failed: {e}");
-                }
+            // Config file changed; reload from disk and apply live-reloadable
+            // settings. Shared with the `glassy @ reload-config` / `set-config`
+            // remote-control verbs (`App::reload_config_from_disk`, `remote.rs`)
+            // so every trigger of a config reload runs the identical path.
+            if let Err(e) = app.reload_config_from_disk() {
+                log::warn!("{e}");
             }
             return;
         }

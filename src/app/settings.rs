@@ -763,18 +763,7 @@ impl App {
     /// drive it there directly), not in `Config::font_size`, which only
     /// reflects the size at startup.
     pub(crate) fn save_settings(&mut self) {
-        let scale = self
-            .window
-            .as_ref()
-            .map(|w| w.scale_factor() as f32)
-            .unwrap_or(1.0)
-            .max(0.1);
-        let px = self
-            .renderer
-            .as_ref()
-            .map(|r| r.font_px())
-            .unwrap_or(self.config.font_size);
-        let pt = (px / scale).max(1.0);
+        let pt = self.live_font_size_pt();
         let mut updates: Vec<(&str, String)> =
             Vec::with_capacity(settings_save::SAVED_KEYS.len() + 1);
         updates.push(("font_size", format!("{pt:.0}")));
@@ -788,6 +777,30 @@ impl App {
             }
             Err(e) => log::error!("settings save failed: {e:#}"),
         }
+    }
+
+    /// The current live font size in points, exactly the number
+    /// [`Self::save_settings`] writes for the `font_size` key: the renderer's
+    /// effective px (Ctrl +/-/0 and the settings stepper both drive it there
+    /// directly) converted back through the window's scale factor — NOT
+    /// `self.config.font_size`, which only reflects the size at startup (see
+    /// this module's `SAVED_KEYS` doc comment for why `font_size` is excluded
+    /// from that table). Shared with the `get-config`/`set-config`
+    /// remote-control verbs (`remote.rs`) so a script reads back the exact
+    /// same number the settings overlay shows.
+    pub(crate) fn live_font_size_pt(&self) -> f32 {
+        let scale = self
+            .window
+            .as_ref()
+            .map(|w| w.scale_factor() as f32)
+            .unwrap_or(1.0)
+            .max(0.1);
+        let px = self
+            .renderer
+            .as_ref()
+            .map(|r| r.font_px())
+            .unwrap_or(self.config.font_size);
+        (px / scale).max(1.0)
     }
 
     /// Apply a runtime font-size change (Ctrl +/-/0): reload the font in the

@@ -68,6 +68,59 @@ impl App {
                     ControlReply::Ok(format!("focused tab {pos1}"))
                 }
             }
+            ControlCommand::ListThemes => {
+                dirty = false; // a read-only query changes nothing on screen
+                ControlReply::Ok(crate::color::theme_names().join(", "))
+            }
+            ControlCommand::ReloadConfig => match self.reload_config_from_disk() {
+                // apply_config_reload flags self.dirty/force_full_redraw for
+                // whatever actually changed but (unlike run_key_action) has no
+                // ActiveEventLoop to reschedule a repaint with; leaving `dirty`
+                // at its default `true` here is what gets that redraw
+                // actually scheduled (via the outer `app.mark_dirty` call in
+                // `user_event.rs`'s `UserEvent::Control` arm).
+                Ok(()) => ControlReply::Ok(String::new()),
+                Err(e) => {
+                    dirty = false; // nothing changed; no repaint needed
+                    ControlReply::Err(e)
+                }
+            },
+            ControlCommand::RunAction(name) => {
+                // Dispatch through the exact same `run_key_action` path a
+                // keybinding or the macOS menu bar uses (see `mac_menu.rs`'s
+                // module doc for the sibling case of that path). Unlike
+                // `MenuAction`, which fires from an Objective-C callback with
+                // no `ActiveEventLoop` in scope (hence its proxy round-trip
+                // through `UserEvent::MenuAction`), `apply_control` already
+                // runs on the UI thread WITH an `&ActiveEventLoop` (see this
+                // method's signature), so no indirection is needed here.
+                dirty = false; // run_key_action marks dirty itself when needed
+                match crate::config::keymap::parse_action(name) {
+                    Ok(Some(action)) => {
+                        self.run_key_action(action, event_loop);
+                        ControlReply::Ok(String::new())
+                    }
+                    Ok(None) => ControlReply::Err(format!(
+                        "unknown action '{name}' (that name disables a bind, not something to run)"
+                    )),
+                    Err(_) => ControlReply::Err(format!("unknown action '{name}'")),
+                }
+            }
+            ControlCommand::GetConfig(key) => {
+                dirty = false;
+                self.control_get_config(key)
+            }
+            ControlCommand::SetConfig { key, value } => {
+                let reply = self.control_set_config(key, value);
+                // Only a successful write reaches the reload_config_from_disk
+                // call (see control_set_config), which needs the same
+                // ActiveEventLoop-less redraw scheduling as ReloadConfig
+                // above; an Err means nothing changed, so skip the repaint.
+                if matches!(reply, ControlReply::Err(_)) {
+                    dirty = false;
+                }
+                reply
+            }
         };
         req.respond(reply);
         dirty
@@ -198,6 +251,59 @@ impl App {
                 "set-color {target} not yet live; use 'set-theme <name>' to change colors"
             )),
             other => ControlReply::Err(format!("unknown color target '{other}' (fg|bg|cursor)")),
+        }
+    }
+
+    /// Apply a `get-config <key>` request: look `key` up in the declarative
+    /// `settings_save::SAVED_KEYS` table (the same one the settings overlay's
+    /// Save button and `glassy @ set-config` write through), with the
+    /// `font_size` special case ([`Self::live_font_size_pt`]) `SAVED_KEYS`
+    /// itself excludes for the reason documented on that table.
+    fn control_get_config(&self, key: &str) -> ControlReply {
+        if key == "font_size" {
+            return ControlReply::Ok(format!("{:.0}", self.live_font_size_pt()));
+        }
+        match settings_save::SAVED_KEYS.iter().find(|sk| sk.key == key) {
+            Some(sk) => ControlReply::Ok((sk.get)(&self.config)),
+            None => ControlReply::Err(format!("unknown key '{key}'")),
+        }
+    }
+
+    /// Apply a `set-config <key> <value>` request.
+    ///
+    /// Simplified write-through design (no per-key live setter to keep in
+    /// sync): validate the key is one `get-config` can also read
+    /// (`ipc::control::is_known_config_key`) and that the value parses at all
+    /// (`config::validate_kv`, a dry run through the same parser
+    /// `glassy.conf` loading uses), persist it via `config::save` — the exact
+    /// mechanism the settings overlay's Save button uses — and apply it live
+    /// through the identical path `reload-config` uses
+    /// ([`Self::reload_config_from_disk`]). This means `set-config` always
+    /// writes to `glassy.conf` on success (unlike a hypothetical
+    /// apply-without-persisting verb), so the value survives a restart.
+    ///
+    /// A value that parses but is out of a field's valid range is persisted
+    /// verbatim and silently clamped downstream in `RawConfig::into_settings`
+    /// rather than rejected here — e.g. `set-config opacity 5` writes
+    /// `opacity = 5` to disk while the *effective* value (live now, and again
+    /// on every future load of that file) is `1.00`. `ERR` is reserved for an
+    /// unknown key or a value that fails to parse at all (e.g. a non-numeric
+    /// `opacity`).
+    fn control_set_config(&mut self, key: &str, value: &str) -> ControlReply {
+        if !crate::ipc::control::is_known_config_key(key) {
+            return ControlReply::Err(format!("unknown key '{key}'"));
+        }
+        // apply_kv's errors already name the offending field (e.g. "opacity:
+        // invalid number 'abc'"), so don't prefix the key again here.
+        if let Err(e) = crate::config::validate_kv(key, value) {
+            return ControlReply::Err(format!("{e:#}"));
+        }
+        if let Err(e) = crate::config::save(&[(key, value.to_string())]) {
+            return ControlReply::Err(format!("set-config: failed to save: {e:#}"));
+        }
+        match self.reload_config_from_disk() {
+            Ok(()) => ControlReply::Ok(String::new()),
+            Err(e) => ControlReply::Err(format!("set-config: saved but reload failed: {e}")),
         }
     }
 }

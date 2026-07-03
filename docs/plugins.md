@@ -62,23 +62,56 @@ glassy @ reload-config            # OK  — re-reads glassy.conf from disk
 glassy @ run-action <name>        # OK  |  ERR unknown action '<name>'
 ```
 
-- **`get-config <key>` / `set-config <key> <value>`** — read or write any
-  config key by name, applied live and persisted to `glassy.conf` the same
-  way the settings overlay's Save button does (both go through the
-  declarative `SAVED_KEYS` table landing alongside this in `src/app/settings.rs`
-  — see [ROADMAP.md](../ROADMAP.md)'s Now section). This is what makes
-  `glassy @ set-config opacity 0.8` from a shell script equivalent to opening
-  the settings overlay.
+- **`get-config <key>`** — reads a key's *current live value* by looking it
+  up in the declarative `SAVED_KEYS` table (`src/app/settings_save.rs`) — the
+  same table `App::save_settings`/the settings overlay's Save button writes —
+  plus a `font_size` special case (its live value lives in the renderer's
+  effective px, not `Config::font_size`, which only reflects the size at
+  startup; that's also why `SAVED_KEYS` itself excludes it). Because the read
+  is of the live config, a key that `reload-config` can't apply live (see
+  below) reads back its *startup* value even after a `set-config` wrote a
+  new one to disk. An unrecognized key replies `ERR unknown key '<key>'`.
+- **`set-config <key> <value>`** — a deliberately simple write-through design
+  with no per-key live setter to keep in sync: the key must be one
+  `get-config` can also read; the value is dry-run parsed through the same
+  parser `glassy.conf` loading uses (`config::validate_kv` /
+  `config::parse::apply_kv`) and rejected with `ERR` only if it fails to parse
+  at all (e.g. a non-numeric `opacity`, an invalid `cursor_style` word). A
+  value that parses but is out of a field's valid range is **persisted
+  verbatim and silently clamped at apply time**, not rejected —
+  `set-config opacity 5` succeeds, writes `opacity = 5` to `glassy.conf`, and
+  the *effective* value (live now, and again on every future load of that
+  file) is `1.00`. Once validated, the value is persisted via `config::save`
+  (the exact mechanism the settings overlay's Save button uses) and then
+  applied live through the identical path `reload-config` uses (below) — so
+  `set-config` **always writes to `glassy.conf`** on success, unlike a
+  hypothetical apply-without-persisting verb. `glassy @ set-config opacity
+  0.8` from a shell script is equivalent to opening the settings overlay,
+  changing Opacity, and clicking Save. A multi-word value needs no quoting
+  gymnastics: everything after the key is the value, spaces included
+  (`glassy @ set-config font_features calt=0 liga`), mirroring `send-text`'s
+  rest-of-the-line handling.
 - **`list-themes`** — enumerates the resolved registry (built-ins + user
   themes dir), so a script can validate a theme name before calling
   `set-theme`, or build its own theme picker.
 - **`reload-config`** — forces the same reload path the file-watcher already
-  triggers on save, useful when a script edits `glassy.conf` directly instead
-  of going through `set-config`.
-- **`run-action <name>`** — invokes a named command-palette action (the same
-  action registry the fuzzy palette searches) without going through a
-  keybinding. This is the escape hatch for anything Phase 1 doesn't expose a
-  dedicated verb for.
+  triggers on save (`App::apply_config_reload`), useful when a script edits
+  `glassy.conf` directly instead of going through `set-config`. Note this
+  reload path only ever applied a *curated subset* of keys live (opacity,
+  window effect, bell flags, status bar, pane headers, command-history
+  capacity, word separator, theme/`follow_system`, command-finish
+  notification settings, command folding) — this predates Phase 1 and isn't
+  changed by it. Keys outside that subset (`font_family`, `scrollback`,
+  `cursor_style`, `padding`, …) are written to `glassy.conf` correctly by
+  `set-config` but only take visual effect after a restart, exactly as
+  editing them by hand and using `reload-config` would.
+- **`run-action <name>`** — invokes a named command-palette/keybinding action
+  (`config::keymap::parse_action`) through `App::run_key_action`, the *exact*
+  same dispatch a keychord or (on macOS) a menu-bar click uses — see
+  `src/app/mac_menu.rs`'s module doc for the sibling case of routing a
+  non-keyboard trigger through that one path. An unrecognized name replies
+  `ERR unknown action '<name>'`. This is the escape hatch for anything Phase 1
+  doesn't expose a dedicated verb for.
 
 Every verb replies on the same request/reply cycle as the existing ones —
 `OK [text]` or `ERR <message>` — so a script gets a clean success/failure
