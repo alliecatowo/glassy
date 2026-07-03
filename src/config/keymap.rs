@@ -200,6 +200,8 @@ pub enum KeyAction {
     CommandPalette,
     Copy,
     Paste,
+    /// Select the entire terminal buffer (scrollback + visible screen).
+    SelectAll,
     ToggleStatusBar,
     FontIncrease,
     FontDecrease,
@@ -280,6 +282,7 @@ impl KeyAction {
             CommandPalette => "Command palette",
             Copy => "Copy selection",
             Paste => "Paste",
+            SelectAll => "Select all",
             ToggleStatusBar => "Toggle status bar",
             FontIncrease => "Font bigger",
             FontDecrease => "Font smaller",
@@ -324,7 +327,7 @@ impl KeyAction {
             | FocusPaneRight | FocusPaneUp | FocusPaneDown | RotatePanes | EqualizePanes => {
                 "Split panes"
             }
-            Copy | Paste | ViMode => "Edit",
+            Copy | Paste | SelectAll | ViMode => "Edit",
             ToggleFullscreen | ToggleMaximize | FontIncrease | FontDecrease | FontReset
             | ToggleStatusBar | ToggleMinimap | ScrollUp | ScrollDown | ScrollTop
             | ScrollBottom | JumpPrevPrompt | JumpNextPrompt | ToggleFold | QuakeToggle
@@ -356,6 +359,7 @@ pub(crate) fn parse_action(s: &str) -> Result<Option<KeyAction>> {
         "command_palette" => CommandPalette,
         "copy" => Copy,
         "paste" => Paste,
+        "select_all" => SelectAll,
         "toggle_status_bar" => ToggleStatusBar,
         "font_increase" => FontIncrease,
         "font_decrease" => FontDecrease,
@@ -603,6 +607,7 @@ fn mac_default_binds() -> &'static [(&'static str, KeyAction)] {
         ("cmd+shift+p", CommandPalette),
         ("cmd+c", Copy),
         ("cmd+v", Paste),
+        ("cmd+a", SelectAll),
         ("cmd+shift+b", ToggleStatusBar),
         ("cmd++", FontIncrease),
         ("cmd+=", FontIncrease),
@@ -794,5 +799,31 @@ mod tests {
             &[("ctrl+shift+i".into(), "none".into())],
         );
         assert!(!map.values().any(|&a| a == KeyAction::BroadcastInput));
+    }
+
+    #[test]
+    fn select_all_action_round_trips() {
+        // The select-all action parses from its config name and reports a
+        // description + section like every other action.
+        assert_eq!(
+            parse_action("select_all").unwrap(),
+            Some(KeyAction::SelectAll)
+        );
+        assert!(!KeyAction::SelectAll.description().is_empty());
+        assert_eq!(KeyAction::SelectAll.section(), "Edit");
+    }
+
+    #[test]
+    fn select_all_has_mac_default_binding_but_not_pc() {
+        // Cmd+A selects all on macOS out of the box, following Apple HIG. It has
+        // no default bind on Linux/Windows: Ctrl+A is shell-critical (readline's
+        // "move to start of line"), so binding it would break every shell.
+        let mac = default_keymap(Platform::Mac);
+        assert_eq!(
+            mac.get(&parse_chord("cmd+a").unwrap()),
+            Some(&KeyAction::SelectAll)
+        );
+        let pc = default_keymap(Platform::Linux);
+        assert!(!pc.values().any(|&a| a == KeyAction::SelectAll));
     }
 }
