@@ -2,7 +2,10 @@
 
 use anyhow::{Context, Result, bail};
 
-use super::parse::{RawConfig, parse_bool, parse_pos_f32};
+use super::parse::{
+    QUAKE_ANIMATION_MS_MAX, QUAKE_HEIGHT_MAX, QUAKE_HEIGHT_MIN, RawConfig, parse_bool,
+    parse_pos_f32,
+};
 use super::theme_import::import_theme_from_file;
 
 /// Parse CLI arguments, overriding fields in `raw`.
@@ -139,8 +142,10 @@ pub(super) fn parse_cli(args: impl Iterator<Item = String>, raw: &mut RawConfig)
                 let h: f32 = v
                     .parse()
                     .with_context(|| format!("--quake-height: invalid number '{v}'"))?;
-                if !(h.is_finite() && (0.1..=1.0).contains(&h)) {
-                    bail!("--quake-height must be between 0.1 and 1.0, got {h}");
+                if !(h.is_finite() && (QUAKE_HEIGHT_MIN..=QUAKE_HEIGHT_MAX).contains(&h)) {
+                    bail!(
+                        "--quake-height must be between {QUAKE_HEIGHT_MIN} and {QUAKE_HEIGHT_MAX}, got {h}"
+                    );
                 }
                 raw.quake_height = Some(h);
             }
@@ -149,7 +154,7 @@ pub(super) fn parse_cli(args: impl Iterator<Item = String>, raw: &mut RawConfig)
                 let ms: u64 = v
                     .parse()
                     .with_context(|| format!("--quake-animation-ms: invalid integer '{v}'"))?;
-                raw.quake_animation_ms = Some(ms.min(5_000));
+                raw.quake_animation_ms = Some(ms.min(QUAKE_ANIMATION_MS_MAX));
             }
             "--restore-session" => {
                 // Optional bool value; bare `--restore-session` means true.
