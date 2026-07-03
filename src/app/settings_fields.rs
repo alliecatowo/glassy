@@ -14,6 +14,7 @@ impl App {
         if f == gui::id("settings/word_separator")
             || f == gui::id("settings/font_features")
             || f == gui::id("settings/custom/hex")
+            || f == gui::id("settings/profile_new_name")
         {
             Some(f)
         } else {
@@ -58,6 +59,8 @@ impl App {
             &mut self.settings_word_sep
         } else if field == gui::id("settings/custom/hex") {
             &mut self.settings_theme_hex
+        } else if field == gui::id("settings/profile_new_name") {
+            &mut self.settings_profile_new
         } else {
             &mut self.settings_font_feat
         };

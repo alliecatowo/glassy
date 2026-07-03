@@ -451,6 +451,14 @@ struct Session {
 pub struct App {
     proxy: EventLoopProxy<UserEvent>,
     config: Config,
+    /// The `[profile.NAME]` section currently active (lower-cased), or `None`
+    /// for the base (no-profile) config. Runtime-only — NOT part of `Config` /
+    /// never persisted itself (it names which config-file SECTION produced the
+    /// live `Config`). Set at startup from `--profile` (via `Settings::resolve`
+    /// / `App::new`) and updated on every live profile switch
+    /// (`switch_profile_by_name` / `switch_to_base_profile`). Drives the
+    /// active-profile indicator in the settings panel's Profiles section.
+    active_profile: Option<String>,
 
     // Created lazily in `resumed()` (winit requires the window there).
     window: Option<Arc<Window>>,
@@ -897,6 +905,11 @@ pub struct App {
     /// Cached runtime profile names (`[profile.*]` sections), refreshed when the
     /// settings window opens. Empty when the config defines no profiles.
     settings_profiles: Vec<String>,
+    /// "Duplicate current settings as a new profile" name field model + its
+    /// mouse drag state (Profiles section). Cleared each time settings open and
+    /// after a successful create.
+    settings_profile_new: gui::TextEdit,
+    settings_profile_new_ms: gui::TextInputMouse,
 
     // --- Leader / multi-key chord sequences ----------------------------------
     /// Pending leader-sequence state: the chords typed so far that are a live

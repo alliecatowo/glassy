@@ -8,12 +8,17 @@ mod rename;
 mod session;
 
 impl App {
-    pub fn new(proxy: EventLoopProxy<UserEvent>, config: Config) -> Self {
+    pub fn new(
+        proxy: EventLoopProxy<UserEvent>,
+        config: Config,
+        active_profile: Option<String>,
+    ) -> Self {
         // Seed Power Mode from the config before `config` is moved into the struct.
         let power = power::PowerState::new(config.power_mode, config.power_mode_intensity);
         Self {
             proxy,
             config,
+            active_profile,
             window: None,
             renderer: None,
             pty: None,
@@ -134,6 +139,8 @@ impl App {
             settings_theme_hex: gui::TextEdit::default(),
             settings_theme_hex_ms: gui::TextInputMouse::default(),
             settings_profiles: Vec::new(),
+            settings_profile_new: gui::TextEdit::default(),
+            settings_profile_new_ms: gui::TextInputMouse::default(),
             key_seq_pending: None,
             mod_hold_since: None,
             vi: Default::default(),

@@ -84,9 +84,27 @@ enum RowKind<'a> {
     },
     /// A free-form informational line (dim), e.g. hints.
     Info(&'a str),
-    /// A clickable runtime-profile row (Advanced section). Picking it switches the
-    /// live profile via [`SettingsEvents::profile_pick`].
-    Profile { index: usize, name: &'a str },
+    /// A clickable runtime-profile row (Profiles section). Picking it switches
+    /// the live profile via [`SettingsEvents::profile_pick`]. `active` marks the
+    /// currently-active profile (accent checkmark + selected-row fill).
+    Profile {
+        index: usize,
+        name: &'a str,
+        active: bool,
+    },
+    /// The "(default)" row (Profiles section): the base config with no profile
+    /// activated — the only way back once a profile has been switched to.
+    /// Picking it fires [`SettingsEvents::profile_pick_default`].
+    ProfileDefault { active: bool },
+    /// "Duplicate current settings as a new profile" row (Profiles section): a
+    /// name [`TextEdit`] + an inline accent Save button. Enter in the field or
+    /// the button both fire [`SettingsEvents::profile_create`]; the pending name
+    /// lives in `SettingsFields::profile_name`.
+    ProfileCreate {
+        text_id: &'static str,
+        button_id: &'static str,
+        placeholder: &'a str,
+    },
     /// `label` + an editable text field bound to one of the [`SettingsFields`]
     /// models (word separators / font features).
     TextEdit {
@@ -231,20 +249,64 @@ impl<'r> Ui<'r> {
                         self.label_clip(pane.x.round(), ty, text, pane.w, fg_dim());
                     }
                 }
-                RowKind::Profile { index, name } => {
+                RowKind::Profile {
+                    index,
+                    name,
+                    active,
+                } => {
                     let inside = ry >= pane.y && ry + ctrl_h <= pane.y + pane.h;
                     if inside {
                         let rr = Rect::new(pane.x, ry, pane.w, ctrl_h);
                         let wid = id_combine(id("settings/profile"), *index as u64);
                         let it = self.interact(wid, rr, true);
-                        if it.hovered {
-                            self.rrect(rr, m.radius, state_fill(track_off(), 1.0, false));
-                        }
-                        let ty = (rr.center_y() - m.cell_h * 0.5).round();
-                        self.label((rr.x + m.pad).round(), ty, name, fg());
-                        self.label_right(rr.x + rr.w - m.pad, ty, "Switch →", fg_dim());
-                        if it.clicked {
+                        self.paint_profile_row(rr, &it, name, *active, fg());
+                        if it.clicked && !*active {
                             ev.profile_pick = Some(*index);
+                        }
+                    }
+                }
+                RowKind::ProfileDefault { active } => {
+                    let inside = ry >= pane.y && ry + ctrl_h <= pane.y + pane.h;
+                    if inside {
+                        let rr = Rect::new(pane.x, ry, pane.w, ctrl_h);
+                        let wid = id("settings/profile_default");
+                        let it = self.interact(wid, rr, true);
+                        self.paint_profile_row(rr, &it, "(default)", *active, fg_dim());
+                        if it.clicked && !*active {
+                            ev.profile_pick_default = true;
+                        }
+                    }
+                }
+                RowKind::ProfileCreate {
+                    text_id,
+                    button_id,
+                    placeholder,
+                } => {
+                    let inside = ry >= pane.y && ry + ctrl_h <= pane.y + pane.h;
+                    if inside {
+                        let ly = (ry + (ctrl_h - m.cell_h) * 0.5).round();
+                        self.label_clip(
+                            pane.x.round(),
+                            ly,
+                            "New profile",
+                            label_w - m.gap,
+                            fg_dim(),
+                        );
+                        let btn_w = (m.cell_w * 10.0).round();
+                        let text_w = (ctrl_w - btn_w - m.gap).max(m.cell_w * 6.0);
+                        let fr = Rect::new(ctrl_x, ry, text_w, ctrl_h);
+                        self.text_input(
+                            id(text_id),
+                            fr,
+                            fields.profile_name,
+                            fields.profile_name_ms,
+                            placeholder,
+                            fields.blink_on,
+                            fields.double_click,
+                        );
+                        let btn_r = Rect::new(ctrl_x + text_w + m.gap, ry, btn_w, ctrl_h);
+                        if self.accent_button(id(button_id), btn_r, "Save as").clicked {
+                            ev.profile_create = true;
                         }
                     }
                 }
@@ -500,8 +562,46 @@ impl<'r> Ui<'r> {
             RowKind::Heading(_)
             | RowKind::Info(_)
             | RowKind::Profile { .. }
+            | RowKind::ProfileDefault { .. }
+            | RowKind::ProfileCreate { .. }
             | RowKind::TextEdit { .. } => {}
         }
+    }
+
+    /// Paint one profile-list row's surface + label (shared by the named
+    /// `RowKind::Profile` rows and the `RowKind::ProfileDefault` row): a
+    /// selected-row fill + accent checkmark + "Active" hint when `active`,
+    /// mirroring the dropdown popup's current-selection treatment
+    /// ([`Ui::dropdown_popup`]) — the same accent-checkmark language used
+    /// elsewhere in this file for "this is the current one", scaled down from
+    /// the active-tab-chip's accent crown to a single-row list affordance.
+    fn paint_profile_row(
+        &mut self,
+        rr: Rect,
+        it: &Interaction,
+        label_text: &str,
+        active: bool,
+        label_color: [f32; 4],
+    ) {
+        let m = self.m;
+        if active {
+            self.rrect(rr, m.radius, sel_bg());
+        } else if it.hovered {
+            self.rrect(rr, m.radius, state_fill(track_off(), 1.0, false));
+        }
+        let ty = (rr.center_y() - m.cell_h * 0.5).round();
+        let mut tx = (rr.x + m.pad).round();
+        if active {
+            self.label(tx, ty, "✓", fill_on());
+            tx += m.cell_w * 1.4;
+        }
+        self.label(tx, ty, label_text, label_color);
+        let (hint, hint_color) = if active {
+            ("Active", fill_on())
+        } else {
+            ("Switch →", fg_dim())
+        };
+        self.label_right(rr.x + rr.w - m.pad, ty, hint, hint_color);
     }
 
     /// Draw the floating custom-theme color editor: a swatch grid (click a swatch
@@ -808,20 +908,37 @@ fn build_section_rows<'a>(section: SettingsSection, v: &'a SettingsView<'a>) -> 
                 label: "Restore session",
                 value: v.restore_session,
             });
-            rows.push(RowKind::Heading("Profiles"));
-            if v.profile_names.is_empty() {
-                rows.push(RowKind::Info("No [profile.*] sections in config."));
-            } else {
-                for (i, name) in v.profile_names.iter().enumerate() {
-                    rows.push(RowKind::Profile { index: i, name });
-                }
-            }
             rows.push(RowKind::Heading("Config file"));
             rows.push(RowKind::PathField {
                 id: "settings/config",
                 label: "Config",
                 text: v.config_path,
             });
+        }
+        // Runtime `[profile.*]` switching + "duplicate current as a new
+        // profile". Split out of Advanced (profiles-ui stream) into its own
+        // section — see `SettingsSection::Profiles`'s doc comment.
+        SettingsSection::Profiles => {
+            rows.push(RowKind::Heading("Profiles"));
+            rows.push(RowKind::ProfileDefault {
+                active: v.active_profile.is_none(),
+            });
+            for (i, name) in v.profile_names.iter().enumerate() {
+                rows.push(RowKind::Profile {
+                    index: i,
+                    name,
+                    active: v.active_profile == Some(*name),
+                });
+            }
+            rows.push(RowKind::Heading("New profile"));
+            rows.push(RowKind::ProfileCreate {
+                text_id: "settings/profile_new_name",
+                button_id: "settings/profile_new_save",
+                placeholder: "name",
+            });
+            rows.push(RowKind::Info(
+                "Duplicates the CURRENT live settings into a new [profile.NAME] section.",
+            ));
         }
     }
     rows
@@ -881,7 +998,7 @@ mod tests {
     #[test]
     fn all_sections_have_distinct_labels() {
         let labels: Vec<&str> = SettingsSection::ALL.iter().map(|s| s.label()).collect();
-        assert_eq!(labels.len(), 6);
+        assert_eq!(labels.len(), 7);
         for (i, a) in labels.iter().enumerate() {
             for b in labels.iter().skip(i + 1) {
                 assert_ne!(a, b, "section labels must be unique");
@@ -954,6 +1071,7 @@ mod tests {
             custom_swatches: &sw,
             custom_editing: usize::MAX,
             profile_names: &[],
+            active_profile: None,
         };
         for sec in SettingsSection::ALL {
             let rows = build_section_rows(*sec, &v);

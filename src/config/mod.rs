@@ -144,6 +144,11 @@ pub use platform::Platform;
 pub struct Settings {
     pub config: crate::app::Config,
     pub theme: crate::color::Theme,
+    /// The `[profile.NAME]` section activated to produce this `Settings` (lower-
+    /// cased), or `None` for the base (no-profile) config. Threaded through to
+    /// `App::new` so the settings UI can show which profile — if any — is
+    /// currently active; see `App::active_profile`.
+    pub active_profile: Option<String>,
 }
 
 impl Settings {
@@ -175,8 +180,10 @@ impl Settings {
         crate::color::reload_user_themes();
 
         // 3. Pre-scan CLI for `--profile` and activate it if present.
+        let mut active_profile: Option<String> = None;
         if let Some(profile_name) = cli::profile_from_args(&args) {
             raw.activate_profile(&profile_name)?;
+            active_profile = Some(profile_name.to_ascii_lowercase());
         }
 
         // 4. Parse CLI args, which override the file + profile.
@@ -185,16 +192,40 @@ impl Settings {
             return Ok(None);
         }
 
-        // 5. Convert accumulated raw config into final settings.
-        raw.into_settings().map(Some)
+        // 5. Convert accumulated raw config into final settings, attaching which
+        // profile (if any) was activated at startup.
+        let mut settings = raw.into_settings()?;
+        settings.active_profile = active_profile;
+        Ok(Some(settings))
     }
 
     /// Re-resolve settings from the on-disk config file with the named profile
-    /// activated, for the LIVE runtime profile switch (palette / keybind). Unlike
-    /// [`Settings::resolve`] this skips CLI parsing (there is none at runtime) and
-    /// ignores the originally-passed `--profile`. Returns an error if the file is
-    /// missing or the profile is unknown.
+    /// activated, for the LIVE runtime profile switch (palette / keybind /
+    /// settings panel). Unlike [`Settings::resolve`] this skips CLI parsing
+    /// (there is none at runtime) and ignores the originally-passed `--profile`.
+    /// Returns an error if the file is missing or the profile is unknown.
     pub fn resolve_with_profile(profile: &str) -> Result<Settings> {
+        let mut raw = Self::load_raw_from_file()?;
+        raw.activate_profile(profile)?;
+        let mut settings = raw.into_settings()?;
+        settings.active_profile = Some(profile.to_ascii_lowercase());
+        Ok(settings)
+    }
+
+    /// Re-resolve settings from the on-disk config file with NO profile
+    /// activated — the base config. This is the live runtime counterpart to
+    /// [`Settings::resolve_with_profile`] that gives the settings UI a way BACK
+    /// to the un-profiled config after switching to a named profile (there was
+    /// previously no such path at runtime).
+    pub fn resolve_base() -> Result<Settings> {
+        let raw = Self::load_raw_from_file()?;
+        raw.into_settings()
+    }
+
+    /// Load + parse the on-disk config file into a fresh [`parse::RawConfig`],
+    /// with no profile activated. Shared by [`Self::resolve_with_profile`] and
+    /// [`Self::resolve_base`] so both start from the identical base parse.
+    fn load_raw_from_file() -> Result<parse::RawConfig> {
         let mut raw = parse::RawConfig::default();
         if let Some(path) = parse::path()
             && let Ok(text) = std::fs::read_to_string(&path)
@@ -202,8 +233,7 @@ impl Settings {
             parse::parse_config_file(&text, &mut raw)
                 .with_context(|| format!("parsing {}", path.display()))?;
         }
-        raw.activate_profile(profile)?;
-        raw.into_settings()
+        Ok(raw)
     }
 }
 
@@ -252,10 +282,8 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // merge_config tests: see `config::parse::merge_tests` for the exhaustive
-    // coverage (`merge_config` is private to `parse.rs`) — this stub asserted
-    // nothing (the setup was dead code with no assertion), so it's replaced
-    // rather than kept alongside the real tests.
+    // merge_config / save_into_section: see `config::parse::merge_tests` for the
+    // exhaustive coverage (those helpers are private to `parse.rs`).
     // -----------------------------------------------------------------------
 
     // -----------------------------------------------------------------------

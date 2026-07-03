@@ -80,7 +80,7 @@ fn main() -> anyhow::Result<()> {
     #[cfg(target_os = "macos")]
     let menu_proxy = proxy.clone();
 
-    let mut app = app::App::new(proxy, settings.config);
+    let mut app = app::App::new(proxy, settings.config, settings.active_profile);
 
     // Set dock + Cmd-Tab icon after EventLoop::build() so winit has already
     // initialised NSApplication — our call then updates the existing singleton.

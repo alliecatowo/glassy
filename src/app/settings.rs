@@ -82,6 +82,8 @@ impl App {
         self.settings_theme_hex = gui::TextEdit::default();
         self.settings_theme_hex_ms = gui::TextInputMouse::default();
         self.settings_profiles = crate::config::profile_names();
+        self.settings_profile_new = gui::TextEdit::default();
+        self.settings_profile_new_ms = gui::TextInputMouse::default();
         self.settings_section_scroll = 0.0;
         // Seed the click-outside hit rect to the WHOLE surface so a stray press
         // landing in the same frame the form opens (before the first paint sets
@@ -233,6 +235,12 @@ impl App {
             // Segmented: Enter/Space advances to the next of the 8 effect modes.
             let cur = self.config.window_effect.index() as i32;
             self.set_window_effect_index(((cur + 1).rem_euclid(8)) as usize);
+        } else if f == Some(gui::id("settings/profile_new_name")) {
+            // Commit-on-enter: Enter in the "duplicate as profile" name field
+            // creates the profile, mirroring the custom-theme hex field's Enter
+            // behaviour of committing its pending value rather than falling
+            // through to the general Save.
+            self.create_profile_from_current();
         } else {
             self.save_settings();
         }
