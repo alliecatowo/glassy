@@ -183,7 +183,7 @@ impl App {
     /// Set the system Light-mode theme (Themes section dropdown). Applies live if
     /// follow_system is on and the OS currently prefers Light.
     pub(crate) fn set_theme_light_by_idx(&mut self, idx: usize) {
-        if let Some(&name) = color::THEME_NAMES.get(idx) {
+        if let Some(&name) = color::theme_names().get(idx) {
             self.config.theme_light = name.to_string();
             self.settings_saved = false;
             if self.config.follow_system {
@@ -206,7 +206,7 @@ impl App {
     /// Set the system Dark-mode theme (Themes section dropdown). Applies live if
     /// follow_system is on and the OS currently prefers Dark.
     pub(crate) fn set_theme_dark_by_idx(&mut self, idx: usize) {
-        if let Some(&name) = color::THEME_NAMES.get(idx) {
+        if let Some(&name) = color::theme_names().get(idx) {
             self.config.theme_dark = name.to_string();
             self.settings_saved = false;
             if self.config.follow_system {

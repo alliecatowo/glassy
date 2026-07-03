@@ -8,6 +8,15 @@
 //! The theme is selected once at startup from config/CLI (`set_theme`) and read
 //! globally thereafter, so the hot `resolve` path and the cell-drawing code can
 //! reach it without threading a `&Theme` through every call.
+//!
+//! # Module layout
+//!
+//! - [`builtin`]: the 18 built-in `const Theme` values (color data only).
+//! - [`registry`]: the single source of truth mapping names/aliases to those
+//!   values — [`theme_by_name`], [`canonical_name`], [`is_light`],
+//!   [`theme_names`], [`theme_entries`] all live there and are re-exported here.
+//! - [`user_themes`]: user-authored themes loaded from the config directory's
+//!   `themes/` folder, which shadow same-named built-ins.
 
 use std::sync::atomic::{AtomicPtr, Ordering};
 
@@ -15,8 +24,18 @@ use alacritty_terminal::term::color::Colors;
 use alacritty_terminal::vte::ansi::{Color, NamedColor, Rgb};
 
 mod builtin;
+mod registry;
+mod user_themes;
 
 pub(crate) use builtin::TOKYO_NIGHT;
+pub use registry::{canonical_name, theme_by_name, theme_entries, theme_names};
+pub use user_themes::reload_user_themes;
+// `BUILTIN_THEMES`, `ThemeEntry`, and `is_light` are part of the registry's
+// public surface (tests + future callers, e.g. a theme-management UI) but have
+// no external caller yet — same forward-looking status the pre-registry
+// `is_light` already had (`#[allow(dead_code)]`) before this refactor.
+#[allow(unused_imports)]
+pub use registry::{BUILTIN_THEMES, ThemeEntry, is_light};
 
 /// A complete color theme: the special fg/bg/cursor entries, the selection
 /// background tint, and the 16-entry ANSI palette (8 normal + 8 bright).
@@ -27,105 +46,6 @@ pub struct Theme {
     pub cursor: Rgb,
     pub selection_bg: Rgb,
     pub ansi16: [Rgb; 16],
-}
-
-/// Resolve a theme by (case-insensitive, separator-insensitive) name. Returns
-/// `None` for an unknown name so the caller can warn and keep the default.
-pub fn theme_by_name(name: &str) -> Option<Theme> {
-    let key: String = name
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric())
-        .map(|c| c.to_ascii_lowercase())
-        .collect();
-    match key.as_str() {
-        "tokyonight" | "tokyo" => Some(builtin::TOKYO_NIGHT),
-        "catppuccinmocha" | "catppuccin" | "mocha" => Some(builtin::CATPPUCCIN_MOCHA),
-        "catppuccinmacchiato" | "macchiato" => Some(builtin::CATPPUCCIN_MACCHIATO),
-        "gruvboxdark" | "gruvbox" => Some(builtin::GRUVBOX_DARK),
-        "dracula" => Some(builtin::DRACULA),
-        "nord" => Some(builtin::NORD),
-        "solarizeddark" | "solarized" => Some(builtin::SOLARIZED_DARK),
-        "rosepine" | "rose" => Some(builtin::ROSE_PINE),
-        "rosepinedawn" | "dawn" => Some(builtin::ROSE_PINE_DAWN),
-        "catppuccinlatte" | "latte" => Some(builtin::CATPPUCCIN_LATTE),
-        "everforestdark" | "everforest" => Some(builtin::EVERFOREST_DARK),
-        "everforestlight" => Some(builtin::EVERFOREST_LIGHT),
-        "kanagawa" | "kanagawawave" => Some(builtin::KANAGAWA),
-        "onedark" | "one" => Some(builtin::ONE_DARK),
-        "onelight" => Some(builtin::ONE_LIGHT),
-        "ayudark" | "ayu" => Some(builtin::AYU_DARK),
-        "ayulight" => Some(builtin::AYU_LIGHT),
-        "gruvboxlight" => Some(builtin::GRUVBOX_LIGHT),
-        _ => None,
-    }
-}
-
-/// Canonical theme names in display order, for the settings overlay to cycle.
-pub const THEME_NAMES: &[&str] = &[
-    "tokyo-night",
-    "catppuccin-mocha",
-    "catppuccin-macchiato",
-    "gruvbox-dark",
-    "dracula",
-    "nord",
-    "solarized-dark",
-    "rose-pine",
-    "rose-pine-dawn",
-    "catppuccin-latte",
-    "everforest-dark",
-    "everforest-light",
-    "kanagawa",
-    "one-dark",
-    "one-light",
-    "ayu-dark",
-    "ayu-light",
-    "gruvbox-light",
-];
-
-/// Whether a named theme is a LIGHT theme (light background, dark text). Used to
-/// pick a sensible default when following the system color scheme. Unknown names
-/// are treated as dark (every original built-in is dark).
-#[allow(dead_code)]
-pub fn is_light(name: &str) -> bool {
-    matches!(
-        canonical_name(name),
-        "rose-pine-dawn"
-            | "catppuccin-latte"
-            | "everforest-light"
-            | "one-light"
-            | "ayu-light"
-            | "gruvbox-light"
-    )
-}
-
-/// Map any accepted theme name/alias to its canonical [`THEME_NAMES`] entry,
-/// defaulting to `tokyo-night`. Lets the app store + cycle + save a stable name.
-pub fn canonical_name(input: &str) -> &'static str {
-    let key: String = input
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric())
-        .map(|c| c.to_ascii_lowercase())
-        .collect();
-    match key.as_str() {
-        "catppuccinmocha" | "catppuccin" | "mocha" => "catppuccin-mocha",
-        "catppuccinmacchiato" | "macchiato" => "catppuccin-macchiato",
-        "gruvboxdark" | "gruvbox" => "gruvbox-dark",
-        "dracula" => "dracula",
-        "nord" => "nord",
-        "solarizeddark" | "solarized" => "solarized-dark",
-        "rosepine" | "rose" => "rose-pine",
-        "rosepinedawn" | "dawn" => "rose-pine-dawn",
-        "catppuccinlatte" | "latte" => "catppuccin-latte",
-        "everforestdark" | "everforest" => "everforest-dark",
-        "everforestlight" => "everforest-light",
-        "kanagawa" | "kanagawawave" => "kanagawa",
-        "onedark" | "one" => "one-dark",
-        "onelight" => "one-light",
-        "ayudark" | "ayu" => "ayu-dark",
-        "ayulight" => "ayu-light",
-        "gruvboxlight" => "gruvbox-light",
-        _ => "tokyo-night",
-    }
 }
 
 /// The process-wide active theme. An `AtomicPtr` to a leaked `Theme` so reads
@@ -376,41 +296,5 @@ mod query_index_tests {
         assert_eq!((red.r, red.g, red.b), (0xF7, 0x76, 0x8E));
         let cube = query_index(196); // pure red in 6x6x6 cube
         assert_eq!((cube.r, cube.g, cube.b), (255, 0, 0));
-    }
-
-    #[test]
-    fn light_themes_are_light_and_named() {
-        // Both light themes resolve and are flagged light; every dark built-in is
-        // flagged dark.
-        for name in [
-            "rose-pine-dawn",
-            "dawn",
-            "catppuccin-latte",
-            "latte",
-            "everforest-light",
-            "one-light",
-            "ayu-light",
-            "gruvbox-light",
-        ] {
-            assert!(theme_by_name(name).is_some(), "{name} should resolve");
-            assert!(is_light(name), "{name} should be light");
-        }
-        for name in THEME_NAMES.iter().filter(|n| !is_light(n)) {
-            let t = theme_by_name(name).expect("theme resolves");
-            // A dark theme's background should be darker than its foreground.
-            let lum = |c: Rgb| c.r as u32 + c.g as u32 + c.b as u32;
-            assert!(lum(t.bg) < lum(t.fg), "{name} bg should be darker than fg");
-        }
-        // A light theme's background is brighter than its foreground.
-        let dawn = theme_by_name("rose-pine-dawn").unwrap();
-        let lum = |c: Rgb| c.r as u32 + c.g as u32 + c.b as u32;
-        assert!(lum(dawn.bg) > lum(dawn.fg));
-        // Every THEME_NAMES entry resolves (catches typos / missing arms).
-        for name in THEME_NAMES {
-            assert!(
-                theme_by_name(name).is_some(),
-                "{name} in THEME_NAMES resolves"
-            );
-        }
     }
 }
