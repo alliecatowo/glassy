@@ -248,6 +248,12 @@ pub struct Config {
     /// `pane_headers` (the header always dims its own text regardless). Toggle via
     /// `dim_unfocused = false` in the config or the command palette.
     pub dim_unfocused: bool,
+    /// Strength of the unfocused-pane dim overlay in [0, 0.9]: the alpha of the
+    /// black quad composited over unfocused split tiles when `dim_unfocused` is
+    /// on. 0 makes the overlay invisible (equivalent to `dim_unfocused = false`);
+    /// the 0.9 ceiling keeps a misconfigured value from blacking a pane out.
+    /// Default [`crate::renderer::DEFAULT_PANE_DIM`] (0.28).
+    pub unfocused_dim: f32,
     /// Also place a rich-text (HTML) flavor on the clipboard alongside the plain
     /// text whenever a terminal selection is copied. Lets HTML-preferring apps
     /// paste a monospace-preserving block; plain text remains the fidelity-correct

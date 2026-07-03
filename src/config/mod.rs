@@ -35,6 +35,7 @@
 //! status_bar  = false                  # show status bar at the bottom (default off)
 //! pane_headers= false                  # show per-pane title bars + accent rail in splits (default off)
 //! dim_unfocused = true                 # dim unfocused pane content in a split (default on)
+//! unfocused_dim = 0.28                 # dim strength 0..0.9 (0 = invisible; needs dim_unfocused)
 //! ligatures   = false                  # enable OpenType ligature shaping across cells (default off)
 //! font_features = ss01, calt=0         # OpenType feature tags to force on/off (comma or space separated)
 //! cwd         = /home/me/projects      # working directory for the first tab's shell
@@ -533,6 +534,38 @@ mod tests {
         assert_eq!(raw_off.dim_unfocused, Some(false));
         let settings_off = raw_off.into_settings().unwrap();
         assert!(!settings_off.config.dim_unfocused);
+    }
+
+    #[test]
+    fn unfocused_dim_parses_clamps_and_defaults() {
+        // Default (unset) is the renderer's DEFAULT_PANE_DIM.
+        let settings = RawConfig::default().into_settings().unwrap();
+        assert_eq!(
+            settings.config.unfocused_dim,
+            crate::renderer::DEFAULT_PANE_DIM
+        );
+        // Explicit value parses.
+        let mut raw = RawConfig::default();
+        parse_config_file("unfocused_dim = 0.5\n", &mut raw).unwrap();
+        assert_eq!(raw.unfocused_dim, Some(0.5));
+        assert_eq!(raw.into_settings().unwrap().config.unfocused_dim, 0.5);
+        // Out-of-range values clamp to [0, 0.9] so a pane can never black out.
+        let mut raw_hi = RawConfig::default();
+        parse_config_file("unfocused_dim = 5.0\n", &mut raw_hi).unwrap();
+        assert_eq!(raw_hi.into_settings().unwrap().config.unfocused_dim, 0.9);
+        let mut raw_lo = RawConfig::default();
+        parse_config_file("unfocused_dim = -1\n", &mut raw_lo).unwrap();
+        assert_eq!(raw_lo.into_settings().unwrap().config.unfocused_dim, 0.0);
+        // Non-numeric input is a parse error, matching opacity's behavior.
+        let mut raw_bad = RawConfig::default();
+        assert!(parse_config_file("unfocused_dim = dim\n", &mut raw_bad).is_err());
+        // Non-finite input falls back to the default rather than poisoning math.
+        let mut raw_nan = RawConfig::default();
+        parse_config_file("unfocused_dim = NaN\n", &mut raw_nan).unwrap();
+        assert_eq!(
+            raw_nan.into_settings().unwrap().config.unfocused_dim,
+            crate::renderer::DEFAULT_PANE_DIM
+        );
     }
 
     #[test]

@@ -133,6 +133,12 @@ const INITIAL_INSTANCES: usize = 512;
 /// and stored per-`Renderer` (`opacity`).
 pub const DEFAULT_OPACITY: f32 = 0.92;
 
+/// Default strength of the unfocused-pane dim overlay (`unfocused_dim`): the
+/// alpha of a black quad composited over an unfocused split tile so the focused
+/// pane reads as foreground. Chosen so the tile clearly recedes while its
+/// content stays legible — 0.10 was too subtle to read as "dimmed".
+pub const DEFAULT_PANE_DIM: f32 = 0.28;
+
 /// Transient surface-acquisition outcomes for a frame.
 ///
 /// wgpu 29 replaced the old `wgpu::SurfaceError` with the [`wgpu::CurrentSurfaceTexture`]
@@ -506,6 +512,11 @@ pub struct Renderer {
     /// Window background opacity in [0, 1]; applied to cell backgrounds and the
     /// clear color (premultiplied) when the surface is transparent.
     opacity: f32,
+
+    /// Alpha of the dark overlay laid over unfocused panes in a split, in
+    /// [0, 0.9]. 0 disables the overlay entirely. Configurable via
+    /// `unfocused_dim`; see [`Renderer::set_pane_dim`].
+    pane_dim: f32,
 
     /// Whether the surface alpha mode actually composites alpha (a transparent
     /// window). When false we keep backgrounds fully opaque so a compositor that

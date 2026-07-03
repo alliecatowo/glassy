@@ -216,6 +216,10 @@ pub(crate) const SAVED_KEYS: &[SavedKey] = &[
         get: |c| c.dim_unfocused.to_string(),
     },
     SavedKey {
+        key: "unfocused_dim",
+        get: |c| format!("{:.2}", c.unfocused_dim),
+    },
+    SavedKey {
         key: "copy_html",
         get: |c| c.copy_html.to_string(),
     },
@@ -331,6 +335,7 @@ mod tests {
         "power_mode",
         "power_mode_intensity",
         "dim_unfocused",
+        "unfocused_dim",
         "copy_html",
         "status_bar_segments",
         "status_bar_time_format",

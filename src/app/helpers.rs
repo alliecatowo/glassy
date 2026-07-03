@@ -568,6 +568,16 @@ impl App {
             self.dirty = true;
         }
 
+        // Unfocused-dim strength applies on the next split frame: the overlay is
+        // re-emitted per frame from the renderer's live value (cached panes too).
+        if new_config.unfocused_dim != self.config.unfocused_dim {
+            self.config.unfocused_dim = new_config.unfocused_dim;
+            if let Some(r) = &mut self.renderer {
+                r.set_pane_dim(self.config.unfocused_dim);
+            }
+            self.dirty = true;
+        }
+
         // Window effect changes hot-swap the post-process mode. Switching to/from
         // None toggles the offscreen pass; the renderer rebuilds resources lazily.
         if new_config.window_effect != self.config.window_effect {

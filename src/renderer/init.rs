@@ -740,6 +740,7 @@ impl Renderer {
             clear_color: [0.0, 0.0, 0.0, 1.0],
             flash: None,
             opacity: opacity.clamp(0.0, 1.0),
+            pane_dim: DEFAULT_PANE_DIM,
             transparent,
             premultiplied_surface,
             mp: MultiPane::default(),

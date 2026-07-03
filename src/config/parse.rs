@@ -255,6 +255,7 @@ pub(super) struct RawConfig {
     pub quake_animation_ms: Option<u64>,
     pub command_history: Option<usize>,
     pub dim_unfocused: Option<bool>,
+    pub unfocused_dim: Option<f32>,
     /// Also place a rich-text (HTML) flavor on the clipboard alongside the plain
     /// text on copy, so apps that prefer HTML get a monospace-preserving paste.
     pub copy_html: Option<bool>,
@@ -450,6 +451,18 @@ impl RawConfig {
                 .min(QUAKE_ANIMATION_MS_MAX),
             command_history: self.command_history.unwrap_or(DEFAULT_COMMAND_HISTORY),
             dim_unfocused: self.dim_unfocused.unwrap_or(true),
+            unfocused_dim: {
+                // Mirror the opacity guard: non-finite falls back to the default,
+                // and the 0.9 ceiling keeps a pane from ever being blacked out.
+                let d = self
+                    .unfocused_dim
+                    .unwrap_or(crate::renderer::DEFAULT_PANE_DIM);
+                if d.is_finite() {
+                    d.clamp(0.0, 0.9)
+                } else {
+                    crate::renderer::DEFAULT_PANE_DIM
+                }
+            },
             copy_html: self.copy_html.unwrap_or(false),
             status_bar_segments: self.status_bar_segments,
             status_bar_time_format: self
@@ -1003,6 +1016,12 @@ pub(super) fn apply_kv(key: &str, value: &str, raw: &mut RawConfig) -> Result<()
         }
         "dim_unfocused" => {
             raw.dim_unfocused = Some(parse_bool(value, "dim_unfocused")?);
+        }
+        "unfocused_dim" => {
+            let d: f32 = value
+                .parse()
+                .with_context(|| format!("unfocused_dim: invalid number '{value}'"))?;
+            raw.unfocused_dim = Some(d);
         }
         "word_separator" => {
             raw.word_separator = Some(value.to_string());

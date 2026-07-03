@@ -146,6 +146,7 @@ impl ApplicationHandler<UserEvent> for App {
             "startup: renderer+GPU+font ready at {:.1} ms",
             ms(self.started)
         );
+        renderer.set_pane_dim(self.config.unfocused_dim);
         // Apply an explicit padding override (logical px scaled to physical). A
         // value of 0 means "use the cell-derived default" (matching the settings
         // form, where 0 is the default sentinel) — without this guard, a config
