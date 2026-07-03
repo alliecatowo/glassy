@@ -634,10 +634,10 @@ impl App {
         self.force_full_redraw = true;
     }
 
-    /// Cycle the active theme by `dir` through `color::THEME_NAMES`, applying it
-    /// live (swap the global theme + full redraw).
+    /// Cycle the active theme by `dir` through `color::theme_names()`, applying
+    /// it live (swap the global theme + full redraw).
     pub(crate) fn cycle_theme(&mut self, dir: i32) {
-        let names = color::THEME_NAMES;
+        let names = color::theme_names();
         let cur = names
             .iter()
             .position(|&n| n == self.config.theme)
@@ -653,10 +653,11 @@ impl App {
         }
     }
 
-    /// Install the theme at absolute index `idx` within `color::THEME_NAMES`,
+    /// Install the theme at absolute index `idx` within `color::theme_names()`,
     /// applying it live (settings theme-dropdown click). No-op if out of range.
     pub(crate) fn set_theme_by_idx(&mut self, idx: usize) {
-        let Some(&name) = color::THEME_NAMES.get(idx) else {
+        let names = color::theme_names();
+        let Some(&name) = names.get(idx) else {
             return;
         };
         if let Some(theme) = color::theme_by_name(name) {

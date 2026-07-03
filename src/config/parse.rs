@@ -423,6 +423,14 @@ pub fn path() -> Option<PathBuf> {
     config_path()
 }
 
+/// The resolved config DIRECTORY (the parent of `glassy.conf`), honoring the
+/// same platform + `$XDG_CONFIG_HOME` resolution as [`path`]. `pub(crate)` so
+/// the user-themes loader can find its `themes/` subdirectory without
+/// duplicating the platform resolution logic.
+pub(crate) fn config_dir() -> Option<PathBuf> {
+    config_path().and_then(|p| p.parent().map(PathBuf::from))
+}
+
 /// Persist `updates` (`(key, value)` pairs) into the config file, preserving all
 /// other lines, comments, and ordering. A key already present is updated in place;
 /// a missing key is appended. Creates the parent directory and file if needed.
@@ -593,8 +601,11 @@ fn unquote(s: &str) -> &str {
     s
 }
 
-/// Parse a hex color string (with or without leading #) to an Rgb.
-pub(super) fn parse_hex_color(s: &str) -> Result<alacritty_terminal::vte::ansi::Rgb> {
+/// Parse a hex color string (with or without leading #) to an Rgb. `pub(crate)`
+/// so the theme-file importer (`config::theme_import`) and the user-themes
+/// loader (`color::user_themes`) share this one parser instead of each
+/// hand-rolling their own.
+pub(crate) fn parse_hex_color(s: &str) -> Result<alacritty_terminal::vte::ansi::Rgb> {
     let hex = s.trim_start_matches('#');
     if hex.len() != 6 {
         bail!("color must be a 6-digit hex value, got '{s}'");

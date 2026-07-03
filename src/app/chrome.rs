@@ -488,18 +488,20 @@ impl App {
         profile_names: &[String],
     ) -> gui::SettingsEvents {
         // Theme names + per-theme accent swatches (the cursor color each theme
-        // deliberately picks to pop).
-        let theme_names = color::THEME_NAMES;
-        let swatches: Vec<[f32; 4]> = theme_names
+        // deliberately picks to pop), sourced from the registry's single
+        // built-ins+user-themes snapshot so both lists always agree.
+        let theme_entries = color::theme_entries();
+        let theme_names: Vec<&str> = theme_entries.iter().map(|e| e.canonical).collect();
+        let swatches: Vec<[f32; 4]> = theme_entries
             .iter()
-            .map(|n| match color::theme_by_name(n) {
-                Some(t) => [
-                    t.cursor.r as f32 / 255.0,
-                    t.cursor.g as f32 / 255.0,
-                    t.cursor.b as f32 / 255.0,
+            .map(|e| {
+                let c = e.theme.cursor;
+                [
+                    c.r as f32 / 255.0,
+                    c.g as f32 / 255.0,
+                    c.b as f32 / 255.0,
                     1.0,
-                ],
-                None => color::accent(),
+                ]
             })
             .collect();
         let theme_idx = theme_names
@@ -548,7 +550,7 @@ impl App {
             opacity: config.opacity,
             bell: bell_idx,
             theme_idx,
-            theme_names,
+            theme_names: &theme_names,
             theme_swatches: &swatches,
             font_family: font_display,
             font_names: &font_refs,

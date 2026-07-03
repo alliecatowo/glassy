@@ -167,13 +167,14 @@ impl App {
         // avoid silently accepting arbitrary junk.
         let canon = crate::color::canonical_name(name);
         let accepted = canon != "tokyo-night" || name_matches_tokyo(name);
+        let theme_names = crate::color::theme_names();
         if !accepted {
             return ControlReply::Err(format!(
                 "unknown theme '{name}' (try one of: {})",
-                crate::color::THEME_NAMES.join(", ")
+                theme_names.join(", ")
             ));
         }
-        match crate::color::THEME_NAMES.iter().position(|&n| n == canon) {
+        match theme_names.iter().position(|&n| n == canon) {
             Some(idx) => {
                 self.set_theme_by_idx(idx);
                 ControlReply::Ok(format!("theme set to {canon}"))

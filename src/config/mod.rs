@@ -161,6 +161,13 @@ impl Settings {
                 .with_context(|| format!("parsing {}", path.display()))?;
         }
 
+        // 2.5. Rescan the user-themes directory (`themes/` next to
+        // `glassy.conf`) so `color::theme_by_name` et al. (used below, and by
+        // the settings overlay) can resolve user-authored themes. Runs once
+        // per process; a user theme with the same name as a built-in shadows
+        // it (see `color::user_themes`'s module doc).
+        crate::color::reload_user_themes();
+
         // 3. Pre-scan CLI for `--profile` and activate it if present.
         if let Some(profile_name) = cli::profile_from_args(&args) {
             raw.activate_profile(&profile_name)?;
