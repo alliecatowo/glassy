@@ -62,6 +62,13 @@ pub(crate) fn import_theme_toml(text: &str) -> Result<Theme> {
         }
     }
 
+    // If nothing matched, this isn't actually an Alacritty TOML theme (e.g. it's
+    // base16 YAML, a Kitty/Ghostty conf, or garbage) — don't silently succeed with
+    // an all-defaults Theme, which would mask the real format from the caller.
+    if fg.is_none() && bg.is_none() && ansi16.iter().all(|c| c.is_none()) {
+        bail!("no recognized Alacritty color keys found (foreground/background/color0-15)");
+    }
+
     // Default values if not provided.
     let fg = fg.unwrap_or(color::TOKYO_NIGHT.fg);
     let bg = bg.unwrap_or(color::TOKYO_NIGHT.bg);
@@ -108,6 +115,12 @@ pub(crate) fn import_theme_yaml(text: &str) -> Result<Theme> {
                 colors[idx as usize] = Some(super::parse::parse_hex_color(value)?);
             }
         }
+    }
+
+    // If nothing matched, this isn't base16 YAML — don't silently succeed with an
+    // all-defaults Theme (see the matching guard in `import_theme_toml`).
+    if colors.iter().all(|c| c.is_none()) {
+        bail!("no recognized base16 color keys found (base00-base0f)");
     }
 
     // Map base16 palette (base00-0f) to standard terminal colors.
