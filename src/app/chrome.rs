@@ -507,6 +507,7 @@ impl App {
         custom_swatches: &[[f32; 4]],
         custom_editing: usize,
         profile_names: &[String],
+        active_profile: Option<&str>,
     ) -> gui::SettingsEvents {
         // Theme names + per-theme accent swatches (the cursor color each theme
         // deliberately picks to pop), sourced from the registry's single
@@ -607,6 +608,7 @@ impl App {
             custom_swatches,
             custom_editing,
             profile_names: &profile_refs,
+            active_profile,
         };
         ui.build_settings((sw as f32, sh as f32), &view, fields)
     }
@@ -791,6 +793,14 @@ impl App {
         }
         if let Some(idx) = ev.profile_pick {
             self.switch_profile_by_idx(idx);
+            changed = true;
+        }
+        if ev.profile_pick_default {
+            self.switch_to_base_profile();
+            changed = true;
+        }
+        if ev.profile_create {
+            self.create_profile_from_current();
             changed = true;
         }
         if ev.copy_path {

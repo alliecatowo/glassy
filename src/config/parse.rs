@@ -415,7 +415,14 @@ impl RawConfig {
             },
         };
 
-        Ok(super::Settings { config, theme })
+        // The activated profile name (if any) is attached by the caller
+        // (`Settings::resolve` / `resolve_with_profile`) — `RawConfig` itself
+        // doesn't track which profile (if any) was applied to it.
+        Ok(super::Settings {
+            config,
+            theme,
+            active_profile: None,
+        })
     }
 
     /// Apply the named profile's key/value pairs over the base config, returning an
@@ -450,10 +457,10 @@ pub(crate) fn config_dir() -> Option<PathBuf> {
 
 /// Persist `updates` (`(key, value)` pairs) into the config file's TOP-LEVEL
 /// scope, preserving all other lines, comments, and ordering. A key already
-/// present is updated in place; a missing key is appended BEFORE the first
-/// `[section]` header (or at the end of the file when there are none — never
-/// inside a section). Creates the parent directory and file if needed. Used by
-/// the live settings overlay so changes survive a restart.
+/// present is updated in place; a missing key is appended before the first
+/// `[section]` header (or at the end of the file when there are none). Creates
+/// the parent directory and file if needed. Used by the live settings overlay so
+/// changes survive a restart.
 pub fn save(updates: &[(&str, String)]) -> Result<()> {
     let path = config_path().context("no config path (HOME/XDG unset)")?;
     if let Some(dir) = path.parent() {
@@ -466,38 +473,139 @@ pub fn save(updates: &[(&str, String)]) -> Result<()> {
     Ok(())
 }
 
-/// Whether a trimmed line is a `[...]` section header of any kind (`[profile.X]`,
-/// `[keybindings]`, or any future/unknown section).
+/// Persist `updates` into a specific `[profile.NAME]` section of the config file
+/// (`section = Some(name)`), or the TOP-LEVEL scope (`section = None`, same
+/// behavior as [`save`]) — preserving everything else: comments, blank lines,
+/// other sections, and key ordering within the target range.
+///
+/// A key already present within the target section is updated in place; a
+/// missing one is appended at the END of that section's line range (just before
+/// the next `[section]` header, or end of file). When `section = Some(name)` and
+/// no matching `[profile.name]` header exists yet, a brand-new section is
+/// appended at the end of the file (with a blank-line separator when the file
+/// has non-blank trailing content).
+///
+/// Header matching mirrors [`parse_config_file`]'s rules exactly (so a write
+/// always targets the section a subsequent read would resolve): the literal
+/// `profile.` prefix is case-SENSITIVE, but the name after it is matched
+/// case-INsensitively. When multiple `[profile.name]` headers exist in the file
+/// (a malformed/hand-edited config), only the FIRST is touched — mirroring
+/// [`profile_names_from_text`]'s first-seen identity.
+///
+/// Creates the parent directory and file if needed.
+pub fn save_into_section(section: Option<&str>, updates: &[(&str, String)]) -> Result<()> {
+    let path = config_path().context("no config path (HOME/XDG unset)")?;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)
+            .with_context(|| format!("creating config dir {}", dir.display()))?;
+    }
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    let out = merge_into_section(&existing, section, updates);
+    std::fs::write(&path, out).with_context(|| format!("writing config {}", path.display()))?;
+    Ok(())
+}
+
+/// Merge `updates` into the text of a config file's TOP-LEVEL scope: a present
+/// key is updated in place (preserving its position), a missing one is appended
+/// BEFORE the first `[section]` header (never inside one); comments, blank
+/// lines, unmanaged keys, and ordering are preserved. Pure for unit testing.
+fn merge_config(existing: &str, updates: &[(&str, String)]) -> String {
+    merge_into_section(existing, None, updates)
+}
+
+/// Whether a trimmed line is a `[...]` section header of any kind.
 fn is_section_header(line: &str) -> bool {
     let t = line.trim();
     t.starts_with('[') && t.ends_with(']')
 }
 
-/// Merge `updates` into the text of a config file's TOP-LEVEL scope: a present
-/// key is updated in place (preserving its position); a missing one is appended
-/// just before the first `[section]` header (skipping back over any trailing
-/// blank line so it stays a trailing separator), or at the end of the file when
-/// there are no sections. Comments, blank lines, unmanaged keys, and ordering
-/// are otherwise preserved. Pure for unit testing.
-///
-/// FIXED BUG: this used to append a missing key at the ABSOLUTE END of the file
-/// unconditionally, with no regard for section boundaries. When the config's
-/// LAST section was a `[profile.NAME]` (or `[keybindings]`), the appended line
-/// landed INSIDE that section instead of at the top level — e.g. saving
-/// `scrollback` when `[profile.work]` was the last thing in the file silently
-/// turned it into a profile-only override, invisible to (and not overridable
-/// from) the base config. See the regression tests below.
-fn merge_config(existing: &str, updates: &[(&str, String)]) -> String {
+/// Parse a trimmed section-header line's profile name (`"work"` from
+/// `"[profile.work]"`), if it is a `[profile.NAME]` header — matching the exact
+/// case rules [`parse_config_file`] uses: the `profile.` prefix is
+/// case-sensitive, the name after it is lower-cased for comparison.
+fn profile_header_name(line: &str) -> Option<String> {
+    let line = line.trim();
+    if !(line.starts_with('[') && line.ends_with(']')) {
+        return None;
+    }
+    let inner = line[1..line.len() - 1].trim();
+    let name = inner.strip_prefix("profile.")?.trim();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_ascii_lowercase())
+    }
+}
+
+/// Merge `updates` into `existing`'s target range: the TOP-LEVEL scope
+/// (`section = None`, bounded by the first `[section]` header) or a specific
+/// `[profile.NAME]` section's body (`section = Some(name)`, bounded by the next
+/// `[section]` header after its own). See [`save_into_section`] for the full
+/// contract. Pure for unit testing.
+fn merge_into_section(existing: &str, section: Option<&str>, updates: &[(&str, String)]) -> String {
     let mut lines: Vec<String> = existing.lines().map(str::to_string).collect();
+
+    // Resolve the (start, end) half-open line-index range to operate within.
+    let range: (usize, usize) = match section {
+        None => {
+            let end = lines
+                .iter()
+                .position(|l| is_section_header(l))
+                .unwrap_or(lines.len());
+            (0, end)
+        }
+        Some(name) => {
+            let key = name.to_ascii_lowercase();
+            let header_idx = lines
+                .iter()
+                .position(|l| profile_header_name(l).as_deref() == Some(key.as_str()));
+            match header_idx {
+                Some(hi) => {
+                    let end = lines[hi + 1..]
+                        .iter()
+                        .position(|l| is_section_header(l))
+                        .map(|off| hi + 1 + off)
+                        .unwrap_or(lines.len());
+                    (hi + 1, end)
+                }
+                None => {
+                    // No existing section for this profile: append a brand-new
+                    // one at the end of the file (separated by a blank line
+                    // unless the file already ends in blank/empty content).
+                    if lines.last().is_some_and(|l| !l.is_empty()) {
+                        lines.push(String::new());
+                    }
+                    lines.push(format!("[profile.{name}]"));
+                    let start = lines.len();
+                    (start, start)
+                }
+            }
+        }
+    };
+
+    apply_updates_in_range(&mut lines, range, updates);
+
+    let mut out = lines.join("\n");
+    out.push('\n');
+    out
+}
+
+/// Update-in-place (or append-at-range-end) the `(key, value)` pairs within
+/// `lines[range.0..range.1]`. A key found in the range (skipping comments/blank
+/// lines) is rewritten in place; a key not found is appended just before any
+/// TRAILING blank lines at the end of the range (so a blank-line separator
+/// before the next section, or the file's end, stays trailing instead of
+/// getting sandwiched between old and newly-appended content), preserving
+/// `updates`' relative order.
+fn apply_updates_in_range(
+    lines: &mut Vec<String>,
+    range: (usize, usize),
+    updates: &[(&str, String)],
+) {
+    let (start, end) = range;
     let mut written = vec![false; updates.len()];
 
-    // The top-level scope ends at the first section header (or EOF when none).
-    let top_level_end = lines
-        .iter()
-        .position(|l| is_section_header(l))
-        .unwrap_or(lines.len());
-
-    for line in &mut lines[..top_level_end] {
+    for line in &mut lines[start..end] {
         let trimmed = line.trim_start();
         if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with(';') {
             continue;
@@ -516,27 +624,28 @@ fn merge_config(existing: &str, updates: &[(&str, String)]) -> String {
         }
     }
 
-    if updates.iter().enumerate().any(|(i, _)| !written[i]) {
-        // Back up over trailing blank lines within the top-level range so the
-        // insertion point sits right after the last real top-level line, not
-        // after a blank separator that precedes the first section.
-        let mut insert_at = top_level_end;
-        while insert_at > 0 && lines[insert_at - 1].trim().is_empty() {
-            insert_at -= 1;
-        }
-        let mut offset = 0;
-        for (i, (k, v)) in updates.iter().enumerate() {
-            if !written[i] {
-                // Strip newlines and carriage returns from value to prevent injection.
-                let clean_v = v.replace(['\n', '\r'], "");
-                lines.insert(insert_at + offset, format!("{k} = {clean_v}"));
-                offset += 1;
-            }
-        }
+    let insertions: Vec<String> = updates
+        .iter()
+        .zip(written.iter())
+        .filter(|&(_, &w)| !w)
+        .map(|((k, v), _)| {
+            // Strip newlines and carriage returns from value to prevent injection.
+            let clean_v = v.replace(['\n', '\r'], "");
+            format!("{k} = {clean_v}")
+        })
+        .collect();
+    if insertions.is_empty() {
+        return;
     }
-    let mut out = lines.join("\n");
-    out.push('\n');
-    out
+    // Back up over trailing blank lines within the range so the insertion point
+    // sits right after the last real content line, not after a blank separator.
+    let mut insert_at = end;
+    while insert_at > start && lines[insert_at - 1].trim().is_empty() {
+        insert_at -= 1;
+    }
+    for (offset, line) in insertions.into_iter().enumerate() {
+        lines.insert(insert_at + offset, line);
+    }
 }
 
 /// The resolved config file path, honoring `$XDG_CONFIG_HOME` then `$HOME`.
@@ -1183,18 +1292,20 @@ pub(super) fn parse_shell(value: &str) -> Option<Shell> {
 
 #[cfg(test)]
 mod merge_tests {
-    //! `merge_config` writes straight to the user's `glassy.conf` on every Save —
-    //! a bug here silently corrupts it. These are regression tests for a bug
-    //! found while auditing this function for the profiles-ui work: it appended
-    //! a missing top-level key at the ABSOLUTE END of the file, with no regard
-    //! for section boundaries, so a key saved while the file's LAST section was
-    //! `[profile.NAME]` (or `[keybindings]`) landed INSIDE that section instead
-    //! of at the top level.
+    //! Exhaustive coverage for `merge_config` / `save_into_section`'s underlying
+    //! `merge_into_section`: a bug here silently corrupts a user's config file on
+    //! the next Save, so every boundary (empty file, no sections, mid-file
+    //! section, trailing section, duplicate headers, comments, trailing
+    //! newlines) gets its own focused test rather than one broad one.
     use super::*;
 
     fn upd<'a>(pairs: &[(&'a str, &str)]) -> Vec<(&'a str, String)> {
         pairs.iter().map(|(k, v)| (*k, v.to_string())).collect()
     }
+
+    // -----------------------------------------------------------------------
+    // merge_config (top-level scope)
+    // -----------------------------------------------------------------------
 
     #[test]
     fn merge_config_empty_file_appends_all() {
@@ -1229,14 +1340,15 @@ opacity = 0.95
         assert_eq!(out, "theme = dracula\nfont_size = 14\nscrollback = 5000\n");
     }
 
-    /// REGRESSION: `merge_config` used to append a missing top-level key at the
-    /// absolute END of the file. With `[profile.work]` as the last thing in the
-    /// file, the appended `scrollback` line used to land AFTER `font_size = 18`
-    /// — i.e. INSIDE `[profile.work]` — silently turning it into a profile-only
-    /// override instead of a top-level default. Proof this was a real bug: run
-    /// `git stash` then `git log -p` on the pre-fix `merge_config` (unconditional
-    /// `lines.push(...)` with no section-boundary check) against this exact
-    /// input and the assertion below fails.
+    /// REGRESSION for the bug this branch fixes: `merge_config` used to append a
+    /// missing top-level key at the absolute END of the file with no regard for
+    /// section boundaries. When the file's last section was a `[profile.NAME]`
+    /// (or `[keybindings]`), the appended line landed INSIDE that section instead
+    /// of at the top level — e.g. saving `scrollback` when `[profile.work]` was
+    /// the last thing in the file silently turned it into a profile-only
+    /// override, invisible to the base config. The fix bounds the top-level
+    /// range to end at the first `[section]` header; a missing key is inserted
+    /// there instead.
     #[test]
     fn merge_config_top_level_append_lands_before_first_section_not_inside_it() {
         let existing = "\
@@ -1297,6 +1409,226 @@ font_size = 18
         let out = merge_config(existing, &upd(&[("opacity", "0.9")]));
         assert_eq!(out, "theme = dracula\nopacity = 0.9\n");
         assert!(out.ends_with('\n') && !out.ends_with("\n\n"));
+    }
+
+    // -----------------------------------------------------------------------
+    // save_into_section (Some(name) — profile-scoped)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn section_creates_new_section_in_empty_file() {
+        let out = merge_into_section("", Some("work"), &upd(&[("theme", "nord")]));
+        assert_eq!(out, "[profile.work]\ntheme = nord\n");
+    }
+
+    #[test]
+    fn section_creates_new_section_with_only_top_level_keys_present() {
+        let existing = "theme = dracula\nfont_size = 14\n";
+        let out = merge_into_section(existing, Some("work"), &upd(&[("theme", "nord")]));
+        assert_eq!(
+            out,
+            "theme = dracula\nfont_size = 14\n\n[profile.work]\ntheme = nord\n"
+        );
+    }
+
+    #[test]
+    fn section_new_section_no_double_blank_line_when_file_already_ends_blank() {
+        let existing = "theme = dracula\n\n";
+        let out = merge_into_section(existing, Some("work"), &upd(&[("theme", "nord")]));
+        // Exactly one blank line separates the existing content from the new section.
+        assert_eq!(out, "theme = dracula\n\n[profile.work]\ntheme = nord\n");
+    }
+
+    #[test]
+    fn section_updates_existing_section_mid_file_followed_by_another_section() {
+        let existing = "\
+theme = dracula
+
+[profile.work]
+font_size = 18
+cwd = /tmp
+
+[profile.home]
+font_size = 12
+";
+        let out = merge_into_section(
+            existing,
+            Some("work"),
+            &upd(&[("font_size", "20"), ("scrollback", "5000")]),
+        );
+        assert_eq!(
+            out,
+            "\
+theme = dracula
+
+[profile.work]
+font_size = 20
+cwd = /tmp
+scrollback = 5000
+
+[profile.home]
+font_size = 12
+"
+        );
+    }
+
+    /// A key present at the TOP LEVEL (outside any section) but absent from the
+    /// target `[profile.NAME]` section must NOT be touched — updating the
+    /// profile must never leak into the base config.
+    #[test]
+    fn section_does_not_touch_top_level_key_of_same_name() {
+        let existing = "scrollback = 5000\n\n[profile.compact]\nfont_size = 10\n";
+        let out = merge_into_section(existing, Some("compact"), &upd(&[("scrollback", "999")]));
+        assert_eq!(
+            out,
+            "scrollback = 5000\n\n[profile.compact]\nfont_size = 10\nscrollback = 999\n"
+        );
+        // The top-level scrollback is unchanged.
+        assert!(out.lines().any(|l| l == "scrollback = 5000"));
+    }
+
+    /// A key present in a DIFFERENT profile section must not be touched either.
+    #[test]
+    fn section_does_not_touch_a_different_profiles_key() {
+        let existing = "[profile.work]\nfont_size = 18\n\n[profile.home]\nfont_size = 12\n";
+        let out = merge_into_section(existing, Some("home"), &upd(&[("font_size", "20")]));
+        assert!(out.contains("[profile.work]\nfont_size = 18"));
+        assert!(out.contains("[profile.home]\nfont_size = 20"));
+    }
+
+    /// When multiple `[profile.NAME]` headers exist in the file (a malformed or
+    /// hand-edited config), only the FIRST is updated — mirroring
+    /// `profile_names_from_text`'s first-seen identity. The second, duplicate
+    /// block is left completely untouched.
+    #[test]
+    fn section_duplicate_headers_first_wins() {
+        let existing = "\
+[profile.work]
+font_size = 16
+
+[profile.work]
+font_size = 99
+";
+        let out = merge_into_section(existing, Some("work"), &upd(&[("font_size", "20")]));
+        assert_eq!(
+            out,
+            "\
+[profile.work]
+font_size = 20
+
+[profile.work]
+font_size = 99
+"
+        );
+    }
+
+    #[test]
+    fn section_preserves_comments_and_unknown_lines_within_section() {
+        let existing = "\
+[profile.work]
+# a comment inside the profile
+font_size = 18
+; another comment style
+unknown_future_key = something
+";
+        let out = merge_into_section(existing, Some("work"), &upd(&[("font_size", "20")]));
+        assert_eq!(
+            out,
+            "\
+[profile.work]
+# a comment inside the profile
+font_size = 20
+; another comment style
+unknown_future_key = something
+"
+        );
+    }
+
+    #[test]
+    fn section_preserves_comments_and_other_sections_outside_target() {
+        let existing = "\
+# top comment
+theme = dracula
+
+[profile.work]
+font_size = 18
+";
+        let out = merge_into_section(existing, Some("work"), &upd(&[("cwd", "/home/me/work")]));
+        assert_eq!(
+            out,
+            "\
+# top comment
+theme = dracula
+
+[profile.work]
+font_size = 18
+cwd = /home/me/work
+"
+        );
+    }
+
+    #[test]
+    fn section_trailing_newline_always_exactly_one() {
+        let existing = "[profile.work]\nfont_size = 18";
+        let out = merge_into_section(existing, Some("work"), &upd(&[("scrollback", "5000")]));
+        assert!(out.ends_with('\n') && !out.ends_with("\n\n"));
+    }
+
+    #[test]
+    fn section_name_match_is_case_insensitive() {
+        let existing = "[profile.Work]\nfont_size = 18\n";
+        let out = merge_into_section(existing, Some("WORK"), &upd(&[("font_size", "20")]));
+        // The existing (differently-cased) header is matched and updated in place,
+        // not duplicated as a second section.
+        assert_eq!(out, "[profile.Work]\nfont_size = 20\n");
+        assert_eq!(out.matches("[profile.Work]").count(), 1);
+    }
+
+    #[test]
+    fn section_none_behaves_identically_to_merge_config() {
+        let existing = "theme = dracula\n\n[profile.work]\nfont_size = 18\n";
+        let updates = upd(&[("scrollback", "5000")]);
+        assert_eq!(
+            merge_into_section(existing, None, &updates),
+            merge_config(existing, &updates)
+        );
+    }
+
+    #[test]
+    fn section_appends_missing_keys_in_order_before_next_section() {
+        let existing = "[profile.work]\nfont_size = 18\n\n[profile.home]\nfont_size = 12\n";
+        let out = merge_into_section(
+            existing,
+            Some("work"),
+            &upd(&[("a_key", "1"), ("b_key", "2")]),
+        );
+        let a_idx = out.lines().position(|l| l == "a_key = 1").unwrap();
+        let b_idx = out.lines().position(|l| l == "b_key = 2").unwrap();
+        let home_idx = out.lines().position(|l| l == "[profile.home]").unwrap();
+        assert!(a_idx < b_idx, "insertion order must match `updates` order");
+        assert!(
+            b_idx < home_idx,
+            "insertions must land before the next section"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Helper unit tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn profile_header_name_parses_only_the_profile_prefix() {
+        assert_eq!(profile_header_name("[profile.work]"), Some("work".into()));
+        assert_eq!(profile_header_name("[profile.Work]"), Some("work".into()));
+        assert_eq!(
+            profile_header_name("  [profile.work]  "),
+            Some("work".into())
+        );
+        // Case-sensitive "profile." prefix, matching `parse_config_file`.
+        assert_eq!(profile_header_name("[Profile.work]"), None);
+        assert_eq!(profile_header_name("[keybindings]"), None);
+        assert_eq!(profile_header_name("[profile.]"), None);
+        assert_eq!(profile_header_name("not a header"), None);
     }
 
     #[test]

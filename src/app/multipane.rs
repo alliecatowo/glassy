@@ -232,6 +232,7 @@ impl App {
                 self.custom_theme_swatches(),
                 self.settings_custom_editing,
                 self.settings_profiles.clone(),
+                self.active_profile.clone(),
             ))
         } else {
             None
@@ -593,6 +594,7 @@ impl App {
             ref custom_swatches,
             custom_editing,
             ref profile_names,
+            ref active_profile,
         )) = settings_inputs
         {
             let font_px = renderer.font_px();
@@ -605,6 +607,8 @@ impl App {
                 double_click: self.gui_double_click,
                 theme_hex: &mut self.settings_theme_hex,
                 theme_hex_ms: &mut self.settings_theme_hex_ms,
+                profile_name: &mut self.settings_profile_new,
+                profile_name_ms: &mut self.settings_profile_new_ms,
             };
             settings_events = Some(Self::paint_settings(
                 renderer,
@@ -628,6 +632,7 @@ impl App {
                 custom_swatches,
                 custom_editing,
                 profile_names,
+                active_profile.as_deref(),
             ));
         } else if self.help_open {
             // Real GUI help panel (§3.7) in split mode.

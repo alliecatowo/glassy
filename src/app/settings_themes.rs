@@ -251,6 +251,7 @@ impl App {
                 self.apply_config_reload(&settings.config);
                 self.config.theme = settings.config.theme.clone();
                 color::set_theme(settings.theme);
+                self.active_profile = Some(name.to_ascii_lowercase());
                 self.force_full_redraw = true;
                 self.push_toast(format!(
                     "Switched to profile '{name}' (font/shell need relaunch)"
@@ -259,6 +260,77 @@ impl App {
             Err(e) => {
                 log::warn!("profile switch '{name}' failed: {e:#}");
                 self.push_toast(format!("Profile '{name}' switch failed"));
+            }
+        }
+    }
+
+    /// Switch back to the BASE (no-profile) config: re-resolves the on-disk file
+    /// with no profile activated and applies it live via the same
+    /// `apply_config_reload` path [`Self::switch_profile_by_name`] uses. This is
+    /// the settings panel's "(default)" row — the only way back to the base
+    /// config once a profile has been activated (there was previously no such
+    /// path at runtime; only a relaunch without `--profile` could clear it).
+    pub(crate) fn switch_to_base_profile(&mut self) {
+        match crate::config::Settings::resolve_base() {
+            Ok(settings) => {
+                self.apply_config_reload(&settings.config);
+                self.config.theme = settings.config.theme.clone();
+                color::set_theme(settings.theme);
+                self.active_profile = None;
+                self.force_full_redraw = true;
+                self.push_toast("Switched to default config (font/shell need relaunch)");
+            }
+            Err(e) => {
+                log::warn!("switch to default config failed: {e:#}");
+                self.push_toast("Switch to default config failed");
+            }
+        }
+    }
+
+    /// "Duplicate current settings as a new profile" (Profiles section): validate
+    /// the pending name in `settings_profile_new`, then write the CURRENT live
+    /// `Config` as a new `[profile.<name>]` section via
+    /// [`crate::config::parse::save_into_section`], using the same
+    /// `settings_save::SAVED_KEYS` table `App::save_settings` uses (so a profile
+    /// snapshot always covers exactly the keys the settings UI can live-mutate —
+    /// see that table's module doc for why it's the single source of truth).
+    /// Refreshes the cached profile list on success so the new row shows
+    /// immediately without reopening settings. Errors surface as a toast (never
+    /// a panic) — this must never corrupt or lose the user's config file.
+    pub(crate) fn create_profile_from_current(&mut self) {
+        let name = self.settings_profile_new.text().trim().to_ascii_lowercase();
+        if name.is_empty()
+            || !name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            self.push_toast("Profile name must be letters, numbers, - or _");
+            return;
+        }
+        // Re-read the profile list fresh (rather than trusting the cached
+        // `settings_profiles`, which could be stale if the file changed since
+        // settings opened) so the uniqueness check is against the real file.
+        let existing = crate::config::profile_names();
+        if existing.iter().any(|p| p.eq_ignore_ascii_case(&name)) {
+            self.push_toast(format!("Profile '{name}' already exists"));
+            return;
+        }
+        let updates: Vec<(&str, String)> = settings_save::SAVED_KEYS
+            .iter()
+            .map(|entry| (entry.key, (entry.get)(&self.config)))
+            .collect();
+        match crate::config::parse::save_into_section(Some(&name), &updates) {
+            Ok(()) => {
+                self.settings_profiles = crate::config::profile_names();
+                self.settings_profile_new = gui::TextEdit::default();
+                self.settings_profile_new_ms = gui::TextInputMouse::default();
+                self.settings_saved = false;
+                self.force_full_redraw = true;
+                self.push_toast(format!("Profile '{name}' created"));
+            }
+            Err(e) => {
+                log::error!("create profile '{name}' failed: {e:#}");
+                self.push_toast(format!("Create profile '{name}' failed"));
             }
         }
     }

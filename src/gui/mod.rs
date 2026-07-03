@@ -509,6 +509,10 @@ pub struct SettingsView<'a> {
     pub custom_editing: usize,
     /// The available runtime profile names (from `[profile.*]` sections).
     pub profile_names: &'a [&'a str],
+    /// The currently-ACTIVE `[profile.NAME]` (lower-cased), or `None` when the
+    /// base (no-profile) config is active. Drives the active-row indicator in
+    /// the Profiles section (see `App::active_profile`).
+    pub active_profile: Option<&'a str>,
 }
 
 /// The left-sidebar sections of the revamped settings window, in display order.
@@ -520,6 +524,12 @@ pub enum SettingsSection {
     Keys,
     Panes,
     Advanced,
+    /// Runtime `[profile.*]` switching + "duplicate current as a new profile".
+    /// Split out of `Advanced` (profiles-ui stream) into its own section so the
+    /// active-profile indicator and the new-profile TextEdit row have room to
+    /// breathe, and so this section's rows don't collide line-for-line with
+    /// other Advanced-section work landing around the same time.
+    Profiles,
 }
 
 impl SettingsSection {
@@ -531,6 +541,7 @@ impl SettingsSection {
         SettingsSection::Keys,
         SettingsSection::Panes,
         SettingsSection::Advanced,
+        SettingsSection::Profiles,
     ];
     /// The sidebar label for this section.
     pub fn label(self) -> &'static str {
@@ -541,6 +552,7 @@ impl SettingsSection {
             SettingsSection::Keys => "Keys",
             SettingsSection::Panes => "Panes",
             SettingsSection::Advanced => "Advanced",
+            SettingsSection::Profiles => "Profiles",
         }
     }
     /// Resolve a section from its index, clamped to a valid section.
@@ -633,9 +645,17 @@ pub struct SettingsEvents {
     pub custom_apply: bool,
     /// Save the custom theme to config (color.* keys).
     pub custom_save: bool,
-    /// A runtime profile was picked from the Advanced section (index into
+    /// A runtime profile was picked from the Profiles section (index into
     /// `profile_names`).
     pub profile_pick: Option<usize>,
+    /// The "(default)" row (Profiles section) was picked: switch back to the
+    /// base (no-profile) config.
+    pub profile_pick_default: bool,
+    /// The "duplicate current settings as a new profile" row's Save affordance
+    /// fired (Enter in the name field, or its button). The pending name lives in
+    /// `SettingsFields::profile_name` (App-owned, like the other editable text
+    /// fields).
+    pub profile_create: bool,
 }
 
 // ---------------------------------------------------------------------------

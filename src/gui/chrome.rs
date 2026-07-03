@@ -19,6 +19,9 @@ pub struct SettingsFields<'a> {
     /// Hex input for the currently-edited custom-theme color (Themes section).
     pub theme_hex: &'a mut TextEdit,
     pub theme_hex_ms: &'a mut TextInputMouse,
+    /// "New profile" name field model + its mouse drag state (Profiles section).
+    pub profile_name: &'a mut TextEdit,
+    pub profile_name_ms: &'a mut TextInputMouse,
 }
 
 impl<'r> Ui<'r> {
