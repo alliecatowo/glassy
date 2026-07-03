@@ -13,6 +13,12 @@
 //!                                       # (turns on follow_system + pins per-scheme themes)
 //! opacity     = 0.92                   # 0.0 (clear) .. 1.0 (opaque); perceptual curve
 //! window_effect = none                 # none|frosted|acrylic|crt|scanlines|grain|vignette|bloom
+//! fx_curvature = 0.12                  # Custom effect channels (0.0..1.0); only used when window_effect = custom
+//! fx_scanline = 0.35
+//! fx_glow     = 0.22
+//! fx_vignette = 0.30
+//! fx_grain    = 0.15
+//! fx_tint     = 0.25
 //! padding     = 6                      # logical px grid inset (all sides)
 //! padding_top = 8                      # per-side overrides (optional, override padding)
 //! padding_bottom = 6
@@ -1463,5 +1469,71 @@ ctrl+a g g = scroll_top\n\
     fn symbol_map_lookup_empty_map() {
         use crate::text::shape::lookup_symbol_family;
         assert_eq!(lookup_symbol_family(&[], 'A'), None);
+    }
+
+    // -----------------------------------------------------------------------
+    // Settings-save round-trip: every `settings_save::SAVED_KEYS` entry must
+    // survive a save/load cycle through `apply_kv`.
+    // -----------------------------------------------------------------------
+
+    /// For every key `App::save_settings` can write (the `settings_save::SAVED_KEYS`
+    /// table), verify that serializing a live [`crate::app::Config`] value and
+    /// re-parsing it through [`super::parse::apply_kv`] reconstructs the exact
+    /// same string. This is the save/load contract the settings-form Save button
+    /// depends on: a key `save_settings` writes must be a key `apply_kv`
+    /// understands, and it must round-trip to the value the user set — covering
+    /// the trickier formats (bool spellings, 2-decimal f32, space-joined
+    /// `Vec<String>`, theme names) in one sweep instead of one test per key.
+    #[test]
+    fn saved_keys_round_trip_through_apply_kv() {
+        use super::parse::apply_kv;
+        use crate::app::settings_save::SAVED_KEYS;
+
+        // A live Config with every SAVED_KEYS-covered field pushed away from its
+        // default, so the round-trip actually exercises a non-default value.
+        let mut config = RawConfig::default().into_settings().unwrap().config;
+        config.opacity = 0.6543;
+        config.bell_visual = false;
+        config.bell_audible = true;
+        config.theme = "dracula".to_string();
+        config.font_family = Some("FiraCode Nerd Font Mono".to_string());
+        config.scrollback = 54321;
+        config.status_bar = true;
+        config.pane_headers = true;
+        config.show_tab_bar = crate::app::TabBarMode::Always;
+        config.follow_system = true;
+        config.ligatures = true;
+        config.restore_session = true;
+        config.padding = Some(12.0);
+        config.cursor_style = crate::app::CursorStyleConfig::Beam;
+        config.cursor_blink = true;
+        config.window_effect = crate::renderer::WindowEffect::Vignette;
+        config.copy_on_select = true;
+        config.minimap = true;
+        config.command_badges = false;
+        config.cursor_trail = true;
+        config.title_show_cwd = false;
+        config.title_show_count = true;
+        config.theme_light = "one-light".to_string();
+        config.theme_dark = "nord".to_string();
+        config.word_separator = "/:@[]{}".to_string();
+        config.font_features = vec!["ss01".to_string(), "calt=0".to_string(), "dlig".to_string()];
+        config.custom_effect = [0.11, 0.22, 0.33, 0.44, 0.55, 0.66];
+
+        for entry in SAVED_KEYS {
+            let serialized = (entry.get)(&config);
+            let mut raw = RawConfig::default();
+            apply_kv(entry.key, &serialized, &mut raw).unwrap_or_else(|e| {
+                panic!("apply_kv rejected '{}={serialized}': {e:#}", entry.key)
+            });
+            let parsed_config = raw.into_settings().unwrap().config;
+            let reserialized = (entry.get)(&parsed_config);
+            assert_eq!(
+                serialized, reserialized,
+                "key '{}' did not round-trip through apply_kv (wrote '{serialized}', \
+                 read back as '{reserialized}')",
+                entry.key
+            );
+        }
     }
 }

@@ -749,9 +749,18 @@ impl App {
         }
     }
 
-    /// Persist the live-adjustable settings (font size in pt, opacity, bell,
-    /// theme, font family, scrollback, status_bar) to the config file, preserving every other
-    /// key/comment.
+    /// Persist every live-adjustable setting to the config file, preserving
+    /// every other key/comment. Driven by the [`settings_save::SAVED_KEYS`]
+    /// table (one `(key, Config -> String)` entry per settings-UI-mutable
+    /// field) so a new settings-form control can't silently ship without being
+    /// saved — see that module's doc comment for why this used to be a
+    /// hand-maintained list that drifted out of sync.
+    ///
+    /// `font_size` is the one exception: it is special-cased here rather than
+    /// in the table because the live, user-visible size lives in the
+    /// renderer's effective font px (Ctrl +/-/0 and the settings stepper both
+    /// drive it there directly), not in `Config::font_size`, which only
+    /// reflects the size at startup.
     pub(crate) fn save_settings(&mut self) {
         let scale = self
             .window
@@ -765,40 +774,12 @@ impl App {
             .map(|r| r.font_px())
             .unwrap_or(self.config.font_size);
         let pt = (px / scale).max(1.0);
-        let updates = [
-            ("font_size", format!("{pt:.0}")),
-            ("opacity", format!("{:.2}", self.config.opacity)),
-            ("bell_visual", self.config.bell_visual.to_string()),
-            ("bell_audible", self.config.bell_audible.to_string()),
-            ("theme", self.config.theme.clone()),
-            (
-                "font_family",
-                self.config.font_family.clone().unwrap_or_default(),
-            ),
-            ("scrollback", self.config.scrollback.to_string()),
-            ("status_bar", self.config.status_bar.to_string()),
-            ("pane_headers", self.config.pane_headers.to_string()),
-            (
-                "show_tab_bar",
-                tab_bar_mode_word(self.config.show_tab_bar).to_string(),
-            ),
-            ("follow_system", self.config.follow_system.to_string()),
-            ("ligatures", self.config.ligatures.to_string()),
-            ("restore_session", self.config.restore_session.to_string()),
-            (
-                "padding",
-                format!("{:.0}", self.config.padding.unwrap_or(0.0)),
-            ),
-            (
-                "cursor_style",
-                self.config.cursor_style.as_str().to_string(),
-            ),
-            ("cursor_blink", self.config.cursor_blink.to_string()),
-            (
-                "window_effect",
-                self.config.window_effect.as_str().to_string(),
-            ),
-        ];
+        let mut updates: Vec<(&str, String)> =
+            Vec::with_capacity(settings_save::SAVED_KEYS.len() + 1);
+        updates.push(("font_size", format!("{pt:.0}")));
+        for entry in settings_save::SAVED_KEYS {
+            updates.push((entry.key, (entry.get)(&self.config)));
+        }
         match crate::config::save(&updates) {
             Ok(()) => {
                 self.settings_saved = true;
