@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (w14 wave)
+
+#### Themes
+- **42 new built-in themes** (60 total): 12 true light themes (GitHub Light, Solarized Light, One Half Light, Tokyo Night Day, Kanagawa Lotus, PaperColor Light, Modus Operandi, Flexoki Light, Vitesse Light, Dayfox, Selenized Light, Alabaster) and 30 dark staples (GitHub Dark, Monokai (+ Pro), Material (+ Darker), Night Owl, Snazzy, Horizon, Oceanic Next, Palenight, Zenburn, Iceberg, Nightfox, Vitesse Dark, Flexoki Dark, Everblush, Melange, Synthwave '84, Catppuccin Frappé, Tokyo Night Storm, Gruvbox Material, One Half Dark, Ayu Mirage, Rosé Pine Moon, Kanagawa Dragon, Solarized Osaka, Poimandres, Andromeda, Aura, Challenger Deep). Every palette verified against upstream sources.
+- **Single-source theme registry**: one `BUILTIN_THEMES` table replaces four hand-maintained lookup functions; adding a theme is one entry.
+- **User themes directory**: drop flat `key = value` theme files into `~/.config/glassy/themes/` — they appear in the theme dropdown, shadow same-named builtins, and need no rebuild.
+- **Theme import formats**: `--import-theme` now reads iTerm2 `.itermcolors`, Kitty, and Ghostty configs in addition to Alacritty TOML and base16 YAML, dispatching on file extension.
+
+#### Settings & profiles
+- **Every config key is now in the settings UI**: new Effects, Terminal, Quake, Notifications, and Profiles sections (power mode, dim-unfocused, copy-as-HTML, quake geometry/animation, notification thresholds, command folding, hint chars, per-style font overrides, symbol map, font variations, status-bar segments/time format, per-side padding, wallpaper theme; shell/cwd shown read-only). Restart-only keys are labeled as such.
+- **Profiles UI**: the active profile is highlighted, a "(default)" row switches back to the base config (previously impossible without a restart), and "duplicate current settings as a new profile" writes a `[profile.NAME]` section from the live config.
+- **Scrollable dropdown popups**: long dropdowns (e.g. 60 themes) scroll instead of truncating.
+
+#### Input & automation
+- **File drag-and-drop**: dropped files paste as shell-quoted paths (multi-file drops coalesce into one bracketed paste); a subtle highlight shows while hovering.
+- **Remote-control automation verbs**: `glassy @ list-themes`, `@ get-config <key>`, `@ set-config <key> <value>` (write-through), `@ reload-config`, `@ run-action <name>` — plugin system Phase 1 (see `docs/plugins.md`).
+- **`select_all` action**: bindable everywhere; default ⌘A on macOS.
+- **macOS menu bar**: Edit > Select All, View > font-size controls, Window > Minimize/Zoom, File > Close Tab.
+
+### Fixed (w14 wave)
+- **Light themes are legible**: raised panels/cards/active tab/dropdowns now darken on light backgrounds instead of additive-lightening into pure white; default `follow_system` light theme is now One Light.
+- **Settings Save persists everything**: ~11 live-toggled settings (minimap, copy-on-select, cursor trail, title toggles, light/dark theme picks, word separator, font features, command badges) plus the custom-effect sliders no longer silently revert on restart; a coverage test keeps the save table complete.
+- **Config writes no longer corrupt profiles**: saving a setting used to append it at end-of-file — inside `[profile.X]`/`[keybindings]` if one was last — silently turning a global setting into a profile-only override.
+- **Theme import no longer silently imports Tokyo Night** for unrecognized files; parsers fail honestly and content-sniffing works.
+- **Render CPU scales with damage**: the renderer no longer collects the entire visible grid every frame — only dirty rows are gathered (split panes get the allocation fix too); also fixes a latent ligature-run damage-attribution edge case.
+
 ### Added
 
 #### Terminal protocol
