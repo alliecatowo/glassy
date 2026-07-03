@@ -234,12 +234,20 @@ fn print_help() {
 USAGE:
     glassy [OPTIONS] [-e COMMAND [ARGS...]]
     glassy toggle | show | hide        Signal a running instance (quake mode)
+    glassy @ <CMD> [ARGS...]           Remote-control a running instance
 
 CONTROL SUBCOMMANDS (for compositor hotkeys — see docs/quake-mode.md):
     toggle, show, hide     Slide the running quake window in/out. Bind one of
                            these to a key in YOUR compositor (Wayland has no
                            portable global hotkey). Also accepted as
                            --toggle / --show / --hide.
+
+REMOTE CONTROL (kitty-style; `glassy msg` is a synonym — see docs/plugins.md):
+    ls, open-tab, split [v|h], send-text <TEXT>, set-theme <NAME>,
+    focus-tab <N>, list-themes, reload-config, run-action <NAME>,
+    get-config <KEY>, set-config <KEY> <VALUE>
+                           Drive the running instance over its Unix socket and
+                           print the one-line OK/ERR reply (exit 0/1).
 
 OPTIONS:
     --font-size <PT>       Font size in points
