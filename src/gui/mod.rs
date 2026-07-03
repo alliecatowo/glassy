@@ -192,6 +192,31 @@ fn with_alpha(mut c: [f32; 4], a: f32) -> [f32; 4] {
     c
 }
 
+/// Elevate a base surface color to build the panel/card/active-tab/floating
+/// hierarchy (§2.1) without changing hue. `amount` is the same "how much
+/// hierarchy" knob in both directions:
+///
+/// - On dark and mid-tone backgrounds (`luma(base) <= 0.7`) this lightens
+///   additively by `amount`, same as the original scheme.
+/// - On light backgrounds (`luma(base) > 0.7`, the same threshold
+///   [`state_fill`] uses) additive lightening clips at white almost
+///   immediately — on a near-white bg like one-light's `#FAFAFA` every
+///   channel is already within `amount` of 1.0, so the result clamps back to
+///   (near) the original color and raised surfaces become invisible against
+///   the background. Darkening instead — by the multiplicative factor
+///   `1.0 - amount` — keeps the surface clearly legible, and because `base`
+///   is close to 1.0 on these themes the resulting per-channel delta
+///   (`base * amount`) lands in the same ballpark as the additive delta a
+///   dark theme gets, so the perceived "how raised is this" contrast stays
+///   comparable across light and dark themes.
+fn glass_elevate(base: [f32; 4], amount: f32) -> [f32; 4] {
+    if luma(base) > 0.7 {
+        darken(base, 1.0 - amount)
+    } else {
+        lighten(base, amount)
+    }
+}
+
 /// E1 chrome bar fill.
 pub fn glass_body() -> [f32; 4] {
     with_alpha(color::default_bg(), GLASS_BAR_ALPHA)
@@ -199,20 +224,26 @@ pub fn glass_body() -> [f32; 4] {
 
 /// E2 raised surface fill (cards / buttons on glass).
 pub fn glass_raised() -> [f32; 4] {
-    with_alpha(lighten(color::default_bg(), 0.12), GLASS_SURFACE_ALPHA)
+    with_alpha(
+        glass_elevate(color::default_bg(), 0.12),
+        GLASS_SURFACE_ALPHA,
+    )
 }
 
 /// E2+ active-tab chip fill — one stop brighter and fully opaque so the active
 /// tab clearly stands apart from both the bar and the recessed inactive chips.
-/// Derived from the theme's background + extra lightening so it reads as
+/// Derived from the theme's background + extra elevation so it reads as
 /// "the open surface" on any theme without hard-coding a color.
 pub fn glass_active_tab() -> [f32; 4] {
-    with_alpha(lighten(color::default_bg(), 0.22), 1.0)
+    with_alpha(glass_elevate(color::default_bg(), 0.22), 1.0)
 }
 
 /// E3 floating surface fill (dropdowns / dialogs / drag-ghost).
 pub fn glass_float() -> [f32; 4] {
-    with_alpha(lighten(color::selection_bg(), 0.12), GLASS_FLOAT_ALPHA)
+    with_alpha(
+        glass_elevate(color::selection_bg(), 0.12),
+        GLASS_FLOAT_ALPHA,
+    )
 }
 
 /// Soft edge accent (was a bright 1px "edge-lit" rail). Kept extremely subtle so
@@ -833,5 +864,133 @@ mod tests {
     #[test]
     fn id_empty_string_is_distinct_from_nonempty() {
         assert_ne!(id(""), id("x"));
+    }
+
+    // ---- glass surface elevation (light/dark theme parity) ------------------
+    //
+    // `glass_raised` / `glass_active_tab` / `glass_float` build their fills as
+    // `with_alpha(glass_elevate(base, amount), alpha)`. Before the fix, the
+    // elevation step was a bare `lighten(base, amount)`: purely additive and
+    // clamped at 1.0. On a near-white light-theme background (one-light
+    // `#FAFAFA`, ayu-light `#FCFCFC`) every channel is already within
+    // `amount` of 1.0, so the result clamped straight back to (almost) the
+    // background color — raised panels, cards, the active-tab chip and
+    // dropdowns all became visually indistinguishable from the page. These
+    // tests exercise `glass_elevate` directly with the exact `amount` values
+    // each public helper uses, on synthetic near-white and dark backgrounds,
+    // rather than mutating the process-global active theme via
+    // `color::set_theme` (which would race with other tests reading
+    // `color::active()` concurrently, e.g. `color::query_index_tests`).
+
+    /// Matches one-light's `#FAFAFA` background (250/255 per channel).
+    const NEAR_WHITE_BG: [f32; 4] = [0.9804, 0.9804, 0.9804, 1.0];
+    /// Matches Tokyo Night's `#1A1B26` background (the default dark theme).
+    const DARK_BG: [f32; 4] = [0.1020, 0.1059, 0.1490, 1.0];
+
+    #[test]
+    fn glass_elevate_panel_amount_darkens_clearly_on_near_white_bg() {
+        // glass_raised()'s amount (0.12).
+        let raised = glass_elevate(NEAR_WHITE_BG, 0.12);
+        for i in 0..3 {
+            assert!(
+                NEAR_WHITE_BG[i] - raised[i] > 0.06,
+                "channel {i}: bg={}, raised={} — must be clearly darker, not clipped to bg",
+                NEAR_WHITE_BG[i],
+                raised[i]
+            );
+        }
+        assert!(
+            luma(NEAR_WHITE_BG) - luma(raised) > 0.06,
+            "raised-panel luma delta too subtle on a near-white bg"
+        );
+    }
+
+    #[test]
+    fn glass_elevate_active_tab_amount_darkens_more_than_panel_on_near_white_bg() {
+        // glass_active_tab()'s amount (0.22) must read as "more elevated" than
+        // glass_raised()'s (0.12) — the active tab should stand out further
+        // from the background than an ordinary raised panel.
+        let raised = glass_elevate(NEAR_WHITE_BG, 0.12);
+        let active_tab = glass_elevate(NEAR_WHITE_BG, 0.22);
+        let raised_delta = luma(NEAR_WHITE_BG) - luma(raised);
+        let active_delta = luma(NEAR_WHITE_BG) - luma(active_tab);
+        assert!(
+            active_delta > raised_delta,
+            "active-tab delta ({active_delta}) should exceed panel delta ({raised_delta})"
+        );
+        assert!(
+            active_delta > 0.12,
+            "active-tab luma delta too subtle on a near-white bg: {active_delta}"
+        );
+    }
+
+    #[test]
+    fn glass_elevate_float_amount_darkens_clearly_on_near_white_selection_bg() {
+        // glass_float()'s amount (0.12), applied to a near-white selection-bg
+        // (one-light's selection tint `#E5E5E6` ≈ 0.898, also > the 0.7
+        // threshold) must stay clearly darker than that selection color.
+        let sel = [0.898, 0.898, 0.902, 1.0];
+        assert!(luma(sel) > 0.7, "fixture must exercise the light branch");
+        let floated = glass_elevate(sel, 0.12);
+        for i in 0..3 {
+            assert!(
+                sel[i] - floated[i] > 0.05,
+                "channel {i}: sel={}, float={} — must be clearly darker",
+                sel[i],
+                floated[i]
+            );
+        }
+    }
+
+    #[test]
+    fn glass_elevate_lightens_on_dark_bg_unchanged() {
+        // Dark-theme behaviour is untouched: still a plain additive lighten,
+        // matching every existing dark-theme expectation.
+        for amount in [0.12_f32, 0.22] {
+            let elevated = glass_elevate(DARK_BG, amount);
+            assert_eq!(elevated, lighten(DARK_BG, amount));
+            for i in 0..3 {
+                assert!(elevated[i] > DARK_BG[i]);
+            }
+        }
+    }
+
+    #[test]
+    fn glass_elevate_threshold_matches_state_fill() {
+        // Keep the light/dark branch point in sync with `state_fill`'s 0.7
+        // luma threshold so panels and interactive fills agree on which
+        // themes count as "light".
+        let just_light = [0.75, 0.75, 0.75, 1.0];
+        let just_dark = [0.65, 0.65, 0.65, 1.0];
+        assert!(luma(just_light) > 0.7);
+        assert!(luma(just_dark) <= 0.7);
+        assert!(
+            glass_elevate(just_dark, 0.1)[0] > just_dark[0],
+            "at/below threshold should lighten"
+        );
+        assert!(
+            glass_elevate(just_light, 0.1)[0] < just_light[0],
+            "above threshold should darken"
+        );
+    }
+
+    #[test]
+    fn glass_raised_active_tab_float_match_dark_theme_baseline() {
+        // With no theme override, the active theme defaults to Tokyo Night (a
+        // dark theme, luma well under 0.7), so the public glass_* helpers must
+        // still compute exactly the original additive-lighten fill — this
+        // pins the "dark themes are unaffected" half of the fix.
+        assert_eq!(
+            glass_raised(),
+            with_alpha(lighten(color::default_bg(), 0.12), GLASS_SURFACE_ALPHA)
+        );
+        assert_eq!(
+            glass_active_tab(),
+            with_alpha(lighten(color::default_bg(), 0.22), 1.0)
+        );
+        assert_eq!(
+            glass_float(),
+            with_alpha(lighten(color::selection_bg(), 0.12), GLASS_FLOAT_ALPHA)
+        );
     }
 }
