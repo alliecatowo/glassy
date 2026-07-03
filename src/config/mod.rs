@@ -136,7 +136,7 @@ pub mod theme_import;
 use anyhow::{Context, Result};
 
 pub use keymap::{Chord, KeyAction, KeyMap, SequenceMap};
-pub use parse::{path, save};
+pub use parse::{path, save, validate_kv};
 pub use platform::Platform;
 
 /// Fully-resolved settings handed to the app: the renderer/PTY `Config` plus the

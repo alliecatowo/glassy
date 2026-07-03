@@ -636,6 +636,25 @@ pub(crate) fn parse_hex_color(s: &str) -> Result<alacritty_terminal::vte::ansi::
     Ok(alacritty_terminal::vte::ansi::Rgb { r, g, b })
 }
 
+/// Dry-run validate a single `key = value` pair through the exact parser the
+/// config file loader uses ([`apply_kv`]), without touching any live state.
+/// Used by `ipc::control`'s `set-config` remote-control verb to reject a hard
+/// parse failure (e.g. a non-numeric `opacity`, an out-of-range
+/// `cursor_style`) before ever writing the value to disk.
+///
+/// `Ok(())` means `apply_kv` accepted the value — it does NOT mean the value
+/// survives unclamped: several numeric keys (`opacity`, `power_mode_intensity`,
+/// the `fx_*` channels) are silently clamped later, in
+/// [`RawConfig::into_settings`], rather than rejected here. An unrecognized
+/// key is intentionally not an error from `apply_kv` itself (it just logs a
+/// warning and no-ops); callers that need to reject unknown keys (like
+/// `set-config`) check that separately (see
+/// `ipc::control::is_known_config_key`) before ever calling this.
+pub fn validate_kv(key: &str, value: &str) -> Result<()> {
+    let mut raw = RawConfig::default();
+    apply_kv(key, value, &mut raw)
+}
+
 /// Apply a single recognized `key`/`value` pair into `raw`.
 pub(super) fn apply_kv(key: &str, value: &str, raw: &mut RawConfig) -> Result<()> {
     match key {

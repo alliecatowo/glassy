@@ -499,6 +499,27 @@ pub(crate) const FONT_STEP_PX: f32 = 2.0;
 /// received (config file was modified). Only opacity/bell_visual/status_bar/
 /// pane_headers/word_separator apply live; font changes require a full reload.
 impl App {
+    /// Re-read `glassy.conf` (+ CLI-less defaults) from disk and apply the
+    /// live-reloadable subset via [`Self::apply_config_reload`]. This is the
+    /// exact path `UserEvent::ConfigReload` runs when the file watcher notices
+    /// an edit (see `user_event.rs`) — factored out here so the `glassy @
+    /// reload-config` and `glassy @ set-config` remote-control verbs
+    /// (`remote.rs`) can trigger the identical reload without duplicating the
+    /// match. Returns `Err` with a message suitable for an IPC `ERR` reply on
+    /// a resolve failure; `Ok(None)` from `Settings::resolve` (the
+    /// `--help`/`--version` early-exit path) can't happen with an empty CLI
+    /// arg iterator, but is handled defensively rather than panicking.
+    pub(crate) fn reload_config_from_disk(&mut self) -> Result<(), String> {
+        match crate::config::Settings::resolve(std::iter::empty()) {
+            Ok(Some(settings)) => {
+                self.apply_config_reload(&settings.config);
+                Ok(())
+            }
+            Ok(None) => Err("config reload produced no settings".to_string()),
+            Err(e) => Err(format!("config reload failed: {e:#}")),
+        }
+    }
+
     pub(crate) fn apply_config_reload(&mut self, new_config: &Config) {
         // Opacity changes take effect immediately in the renderer.
         if new_config.opacity != self.config.opacity {
