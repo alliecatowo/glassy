@@ -260,6 +260,7 @@ impl App {
                 self.custom_theme_swatches(),
                 self.settings_custom_editing,
                 self.settings_profiles.clone(),
+                self.settings_popup_scroll,
             ))
         } else {
             None
@@ -1055,6 +1056,7 @@ impl App {
             ref custom_swatches,
             custom_editing,
             ref profile_names,
+            popup_scroll,
         )) = settings_inputs
         {
             let font_px = renderer.font_px();
@@ -1090,6 +1092,7 @@ impl App {
                 custom_swatches,
                 custom_editing,
                 profile_names,
+                popup_scroll,
             ));
         } else if self.help_open {
             // Real GUI help panel (§3.7): scrollable two-column keybindings over

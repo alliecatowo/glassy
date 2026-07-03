@@ -353,13 +353,14 @@ impl<'r> Ui<'r> {
                 SettingsDrop::Effect => (EFFECT_NAMES, v.window_effect_idx.min(8), None),
                 SettingsDrop::None => (&[], 0, None),
             };
-            let pick = self.dropdown_popup(
+            let (pick, new_scroll) = self.dropdown_popup(
                 id("settings/section/popup"),
                 anchor,
                 names,
                 sel,
                 swatches,
                 surface.1,
+                v.popup_scroll,
             );
             if let Some(p) = pick {
                 match which {
@@ -370,6 +371,9 @@ impl<'r> Ui<'r> {
                     SettingsDrop::Effect => ev.window_effect = Some(p),
                     SettingsDrop::None => {}
                 }
+            }
+            if (new_scroll - v.popup_scroll).abs() > f32::EPSILON {
+                ev.popup_scroll = Some(new_scroll);
             }
         }
 
@@ -954,6 +958,7 @@ mod tests {
             custom_swatches: &sw,
             custom_editing: usize::MAX,
             profile_names: &[],
+            popup_scroll: 0.0,
         };
         for sec in SettingsSection::ALL {
             let rows = build_section_rows(*sec, &v);

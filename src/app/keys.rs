@@ -368,7 +368,7 @@ impl App {
                 && matches!(key, Key::Named(NamedKey::Escape))
                 && self.settings_drop != gui::SettingsDrop::None
             {
-                self.settings_drop = gui::SettingsDrop::None;
+                self.set_settings_drop(gui::SettingsDrop::None);
                 self.force_full_redraw = true;
                 self.mark_dirty(event_loop);
                 return;
@@ -376,7 +376,7 @@ impl App {
             if matches!(key, Key::Named(NamedKey::Escape | NamedKey::F1)) || toggle_settings {
                 self.help_open = false;
                 self.settings_open = false;
-                self.settings_drop = gui::SettingsDrop::None;
+                self.set_settings_drop(gui::SettingsDrop::None);
                 // Clear the opening-gesture guard on a keyboard close so a stale
                 // `true` (e.g. opened by cog, then closed by Esc before any click
                 // edge consumed it) cannot leak into the next overlay and swallow

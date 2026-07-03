@@ -507,6 +507,7 @@ impl App {
         custom_swatches: &[[f32; 4]],
         custom_editing: usize,
         profile_names: &[String],
+        popup_scroll: f32,
     ) -> gui::SettingsEvents {
         // Theme names + per-theme accent swatches (the cursor color each theme
         // deliberately picks to pop), sourced from the registry's single
@@ -607,6 +608,7 @@ impl App {
             custom_swatches,
             custom_editing,
             profile_names: &profile_refs,
+            popup_scroll,
         };
         ui.build_settings((sw as f32, sh as f32), &view, fields)
     }
@@ -638,29 +640,29 @@ impl App {
             changed = true;
         }
         if ev.theme_toggle {
-            self.settings_drop = if self.settings_drop == gui::SettingsDrop::Theme {
+            self.set_settings_drop(if self.settings_drop == gui::SettingsDrop::Theme {
                 gui::SettingsDrop::None
             } else {
                 gui::SettingsDrop::Theme
-            };
+            });
             changed = true;
         }
         if let Some(t) = ev.theme_pick {
             self.set_theme_by_idx(t);
-            self.settings_drop = gui::SettingsDrop::None;
+            self.set_settings_drop(gui::SettingsDrop::None);
             changed = true;
         }
         if ev.font_toggle {
-            self.settings_drop = if self.settings_drop == gui::SettingsDrop::Font {
+            self.set_settings_drop(if self.settings_drop == gui::SettingsDrop::Font {
                 gui::SettingsDrop::None
             } else {
                 gui::SettingsDrop::Font
-            };
+            });
             changed = true;
         }
         if let Some(f) = ev.font_pick {
             self.set_font_family_index(f);
-            self.settings_drop = gui::SettingsDrop::None;
+            self.set_settings_drop(gui::SettingsDrop::None);
             changed = true;
         }
         if ev.scrollback_delta != 0 {
@@ -672,16 +674,16 @@ impl App {
             changed = true;
         }
         if ev.window_effect_toggle {
-            self.settings_drop = if self.settings_drop == gui::SettingsDrop::Effect {
+            self.set_settings_drop(if self.settings_drop == gui::SettingsDrop::Effect {
                 gui::SettingsDrop::None
             } else {
                 gui::SettingsDrop::Effect
-            };
+            });
             changed = true;
         }
         if let Some(idx) = ev.window_effect {
             self.set_window_effect_index(idx);
-            self.settings_drop = gui::SettingsDrop::None;
+            self.set_settings_drop(gui::SettingsDrop::None);
             changed = true;
         }
         if let Some((ch, val)) = ev.custom_effect
@@ -706,6 +708,10 @@ impl App {
         }
         if let Some(s) = ev.section_scroll {
             self.settings_section_scroll = s;
+            changed = true;
+        }
+        if let Some(s) = ev.popup_scroll {
+            self.settings_popup_scroll = s;
             changed = true;
         }
         // Every boolean toggle row fired this frame (see `SettingsEvents::toggled`'s
@@ -752,29 +758,29 @@ impl App {
             changed = true;
         }
         if ev.theme_light_toggle {
-            self.settings_drop = if self.settings_drop == gui::SettingsDrop::ThemeLight {
+            self.set_settings_drop(if self.settings_drop == gui::SettingsDrop::ThemeLight {
                 gui::SettingsDrop::None
             } else {
                 gui::SettingsDrop::ThemeLight
-            };
+            });
             changed = true;
         }
         if let Some(idx) = ev.theme_light_pick {
             self.set_theme_light_by_idx(idx);
-            self.settings_drop = gui::SettingsDrop::None;
+            self.set_settings_drop(gui::SettingsDrop::None);
             changed = true;
         }
         if ev.theme_dark_toggle {
-            self.settings_drop = if self.settings_drop == gui::SettingsDrop::ThemeDark {
+            self.set_settings_drop(if self.settings_drop == gui::SettingsDrop::ThemeDark {
                 gui::SettingsDrop::None
             } else {
                 gui::SettingsDrop::ThemeDark
-            };
+            });
             changed = true;
         }
         if let Some(idx) = ev.theme_dark_pick {
             self.set_theme_dark_by_idx(idx);
-            self.settings_drop = gui::SettingsDrop::None;
+            self.set_settings_drop(gui::SettingsDrop::None);
             changed = true;
         }
         if let Some(idx) = ev.custom_color_pick {
@@ -806,7 +812,7 @@ impl App {
         }
         if ev.close {
             self.settings_open = false;
-            self.settings_drop = gui::SettingsDrop::None;
+            self.set_settings_drop(gui::SettingsDrop::None);
             self.overlay_opened_by_press = false;
             changed = true;
         }

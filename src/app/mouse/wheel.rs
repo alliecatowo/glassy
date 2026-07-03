@@ -35,9 +35,12 @@ impl App {
             self.mark_dirty(event_loop);
             return;
         }
-        // Settings window owns the wheel while open: scroll the active section's
-        // right pane. The next `build_settings_sectioned` clamps the offset against
-        // the section's content height, so we only accumulate here.
+        // Settings window owns the wheel while open: scroll whichever list is
+        // frontmost. An open dropdown popup (theme / font / effect / …) floats
+        // over the section body and is what the user is actually looking at, so
+        // it gets the wheel; otherwise it falls through to the active section's
+        // right pane. The next `build_settings_sectioned` clamps either offset
+        // against its own content height, so we only accumulate here.
         if self.settings_open {
             let line_px = self
                 .renderer
@@ -49,7 +52,11 @@ impl App {
                 MouseScrollDelta::LineDelta(_, y) => y * line_px * 3.0,
                 MouseScrollDelta::PixelDelta(p) => p.y as f32,
             };
-            self.settings_section_scroll = (self.settings_section_scroll - dy).max(0.0);
+            if self.settings_drop != gui::SettingsDrop::None {
+                self.settings_popup_scroll = (self.settings_popup_scroll - dy).max(0.0);
+            } else {
+                self.settings_section_scroll = (self.settings_section_scroll - dy).max(0.0);
+            }
             self.force_full_redraw = true;
             self.mark_dirty(event_loop);
             return;
