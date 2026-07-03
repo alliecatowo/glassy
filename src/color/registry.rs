@@ -1,7 +1,10 @@
 //! The single source of truth mapping theme names/aliases to [`Theme`] values.
 //!
-//! [`BUILTIN_THEMES`] is the canonical list of the 18 themes glassy ships with:
-//! each entry carries its canonical display name, the extra aliases it accepts,
+//! [`BUILTIN_THEMES`] is the canonical list of the 60 themes glassy ships with
+//! (the original 18 plus the w14 themes-pack wave's 42 -- 12 light + 30 dark,
+//! every one sourced from a fetched, verified upstream palette -- see the
+//! `// Source: ...` comment above each `const Theme` in `builtin.rs`): each
+//! entry carries its canonical display name, the extra aliases it accepts,
 //! whether it's a LIGHT theme, and the [`Theme`] color data itself. This
 //! replaces what used to be four independently hand-maintained lists
 //! (`theme_by_name`'s `match`, the `THEME_NAMES` const slice, `is_light`'s
@@ -42,12 +45,14 @@ pub struct ThemeEntry {
     pub theme: Theme,
 }
 
-/// The 18 built-in themes, in the order they've always shipped in (this order
+/// The 60 built-in themes, in the order they've always shipped in (this order
 /// is user-visible: it's the settings dropdown / theme-cycle / palette order).
 /// Aliases and light flags exactly match the pre-registry hand-written `match`
 /// arms in the old `theme_by_name` / `canonical_name` / `is_light` — see
 /// `every_builtin_name_and_alias_resolves` below, which encodes them as a test
-/// so a future edit can't silently drop one.
+/// so a future edit can't silently drop one. The original 18 come first,
+/// followed by the w14 themes-pack wave's light pack (12) then dark pack (30)
+/// in the order added — see `builtin.rs` for the color data + source citations.
 pub const BUILTIN_THEMES: &[ThemeEntry] = &[
     ThemeEntry {
         canonical: "tokyo-night",
@@ -156,6 +161,261 @@ pub const BUILTIN_THEMES: &[ThemeEntry] = &[
         aliases: &[],
         light: true,
         theme: GRUVBOX_LIGHT,
+    },
+    // --- w14 themes-pack wave: 12 light + 30 dark, added below ---
+    // --- light pack ---
+    ThemeEntry {
+        canonical: "github-light",
+        aliases: &[],
+        light: true,
+        theme: GITHUB_LIGHT,
+    },
+    ThemeEntry {
+        canonical: "solarized-light",
+        aliases: &[],
+        light: true,
+        theme: SOLARIZED_LIGHT,
+    },
+    ThemeEntry {
+        canonical: "one-half-light",
+        aliases: &[],
+        light: true,
+        theme: ONE_HALF_LIGHT,
+    },
+    ThemeEntry {
+        canonical: "tokyo-night-day",
+        aliases: &["day"],
+        light: true,
+        theme: TOKYO_NIGHT_DAY,
+    },
+    ThemeEntry {
+        canonical: "kanagawa-lotus",
+        aliases: &["lotus"],
+        light: true,
+        theme: KANAGAWA_LOTUS,
+    },
+    ThemeEntry {
+        canonical: "papercolor-light",
+        aliases: &["papercolor"],
+        light: true,
+        theme: PAPERCOLOR_LIGHT,
+    },
+    ThemeEntry {
+        canonical: "modus-operandi",
+        aliases: &["modus"],
+        light: true,
+        theme: MODUS_OPERANDI,
+    },
+    ThemeEntry {
+        canonical: "flexoki-light",
+        aliases: &[],
+        light: true,
+        theme: FLEXOKI_LIGHT,
+    },
+    ThemeEntry {
+        canonical: "vitesse-light",
+        aliases: &[],
+        light: true,
+        theme: VITESSE_LIGHT,
+    },
+    ThemeEntry {
+        canonical: "dayfox",
+        aliases: &[],
+        light: true,
+        theme: DAYFOX,
+    },
+    ThemeEntry {
+        canonical: "selenized-light",
+        aliases: &["selenized"],
+        light: true,
+        theme: SELENIZED_LIGHT,
+    },
+    ThemeEntry {
+        canonical: "alabaster",
+        aliases: &[],
+        light: true,
+        theme: ALABASTER,
+    },
+    // --- dark pack ---
+    ThemeEntry {
+        canonical: "github-dark",
+        aliases: &["github"],
+        light: false,
+        theme: GITHUB_DARK,
+    },
+    ThemeEntry {
+        canonical: "monokai",
+        aliases: &["monokaiclassic"],
+        light: false,
+        theme: MONOKAI,
+    },
+    ThemeEntry {
+        canonical: "monokai-pro",
+        aliases: &[],
+        light: false,
+        theme: MONOKAI_PRO,
+    },
+    ThemeEntry {
+        canonical: "material",
+        aliases: &[],
+        light: false,
+        theme: MATERIAL,
+    },
+    ThemeEntry {
+        canonical: "material-darker",
+        aliases: &[],
+        light: false,
+        theme: MATERIAL_DARKER,
+    },
+    ThemeEntry {
+        canonical: "night-owl",
+        aliases: &[],
+        light: false,
+        theme: NIGHT_OWL,
+    },
+    ThemeEntry {
+        canonical: "snazzy",
+        aliases: &[],
+        light: false,
+        theme: SNAZZY,
+    },
+    ThemeEntry {
+        canonical: "horizon-dark",
+        aliases: &["horizon"],
+        light: false,
+        theme: HORIZON_DARK,
+    },
+    ThemeEntry {
+        canonical: "oceanic-next",
+        aliases: &["oceanic"],
+        light: false,
+        theme: OCEANIC_NEXT,
+    },
+    ThemeEntry {
+        canonical: "palenight",
+        aliases: &[],
+        light: false,
+        theme: PALENIGHT,
+    },
+    ThemeEntry {
+        canonical: "zenburn",
+        aliases: &[],
+        light: false,
+        theme: ZENBURN,
+    },
+    ThemeEntry {
+        canonical: "iceberg-dark",
+        aliases: &["iceberg"],
+        light: false,
+        theme: ICEBERG_DARK,
+    },
+    ThemeEntry {
+        canonical: "nightfox",
+        aliases: &[],
+        light: false,
+        theme: NIGHTFOX,
+    },
+    ThemeEntry {
+        canonical: "vitesse-dark",
+        aliases: &["vitesse"],
+        light: false,
+        theme: VITESSE_DARK,
+    },
+    ThemeEntry {
+        canonical: "flexoki-dark",
+        aliases: &["flexoki"],
+        light: false,
+        theme: FLEXOKI_DARK,
+    },
+    ThemeEntry {
+        canonical: "everblush",
+        aliases: &[],
+        light: false,
+        theme: EVERBLUSH,
+    },
+    ThemeEntry {
+        canonical: "melange-dark",
+        aliases: &["melange"],
+        light: false,
+        theme: MELANGE_DARK,
+    },
+    ThemeEntry {
+        canonical: "synthwave-84",
+        aliases: &["synthwave"],
+        light: false,
+        theme: SYNTHWAVE_84,
+    },
+    ThemeEntry {
+        canonical: "catppuccin-frappe",
+        aliases: &["frappe"],
+        light: false,
+        theme: CATPPUCCIN_FRAPPE,
+    },
+    ThemeEntry {
+        canonical: "tokyo-night-storm",
+        aliases: &["storm"],
+        light: false,
+        theme: TOKYO_NIGHT_STORM,
+    },
+    ThemeEntry {
+        canonical: "gruvbox-material",
+        aliases: &[],
+        light: false,
+        theme: GRUVBOX_MATERIAL,
+    },
+    ThemeEntry {
+        canonical: "one-half-dark",
+        aliases: &["onehalf"],
+        light: false,
+        theme: ONE_HALF_DARK,
+    },
+    ThemeEntry {
+        canonical: "ayu-mirage",
+        aliases: &["mirage"],
+        light: false,
+        theme: AYU_MIRAGE,
+    },
+    ThemeEntry {
+        canonical: "rose-pine-moon",
+        aliases: &["moon"],
+        light: false,
+        theme: ROSE_PINE_MOON,
+    },
+    ThemeEntry {
+        canonical: "kanagawa-dragon",
+        aliases: &["dragon"],
+        light: false,
+        theme: KANAGAWA_DRAGON,
+    },
+    ThemeEntry {
+        canonical: "solarized-osaka",
+        aliases: &["osaka"],
+        light: false,
+        theme: SOLARIZED_OSAKA,
+    },
+    ThemeEntry {
+        canonical: "poimandres",
+        aliases: &["poi"],
+        light: false,
+        theme: POIMANDRES,
+    },
+    ThemeEntry {
+        canonical: "andromeda",
+        aliases: &[],
+        light: false,
+        theme: ANDROMEDA,
+    },
+    ThemeEntry {
+        canonical: "aura",
+        aliases: &[],
+        light: false,
+        theme: AURA,
+    },
+    ThemeEntry {
+        canonical: "challenger-deep",
+        aliases: &["deep"],
+        light: false,
+        theme: CHALLENGER_DEEP,
     },
 ];
 
@@ -344,5 +604,58 @@ mod tests {
         let names = theme_names();
         let expected: Vec<&str> = BUILTIN_THEMES.iter().map(|e| e.canonical).collect();
         assert_eq!(names, expected);
+    }
+
+    /// No canonical name or alias appears twice across `BUILTIN_THEMES` — a
+    /// mechanical guard for the themes-pack wave (60 entries, added by hand)
+    /// against a copy-paste duplicate silently shadowing an earlier theme
+    /// (`find_builtin` returns the FIRST match, so a duplicate would make one
+    /// entry permanently unreachable by name without any other test failing).
+    #[test]
+    fn no_duplicate_canonical_names_or_aliases() {
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for entry in BUILTIN_THEMES {
+            let key = normalize(entry.canonical);
+            assert!(
+                seen.insert(key),
+                "duplicate canonical name (or alias colliding with it): {}",
+                entry.canonical
+            );
+            for alias in entry.aliases {
+                let key = normalize(alias);
+                assert!(
+                    seen.insert(key),
+                    "duplicate alias (or alias colliding with a canonical name): {alias}",
+                );
+            }
+        }
+    }
+
+    /// Every theme flagged `light: true` actually has a light background —
+    /// computed the same way the renderer would (via [`super::luma`] on the
+    /// theme's `bg`), not the coarse RGB-sum check `light_flags_match_known_light_themes`
+    /// already does. Catches a transcription error (e.g. a copy-pasted `light: true`
+    /// on a theme whose fetched palette turned out to be dark, or vice versa)
+    /// that a sum-based check could theoretically miss.
+    #[test]
+    fn light_flagged_themes_have_a_light_background() {
+        for entry in BUILTIN_THEMES.iter().filter(|e| e.light) {
+            let l = crate::color::luma(crate::color::to_f32(entry.theme.bg));
+            assert!(
+                l > 0.6,
+                "{} is flagged light but its background luma is {l:.3} (expected > 0.6)",
+                entry.canonical
+            );
+        }
+        // And the converse, for symmetry: no dark-flagged theme should have a
+        // luma high enough to read as light.
+        for entry in BUILTIN_THEMES.iter().filter(|e| !e.light) {
+            let l = crate::color::luma(crate::color::to_f32(entry.theme.bg));
+            assert!(
+                l <= 0.6,
+                "{} is flagged dark but its background luma is {l:.3} (expected <= 0.6)",
+                entry.canonical
+            );
+        }
     }
 }
