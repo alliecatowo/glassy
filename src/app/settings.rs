@@ -59,12 +59,23 @@ impl App {
         ]
     }
 
+    /// Set which settings dropdown popup is open (or close all with `None`),
+    /// resetting its scroll offset — a freshly-opened list should always start
+    /// scrolled to the top, and a closed popup's scroll is stale until it's
+    /// reopened anyway. Every assignment to `settings_drop` goes through this
+    /// (rather than setting the field directly) so a new call site can't
+    /// forget the reset and leave a stale scroll bleeding into the next list.
+    pub(crate) fn set_settings_drop(&mut self, drop: gui::SettingsDrop) {
+        self.settings_drop = drop;
+        self.settings_popup_scroll = 0.0;
+    }
+
     /// Open the settings form: focus the first control and clear transient state.
     /// Forces a full rebuild so the glass panel composites over freshly-painted
     /// terminal rows (the `push_overlay_px` invariant).
     pub(crate) fn open_settings(&mut self) {
         self.settings_open = true;
-        self.settings_drop = gui::SettingsDrop::None;
+        self.set_settings_drop(gui::SettingsDrop::None);
         self.settings_saved = false;
         self.gui_focused = Some(Self::settings_focus_order()[0]);
         // Seed the editable text fields from the live config.
@@ -221,17 +232,17 @@ impl App {
         } else if f == Some(gui::id("settings/config")) {
             self.copy_config_path();
         } else if f == Some(gui::id("settings/theme")) {
-            self.settings_drop = if self.settings_drop == gui::SettingsDrop::Theme {
+            self.set_settings_drop(if self.settings_drop == gui::SettingsDrop::Theme {
                 gui::SettingsDrop::None
             } else {
                 gui::SettingsDrop::Theme
-            };
+            });
         } else if f == Some(gui::id("settings/font_family")) {
-            self.settings_drop = if self.settings_drop == gui::SettingsDrop::Font {
+            self.set_settings_drop(if self.settings_drop == gui::SettingsDrop::Font {
                 gui::SettingsDrop::None
             } else {
                 gui::SettingsDrop::Font
-            };
+            });
         } else if f == Some(gui::id("settings/bell")) {
             // Segmented control: Enter/Space advances to the next mode (wraps),
             // matching a click cycling Off → Visual → Audible → Off.

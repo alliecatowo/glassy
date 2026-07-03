@@ -134,6 +134,7 @@ impl App {
             cwd_history: std::collections::VecDeque::new(),
             settings_section: 0,
             settings_section_scroll: 0.0,
+            settings_popup_scroll: 0.0,
             settings_custom: [alacritty_terminal::vte::ansi::Rgb { r: 0, g: 0, b: 0 }; 20],
             settings_custom_editing: usize::MAX,
             settings_theme_hex: gui::TextEdit::default(),

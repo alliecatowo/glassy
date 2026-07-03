@@ -100,7 +100,7 @@ impl App {
                     let (mx, my) = self.gui_click_pos;
                     if !gui::hit(self.settings_panel, mx, my) {
                         self.settings_open = false;
-                        self.settings_drop = gui::SettingsDrop::None;
+                        self.set_settings_drop(gui::SettingsDrop::None);
                         self.force_full_redraw = true;
                         self.mark_dirty(event_loop);
                     }

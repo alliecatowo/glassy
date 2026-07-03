@@ -573,6 +573,11 @@ pub struct SettingsView<'a> {
     /// Path to the wallpaper-theme source image, display text (empty =
     /// disabled).
     pub wallpaper_theme: &'a str,
+    /// Vertical scroll offset (px) of the currently-open dropdown popup (see
+    /// [`Ui::dropdown_popup`]), if any. With 60 built-in themes the theme
+    /// popup can easily be taller than the window; this lets it scroll instead
+    /// of silently truncating the list past whatever fits.
+    pub popup_scroll: f32,
 }
 
 /// The left-sidebar sections of the revamped settings window, in display order.
@@ -703,6 +708,8 @@ pub struct SettingsEvents {
     pub section_pick: Option<usize>,
     /// The active section's right-pane scroll moved (new offset in px).
     pub section_scroll: Option<f32>,
+    /// The open dropdown popup's scroll moved (new offset in px).
+    pub popup_scroll: Option<f32>,
     /// The system Light-mode theme dropdown header was toggled.
     pub theme_light_toggle: bool,
     /// A system Light-mode theme row was picked (absolute index into THEME_NAMES).

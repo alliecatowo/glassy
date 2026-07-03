@@ -103,8 +103,21 @@ impl<'r> Ui<'r> {
     /// The floating popup list for a dropdown (E3 surface anchored just below
     /// `anchor`, or flipped above if it would overflow the bottom of the surface).
     /// Each row shows an optional swatch, the option name, and a `✓` on the
-    /// current selection. Returns the absolute index if a row was clicked.
-    /// Drawn after the form body so it composites above everything.
+    /// current selection. Drawn after the form body so it composites above
+    /// everything.
+    ///
+    /// The popup's own height is capped to what fits the surface (never fewer
+    /// than 4 rows), but ALL of `rows` remains reachable: when there are more
+    /// rows than fit, a scrollbar appears on the right edge and the visible
+    /// window scrolls by `scroll` (px, owned by the caller across frames — see
+    /// [`super::SettingsView::popup_scroll`]). A fixed visible cap with no
+    /// scroll would silently strand any row past it (the 60-theme dropdown is
+    /// the case that matters today, but this is generic to any long list).
+    ///
+    /// Returns `(picked, new_scroll)`: `picked` is the absolute row index if a
+    /// row was clicked this frame; `new_scroll` is `scroll` clamped to the
+    /// valid range, or moved if the scrollbar thumb was dragged.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn dropdown_popup(
         &mut self,
         wid: WidgetId,
@@ -113,16 +126,23 @@ impl<'r> Ui<'r> {
         sel: usize,
         swatches: Option<&[[f32; 4]]>,
         surface_h: f32,
-    ) -> Option<usize> {
+        scroll: f32,
+    ) -> (Option<usize>, f32) {
         let m = self.m;
         let row_h = m.row_h;
-        // Cap the popup to what actually fits the surface (leaving a small margin),
-        // never fewer than 4. A fixed cap of 8 silently hid the 9th effect
-        // ("Custom") and any theme past the 8th; sizing to the window shows them
-        // all (it flips above when anchored low, below).
+        // Visible row count: what actually fits the surface (leaving a small
+        // margin), never fewer than 4. A fixed cap of 8 used to silently hide
+        // the 9th effect ("Custom") and any theme past the 8th; sizing to the
+        // window instead shows as many as fit, with the rest reachable via scroll.
         let fit = ((surface_h - 4.0 * m.pad) / row_h).floor().max(4.0) as usize;
-        let max_rows = rows.len().min(fit);
-        let h = (max_rows as f32 * row_h + 2.0).round();
+        let visible_rows = rows.len().min(fit);
+        let scrollable = rows.len() > fit;
+        let scrollbar_w = if scrollable {
+            m.gap.max(6.0).round()
+        } else {
+            0.0
+        };
+        let h = (visible_rows as f32 * row_h + 2.0).round();
         // Anchor below by default; flip above when it would overflow the surface.
         let below_y = anchor.y + anchor.h + 2.0;
         let popup_y = if below_y + h > surface_h - m.pad {
@@ -134,10 +154,24 @@ impl<'r> Ui<'r> {
         let rect = Rect::new(anchor.x, popup_y, anchor.w, h);
         self.rrect(rect, m.radius, glass_float());
         self.edge_light(rect);
+
+        let content_h = rows.len() as f32 * row_h;
+        let view_h = h - 2.0;
+        let max_scroll = (content_h - view_h).max(0.0);
+        let scroll = scroll.clamp(0.0, max_scroll);
+        let row_area_w = rect.w - scrollbar_w;
+
+        let first = (scroll / row_h).floor().max(0.0) as usize;
+        // +1 so a row that's only partially scrolled into view still paints.
+        let take = visible_rows + 1;
         let mut picked = None;
-        for (i, name) in rows.iter().enumerate().take(max_rows) {
-            let ry = rect.y + 1.0 + i as f32 * row_h;
-            let rr = Rect::new(rect.x + 1.0, ry, rect.w - 2.0, row_h);
+        for (i, name) in rows.iter().enumerate().skip(first).take(take) {
+            let ry = rect.y + 1.0 + i as f32 * row_h - scroll;
+            // Cull rows fully outside the popup's viewport.
+            if ry + row_h <= rect.y || ry >= rect.y + rect.h {
+                continue;
+            }
+            let rr = Rect::new(rect.x + 1.0, ry, row_area_w - 2.0, row_h);
             let it = self.interact(id_combine(wid, i as u64), rr, true);
             if i == sel {
                 self.rrect(rr.inset(1.0), m.radius - 1.0, sel_bg());
@@ -169,7 +203,19 @@ impl<'r> Ui<'r> {
                 picked = Some(i);
             }
         }
-        picked
+
+        let new_scroll = if scrollable {
+            let track = Rect::new(
+                rect.x + rect.w - scrollbar_w,
+                rect.y + 1.0,
+                scrollbar_w,
+                view_h,
+            );
+            self.scrollbar(id_combine(wid, u64::MAX), track, content_h, view_h, scroll)
+        } else {
+            scroll
+        };
+        (picked, new_scroll)
     }
 }
 

@@ -914,6 +914,11 @@ pub struct App {
     settings_section: usize,
     /// Vertical scroll offset (px) of the active settings section's right pane.
     settings_section_scroll: f32,
+    /// Vertical scroll offset (px) of the currently-open settings dropdown
+    /// popup (theme / font / light-theme / dark-theme / effect), if any. Reset
+    /// to 0 whenever `settings_drop` changes (see `App::set_settings_drop`) so
+    /// a newly-opened list always starts scrolled to the top.
+    settings_popup_scroll: f32,
     /// The working custom-theme palette being edited in the Themes section: the
     /// four specials (fg/bg/cursor/selection) followed by the 16 ANSI entries, all
     /// as `Rgb`. Seeded from the active theme when settings open; mutated by the
