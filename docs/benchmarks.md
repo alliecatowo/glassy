@@ -60,10 +60,13 @@ Measured on this dev machine. Numbers rounded; startup is approximate.
   than redrawing the whole grid every frame.
 - **Lean binary.** Fat LTO + one codegen unit + `panic = "abort"` + stripping
   keep the release binary around 10 MB.
-- **Low input latency.** The swapchain uses Mailbox present mode with
-  `max_frames_in_flight = 1`, so a keystroke reaches the screen on the next
-  frame instead of queueing behind buffered ones. (Latency is not quantified
-  here; it is a design choice, noted for context.)
+- **Lean swapchain.** The swapchain uses **Fifo** present mode (vsync,
+  guaranteed available on every backend) with `desired_maximum_frame_latency: 2`.
+  Fifo holds the minimum image count (2, vs. Mailbox's typical 3 — roughly
+  8 MB saved at 1080p `Bgra8`), never redraws an idle frame, and sidesteps the
+  tearing/latency tradeoffs Mailbox or Immediate exist for — tradeoffs that
+  don't matter for a glyph grid that only repaints on damage anyway. (Latency
+  is not quantified here; it is a design choice, noted for context.)
 
 ## w10/perf wave improvements
 
