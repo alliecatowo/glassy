@@ -45,16 +45,16 @@ pub(crate) fn import_theme_toml(text: &str) -> Result<Theme> {
             let value = unquote(value.trim());
 
             match key.as_str() {
-                "foreground" => fg = Some(parse_hex_color(value)?),
-                "background" => bg = Some(parse_hex_color(value)?),
-                "cursor" => cursor = Some(parse_hex_color(value)?),
+                "foreground" => fg = Some(super::parse::parse_hex_color(value)?),
+                "background" => bg = Some(super::parse::parse_hex_color(value)?),
+                "cursor" => cursor = Some(super::parse::parse_hex_color(value)?),
                 k if k.starts_with("color") => {
                     // Handle color0..color15
                     if let Some(idx_str) = k.strip_prefix("color")
                         && let Ok(idx) = idx_str.parse::<usize>()
                         && idx < 16
                     {
-                        ansi16[idx] = Some(parse_hex_color(value)?);
+                        ansi16[idx] = Some(super::parse::parse_hex_color(value)?);
                     }
                 }
                 _ => {}
@@ -105,7 +105,7 @@ pub(crate) fn import_theme_yaml(text: &str) -> Result<Theme> {
                 && let Ok(idx) = u8::from_str_radix(hex, 16)
                 && (idx as usize) < 16
             {
-                colors[idx as usize] = Some(parse_hex_color(value)?);
+                colors[idx as usize] = Some(super::parse::parse_hex_color(value)?);
             }
         }
     }
@@ -140,17 +140,4 @@ fn unquote(s: &str) -> &str {
         .trim_end_matches('"')
         .trim_start_matches('\'')
         .trim_end_matches('\'')
-}
-
-/// Parse a hex color string (e.g., "#ff0000") into an RGB triple.
-fn parse_hex_color(s: &str) -> Result<alacritty_terminal::vte::ansi::Rgb> {
-    use alacritty_terminal::vte::ansi::Rgb;
-    let s = s.trim_start_matches('#');
-    if s.len() != 6 {
-        bail!("invalid hex color '{s}' (must be 6 digits)");
-    }
-    let r = u8::from_str_radix(&s[0..2], 16)?;
-    let g = u8::from_str_radix(&s[2..4], 16)?;
-    let b = u8::from_str_radix(&s[4..6], 16)?;
-    Ok(Rgb { r, g, b })
 }
