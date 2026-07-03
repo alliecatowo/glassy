@@ -61,6 +61,7 @@ mod search;
 mod selection;
 mod settings;
 mod settings_fields;
+pub(crate) mod settings_save;
 mod settings_themes;
 mod strip;
 mod tab_paint;

@@ -465,7 +465,7 @@ impl<'r> Ui<'r> {
             } => {
                 self.label_clip(px.round(), ly, label, label_clip, fg_dim());
                 if self.toggle(id(wid), toggle_rect, *value) != *value {
-                    apply_toggle_event(wid, ev);
+                    ev.toggled.push(wid);
                 }
             }
             RowKind::Dropdown {
@@ -862,26 +862,6 @@ fn apply_segmented_event(wid: &str, nv: usize, ev: &mut SettingsEvents) {
     }
 }
 
-/// Map a toggle widget id to its boolean-toggle event field.
-fn apply_toggle_event(wid: &str, ev: &mut SettingsEvents) {
-    match wid {
-        "settings/status_bar" => ev.status_bar_toggle = true,
-        "settings/pane_headers" => ev.pane_headers_toggle = true,
-        "settings/follow_system" => ev.follow_system_toggle = true,
-        "settings/ligatures" => ev.ligatures_toggle = true,
-        "settings/restore_session" => ev.restore_session_toggle = true,
-        "settings/cursor_blink" => ev.cursor_blink_toggle = true,
-        "settings/copy_on_select" => ev.copy_on_select_toggle = true,
-        "settings/minimap" => ev.minimap_toggle = true,
-        "settings/command_badges" => ev.command_badges_toggle = true,
-        "settings/cursor_trail" => ev.cursor_trail_toggle = true,
-        "settings/crt_effect" => ev.crt_effect_toggle = true,
-        "settings/title_show_cwd" => ev.title_show_cwd_toggle = true,
-        "settings/title_show_count" => ev.title_show_count_toggle = true,
-        _ => {}
-    }
-}
-
 /// Map a dropdown toggle to its `*_toggle` event field.
 fn apply_dropdown_toggle(which: SettingsDrop, ev: &mut SettingsEvents) {
     match which {
@@ -966,7 +946,6 @@ mod tests {
             minimap: false,
             command_badges: true,
             cursor_trail: false,
-            crt_effect: false,
             title_show_cwd: true,
             title_show_count: false,
             theme_light: "tokyo-night",
