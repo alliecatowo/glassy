@@ -22,8 +22,8 @@ pub(crate) mod save_scrollback;
 ///
 /// The variants intentionally mirror the menu actions AND the settings form so a
 /// single fuzzy list covers "do X" and "change setting Y" uniformly. Themes are
-/// carried by index into [`color::THEME_NAMES`] so adding a theme there surfaces
-/// it in the palette for free.
+/// carried by index into [`color::theme_names`] so adding a theme to the
+/// registry surfaces it in the palette for free.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum PaletteCmd {
     // --- Tabs / panes ---
@@ -76,7 +76,7 @@ pub(crate) enum PaletteCmd {
     PrevTheme,
     /// Fold/unfold the output of the command block in view (OSC 133).
     ToggleFold,
-    /// Set the theme at this index into [`color::THEME_NAMES`].
+    /// Set the theme at this index into [`color::theme_names`].
     SetTheme(usize),
     /// Generate a theme from the configured `wallpaper_theme` image path and apply it live.
     GenerateThemeFromWallpaper,
@@ -381,7 +381,8 @@ impl App {
         if self.config.quake {
             cmds.push(ToggleQuake);
         }
-        for i in 0..color::THEME_NAMES.len() {
+        let theme_names = color::theme_names();
+        for i in 0..theme_names.len() {
             cmds.push(SetTheme(i));
         }
         // Resolved once from the live keymap so hints show the actual bound
@@ -394,7 +395,7 @@ impl App {
             .into_iter()
             .map(|cmd| {
                 let label = match cmd {
-                    SetTheme(i) => format!("Set theme: {}", color::THEME_NAMES[i]),
+                    SetTheme(i) => format!("Set theme: {}", theme_names[i]),
                     other => other.label(),
                 };
                 let display = format!("{}  {}", cmd.category(), label);
