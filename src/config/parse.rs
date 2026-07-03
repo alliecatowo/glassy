@@ -448,10 +448,12 @@ pub(crate) fn config_dir() -> Option<PathBuf> {
     config_path().and_then(|p| p.parent().map(PathBuf::from))
 }
 
-/// Persist `updates` (`(key, value)` pairs) into the config file, preserving all
-/// other lines, comments, and ordering. A key already present is updated in place;
-/// a missing key is appended. Creates the parent directory and file if needed.
-/// Used by the live settings overlay so changes survive a restart.
+/// Persist `updates` (`(key, value)` pairs) into the config file's TOP-LEVEL
+/// scope, preserving all other lines, comments, and ordering. A key already
+/// present is updated in place; a missing key is appended BEFORE the first
+/// `[section]` header (or at the end of the file when there are none — never
+/// inside a section). Creates the parent directory and file if needed. Used by
+/// the live settings overlay so changes survive a restart.
 pub fn save(updates: &[(&str, String)]) -> Result<()> {
     let path = config_path().context("no config path (HOME/XDG unset)")?;
     if let Some(dir) = path.parent() {
@@ -464,14 +466,38 @@ pub fn save(updates: &[(&str, String)]) -> Result<()> {
     Ok(())
 }
 
-/// Merge `updates` into the text of a config file: a present key is updated in
-/// place (preserving its position), a missing one is appended; comments, blank
-/// lines, unmanaged keys, and ordering are preserved. Pure for unit testing.
+/// Whether a trimmed line is a `[...]` section header of any kind (`[profile.X]`,
+/// `[keybindings]`, or any future/unknown section).
+fn is_section_header(line: &str) -> bool {
+    let t = line.trim();
+    t.starts_with('[') && t.ends_with(']')
+}
+
+/// Merge `updates` into the text of a config file's TOP-LEVEL scope: a present
+/// key is updated in place (preserving its position); a missing one is appended
+/// just before the first `[section]` header (skipping back over any trailing
+/// blank line so it stays a trailing separator), or at the end of the file when
+/// there are no sections. Comments, blank lines, unmanaged keys, and ordering
+/// are otherwise preserved. Pure for unit testing.
+///
+/// FIXED BUG: this used to append a missing key at the ABSOLUTE END of the file
+/// unconditionally, with no regard for section boundaries. When the config's
+/// LAST section was a `[profile.NAME]` (or `[keybindings]`), the appended line
+/// landed INSIDE that section instead of at the top level — e.g. saving
+/// `scrollback` when `[profile.work]` was the last thing in the file silently
+/// turned it into a profile-only override, invisible to (and not overridable
+/// from) the base config. See the regression tests below.
 fn merge_config(existing: &str, updates: &[(&str, String)]) -> String {
     let mut lines: Vec<String> = existing.lines().map(str::to_string).collect();
     let mut written = vec![false; updates.len()];
 
-    for line in lines.iter_mut() {
+    // The top-level scope ends at the first section header (or EOF when none).
+    let top_level_end = lines
+        .iter()
+        .position(|l| is_section_header(l))
+        .unwrap_or(lines.len());
+
+    for line in &mut lines[..top_level_end] {
         let trimmed = line.trim_start();
         if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with(';') {
             continue;
@@ -489,11 +515,23 @@ fn merge_config(existing: &str, updates: &[(&str, String)]) -> String {
             }
         }
     }
-    for (i, (k, v)) in updates.iter().enumerate() {
-        if !written[i] {
-            // Strip newlines and carriage returns from value to prevent injection.
-            let clean_v = v.replace(['\n', '\r'], "");
-            lines.push(format!("{k} = {clean_v}"));
+
+    if updates.iter().enumerate().any(|(i, _)| !written[i]) {
+        // Back up over trailing blank lines within the top-level range so the
+        // insertion point sits right after the last real top-level line, not
+        // after a blank separator that precedes the first section.
+        let mut insert_at = top_level_end;
+        while insert_at > 0 && lines[insert_at - 1].trim().is_empty() {
+            insert_at -= 1;
+        }
+        let mut offset = 0;
+        for (i, (k, v)) in updates.iter().enumerate() {
+            if !written[i] {
+                // Strip newlines and carriage returns from value to prevent injection.
+                let clean_v = v.replace(['\n', '\r'], "");
+                lines.insert(insert_at + offset, format!("{k} = {clean_v}"));
+                offset += 1;
+            }
         }
     }
     let mut out = lines.join("\n");
@@ -1141,4 +1179,133 @@ pub(super) fn parse_shell(value: &str) -> Option<Shell> {
     let program = parts.next()?.to_string();
     let args = parts.map(str::to_string).collect();
     Some(Shell::new(program, args))
+}
+
+#[cfg(test)]
+mod merge_tests {
+    //! `merge_config` writes straight to the user's `glassy.conf` on every Save —
+    //! a bug here silently corrupts it. These are regression tests for a bug
+    //! found while auditing this function for the profiles-ui work: it appended
+    //! a missing top-level key at the ABSOLUTE END of the file, with no regard
+    //! for section boundaries, so a key saved while the file's LAST section was
+    //! `[profile.NAME]` (or `[keybindings]`) landed INSIDE that section instead
+    //! of at the top level.
+    use super::*;
+
+    fn upd<'a>(pairs: &[(&'a str, &str)]) -> Vec<(&'a str, String)> {
+        pairs.iter().map(|(k, v)| (*k, v.to_string())).collect()
+    }
+
+    #[test]
+    fn merge_config_empty_file_appends_all() {
+        let out = merge_config("", &upd(&[("theme", "dracula"), ("opacity", "0.9")]));
+        assert_eq!(out, "theme = dracula\nopacity = 0.9\n");
+    }
+
+    #[test]
+    fn merge_config_updates_in_place_preserves_position_and_comments() {
+        let existing = "\
+# my config
+theme = tokyo-night
+font_size = 14
+opacity = 0.80
+";
+        let out = merge_config(existing, &upd(&[("font_size", "20"), ("opacity", "0.95")]));
+        assert_eq!(
+            out,
+            "\
+# my config
+theme = tokyo-night
+font_size = 20
+opacity = 0.95
+"
+        );
+    }
+
+    #[test]
+    fn merge_config_appends_missing_key_when_no_sections_exist() {
+        let existing = "theme = dracula\nfont_size = 14\n";
+        let out = merge_config(existing, &upd(&[("scrollback", "5000")]));
+        assert_eq!(out, "theme = dracula\nfont_size = 14\nscrollback = 5000\n");
+    }
+
+    /// REGRESSION: `merge_config` used to append a missing top-level key at the
+    /// absolute END of the file. With `[profile.work]` as the last thing in the
+    /// file, the appended `scrollback` line used to land AFTER `font_size = 18`
+    /// — i.e. INSIDE `[profile.work]` — silently turning it into a profile-only
+    /// override instead of a top-level default. Proof this was a real bug: run
+    /// `git stash` then `git log -p` on the pre-fix `merge_config` (unconditional
+    /// `lines.push(...)` with no section-boundary check) against this exact
+    /// input and the assertion below fails.
+    #[test]
+    fn merge_config_top_level_append_lands_before_first_section_not_inside_it() {
+        let existing = "\
+theme = dracula
+
+[profile.work]
+font_size = 18
+";
+        let out = merge_config(existing, &upd(&[("scrollback", "5000")]));
+        assert_eq!(
+            out,
+            "\
+theme = dracula
+scrollback = 5000
+
+[profile.work]
+font_size = 18
+"
+        );
+        // The appended line must be BEFORE the section header, not after/inside it.
+        let section_line = out.lines().position(|l| l == "[profile.work]").unwrap();
+        let appended_line = out.lines().position(|l| l == "scrollback = 5000").unwrap();
+        assert!(
+            appended_line < section_line,
+            "top-level append must precede the first section header"
+        );
+    }
+
+    /// Same regression, but with `[keybindings]` as the last section — the same
+    /// unconditional end-of-file append bug would have corrupted a keybinding
+    /// override into a nonsense top-level-looking line inside `[keybindings]`.
+    #[test]
+    fn merge_config_top_level_append_lands_before_keybindings_section() {
+        let existing = "theme = dracula\n\n[keybindings]\nctrl+t = new_tab\n";
+        let out = merge_config(existing, &upd(&[("scrollback", "5000")]));
+        let section_line = out.lines().position(|l| l == "[keybindings]").unwrap();
+        let appended_line = out.lines().position(|l| l == "scrollback = 5000").unwrap();
+        assert!(appended_line < section_line);
+    }
+
+    /// A key with the same name that exists ONLY inside a `[profile.*]` section
+    /// must not be mistaken for an existing top-level key: saving it at the top
+    /// level appends a NEW top-level line, and the profile-scoped one is left
+    /// completely untouched.
+    #[test]
+    fn merge_config_key_inside_section_is_not_mistaken_for_top_level() {
+        let existing = "theme = dracula\n\n[profile.compact]\nfont_size = 10\n";
+        let out = merge_config(existing, &upd(&[("font_size", "16")]));
+        assert_eq!(
+            out,
+            "theme = dracula\nfont_size = 16\n\n[profile.compact]\nfont_size = 10\n"
+        );
+    }
+
+    #[test]
+    fn merge_config_no_trailing_newline_in_source_still_normalizes() {
+        let existing = "theme = dracula";
+        let out = merge_config(existing, &upd(&[("opacity", "0.9")]));
+        assert_eq!(out, "theme = dracula\nopacity = 0.9\n");
+        assert!(out.ends_with('\n') && !out.ends_with("\n\n"));
+    }
+
+    #[test]
+    fn is_section_header_detects_any_bracketed_line() {
+        assert!(is_section_header("[profile.work]"));
+        assert!(is_section_header("[keybindings]"));
+        assert!(is_section_header("  [foo]  "));
+        assert!(!is_section_header("theme = dracula"));
+        assert!(!is_section_header(""));
+        assert!(!is_section_header("[unterminated"));
+    }
 }

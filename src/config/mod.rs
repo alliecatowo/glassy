@@ -252,26 +252,11 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // merge_config tests
+    // merge_config tests: see `config::parse::merge_tests` for the exhaustive
+    // coverage (`merge_config` is private to `parse.rs`) — this stub asserted
+    // nothing (the setup was dead code with no assertion), so it's replaced
+    // rather than kept alongside the real tests.
     // -----------------------------------------------------------------------
-
-    #[test]
-    fn merge_updates_in_place_and_appends() {
-        let _existing = "\
-# my config
-theme = dracula
-font_size = 14
-opacity = 0.80
-";
-        // merge_config is private but tested indirectly via save()
-        // For direct access, we'd need to expose it or test via integration
-        let _updates = [
-            ("font_size", "20".to_string()),
-            ("opacity", "0.95".to_string()),
-            ("bell_visual", "false".to_string()),
-        ];
-        // Verify the logic inline: it should preserve comments and update in place
-    }
 
     // -----------------------------------------------------------------------
     // Boolean parsing tests
