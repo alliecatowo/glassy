@@ -466,9 +466,16 @@ impl App {
         // `begin_row` and the cursor overlay can re-target it later.
         let mut row_started = vec![false; rows];
 
-        // Collect the visible cells so we can look ahead across cells when
-        // reconstructing grapheme clusters (compound emoji span several cells).
-        let cells: Vec<_> = content.display_iter.collect();
+        // Read cells straight from the grid one dirty row at a time (in the loop
+        // below) instead of materializing the whole viewport every frame. `Grid`
+        // indexes a row in O(1), and each display row is self-contained: grapheme
+        // clusters, wide-char spacers and ligature runs are all row-scoped
+        // (`build_grapheme`/`unit_len` never look past the row, and a ligature run
+        // only continues while `run_row == srow`), so per-row buffers preserve every
+        // lookahead the old flat `display_iter.collect()` relied on. `grid` shares
+        // the same immutable term borrow as `content.colors`; `content.display_iter`
+        // is now unused.
+        let grid = term.grid();
 
         // Ligature run accumulator. When ligature shaping is active we buffer
         // consecutive simple (no-combiner, single-cell, same bold/italic/row)
@@ -523,219 +530,240 @@ impl App {
             };
         }
 
-        let mut ci = 0;
-        while ci < cells.len() {
-            let indexed = &cells[ci];
-            let cell = indexed.cell;
-
-            // The right half of a wide character is a spacer; a base cell consumes
-            // its own spacer below, so any spacer reached here is stray — skip it.
-            if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
-                ci += 1;
-                continue;
-            }
-
-            let row = indexed.point.line.0 + display_offset;
-            let col = indexed.point.column.0 as i32;
-            if row < 0 || row >= self.rows as i32 || col < 0 || col >= self.cols as i32 {
-                ci += 1;
-                continue;
-            }
-            let row_u = row as usize;
-            // Skip cells in rows that did not change: their instances are reused.
+        // Per-row cell buffer, reused across rows within this frame via `.clear()`.
+        // It borrows the term lock guard (`&Cell`), so it must be function-local
+        // rather than a persistent App field. Only dirty rows are visited; on a full
+        // rebuild every row is marked dirty above, so the visit order (top to bottom)
+        // and set are identical to the old whole-viewport traversal.
+        let mut row_buf: Vec<Indexed<&Cell>> = Vec::new();
+        for row_u in 0..rows {
             if !dirty[row_u] {
-                flush_run!();
-                ci += unit_len(&cells, ci);
                 continue;
             }
-            // First cell of a dirty row: clear it and begin pushing into it. The
-            // tab-bar inset is applied in pixels by the renderer (grid_origin_y),
-            // so the screen row equals the terminal row.
-            let srow = row_u;
-            if !row_started[srow] {
-                renderer.begin_row(srow);
-                row_started[srow] = true;
+            // Rows outside the grid's visible lines are never yielded by
+            // `display_iter`; skip them so behaviour matches the old bounds check.
+            if !collect_display_row(grid, row_u, display_offset, &mut row_buf) {
+                continue;
             }
+            let mut ci = 0;
+            while ci < row_buf.len() {
+                let indexed = &row_buf[ci];
+                let cell = indexed.cell;
 
-            let mut fg = color::resolve(cell.fg, colors);
-            let mut bg = color::resolve(cell.bg, colors);
-
-            if cell.flags.contains(Flags::INVERSE) {
-                std::mem::swap(&mut fg, &mut bg);
-            }
-            if cell.flags.contains(Flags::DIM) {
-                fg = [fg[0] * 0.66, fg[1] * 0.66, fg[2] * 0.66, fg[3]];
-            }
-            // Tint selected cells. Done before the cursor inversion so the cursor
-            // still reads clearly when it sits inside the selection.
-            if selection.is_some_and(|range| range.contains(indexed.point)) {
-                bg = color::selection_bg();
-            }
-            // Block cursor: invert the cell beneath it.
-            if invert_block && row == cursor_row && col == cursor_col {
-                std::mem::swap(&mut fg, &mut bg);
-            }
-            let hidden = cell.flags.contains(Flags::HIDDEN);
-
-            let bold = cell.flags.contains(Flags::BOLD) || cell.flags.contains(Flags::BOLD_ITALIC);
-            let italic =
-                cell.flags.contains(Flags::ITALIC) || cell.flags.contains(Flags::BOLD_ITALIC);
-            // A double-width (CJK / wide-emoji) cell spans two columns; the
-            // trailing spacer column is skipped above. The renderer lays the
-            // glyph out across the full two-cell box when this is set.
-            let wide = cell.flags.contains(Flags::WIDE_CHAR);
-
-            // Text decorations. Hidden cells draw nothing, so suppress strokes
-            // too. Underline styles are mutually exclusive (latest SGR wins);
-            // map the cell flags to a single style. The decoration color is the
-            // SGR 58 underline color when set, else the cell foreground, so e.g.
-            // a red LSP curl sits under default-fg text.
-            let mut decorations = if hidden {
-                Decorations::default()
-            } else {
-                let underline = if cell.flags.contains(Flags::UNDERCURL) {
-                    UnderlineStyle::Curl
-                } else if cell.flags.contains(Flags::DOTTED_UNDERLINE) {
-                    UnderlineStyle::Dotted
-                } else if cell.flags.contains(Flags::DASHED_UNDERLINE) {
-                    UnderlineStyle::Dashed
-                } else if cell.flags.contains(Flags::DOUBLE_UNDERLINE) {
-                    UnderlineStyle::Double
-                } else if cell.flags.contains(Flags::UNDERLINE) {
-                    UnderlineStyle::Single
-                } else {
-                    UnderlineStyle::None
-                };
-                let color = cell
-                    .underline_color()
-                    .map(|c| color::resolve(c, colors))
-                    .unwrap_or(fg);
-                Decorations {
-                    underline,
-                    strikeout: cell.flags.contains(Flags::STRIKEOUT),
-                    // SGR 53 overline (tracked in the side table, keyed by the
-                    // absolute grid row + column this cell occupies).
-                    overline: !overline_cells.is_empty()
-                        && overline_cells.contains(&(row, col as usize)),
-                    color,
+                // The right half of a wide character is a spacer; a base cell consumes
+                // its own spacer below, so any spacer reached here is stray — skip it.
+                if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                    ci += 1;
+                    continue;
                 }
-            };
 
-            // Underline the hovered link's cells as a Ctrl+click affordance.
-            // OSC 8 links: match by URI stored in the cell's hyperlink field.
-            // Plain-text links: match by pre-computed col range on the hovered row.
-            if !hidden && matches!(decorations.underline, UnderlineStyle::None) {
-                let is_hovered_osc8 = hovered_link
-                    .as_deref()
-                    .is_some_and(|hov| cell.hyperlink().is_some_and(|h| h.uri() == hov));
-                let is_hovered_plain = !plain_link_spans.is_empty()
-                    && row_u == hovered_cell_row
-                    && plain_link_spans
-                        .iter()
-                        .any(|s| (col as usize) >= s.col_start && (col as usize) < s.col_end);
-                if is_hovered_osc8 || is_hovered_plain {
-                    decorations.underline = UnderlineStyle::Single;
+                let row = indexed.point.line.0 + display_offset;
+                let col = indexed.point.column.0 as i32;
+                if row < 0 || row >= self.rows as i32 || col < 0 || col >= self.cols as i32 {
+                    ci += 1;
+                    continue;
                 }
-            }
-
-            let ch = if hidden || cell.c == '\0' {
-                ' '
-            } else {
-                cell.c
-            };
-            // Reconstruct the grapheme cluster, merging this cell's combining /
-            // ZWJ code points with any following cells joined by ZWJ, a skin-tone
-            // modifier, a regional-indicator pair, or a variation selector — so
-            // compound emoji (flags, families, professions) shape into one glyph.
-            let (combiners, consumed) = if hidden {
-                (Vec::new(), unit_len(&cells, ci))
-            } else {
-                build_grapheme(&cells, ci, indexed.point.line.0)
-            };
-            // A cluster that spans 2+ grid cells (a wide CJK char, but also an
-            // emoji whose base code point is *narrow* yet joins following cells —
-            // e.g. the trans flag 🏳️‍⚧️ = narrow white-flag + ZWJ + symbol) must get
-            // a 2-cell box so its color glyph fills the space instead of being
-            // squished into one cell.
-            let wide = wide || consumed >= 2;
-
-            // Whether the (shown) cursor sits on this exact cell. A ligature run
-            // must not span the cursor cell: while editing, the character under the
-            // cursor has to render as its own glyph (not be swallowed into a wider
-            // ligature like `=>` → `⇒`), so the user sees and edits the real char.
-            // This holds for EVERY cursor shape (not just the inverting block):
-            // a beam/underline cursor over the middle of a ligature is just as
-            // misleading. Independent of fg/bg inversion, which only the block does.
-            let is_cursor_cell = cursor_shown && cur_cursor_cell == Some((col as usize, srow));
-
-            // Determine whether this cell is eligible for ligature run accumulation.
-            // A cell is ineligible if it has combiners, is wide, is hidden, is a
-            // space/null (blank), falls in the box-drawing / block-element ranges
-            // (those take the procedural path in push_cell and must not be shaped as
-            // part of a text run), or carries the cursor (so it splits out as an
-            // individual glyph — see `is_cursor_cell`).
-            let cp = ch as u32;
-            let is_box_or_block = (0x2500..=0x259F).contains(&cp);
-            let liga_eligible = use_liga
-                && !hidden
-                && combiners.is_empty()
-                && !wide
-                && ch != ' '
-                && ch != '\0'
-                && !is_box_or_block
-                && !is_cursor_cell;
-
-            if liga_eligible {
-                // Check if this cell is compatible with the current open run.
-                // A run break occurs on row change or style change. (The cursor cell
-                // itself is already excluded from `liga_eligible` above, so it never
-                // reaches here — it takes the individual `push_cell` path below.)
-                let run_continues = !run_cells.is_empty()
-                    && run_row == srow
-                    && run_bold == bold
-                    && run_italic == italic;
-
-                if !run_continues {
-                    // Flush any open run before starting a new one.
+                let row_u = row as usize;
+                // Skip cells in rows that did not change: their instances are reused.
+                if !dirty[row_u] {
                     flush_run!();
-                    run_row = srow;
-                    run_bold = bold;
-                    run_italic = italic;
+                    ci += unit_len(&row_buf, ci);
+                    continue;
+                }
+                // First cell of a dirty row: clear it and begin pushing into it. The
+                // tab-bar inset is applied in pixels by the renderer (grid_origin_y),
+                // so the screen row equals the terminal row.
+                let srow = row_u;
+                if !row_started[srow] {
+                    renderer.begin_row(srow);
+                    row_started[srow] = true;
                 }
 
-                // Append this cell to the run.
-                run_text.push(ch);
-                run_cells.push(LigatureCell {
-                    col: col as usize,
+                let mut fg = color::resolve(cell.fg, colors);
+                let mut bg = color::resolve(cell.bg, colors);
+
+                if cell.flags.contains(Flags::INVERSE) {
+                    std::mem::swap(&mut fg, &mut bg);
+                }
+                if cell.flags.contains(Flags::DIM) {
+                    fg = [fg[0] * 0.66, fg[1] * 0.66, fg[2] * 0.66, fg[3]];
+                }
+                // Tint selected cells. Done before the cursor inversion so the cursor
+                // still reads clearly when it sits inside the selection.
+                if selection.is_some_and(|range| range.contains(indexed.point)) {
+                    bg = color::selection_bg();
+                }
+                // Block cursor: invert the cell beneath it.
+                if invert_block && row == cursor_row && col == cursor_col {
+                    std::mem::swap(&mut fg, &mut bg);
+                }
+                let hidden = cell.flags.contains(Flags::HIDDEN);
+
+                let bold =
+                    cell.flags.contains(Flags::BOLD) || cell.flags.contains(Flags::BOLD_ITALIC);
+                let italic =
+                    cell.flags.contains(Flags::ITALIC) || cell.flags.contains(Flags::BOLD_ITALIC);
+                // A double-width (CJK / wide-emoji) cell spans two columns; the
+                // trailing spacer column is skipped above. The renderer lays the
+                // glyph out across the full two-cell box when this is set.
+                let wide = cell.flags.contains(Flags::WIDE_CHAR);
+
+                // Text decorations. Hidden cells draw nothing, so suppress strokes
+                // too. Underline styles are mutually exclusive (latest SGR wins);
+                // map the cell flags to a single style. The decoration color is the
+                // SGR 58 underline color when set, else the cell foreground, so e.g.
+                // a red LSP curl sits under default-fg text.
+                let mut decorations = if hidden {
+                    Decorations::default()
+                } else {
+                    let underline = if cell.flags.contains(Flags::UNDERCURL) {
+                        UnderlineStyle::Curl
+                    } else if cell.flags.contains(Flags::DOTTED_UNDERLINE) {
+                        UnderlineStyle::Dotted
+                    } else if cell.flags.contains(Flags::DASHED_UNDERLINE) {
+                        UnderlineStyle::Dashed
+                    } else if cell.flags.contains(Flags::DOUBLE_UNDERLINE) {
+                        UnderlineStyle::Double
+                    } else if cell.flags.contains(Flags::UNDERLINE) {
+                        UnderlineStyle::Single
+                    } else {
+                        UnderlineStyle::None
+                    };
+                    let color = cell
+                        .underline_color()
+                        .map(|c| color::resolve(c, colors))
+                        .unwrap_or(fg);
+                    Decorations {
+                        underline,
+                        strikeout: cell.flags.contains(Flags::STRIKEOUT),
+                        // SGR 53 overline (tracked in the side table, keyed by the
+                        // absolute grid row + column this cell occupies).
+                        overline: !overline_cells.is_empty()
+                            && overline_cells.contains(&(row, col as usize)),
+                        color,
+                    }
+                };
+
+                // Underline the hovered link's cells as a Ctrl+click affordance.
+                // OSC 8 links: match by URI stored in the cell's hyperlink field.
+                // Plain-text links: match by pre-computed col range on the hovered row.
+                if !hidden && matches!(decorations.underline, UnderlineStyle::None) {
+                    let is_hovered_osc8 = hovered_link
+                        .as_deref()
+                        .is_some_and(|hov| cell.hyperlink().is_some_and(|h| h.uri() == hov));
+                    let is_hovered_plain = !plain_link_spans.is_empty()
+                        && row_u == hovered_cell_row
+                        && plain_link_spans
+                            .iter()
+                            .any(|s| (col as usize) >= s.col_start && (col as usize) < s.col_end);
+                    if is_hovered_osc8 || is_hovered_plain {
+                        decorations.underline = UnderlineStyle::Single;
+                    }
+                }
+
+                let ch = if hidden || cell.c == '\0' {
+                    ' '
+                } else {
+                    cell.c
+                };
+                // Reconstruct the grapheme cluster, merging this cell's combining /
+                // ZWJ code points with any following cells joined by ZWJ, a skin-tone
+                // modifier, a regional-indicator pair, or a variation selector — so
+                // compound emoji (flags, families, professions) shape into one glyph.
+                let (combiners, consumed) = if hidden {
+                    (Vec::new(), unit_len(&row_buf, ci))
+                } else {
+                    build_grapheme(&row_buf, ci, indexed.point.line.0)
+                };
+                // A cluster that spans 2+ grid cells (a wide CJK char, but also an
+                // emoji whose base code point is *narrow* yet joins following cells —
+                // e.g. the trans flag 🏳️‍⚧️ = narrow white-flag + ZWJ + symbol) must get
+                // a 2-cell box so its color glyph fills the space instead of being
+                // squished into one cell.
+                let wide = wide || consumed >= 2;
+
+                // Whether the (shown) cursor sits on this exact cell. A ligature run
+                // must not span the cursor cell: while editing, the character under the
+                // cursor has to render as its own glyph (not be swallowed into a wider
+                // ligature like `=>` → `⇒`), so the user sees and edits the real char.
+                // This holds for EVERY cursor shape (not just the inverting block):
+                // a beam/underline cursor over the middle of a ligature is just as
+                // misleading. Independent of fg/bg inversion, which only the block does.
+                let is_cursor_cell = cursor_shown && cur_cursor_cell == Some((col as usize, srow));
+
+                // Determine whether this cell is eligible for ligature run accumulation.
+                // A cell is ineligible if it has combiners, is wide, is hidden, is a
+                // space/null (blank), falls in the box-drawing / block-element ranges
+                // (those take the procedural path in push_cell and must not be shaped as
+                // part of a text run), or carries the cursor (so it splits out as an
+                // individual glyph — see `is_cursor_cell`).
+                let cp = ch as u32;
+                let is_box_or_block = (0x2500..=0x259F).contains(&cp);
+                let liga_eligible = use_liga
+                    && !hidden
+                    && combiners.is_empty()
+                    && !wide
+                    && ch != ' '
+                    && ch != '\0'
+                    && !is_box_or_block
+                    && !is_cursor_cell;
+
+                if liga_eligible {
+                    // Check if this cell is compatible with the current open run.
+                    // A run break occurs on row change or style change. (The cursor cell
+                    // itself is already excluded from `liga_eligible` above, so it never
+                    // reaches here — it takes the individual `push_cell` path below.)
+                    let run_continues = !run_cells.is_empty()
+                        && run_row == srow
+                        && run_bold == bold
+                        && run_italic == italic;
+
+                    if !run_continues {
+                        // Flush any open run before starting a new one.
+                        flush_run!();
+                        run_row = srow;
+                        run_bold = bold;
+                        run_italic = italic;
+                    }
+
+                    // Append this cell to the run.
+                    run_text.push(ch);
+                    run_cells.push(LigatureCell {
+                        col: col as usize,
+                        fg,
+                        bg,
+                        wide: false, // we checked !wide above
+                        decorations,
+                    });
+                    ci += consumed;
+                    continue;
+                }
+
+                // Non-ligature path: flush any open ligature run first.
+                flush_run!();
+
+                renderer.push_cell(
+                    col as usize,
+                    srow,
+                    ch,
+                    &combiners,
                     fg,
                     bg,
-                    wide: false, // we checked !wide above
+                    bold,
+                    italic,
+                    wide,
                     decorations,
-                });
+                );
                 ci += consumed;
-                continue;
             }
 
-            // Non-ligature path: flush any open ligature run first.
+            // Flush the ligature run at the end of every row. Runs never span rows
+            // (`run_continues` requires `run_row == srow`), so this is equivalent to
+            // the old single end-of-buffer flush while keeping each run's cells in
+            // their own row's instance storage (`push_*` targets the renderer's
+            // current row, which is this row).
             flush_run!();
-
-            renderer.push_cell(
-                col as usize,
-                srow,
-                ch,
-                &combiners,
-                fg,
-                bg,
-                bold,
-                italic,
-                wide,
-                decorations,
-            );
-            ci += consumed;
         }
-
-        // Flush any remaining ligature run at end of cell list.
-        flush_run!();
 
         // The real GUI tab bar is painted as a pixel overlay near the END of the
         // frame (after the cursor + images), so it composites above everything in
