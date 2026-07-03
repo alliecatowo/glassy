@@ -499,6 +499,10 @@ impl App {
                 self.paste_clipboard();
                 self.mark_dirty(event_loop);
             }
+            SelectAll => {
+                self.select_all();
+                self.mark_dirty(event_loop);
+            }
             ToggleStatusBar => {
                 self.toggle_status_bar();
                 self.mark_dirty(event_loop);
