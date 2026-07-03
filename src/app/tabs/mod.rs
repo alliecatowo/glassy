@@ -138,6 +138,8 @@ impl App {
             mod_hold_since: None,
             vi: Default::default(),
             opacity_before_toggle: None,
+            pending_drop_files: Vec::new(),
+            drop_hover: false,
         }
     }
 
