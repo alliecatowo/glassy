@@ -461,8 +461,6 @@ pub struct SettingsView<'a> {
     pub command_badges: bool,
     /// Animate the cursor between cells (cursor trail).
     pub cursor_trail: bool,
-    /// CRT / scanline post-process effect enabled.
-    pub crt_effect: bool,
     /// Include the cwd in the OS window title.
     pub title_show_cwd: bool,
     /// Append " · N tabs" to the OS window title.
@@ -526,7 +524,20 @@ impl SettingsSection {
 /// Everything the settings form reported this frame. The App applies each
 /// non-default field to its live effects (`resize_font`, `set_opacity`,
 /// `cycle_theme`/`set_theme`, `save_settings`, …).
-#[derive(Clone, Copy, Debug, Default)]
+///
+/// Not `Copy` (the `toggled` list needs an allocation): every boolean toggle
+/// row used to carry its own dedicated `*_toggle: bool` field, set by a
+/// widget-id string match in `settings_panel::draw_control_row` and then read
+/// back through a near-identical `if ev.foo_toggle { … }` block in
+/// `App::apply_settings_events`. `toggled` collapses that into one table-driven
+/// path: a toggle row just pushes its widget id here, and
+/// `App::apply_settings_events` resolves each id via a small
+/// `(widget_id, accessor)` table for the plain flips, matching explicitly only
+/// the few toggles with extra live side effects (grid reflow, renderer sync,
+/// session-dirty). Adding a new plain boolean setting is then one
+/// `RowKind::Toggle` push + one table row, instead of a field here + a match
+/// arm in `settings_panel.rs` + an `if` block in `chrome.rs`.
+#[derive(Clone, Debug, Default)]
 pub struct SettingsEvents {
     /// Font-size stepper delta in clicks (-1 / 0 / +1).
     pub font_delta: i32,
@@ -556,22 +567,14 @@ pub struct SettingsEvents {
     pub close: bool,
     /// The bounding rect of the whole panel (for click-outside dismissal).
     pub panel: Rect,
-    /// Status bar toggle was clicked.
-    pub status_bar_toggle: bool,
-    /// Pane-headers toggle was clicked.
-    pub pane_headers_toggle: bool,
-    /// Follow-system toggle was clicked.
-    pub follow_system_toggle: bool,
-    /// Ligatures toggle was clicked.
-    pub ligatures_toggle: bool,
-    /// Restore-session toggle was clicked.
-    pub restore_session_toggle: bool,
+    /// Widget ids of every boolean toggle row clicked this frame (see the
+    /// struct doc comment). Populated by `settings_panel::draw_control_row`;
+    /// consulted by `App::apply_settings_events`.
+    pub toggled: Vec<&'static str>,
     /// Padding stepper delta in clicks (-1 / 0 / +1).
     pub padding_delta: i32,
     /// New cursor-shape index if the segmented control changed.
     pub cursor_style: Option<usize>,
-    /// Cursor-blink toggle was clicked.
-    pub cursor_blink_toggle: bool,
     /// New tab-bar-mode index if the segmented control changed (0/1/2).
     pub tab_bar_mode: Option<usize>,
     /// New window-effect index if the segmented control changed (0..=8).
@@ -585,20 +588,6 @@ pub struct SettingsEvents {
     pub section_pick: Option<usize>,
     /// The active section's right-pane scroll moved (new offset in px).
     pub section_scroll: Option<f32>,
-    /// Copy-on-select toggle was clicked.
-    pub copy_on_select_toggle: bool,
-    /// Minimap toggle was clicked.
-    pub minimap_toggle: bool,
-    /// Command-badges toggle was clicked.
-    pub command_badges_toggle: bool,
-    /// Cursor-trail toggle was clicked.
-    pub cursor_trail_toggle: bool,
-    /// CRT-effect toggle was clicked.
-    pub crt_effect_toggle: bool,
-    /// Title-show-cwd toggle was clicked.
-    pub title_show_cwd_toggle: bool,
-    /// Title-show-count toggle was clicked.
-    pub title_show_count_toggle: bool,
     /// The system Light-mode theme dropdown header was toggled.
     pub theme_light_toggle: bool,
     /// A system Light-mode theme row was picked (absolute index into THEME_NAMES).

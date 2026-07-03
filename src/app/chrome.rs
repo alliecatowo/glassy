@@ -104,6 +104,27 @@ pub(crate) enum ConfirmCloseResult {
     Cancel,
 }
 
+/// A `CONFIG_TOGGLES` entry's accessor: returns the `&mut bool` a toggle flips.
+type ConfigToggleField = fn(&mut Config) -> &mut bool;
+
+/// Plain boolean settings-form toggles: `(widget id, config field accessor)`.
+/// Consulted by [`App::apply_settings_events`] for every id in
+/// `SettingsEvents::toggled` that isn't one of the toggles matched explicitly
+/// there because it drives an extra live side effect beyond the flip itself
+/// (status bar / pane headers reflow the grid; ligatures / cursor trail push to
+/// the renderer; restore-session marks the session dirty). Adding a new plain
+/// boolean setting is then one `RowKind::Toggle` push (`settings_panel.rs`) +
+/// one row here — no new `SettingsEvents` field, no new `if` block.
+const CONFIG_TOGGLES: &[(&str, ConfigToggleField)] = &[
+    ("settings/follow_system", |c| &mut c.follow_system),
+    ("settings/cursor_blink", |c| &mut c.cursor_blink),
+    ("settings/copy_on_select", |c| &mut c.copy_on_select),
+    ("settings/minimap", |c| &mut c.minimap),
+    ("settings/command_badges", |c| &mut c.command_badges),
+    ("settings/title_show_cwd", |c| &mut c.title_show_cwd),
+    ("settings/title_show_count", |c| &mut c.title_show_count),
+];
+
 impl App {
     // paint_tab_bar, paint_tab_chip, paint_tab_label live in tab_paint.rs.
 
@@ -576,7 +597,6 @@ impl App {
             minimap: config.minimap,
             command_badges: config.command_badges,
             cursor_trail: config.cursor_trail,
-            crt_effect: config.crt_effect,
             title_show_cwd: config.title_show_cwd,
             title_show_count: config.title_show_count,
             theme_light: &config.theme_light,
@@ -645,14 +665,6 @@ impl App {
             self.adjust_scrollback(ev.scrollback_delta);
             changed = true;
         }
-        if ev.status_bar_toggle {
-            self.toggle_status_bar();
-            changed = true;
-        }
-        if ev.pane_headers_toggle {
-            self.toggle_pane_headers();
-            changed = true;
-        }
         if let Some(idx) = ev.tab_bar_mode {
             self.set_tab_bar_mode_index(idx);
             changed = true;
@@ -677,36 +689,12 @@ impl App {
             self.apply_custom_effect();
             changed = true;
         }
-        if ev.follow_system_toggle {
-            self.config.follow_system = !self.config.follow_system;
-            self.settings_saved = false;
-            changed = true;
-        }
-        if ev.ligatures_toggle {
-            self.config.ligatures = !self.config.ligatures;
-            if let Some(r) = self.renderer.as_mut() {
-                r.set_ligatures(self.config.ligatures);
-            }
-            self.settings_saved = false;
-            changed = true;
-        }
-        if ev.restore_session_toggle {
-            self.config.restore_session = !self.config.restore_session;
-            self.session_dirty = true;
-            self.settings_saved = false;
-            changed = true;
-        }
         if ev.padding_delta != 0 {
             self.adjust_padding(ev.padding_delta);
             changed = true;
         }
         if let Some(cs_idx) = ev.cursor_style {
             self.set_cursor_style_index(cs_idx);
-            changed = true;
-        }
-        if ev.cursor_blink_toggle {
-            self.config.cursor_blink = !self.config.cursor_blink;
-            self.settings_saved = false;
             changed = true;
         }
         // --- settings-themes stream events ---
@@ -718,45 +706,47 @@ impl App {
             self.settings_section_scroll = s;
             changed = true;
         }
-        if ev.copy_on_select_toggle {
-            self.config.copy_on_select = !self.config.copy_on_select;
-            self.settings_saved = false;
-            changed = true;
-        }
-        if ev.minimap_toggle {
-            self.config.minimap = !self.config.minimap;
-            self.settings_saved = false;
-            changed = true;
-        }
-        if ev.command_badges_toggle {
-            self.config.command_badges = !self.config.command_badges;
-            self.settings_saved = false;
-            changed = true;
-        }
-        if ev.cursor_trail_toggle {
-            self.config.cursor_trail = !self.config.cursor_trail;
-            if let Some(r) = self.renderer.as_mut() {
-                r.set_cursor_trail(self.config.cursor_trail);
+        // Every boolean toggle row fired this frame (see `SettingsEvents::toggled`'s
+        // doc comment for why this replaced a dedicated `*_toggle: bool` field +
+        // `if` block per toggle). Toggles with extra live side effects (grid
+        // reflow, renderer sync, session-dirty) are matched explicitly; everything
+        // else is a plain flip resolved via `CONFIG_TOGGLES`.
+        for &wid in &ev.toggled {
+            match wid {
+                "settings/status_bar" => {
+                    self.toggle_status_bar();
+                }
+                "settings/pane_headers" => {
+                    self.toggle_pane_headers();
+                }
+                "settings/ligatures" => {
+                    self.config.ligatures = !self.config.ligatures;
+                    if let Some(r) = self.renderer.as_mut() {
+                        r.set_ligatures(self.config.ligatures);
+                    }
+                    self.settings_saved = false;
+                }
+                "settings/restore_session" => {
+                    self.config.restore_session = !self.config.restore_session;
+                    self.session_dirty = true;
+                    self.settings_saved = false;
+                }
+                "settings/cursor_trail" => {
+                    self.config.cursor_trail = !self.config.cursor_trail;
+                    if let Some(r) = self.renderer.as_mut() {
+                        r.set_cursor_trail(self.config.cursor_trail);
+                    }
+                    self.settings_saved = false;
+                }
+                other => {
+                    if let Some((_, apply)) = CONFIG_TOGGLES.iter().find(|(id, _)| *id == other) {
+                        *apply(&mut self.config) ^= true;
+                        self.settings_saved = false;
+                    } else {
+                        log::debug!("glassy: settings toggle: unknown widget id '{other}'");
+                    }
+                }
             }
-            self.settings_saved = false;
-            changed = true;
-        }
-        if ev.crt_effect_toggle {
-            self.config.crt_effect = !self.config.crt_effect;
-            if let Some(r) = self.renderer.as_mut() {
-                r.set_crt(self.config.crt_effect);
-            }
-            self.settings_saved = false;
-            changed = true;
-        }
-        if ev.title_show_cwd_toggle {
-            self.config.title_show_cwd = !self.config.title_show_cwd;
-            self.settings_saved = false;
-            changed = true;
-        }
-        if ev.title_show_count_toggle {
-            self.config.title_show_count = !self.config.title_show_count;
-            self.settings_saved = false;
             changed = true;
         }
         if ev.theme_light_toggle {
