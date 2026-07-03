@@ -21,6 +21,19 @@ const DEFAULT_COMMAND_HISTORY: usize = 200;
 /// notification when the window is unfocused. 10 s avoids spamming for quick
 /// commands while still catching long builds/tests.
 const DEFAULT_NOTIFY_COMMAND_THRESHOLD_MS: u64 = 10_000;
+/// Clamp bounds for `quake_height` (fraction of the monitor height the quake
+/// window occupies). Shared by `apply_kv`, `RawConfig::into_settings`'s default
+/// fallback, the CLI flag parser (`config::cli`), and the settings-form slider
+/// (`gui::settings_panel`) so all four enforce the identical range.
+pub(crate) const QUAKE_HEIGHT_MIN: f32 = 0.1;
+pub(crate) const QUAKE_HEIGHT_MAX: f32 = 1.0;
+/// Clamp bound for `quake_animation_ms` (the quake slide duration). Shared by
+/// `apply_kv`, `RawConfig::into_settings`'s default fallback, the CLI flag
+/// parser, and the settings-form stepper.
+pub(crate) const QUAKE_ANIMATION_MS_MAX: u64 = 5_000;
+/// Clamp bound for `notify_command_threshold_ms` (24 hours). Shared by
+/// `apply_kv` and the settings-form stepper so both enforce the identical cap.
+pub(crate) const NOTIFY_COMMAND_THRESHOLD_MS_MAX: u64 = 86_400_000;
 
 /// A single entry in the `font_symbol_map` config key: a Unicode range mapped
 /// to a specific font family. The shaper routes codepoints in `[start, end]`
@@ -133,6 +146,55 @@ pub fn parse_font_variations(value: &str) -> Vec<String> {
             token.to_string()
         })
         .collect()
+}
+
+/// Parse a `status_bar_segments` value: a comma- or space-separated list of
+/// segment tokens. Unknown tokens are warned about and dropped (never a hard
+/// error — a stray typo shouldn't block startup). Shared by `apply_kv` (the
+/// config-file path) and the live settings-form "Status bar segments" text
+/// field (`App::commit_settings_field` in `settings_fields.rs`) so both apply
+/// the identical token set — this function IS the authoritative parser both
+/// callers of.
+pub(crate) fn parse_status_bar_segments(value: &str) -> Vec<crate::app::StatusBarSegment> {
+    use crate::app::StatusBarSegment;
+    value
+        .split([',', ' '])
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .filter_map(|s| match s.to_ascii_lowercase().as_str() {
+            "cwd" => Some(StatusBarSegment::Cwd),
+            "git_branch" | "git" => Some(StatusBarSegment::GitBranch),
+            "process" | "fg_process" => Some(StatusBarSegment::Process),
+            "time" | "clock" => Some(StatusBarSegment::Time),
+            "mode" => Some(StatusBarSegment::Mode),
+            "broadcast" | "bcast" => Some(StatusBarSegment::Broadcast),
+            "selection" | "sel" => Some(StatusBarSegment::Selection),
+            "scroll" => Some(StatusBarSegment::Scroll),
+            "encoding" | "enc" => Some(StatusBarSegment::Encoding),
+            "progress" => Some(StatusBarSegment::Progress),
+            "exit_status" | "exit" => Some(StatusBarSegment::ExitStatus),
+            "key_hints" | "hints" => Some(StatusBarSegment::KeyHints),
+            other => {
+                log::warn!("glassy: ignoring unknown status_bar_segments entry '{other}'");
+                None
+            }
+        })
+        .collect()
+}
+
+/// Normalize a raw `hints_chars` string to the filtered alphabet `apply_kv`'s
+/// finalization step derives: only ASCII letters are kept, and an alphabet
+/// shorter than 2 chars is rejected (falls back to the built-in default by
+/// returning `None`). Shared by [`RawConfig::into_settings`] (the config-file
+/// path) and the live settings-form "Hint chars" text field so both apply the
+/// identical rule.
+pub(crate) fn normalize_hints_chars(s: &str) -> Option<String> {
+    let filtered: String = s.chars().filter(|c| c.is_ascii_alphabetic()).collect();
+    if filtered.chars().count() >= 2 {
+        Some(filtered)
+    } else {
+        None
+    }
 }
 
 /// Accumulated raw configuration before validation/finalization. Every field is
@@ -370,22 +432,22 @@ impl RawConfig {
             show_tab_bar: parse_tab_bar_mode(self.show_tab_bar.as_deref()),
             title_show_cwd: self.title_show_cwd.unwrap_or(true),
             title_show_count: self.title_show_count.unwrap_or(false),
-            hints_chars: self
-                .hints_chars
-                .filter(|s| s.chars().filter(|c| c.is_ascii_alphabetic()).count() >= 2)
-                .map(|s| s.chars().filter(|c| c.is_ascii_alphabetic()).collect()),
+            hints_chars: self.hints_chars.and_then(|s| normalize_hints_chars(&s)),
             command_badges: self.command_badges.unwrap_or(true),
             minimap: self.minimap.unwrap_or(false),
             quake: self.quake.unwrap_or(false),
             quake_height: {
                 let h = self.quake_height.unwrap_or(0.5);
-                if h.is_finite() && (0.1..=1.0).contains(&h) {
+                if h.is_finite() && (QUAKE_HEIGHT_MIN..=QUAKE_HEIGHT_MAX).contains(&h) {
                     h
                 } else {
                     0.5
                 }
             },
-            quake_animation_ms: self.quake_animation_ms.unwrap_or(180).min(5_000),
+            quake_animation_ms: self
+                .quake_animation_ms
+                .unwrap_or(180)
+                .min(QUAKE_ANIMATION_MS_MAX),
             command_history: self.command_history.unwrap_or(DEFAULT_COMMAND_HISTORY),
             dim_unfocused: self.dim_unfocused.unwrap_or(true),
             copy_html: self.copy_html.unwrap_or(false),
@@ -909,7 +971,7 @@ pub(super) fn apply_kv(key: &str, value: &str, raw: &mut RawConfig) -> Result<()
             let ms: u64 = value.parse().with_context(|| {
                 format!("notify_command_threshold_ms: invalid integer '{value}'")
             })?;
-            raw.notify_command_threshold_ms = Some(ms.min(86_400_000)); // cap at 24h
+            raw.notify_command_threshold_ms = Some(ms.min(NOTIFY_COMMAND_THRESHOLD_MS_MAX));
         }
         "command_fold" => {
             raw.command_fold = Some(parse_bool(value, "command_fold")?);
@@ -1031,8 +1093,10 @@ pub(super) fn apply_kv(key: &str, value: &str, raw: &mut RawConfig) -> Result<()
             let h: f32 = value
                 .parse()
                 .with_context(|| format!("quake_height: invalid number '{value}'"))?;
-            if !(h.is_finite() && (0.1..=1.0).contains(&h)) {
-                bail!("quake_height must be between 0.1 and 1.0, got {h}");
+            if !(h.is_finite() && (QUAKE_HEIGHT_MIN..=QUAKE_HEIGHT_MAX).contains(&h)) {
+                bail!(
+                    "quake_height must be between {QUAKE_HEIGHT_MIN} and {QUAKE_HEIGHT_MAX}, got {h}"
+                );
             }
             raw.quake_height = Some(h);
         }
@@ -1040,7 +1104,7 @@ pub(super) fn apply_kv(key: &str, value: &str, raw: &mut RawConfig) -> Result<()
             let ms: u64 = value
                 .parse()
                 .with_context(|| format!("quake_animation_ms: invalid integer '{value}'"))?;
-            raw.quake_animation_ms = Some(ms.min(5_000));
+            raw.quake_animation_ms = Some(ms.min(QUAKE_ANIMATION_MS_MAX));
         }
         "power_mode" => {
             raw.power_mode = Some(parse_bool(value, "power_mode")?);
@@ -1125,36 +1189,10 @@ pub(super) fn apply_kv(key: &str, value: &str, raw: &mut RawConfig) -> Result<()
             }
         }
         "status_bar_segments" => {
-            use crate::app::StatusBarSegment;
             if value.is_empty() {
                 raw.status_bar_segments = None;
             } else {
-                let segs: Vec<StatusBarSegment> = value
-                    .split([',', ' '])
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .filter_map(|s| match s.to_ascii_lowercase().as_str() {
-                        "cwd" => Some(StatusBarSegment::Cwd),
-                        "git_branch" | "git" => Some(StatusBarSegment::GitBranch),
-                        "process" | "fg_process" => Some(StatusBarSegment::Process),
-                        "time" | "clock" => Some(StatusBarSegment::Time),
-                        "mode" => Some(StatusBarSegment::Mode),
-                        "broadcast" | "bcast" => Some(StatusBarSegment::Broadcast),
-                        "selection" | "sel" => Some(StatusBarSegment::Selection),
-                        "scroll" => Some(StatusBarSegment::Scroll),
-                        "encoding" | "enc" => Some(StatusBarSegment::Encoding),
-                        "progress" => Some(StatusBarSegment::Progress),
-                        "exit_status" | "exit" => Some(StatusBarSegment::ExitStatus),
-                        "key_hints" | "hints" => Some(StatusBarSegment::KeyHints),
-                        other => {
-                            log::warn!(
-                                "glassy: ignoring unknown status_bar_segments entry '{other}'"
-                            );
-                            None
-                        }
-                    })
-                    .collect();
-                raw.status_bar_segments = Some(segs);
+                raw.status_bar_segments = Some(parse_status_bar_segments(value));
             }
         }
         "status_bar_time_format" => {
