@@ -1179,6 +1179,27 @@ impl App {
             Self::paint_peek(renderer, peek, area);
         }
 
+        // File drag-and-drop hover affordance: a subtle accent-tinted overlay
+        // over the pane's content area while a file is being dragged over the
+        // window (see `dragdrop.rs`). Single-pane tab: the "focused pane" is the
+        // whole content area.
+        if self.drop_hover {
+            let (sw, sh) = renderer.surface_size();
+            let status_h = if self.config.status_bar {
+                STATUS_BAR_H.round() as i32
+            } else {
+                0
+            };
+            let top = tab_strip_h.round() as i32;
+            let area = pane::Rect {
+                x: 0,
+                y: top,
+                w: sw as i32,
+                h: (sh as i32 - top - status_h).max(0),
+            };
+            Self::paint_drop_hover(renderer, area);
+        }
+
         // Power Mode particle burst: soft glow dots flying out of the cursor,
         // painted above the terminal content but below the toasts/modals. A no-op
         // (zero overlay quads) when there are no live particles, so the common

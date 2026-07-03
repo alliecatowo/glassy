@@ -767,11 +767,48 @@ impl ApplicationHandler<UserEvent> for App {
                 self.mark_dirty(event_loop);
             }
 
+            // File drag-and-drop (see `dragdrop.rs`). A file is being dragged
+            // over the window: show the drop-hover overlay. winit does not
+            // report a pointer position with this event on every backend, so
+            // the overlay covers the whole focused-pane content rect rather
+            // than tracking the cursor.
+            WindowEvent::HoveredFile(_) => {
+                self.drop_hover = true;
+                self.mark_dirty(event_loop);
+            }
+            // The drag left the window (or was cancelled) without dropping.
+            WindowEvent::HoveredFileCancelled => {
+                self.drop_hover = false;
+                self.mark_dirty(event_loop);
+            }
+            // A file was dropped. winit fires one `DroppedFile` per file in a
+            // multi-file drop with no batch-end marker, so queue the path here;
+            // `about_to_wait` flushes the whole queued batch as a single paste
+            // once every event from this wakeup (including the rest of a
+            // multi-file drop) has been delivered.
+            WindowEvent::DroppedFile(path) => {
+                self.drop_hover = false;
+                self.pending_drop_files.push(path);
+                self.mark_dirty(event_loop);
+            }
+
             _ => {}
         }
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // File drag-and-drop: flush any paths queued by `WindowEvent::DroppedFile`
+        // this wakeup as a single paste (see `dragdrop.rs`). winit delivers one
+        // `DroppedFile` per file in a multi-file drop with no batch-end marker;
+        // `about_to_wait` runs once per wakeup, after every event queued for it
+        // (including the rest of a multi-file drop) has already reached
+        // `window_event`, so this coalesces the whole drop into one paste rather
+        // than one per file. `is_empty()` keeps this check O(1) on every idle
+        // wake, preserving the 0%-idle invariant.
+        if !self.pending_drop_files.is_empty() {
+            self.flush_dropped_files();
+        }
+
         // Periodically refresh /proc-based pane info (cwd + foreground process).
         // Only done for panes of the active tab; background tabs refresh on focus.
         // This is cheap (a few symlink reads) and keeps the header/status bar live.
