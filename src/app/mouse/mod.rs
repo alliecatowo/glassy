@@ -215,6 +215,13 @@ impl App {
             };
             if link != self.hovered_link {
                 self.hovered_link = link;
+                // The hover underline is a render-time overlay; hovering doesn't
+                // change cell *content*, so the link row carries no terminal damage
+                // and a damage-only frame would skip re-rasterizing it (leaving the
+                // underline unpainted — very visible under mouse-mode apps like
+                // Claude Code that drive their own damage). Force a full rebuild so
+                // the underline appears/clears immediately.
+                self.force_full_redraw = true;
                 self.mark_dirty(event_loop);
             }
             // Update the OS cursor icon on every cell move (cheap: winit deduplicates
@@ -267,6 +274,10 @@ impl App {
                 };
                 window.set_cursor(icon);
             }
+            // Force a full rebuild so the underline overlay paints on the link
+            // row (hovering carries no terminal damage of its own — see the
+            // motion path for the full rationale).
+            self.force_full_redraw = true;
             self.mark_dirty(event_loop);
         }
     }
