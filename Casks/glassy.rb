@@ -19,11 +19,11 @@
 cask "glassy" do
   arch arm: "aarch64", intel: "x86_64"
 
-  version "0.4.4"
-  sha256 arm:   "9280c4e9e6f17a1c1bcb8ccd0351be5ba6001ecded4b2bcbbd689648f40303fe",
-         intel: "6782b2de84b0c0e6a48d72ffcfc6c92122a788f3ea365294cf57c3f364beb0f8"
+  version "0.5.0"
+  sha256 arm:   "00389d83f52fc92a7e6c60bf2c8f63d4f2f31438e37c710f68ce95ff012ca77f",
+         intel: "900bd3b30f7d156863ff524b5c848edfd73155ca4fa5da45eee7b7ef15fa8102"
 
-  url "https://github.com/alliecatowo/glassy/releases/download/v0.4.4/glassy-#{version}-macos-#{arch}.dmg"
+  url "https://github.com/alliecatowo/glassy/releases/download/v0.5.0/glassy-#{version}-macos-#{arch}.dmg"
   name "Glassy"
   desc "Fast, minimal GPU-accelerated terminal emulator written in Rust"
   homepage "https://github.com/alliecatowo/glassy"
