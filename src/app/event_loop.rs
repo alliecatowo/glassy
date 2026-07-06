@@ -39,7 +39,7 @@ impl ApplicationHandler<UserEvent> for App {
         }
 
         let attrs = Window::default_attributes()
-            .with_title("glassy")
+            .with_title("Glassy")
             .with_inner_size(LogicalSize::new(960.0, 600.0))
             // Request a translucent window (the "glassy" namesake). The renderer
             // drives the backdrop alpha from its configured opacity when the

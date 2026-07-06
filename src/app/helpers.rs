@@ -142,7 +142,7 @@ pub(crate) fn os_title(title: &str) -> String {
     }
     let trimmed = out.trim_end();
     if trimmed.is_empty() {
-        "glassy".to_string()
+        "Glassy".to_string()
     } else {
         trimmed.to_string()
     }
@@ -623,14 +623,14 @@ pub(super) fn fire_notification(spec: &crate::image::NotifySpec) {
         .name("glassy-notify".to_string())
         .spawn(move || {
             let summary = if spec.title.is_empty() {
-                "glassy".to_string()
+                "Glassy".to_string()
             } else {
                 spec.title.clone()
             };
             let mut n = Notification::new();
             n.summary(&summary)
                 .body(&spec.body)
-                .appname("glassy")
+                .appname("Glassy")
                 .timeout(Timeout::Milliseconds(5000));
             // Urgency is applied via a cfg'd helper (below): notify-rust only
             // exposes `.urgency()` on Linux/BSD + Windows — on macOS it lives
