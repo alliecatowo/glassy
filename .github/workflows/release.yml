@@ -286,13 +286,13 @@ jobs:
           mkdir -p dist
           cp assets/icons/glassy-pink.icns dist/glassy.icns
 
-      # Assemble glassy.app following the macOS bundle layout.
+      # Assemble Glassy.app following the macOS bundle layout.
       # The Info.plist declares the app as a Terminal Emulator so
       # Finder and Launchpad display it correctly.
-      - name: Bundle glassy.app
+      - name: Bundle Glassy.app
         run: |
           VERSION="${{ steps.meta.outputs.version }}"
-          APP=dist/glassy.app
+          APP=dist/Glassy.app
           CONTENTS="$APP/Contents"
           MACOS="$CONTENTS/MacOS"
           RESOURCES="$CONTENTS/Resources"
@@ -316,9 +316,9 @@ jobs:
             <key>CFBundleIdentifier</key>
             <string>io.github.alliecatowo.glassy</string>
             <key>CFBundleName</key>
-            <string>glassy</string>
+            <string>Glassy</string>
             <key>CFBundleDisplayName</key>
-            <string>glassy</string>
+            <string>Glassy</string>
             <key>CFBundleExecutable</key>
             <string>glassy</string>
             <key>CFBundleIconFile</key>
@@ -354,10 +354,10 @@ jobs:
       # (not just the milder "unidentified developer" prompt). This ad-hoc
       # pass runs unconditionally (needs no certificate); the optional
       # Developer ID signing step below layers on top of it when configured.
-      - name: Ad-hoc sign glassy.app (seal bundle resources)
+      - name: Ad-hoc sign Glassy.app (seal bundle resources)
         run: |
-          codesign --force --deep --sign - dist/glassy.app
-          codesign --verify --deep --strict dist/glassy.app
+          codesign --force --deep --sign - dist/Glassy.app
+          codesign --verify --deep --strict dist/Glassy.app
 
       # create-dmg produces a drag-to-Applications installer image.
       # The volume name and window geometry follow macOS conventions.
@@ -367,17 +367,17 @@ jobs:
           DMG="dist/${{ env.BIN }}-${VERSION}-macos-${{ matrix.arch }}.dmg"
 
           create-dmg \
-            --volname "glassy ${VERSION} (${{ matrix.arch }})" \
+            --volname "Glassy ${VERSION} (${{ matrix.arch }})" \
             --volicon dist/glassy.icns \
             --window-pos 200 120 \
             --window-size 600 400 \
             --icon-size 100 \
-            --icon "glassy.app" 175 190 \
-            --hide-extension "glassy.app" \
+            --icon "Glassy.app" 175 190 \
+            --hide-extension "Glassy.app" \
             --app-drop-link 425 190 \
             --no-internet-enable \
             "$DMG" \
-            dist/glassy.app
+            dist/Glassy.app
 
           echo "dmg=$DMG" >> "$GITHUB_OUTPUT"
         id: dmg
@@ -554,7 +554,7 @@ jobs:
   # (continue-on-error below swallowed the no-op). Rendering fresh from an
   # untouched .tmpl on every run avoids that trap for good.
   #
-  # Casks/glassy.rb installs glassy.app into /Applications AND symlinks the
+  # Casks/glassy.rb installs Glassy.app into /Applications AND symlinks the
   # CLI binary embedded in the bundle onto PATH (see Casks/glassy.rb.tmpl) —
   # the recommended macOS install path. Formula/glassy.rb's stable path
   # downloads the same prebuilt per-arch binary instead of running

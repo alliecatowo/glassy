@@ -10,7 +10,7 @@ pub(crate) type TabDesc<'a> = (&'a str, bool, bool);
 /// Compose the OS window-title string from the primary label (process or OSC
 /// title), an optional working directory, and an optional tab count. Produces
 /// `"<primary> — <cwd>"` when a cwd is given, then appends ` · N tabs` when
-/// `count > 1`. An empty primary falls back to "glassy". Pure for unit testing.
+/// `count > 1`. An empty primary falls back to "Glassy". Pure for unit testing.
 pub(crate) fn compose_window_title(
     primary: &str,
     cwd: Option<&str>,
@@ -18,7 +18,7 @@ pub(crate) fn compose_window_title(
 ) -> String {
     let primary = primary.trim();
     let mut out = if primary.is_empty() {
-        "glassy".to_string()
+        "Glassy".to_string()
     } else {
         primary.to_string()
     };
@@ -420,7 +420,7 @@ impl App {
                 (!t.is_empty()).then(|| t.to_string())
             })
             .or_else(|| self.active_process_name())
-            .unwrap_or_else(|| "glassy".to_string());
+            .unwrap_or_else(|| "Glassy".to_string());
         let cwd = if self.config.title_show_cwd {
             self.pty
                 .as_ref()

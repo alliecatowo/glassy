@@ -2,7 +2,7 @@
 <component type="desktop-application">
   <id>io.github.alliecatowo.glassy</id>
 
-  <name>glassy</name>
+  <name>Glassy</name>
   <summary>Fast, minimal GPU-accelerated terminal emulator</summary>
 
   <metadata_license>MIT</metadata_license>

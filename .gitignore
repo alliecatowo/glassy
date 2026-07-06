@@ -5,3 +5,7 @@
 .glassy-wf-*.js
 /target-mega/
 /target-*/
+
+# Claude Code: track shared project config (agents, commands, settings) but
+# never the transient per-agent git worktrees.
+.claude/worktrees/

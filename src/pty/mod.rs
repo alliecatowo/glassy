@@ -978,7 +978,7 @@ impl Pty {
                 shape: default_cursor_shape,
                 blinking: default_cursor_blink,
             },
-            ..Config::default()
+            ..term_config_base()
         };
         let term = Arc::new(FairMutex::new(Term::new(
             config,
@@ -1159,7 +1159,7 @@ impl Pty {
             scrolling_history: scrollback,
             semantic_escape_chars,
             default_cursor_style: alacritty_terminal::vte::ansi::CursorStyle { shape, blinking },
-            ..Config::default()
+            ..term_config_base()
         };
         self.term.lock().set_options(config);
     }
@@ -1167,6 +1167,27 @@ impl Pty {
     /// Ask the PTY loop to shut down cleanly.
     pub fn shutdown(&self) {
         self.send(LoopMsg::Shutdown);
+    }
+}
+
+/// The base `alacritty_terminal` [`Config`] every glassy PTY starts from.
+///
+/// This exists so the non-default fields we ALWAYS want are set in exactly one
+/// place — most importantly `kitty_keyboard: true`. That flag enables the kitty
+/// keyboard protocol at the root: without it the `Term` silently drops every
+/// `set`/`push`/`pop`/`report` keyboard-mode request (each early-returns on this
+/// flag in alacritty_terminal), so the `DISAMBIGUATE_ESC_CODES` mode bits never
+/// latch (leaving our CSI-u encoder permanently inert) AND the `CSI ? u`
+/// progressive-enhancement query is never answered — so apps like Claude Code
+/// can't detect support and Shift+Enter degrades to Ctrl+J.
+///
+/// Every `Config { .. }` literal in glassy must spread `..term_config_base()`
+/// (never `..Config::default()`); otherwise a resize or a settings change silently
+/// resets the flag to its `false` default and kills the protocol again.
+pub(crate) fn term_config_base() -> Config {
+    Config {
+        kitty_keyboard: true,
+        ..Config::default()
     }
 }
 
@@ -1191,6 +1212,64 @@ pub fn merge_word_separators(defaults: &str, extras: &str) -> String {
 mod tests {
     use super::{PaneInfo, PromptTracker, merge_word_separators};
     use std::time::{Duration, Instant};
+
+    // ---- kitty keyboard protocol negotiation (wire-level) --------------------
+
+    /// Capturing `EventListener` that records the text of every `PtyWrite` the
+    /// `Term` emits back toward the PTY — the reply channel apps read to detect
+    /// and drive the kitty keyboard protocol.
+    struct CaptureListener {
+        writes: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
+    }
+    impl alacritty_terminal::event::EventListener for CaptureListener {
+        fn send_event(&self, event: alacritty_terminal::event::Event) {
+            if let alacritty_terminal::event::Event::PtyWrite(text) = event {
+                self.writes.borrow_mut().push(text);
+            }
+        }
+    }
+
+    #[test]
+    fn kitty_keyboard_query_is_answered() {
+        // The progressive-enhancement QUERY an app (e.g. Claude Code) sends to
+        // detect support is `CSI ? u`. With kitty_keyboard enabled at the root
+        // (`term_config_base`), the Term must reply `CSI ? <flags> u` — here 0
+        // (NO_MODE), since nothing has been pushed. Before the root fix this reply
+        // never came, so apps concluded glassy had no kitty support and degraded.
+        use super::{GridSize, term_config_base};
+        use alacritty_terminal::Term;
+        use alacritty_terminal::vte::ansi::Processor;
+
+        let writes = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
+        let listener = CaptureListener {
+            writes: writes.clone(),
+        };
+        let size = GridSize { cols: 80, rows: 24 };
+        let mut term = Term::new(term_config_base(), &size, listener);
+        let mut parser: Processor = Processor::new();
+        parser.advance(&mut term, b"\x1b[?u");
+        assert_eq!(writes.borrow().as_slice(), &["\x1b[?0u".to_string()]);
+    }
+
+    #[test]
+    fn kitty_keyboard_push_latches_disambiguate_mode() {
+        // Pushing flags via `CSI > 1 u` (DISAMBIGUATE_ESC_CODES) must set the
+        // matching TermMode bit — the exact bit our CSI-u encoder keys off to
+        // encode Shift+Enter as `\x1b[13;2u`. Before the root fix the push handler
+        // early-returned on `!config.kitty_keyboard`, so the bit never latched.
+        use super::{GridSize, term_config_base};
+        use alacritty_terminal::Term;
+        use alacritty_terminal::term::TermMode;
+        use alacritty_terminal::vte::ansi::Processor;
+
+        let writes = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
+        let listener = CaptureListener { writes };
+        let size = GridSize { cols: 80, rows: 24 };
+        let mut term = Term::new(term_config_base(), &size, listener);
+        let mut parser: Processor = Processor::new();
+        parser.advance(&mut term, b"\x1b[>1u");
+        assert!(term.mode().contains(TermMode::DISAMBIGUATE_ESC_CODES));
+    }
 
     // ---- PromptTracker (OSC 133 jump-to-prompt) tests ------------------------
 

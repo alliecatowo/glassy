@@ -193,24 +193,40 @@ impl App {
             let mode = self.term_mode();
             if let Some(button) = motion_button(mode, self.held_button) {
                 self.report_mouse(button, true, true, mode);
-            } else if !mode.intersects(TermMode::MOUSE_MODE) {
-                // Track the hovered link so it can be underlined and
-                // Ctrl+clicked.  OSC 8 links take priority; for cells
-                // with no OSC 8 annotation we fall back to the
-                // plain-text URL/path scanner.
+            }
+            // Track the hovered link for the underline + pointer affordance.
+            // OSC 8 links take priority; plain-text URLs/paths are the fallback.
+            // Shown when the app is NOT capturing the mouse, OR the link-open
+            // modifier (⌘ on macOS, Ctrl elsewhere) is held — the latter reveals
+            // links *inside* mouse-mode apps (Claude Code, vim, …) so ⌘+hover
+            // underlines and ⌘+click opens, matching iTerm2/ghostty. The motion
+            // report above still fires, so the app's own behaviour is unchanged.
+            let link_mod = if cfg!(target_os = "macos") {
+                self.mods.super_key()
+            } else {
+                self.mods.control_key()
+            };
+            let link = if !mode.intersects(TermMode::MOUSE_MODE) || link_mod {
                 let (c, r) = self.mouse_cell;
-                let link = self
-                    .cell_hyperlink(c, r)
-                    .or_else(|| self.plain_link_at(c, r));
-                let link_changed = link != self.hovered_link;
-                if link_changed {
-                    self.hovered_link = link;
-                    self.mark_dirty(event_loop);
-                }
+                self.cell_hyperlink(c, r)
+                    .or_else(|| self.plain_link_at(c, r))
+            } else {
+                None
+            };
+            if link != self.hovered_link {
+                self.hovered_link = link;
+                // The hover underline is a render-time overlay; hovering doesn't
+                // change cell *content*, so the link row carries no terminal damage
+                // and a damage-only frame would skip re-rasterizing it (leaving the
+                // underline unpainted — very visible under mouse-mode apps like
+                // Claude Code that drive their own damage). Force a full rebuild so
+                // the underline appears/clears immediately.
+                self.force_full_redraw = true;
+                self.mark_dirty(event_loop);
             }
             // Update the OS cursor icon on every cell move (cheap: winit deduplicates
             // repeated set_cursor calls on most backends). Rules:
-            //   • Pointer  — over a hoverable link (Ctrl+click opens it)
+            //   • Pointer  — over a hoverable link (modifier+click opens it)
             //   • Default  — the normal arrow everywhere else (owner prefers the
             //     arrow over the grid, not an I-beam). Gutter hover sets a resize
             //     cursor separately.
@@ -224,6 +240,45 @@ impl App {
                 };
                 window.set_cursor(icon);
             }
+        }
+    }
+
+    /// Recompute the OSC 8 / plain-text link under the pointer and refresh the
+    /// pointer-cursor affordance WITHOUT requiring pointer motion — called on
+    /// `ModifiersChanged` so pressing ⌘ (macOS) / Ctrl reveals links under a
+    /// stationary pointer (and releasing hides them). Same rule as the motion
+    /// path: shown when the app isn't capturing the mouse or the link-open
+    /// modifier is held. Repaints only on a change.
+    pub(super) fn refresh_hovered_link(&mut self, event_loop: &ActiveEventLoop) {
+        let mode = self.term_mode();
+        let link_mod = if cfg!(target_os = "macos") {
+            self.mods.super_key()
+        } else {
+            self.mods.control_key()
+        };
+        let link = if !mode.intersects(TermMode::MOUSE_MODE) || link_mod {
+            let (c, r) = self.mouse_cell;
+            self.cell_hyperlink(c, r)
+                .or_else(|| self.plain_link_at(c, r))
+        } else {
+            None
+        };
+        if link != self.hovered_link {
+            self.hovered_link = link;
+            if let Some(window) = self.window.as_ref() {
+                use winit::window::CursorIcon;
+                let icon = if self.hovered_link.is_some() {
+                    CursorIcon::Pointer
+                } else {
+                    CursorIcon::Default
+                };
+                window.set_cursor(icon);
+            }
+            // Force a full rebuild so the underline overlay paints on the link
+            // row (hovering carries no terminal damage of its own — see the
+            // motion path for the full rationale).
+            self.force_full_redraw = true;
+            self.mark_dirty(event_loop);
         }
     }
 
