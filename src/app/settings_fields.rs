@@ -97,7 +97,9 @@ impl App {
                 pty.term.lock().set_options(TermConfig {
                     scrolling_history: scrollback,
                     semantic_escape_chars: escape.to_owned(),
-                    ..TermConfig::default()
+                    // Spread the shared base (NOT TermConfig::default()) so this
+                    // word-separator push can't silently disable kitty_keyboard.
+                    ..crate::pty::term_config_base()
                 });
             };
             if let Some(pty) = self.pty.as_ref() {
