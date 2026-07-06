@@ -704,6 +704,10 @@ impl ApplicationHandler<UserEvent> for App {
                 // macOS / Ctrl-hold elsewhere). Idle-safe: only schedules a single
                 // dwell wake; cleared on release or any non-modifier key.
                 self.update_mod_hold(event_loop);
+                // Reveal/hide link affordances under a stationary pointer the moment
+                // the link-open modifier is pressed/released (⌘ on macOS, Ctrl else),
+                // so hovering a link then pressing ⌘ underlines it without a wiggle.
+                self.refresh_hovered_link(event_loop);
             }
             WindowEvent::KeyboardInput {
                 event,

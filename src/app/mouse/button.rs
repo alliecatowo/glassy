@@ -349,9 +349,16 @@ impl App {
         }
 
         let mode = self.term_mode();
-        // Ctrl+Click opens the link under the pointer.  OSC 8 links
-        // take priority; plain-text URLs/paths are the fallback.
-        if button == MouseButton::Left && pressed && self.mods.control_key() {
+        // Cmd+Click (macOS) / Ctrl+Click (elsewhere) opens the link under the
+        // pointer. OSC 8 links take priority; plain-text URLs/paths are the
+        // fallback. macOS uses ⌘ because Ctrl+click there is a secondary
+        // (right) click, matching iTerm2/ghostty; every other platform uses Ctrl.
+        let link_click_mod = if cfg!(target_os = "macos") {
+            self.mods.super_key()
+        } else {
+            self.mods.control_key()
+        };
+        if button == MouseButton::Left && pressed && link_click_mod {
             let (c, r) = self.mouse_cell;
             let uri = self
                 .cell_hyperlink(c, r)

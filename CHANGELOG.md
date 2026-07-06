@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - **Kitty keyboard protocol negotiation** now actually works: `kitty_keyboard` is enabled at the root (via a shared `term_config_base()` so a resize or settings change can't silently reset it), so glassy answers the `CSI ? u` progressive-enhancement query and latches the mode flags. Previously the flag defaulted off, leaving the CSI-u encoder permanently inert and the query unanswered.
 - **macOS menu bar** (Glassy / File / Edit / View / Window) now appears. winit's built-in default menu was overwriting glassy's during launch; disabled with `with_default_menu(false)`.
+- **Clickable links inside mouse-capturing apps** (Claude Code, vim, …): the hover underline + pointer cursor and modifier-click open were previously suppressed whenever an app enabled mouse reporting, so links looked and behaved dead there. They now reveal and open while the link-open modifier is held (and appear immediately on modifier press under a stationary pointer). Link-open is **⌘+Click on macOS** (Ctrl elsewhere), matching iTerm2/ghostty — previously it was Ctrl+Click everywhere, which on macOS is a secondary click.
 
 ---
 
