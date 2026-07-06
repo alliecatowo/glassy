@@ -55,8 +55,17 @@ pub(crate) enum PaletteCmd {
     Paste,
     // --- Window ---
     ToggleFullscreen,
-    /// Slide the quake/dropdown window away (only registered in quake mode).
+    /// Slide the quake/dropdown window away. Only ever registered when THIS
+    /// window is itself a quake instance (`config.quake`, armed at startup —
+    /// see `App::init_quake`); a normal window gets [`PaletteCmd::QuakeInfo`]
+    /// in the same registry slot instead, so the palette always has exactly
+    /// one quake-related row no matter the mode.
     ToggleQuake,
+    /// The quake-discoverability row for a normal (non-quake) window: quake
+    /// mode has no live toggle here (it's startup-only), so this jumps to
+    /// Settings > Quake and toasts a one-line pointer to `docs/quake-mode.md`
+    /// instead of the palette silently having zero quake-related entries.
+    QuakeInfo,
     // --- Font ---
     FontIncrease,
     FontDecrease,
@@ -126,6 +135,13 @@ pub(crate) enum PaletteCmd {
     /// [`PaletteEntry::payload`]. Applies the profile's live-applicable settings
     /// immediately (theme / opacity / bell / status / panes / word seps).
     SwitchProfile,
+    /// Run-command scratchpad: the query typed a `>`/`$`-prefixed shell command
+    /// (carried in [`PaletteEntry::payload`]). Spawns a transient tab running
+    /// that command via the same [`crate::pty::Pty::spawn`] path `new_tab`
+    /// uses (see `App::spawn_scratch_run`), then closes itself on the next
+    /// keypress after the command exits — no new persisted state, no session
+    /// entry, nothing to clean up.
+    RunShellScratch,
 }
 
 impl PaletteCmd {
@@ -140,7 +156,7 @@ impl PaletteCmd {
             }
             OpenSettings | OpenHelp | OpenSearch => "View",
             Copy | Paste => "Edit",
-            ToggleFullscreen | ToggleQuake => "Window",
+            ToggleFullscreen | ToggleQuake | QuakeInfo => "Window",
             FontIncrease | FontDecrease | FontReset => "Font",
             ToggleStatusBar | ToggleMinimap | TogglePaneHeaders | TogglePowerMode | BellOff
             | BellVisual | BellAudible | ScrollbackIncrease | ScrollbackDecrease => "Setting",
@@ -154,6 +170,7 @@ impl PaletteCmd {
             RunCommand => "History",
             CdTo => "Cwd",
             SwitchProfile => "Profile",
+            RunShellScratch => "Run",
         }
     }
 
@@ -184,6 +201,7 @@ impl PaletteCmd {
             Paste => "Paste".into(),
             ToggleFullscreen => "Toggle fullscreen".into(),
             ToggleQuake => "Toggle quake dropdown".into(),
+            QuakeInfo => "Quake mode…".into(),
             FontIncrease => "Increase font size".into(),
             FontDecrease => "Decrease font size".into(),
             FontReset => "Reset font size".into(),
@@ -214,8 +232,9 @@ impl PaletteCmd {
             ToggleCopyOnSelect => "Toggle copy-on-select".into(),
             ToggleCommandBadges => "Toggle command badges (OSC 133)".into(),
             SaveScrollbackToFile => "Save scrollback to file".into(),
-            // History/cwd/profile labels are filled in by the registry from the payload.
-            RunCommand | CdTo | SwitchProfile => String::new(),
+            // History/cwd/profile/run labels are filled in by the registry from
+            // the payload.
+            RunCommand | CdTo | SwitchProfile | RunShellScratch => String::new(),
         }
     }
 
@@ -297,7 +316,10 @@ pub(crate) struct PaletteState {
     /// The live query, as an editable model (caret, selection, word-jump,
     /// clipboard) shared with every other glassy text field via [`gui::TextEdit`].
     pub edit: gui::TextEdit,
-    /// The full registry, built once on open (cheap; ~30 rows).
+    /// The full registry, built once on open (cheap; ~30 rows). The LAST entry
+    /// is always a reserved [`PaletteCmd::RunShellScratch`] row: `refilter_palette`
+    /// mutates its display/haystack/payload in place whenever the query is a
+    /// `>`/`$`-prefixed command, rather than growing this vec on every keystroke.
     pub all: Vec<PaletteEntry>,
     /// Indices into `all` that pass the current filter, best-first.
     pub filtered: Vec<usize>,
@@ -310,6 +332,32 @@ impl PaletteState {
     pub fn query(&self) -> String {
         self.edit.text()
     }
+}
+
+/// Which quake-related row belongs in the registry for a window that is
+/// (`true`) or isn't (`false`) itself a quake instance (`config.quake`). Pulled
+/// out as a pure fn so the "always exactly one quake row, mode-appropriate"
+/// invariant is unit-testable without constructing a full `App`.
+fn quake_entry_for(is_quake_window: bool) -> PaletteCmd {
+    if is_quake_window {
+        PaletteCmd::ToggleQuake
+    } else {
+        PaletteCmd::QuakeInfo
+    }
+}
+
+/// If `query` (after trimming leading whitespace) starts with `>` or `$`,
+/// returns the trimmed command text following the prefix — `None` if there is
+/// no such prefix, or if the remainder is empty (so a bare `>`/`$` doesn't try
+/// to run an empty command). Pulled out as a pure fn so the prefix rule is
+/// unit-testable independent of `PaletteState`.
+fn parse_scratch_query(query: &str) -> Option<&str> {
+    let trimmed = query.trim_start();
+    let rest = trimmed
+        .strip_prefix('>')
+        .or_else(|| trimmed.strip_prefix('$'))?;
+    let rest = rest.trim();
+    (!rest.is_empty()).then_some(rest)
 }
 
 impl App {
@@ -377,10 +425,11 @@ impl App {
         for v in [5u8, 10, 15, 18, 20] {
             cmds.push(SetOpacity(v));
         }
-        // Only surface the quake toggle when the instance is actually in quake mode.
-        if self.config.quake {
-            cmds.push(ToggleQuake);
-        }
+        // A quake-related row is ALWAYS present (unlike before, when it only
+        // appeared once quake mode was already on — the one in-app path that
+        // could ever tell a user the feature exists). Which command depends on
+        // whether this window is itself a quake instance; see `quake_entry_for`.
+        cmds.push(quake_entry_for(self.config.quake));
         let theme_names = color::theme_names();
         for i in 0..theme_names.len() {
             cmds.push(SetTheme(i));
@@ -472,6 +521,18 @@ impl App {
                 payload: Some(name),
             });
         }
+        // Reserved run-command-scratchpad slot: MUST be the last entry so its
+        // index is always `entries.len() - 1` — see `refilter_palette`, which
+        // mutates it in place instead of appending on every keystroke. Starts
+        // empty/unmatchable (no query is an empty string after fuzzy-lowering
+        // that would score a real match) until a `>`/`$` query fills it in.
+        entries.push(PaletteEntry {
+            cmd: RunShellScratch,
+            display: String::new(),
+            haystack: String::new(),
+            hint: None,
+            payload: None,
+        });
         entries
     }
 
@@ -489,7 +550,11 @@ impl App {
     pub(crate) fn open_palette(&mut self, event_loop: &ActiveEventLoop) {
         if self.palette.is_none() {
             let all = self.palette_registry();
-            let filtered: Vec<usize> = (0..all.len()).collect();
+            // Exclude the reserved run-command-scratchpad slot (always the last
+            // entry, see `palette_registry`) from the initial full listing — it
+            // starts empty and only becomes a real row once the query matches
+            // `parse_scratch_query` (handled in `refilter_palette`).
+            let filtered: Vec<usize> = (0..all.len().saturating_sub(1)).collect();
             self.palette = Some(PaletteState {
                 edit: gui::TextEdit::default(),
                 all,
@@ -516,14 +581,36 @@ impl App {
         let Some(p) = self.palette.as_mut() else {
             return;
         };
-        let q = p.query().to_lowercase();
+        let raw_query = p.query();
+        // Run-command scratchpad: a `>`/`$`-prefixed query bypasses fuzzy
+        // matching entirely and shows exactly one synthesized row, mutating the
+        // reserved last slot in place (see `PaletteState::all` doc) rather than
+        // growing the registry on every keystroke.
+        if let Some(cmd) = parse_scratch_query(&raw_query) {
+            let scratch_idx = p.all.len() - 1;
+            let display = format!("Run  ▸ {cmd}");
+            let haystack = display.to_lowercase();
+            if let Some(entry) = p.all.get_mut(scratch_idx) {
+                entry.display = display;
+                entry.haystack = haystack;
+                entry.payload = Some(cmd.to_string());
+            }
+            p.filtered = vec![scratch_idx];
+            p.sel = 0;
+            return;
+        }
+        // Not a scratch query: fall back to normal fuzzy matching, excluding the
+        // reserved scratch slot (it's either empty or stale from a prior query).
+        let scratch_idx = p.all.len().saturating_sub(1);
+        let q = raw_query.to_lowercase();
         if q.is_empty() {
-            p.filtered = (0..p.all.len()).collect();
+            p.filtered = (0..p.all.len()).filter(|&i| i != scratch_idx).collect();
         } else {
             let mut scored: Vec<(i32, usize)> = p
                 .all
                 .iter()
                 .enumerate()
+                .filter(|&(i, _)| i != scratch_idx)
                 .filter_map(|(i, e)| fuzzy_score(&e.haystack, &q).map(|s| (s, i)))
                 .collect();
             // Higher score first; ties keep registry order (stable sort on index).
@@ -662,6 +749,11 @@ impl App {
                     self.mark_dirty(event_loop);
                 }
             }
+            RunShellScratch => {
+                if let Some(cmdline) = payload {
+                    self.spawn_scratch_run(&cmdline, event_loop);
+                }
+            }
             NewTab => self.new_tab(event_loop),
             CloseTab => self.close_active_tab(event_loop),
             NextTab => self.cycle_tab(1, event_loop),
@@ -725,6 +817,28 @@ impl App {
             }
             ToggleQuake => {
                 self.quake_apply(crate::ipc::IpcCommand::Toggle, event_loop);
+            }
+            QuakeInfo => {
+                // Not a quake instance: there is no live toggle to run (quake
+                // mode is armed only at startup, see `App::init_quake`). Jump to
+                // Settings > Quake (the "Enable quake mode" toggle lives there)
+                // and toast a pointer to the external-hotkey doc, since binding
+                // `glassy --toggle` to a compositor key — the actual point of
+                // the feature — isn't surfaced anywhere else in the running app.
+                self.open_settings();
+                let quake_idx = gui::SettingsSection::ALL
+                    .iter()
+                    .position(|s| *s == gui::SettingsSection::Quake)
+                    .unwrap_or(0);
+                self.settings_set_section(quake_idx);
+                // See OpenSettings above: guard the activating release so it
+                // isn't treated as a click-outside dismiss of the panel it just
+                // opened.
+                self.overlay_opened_by_press = true;
+                self.push_toast(
+                    "Quake mode: a dropdown terminal toggled by a hotkey — see docs/quake-mode.md",
+                );
+                self.mark_dirty(event_loop);
             }
             FontIncrease => {
                 self.resize_font(FontStep::Inc);
@@ -940,6 +1054,7 @@ mod tests {
             ToggleCopyOnSelect,
             ToggleCommandBadges,
             SaveScrollbackToFile,
+            QuakeInfo,
         ];
         for cmd in cmds {
             assert!(
@@ -968,5 +1083,41 @@ mod tests {
         assert_eq!(PaletteCmd::CdTo.label(), "");
         assert_eq!(PaletteCmd::RunCommand.category(), "History");
         assert_eq!(PaletteCmd::CdTo.category(), "Cwd");
+    }
+
+    #[test]
+    fn run_shell_scratch_label_deferred_to_registry() {
+        assert_eq!(PaletteCmd::RunShellScratch.label(), "");
+        assert_eq!(PaletteCmd::RunShellScratch.category(), "Run");
+    }
+
+    // ---- quake discoverability ---------------------------------------------
+
+    #[test]
+    fn quake_entry_present_in_both_modes() {
+        // A quake-mode window keeps the live toggle; a normal window gets the
+        // discoverability row instead — but the slot is never empty either way.
+        assert_eq!(quake_entry_for(true), PaletteCmd::ToggleQuake);
+        assert_eq!(quake_entry_for(false), PaletteCmd::QuakeInfo);
+    }
+
+    // ---- run-command scratchpad prefix parsing -----------------------------
+
+    #[test]
+    fn parse_scratch_query_matches_gt_and_dollar_prefixes() {
+        assert_eq!(parse_scratch_query(">ls -la"), Some("ls -la"));
+        assert_eq!(parse_scratch_query("$ls -la"), Some("ls -la"));
+        // Leading whitespace before the prefix, and around the command, is trimmed.
+        assert_eq!(parse_scratch_query("  > echo hi  "), Some("echo hi"));
+    }
+
+    #[test]
+    fn parse_scratch_query_rejects_non_prefixed_or_empty() {
+        assert_eq!(parse_scratch_query("echo hi"), None);
+        assert_eq!(parse_scratch_query(""), None);
+        // A bare prefix with nothing (or only whitespace) after it doesn't spawn
+        // an empty command.
+        assert_eq!(parse_scratch_query(">"), None);
+        assert_eq!(parse_scratch_query("$   "), None);
     }
 }

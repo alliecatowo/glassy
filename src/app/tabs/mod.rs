@@ -465,6 +465,112 @@ impl App {
         self.mark_dirty(event_loop);
     }
 
+    /// Command-palette run-command scratchpad (`>`/`$`-prefixed query, see
+    /// `palette::parse_scratch_query`): spawn `cmdline` as a transient tab.
+    ///
+    /// Reuses `new_tab`'s exact spawn + splice-into-`tab_order` + focus flow
+    /// (so the tab bar, renderer, and grid all "just work" for free — no
+    /// separate overlay renderer, no new `Session`/`App` field), but overrides
+    /// the shell with a synthesized `<shell> -c "<cmd>; ...; press any key"`.
+    /// No new teardown path is needed either: the wrapper blocks on exactly one
+    /// keypress after `cmdline` exits, and `App::handle_child_exit`
+    /// (src/app/input.rs) already closes the active single-pane tab the moment
+    /// its shell process exits — so "press any key to close" falls straight out
+    /// of existing child-exit handling. Not persisted: a scratch tab restored
+    /// from a saved session would just be an ordinary shell tab (the wrapped
+    /// command itself is never written to disk).
+    pub(crate) fn spawn_scratch_run(&mut self, cmdline: &str, event_loop: &ActiveEventLoop) {
+        let Some(renderer) = self.renderer.as_ref() else {
+            return;
+        };
+        let cmdline = cmdline.trim();
+        if cmdline.is_empty() {
+            return;
+        }
+        // Guard against a pathological paste turning into a giant argv/script.
+        const MAX_LEN: usize = 4000;
+        if cmdline.len() > MAX_LEN {
+            self.push_toast("Command too long to run");
+            return;
+        }
+        let m = renderer.cell_metrics();
+        let (pad_x, pad_y) = (renderer.pad_x(), renderer.pad_y());
+        let id = self.next_id;
+        // Inherit the current tab's cwd, same as `new_tab`.
+        let cwd = self.active_cwd.clone();
+        let (spawn_cols, spawn_rows) = match self.window.as_ref().map(|w| w.inner_size()) {
+            Some(sz) if sz.width > 0 && sz.height > 0 => {
+                let strip_h = tab_bar_h(m.height).max(self.chrome_top_inset());
+                Self::grid_for(
+                    sz,
+                    m.width,
+                    m.height,
+                    pad_x,
+                    pad_y,
+                    self.config.status_bar,
+                    strip_h,
+                )
+            }
+            _ => (self.cols, self.rows),
+        };
+        // `config.shell`'s program/args are private to `alacritty_terminal` (not
+        // readable outside that crate), so a custom-shell override configured
+        // for ordinary tabs can't be reused here; fall back to $SHELL (the same
+        // env var alacritty_terminal itself resolves a `None` shell from) or
+        // `/bin/sh`.
+        let shell_program = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+        let (program, args) = scratch_shell_parts(shell_program, cmdline);
+        let shell = Shell::new(program, args);
+        let pty = match Pty::spawn(
+            self.proxy.clone(),
+            id,
+            spawn_cols,
+            spawn_rows,
+            m.width.round() as u16,
+            m.height.round() as u16,
+            Some(shell),
+            cwd.clone(),
+            self.config.scrollback,
+            &self.config.word_separator,
+            self.config.cursor_style.to_cursor_shape(),
+            self.config.cursor_blink,
+        ) {
+            Ok(p) => p,
+            Err(e) => {
+                log::error!("failed to spawn scratch run: {e:#}");
+                return;
+            }
+        };
+        self.next_id += 1;
+        if let Some(old) = self.pty.take() {
+            self.background.push(Session {
+                id: self.active_id,
+                pty: old,
+                panes: self.panes.take(),
+                title: std::mem::take(&mut self.active_title),
+                activity: false,
+                busy_until: self.active_busy_until.take(),
+                last_cwd: self.active_cwd.take(),
+                custom_title: self.active_custom_title.take(),
+                pane_cwds: std::mem::take(&mut self.active_pane_cwds),
+            });
+        }
+        self.tab_order.push(id);
+        self.pty = Some(pty);
+        self.active_id = id;
+        self.active_title.clear();
+        // Label the tab with the command so it's identifiable while it runs.
+        self.active_custom_title = Some(format!("▸ {cmdline}"));
+        self.active_busy_until = None;
+        self.active_cwd = cwd;
+        self.modify_other_keys = ModifyOtherKeys::default();
+        self.reset_pointer_state();
+        self.reflow_grid();
+        self.update_window_title();
+        self.force_full_redraw = true;
+        self.mark_dirty(event_loop);
+    }
+
     /// Switch to the next/previous tab in the stable order (wrapping).
     pub(crate) fn cycle_tab(&mut self, delta: isize, event_loop: &ActiveEventLoop) {
         let n = self.tab_order.len();
@@ -719,6 +825,21 @@ impl App {
     pub(crate) const PANE_DRAG_THRESHOLD: f64 = 6.0;
 }
 
+/// Build the `(program, args)` for `App::spawn_scratch_run`'s transient shell:
+/// `program` unchanged, plus a `-c <script>` invocation that runs `cmdline`,
+/// prints its exit status, then blocks for exactly one keypress via `dd` (a
+/// POSIX-portable read-one-byte, unlike bash's `read -n1 -s` extension, so this
+/// works whether `program` resolves to sh/dash/bash/zsh). `-c` (not `-lc`) is
+/// used deliberately: a login-shell flag is unnecessary here and not portable
+/// to every POSIX shell either. Pulled out as a pure fn (no `Pty`/`Shell`
+/// construction) so the exact wrapping is unit-testable.
+fn scratch_shell_parts(program: String, cmdline: &str) -> (String, Vec<String>) {
+    let script = format!(
+        "{cmdline}\nstatus=$?\nprintf '\\n[glassy] exit %d - press any key to close\\n' \"$status\"\ndd bs=1 count=1 2>/dev/null >/dev/null\n"
+    );
+    (program, vec!["-c".to_string(), script])
+}
+
 /// Whether a `file://` URL's path (the part after the scheme, still possibly
 /// percent-encoded) is safe to hand to the system opener. Terminal output is
 /// untrusted, so we percent-decode and normalize FIRST, then reject `.desktop`
@@ -848,5 +969,38 @@ mod url_tests {
         assert_eq!(normalize_path_segments("/a/./b"), "/a/b");
         assert_eq!(normalize_path_segments("/a/../../b"), "/b"); // can't pop past root
         assert_eq!(normalize_path_segments("/proc/../proc"), "/proc");
+    }
+}
+
+#[cfg(test)]
+mod scratch_tests {
+    use super::scratch_shell_parts;
+
+    #[test]
+    fn wraps_command_with_c_flag() {
+        let (program, args) = scratch_shell_parts("/bin/bash".to_string(), "ls -la");
+        assert_eq!(program, "/bin/bash");
+        assert_eq!(args.len(), 2);
+        assert_eq!(args[0], "-c");
+        assert!(args[1].starts_with("ls -la\n"));
+    }
+
+    #[test]
+    fn script_prints_exit_status_and_waits_for_a_keypress() {
+        let (_, args) = scratch_shell_parts("/bin/sh".to_string(), "false");
+        let script = &args[1];
+        assert!(script.contains("status=$?"));
+        assert!(script.contains("press any key to close"));
+        // `dd`, not bash's `read -n1 -s`, so this also works under a POSIX-only
+        // /bin/sh or dash where `read -n` isn't supported.
+        assert!(script.contains("dd bs=1 count=1"));
+    }
+
+    #[test]
+    fn does_not_mutate_the_program_string() {
+        // The resolved shell program passes through untouched; only `args` carries
+        // the synthesized script.
+        let (program, _) = scratch_shell_parts("zsh".to_string(), "echo hi");
+        assert_eq!(program, "zsh");
     }
 }
