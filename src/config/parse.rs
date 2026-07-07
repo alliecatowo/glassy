@@ -1593,6 +1593,7 @@ pub(super) fn apply_kv(key: &str, value: &str, raw: &mut RawConfig) -> Result<()
                 "off" | "badges" | "cards" => raw.command_blocks = Some(v),
                 _ => bail!("command_blocks must be off, badges, or cards; got '{value}'"),
             }
+        }
         // --- w15: scrollback memory bounding (Phase 1) ---
         "scrollback_background_cap" => {
             let n: usize = value
@@ -1605,6 +1606,7 @@ pub(super) fn apply_kv(key: &str, value: &str, raw: &mut RawConfig) -> Result<()
                 format!("scrollback_background_idle_secs: invalid integer '{value}'")
             })?;
             raw.scrollback_background_idle_secs = Some(s);
+        }
         "pane_header_style" => {
             // Unrecognized values are accepted here (stored verbatim) and fall
             // back to `Full` in `into_settings` — same forgiving pattern as
@@ -2394,6 +2396,9 @@ mod scrollback_background_tests {
         // of `ScrollbackBackgroundPolicy::effective_cap` via `into_settings`.
         let raw = RawConfig::default();
         assert!(raw.into_settings().is_ok());
+    }
+}
+
 #[cfg(test)]
 mod segment_tests {
     //! `parse_status_bar_segments` coverage for the w15 additions (TabCount,

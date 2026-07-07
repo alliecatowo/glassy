@@ -44,7 +44,7 @@ mod input;
 mod keys;
 mod keyseq;
 #[cfg(target_os = "macos")]
-pub(crate) mod mac_menu;
+pub mod mac_menu;
 mod minimap;
 mod modhold;
 mod mouse;
@@ -66,7 +66,7 @@ pub(crate) mod settings_save;
 mod settings_themes;
 mod strip;
 #[cfg(target_os = "linux")]
-pub(crate) mod system_theme;
+pub mod system_theme;
 mod tab_paint;
 mod tabs;
 pub(crate) mod toast;

@@ -495,6 +495,8 @@ fn window_effect_cycle_backward_from_zero_reaches_custom() {
         crate::renderer::WindowEffect::from_index(prev as usize),
         crate::renderer::WindowEffect::Custom
     );
+}
+
 // --- w15: custom status-bar segments (glassy @ set-segment/clear-segment) --
 
 #[test]

@@ -109,7 +109,7 @@ fn read_color_scheme(portal: &dbus::blocking::Proxy<'_, &Connection>) -> Option<
 /// Degrades gracefully on any failure: logs once at debug level and returns,
 /// leaving `follow_system` pinned to `theme_dark` exactly as it behaved before
 /// this module existed.
-pub(crate) fn spawn(proxy: EventLoopProxy<UserEvent>) {
+pub fn spawn(proxy: EventLoopProxy<UserEvent>) {
     std::thread::spawn(move || {
         let conn = match Connection::new_session() {
             Ok(c) => c,
