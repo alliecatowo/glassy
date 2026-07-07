@@ -121,6 +121,14 @@ impl App {
                 }
                 reply
             }
+            ControlCommand::SetSegment { id, text } => {
+                let reply = self.control_set_segment(id, text);
+                if matches!(reply, ControlReply::Err(_)) {
+                    dirty = false;
+                }
+                reply
+            }
+            ControlCommand::ClearSegment(id) => self.control_clear_segment(id),
         };
         req.respond(reply);
         dirty
@@ -305,6 +313,27 @@ impl App {
             Ok(()) => ControlReply::Ok(String::new()),
             Err(e) => ControlReply::Err(format!("set-config: saved but reload failed: {e}")),
         }
+    }
+
+    /// Apply a `set-segment <id> <text...>` request (Phase 1 plugin surface,
+    /// see `docs/plugins.md`): push/update `id`'s text in `self.custom_segments`
+    /// via the bounded, unit-tested [`upsert_custom_segment`] (mod.rs). Shows
+    /// wherever `custom` appears in `status_bar_segments`, or appended at the
+    /// end of the left side otherwise.
+    fn control_set_segment(&mut self, id: &str, text: &str) -> ControlReply {
+        match upsert_custom_segment(&mut self.custom_segments, id, text) {
+            Ok(()) => ControlReply::Ok(String::new()),
+            Err(e) => ControlReply::Err(format!("set-segment: {e}")),
+        }
+    }
+
+    /// Apply a `clear-segment <id>` request: remove a custom segment
+    /// previously set by `set-segment`. Always replies `OK` — clearing an id
+    /// that isn't set is not an error (idempotent, matching `RunAction`'s
+    /// "already applied" tolerance elsewhere in this file).
+    fn control_clear_segment(&mut self, id: &str) -> ControlReply {
+        remove_custom_segment(&mut self.custom_segments, id);
+        ControlReply::Ok(String::new())
     }
 }
 

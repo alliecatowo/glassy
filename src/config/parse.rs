@@ -196,6 +196,13 @@ pub(crate) fn parse_status_bar_segments(value: &str) -> Vec<crate::app::StatusBa
             "progress" => Some(StatusBarSegment::Progress),
             "exit_status" | "exit" => Some(StatusBarSegment::ExitStatus),
             "key_hints" | "hints" => Some(StatusBarSegment::KeyHints),
+            // w15 additions — see status-bar.md recs 1/3/4.
+            "tab_count" | "tabs" => Some(StatusBarSegment::TabCount),
+            "zoom" => Some(StatusBarSegment::Zoom),
+            "profile" => Some(StatusBarSegment::Profile),
+            "busy" => Some(StatusBarSegment::Busy),
+            "hostname" | "host" => Some(StatusBarSegment::Hostname),
+            "custom" => Some(StatusBarSegment::Custom),
             other => {
                 log::warn!("glassy: ignoring unknown status_bar_segments entry '{other}'");
                 None
@@ -2288,5 +2295,70 @@ mod scrollback_background_tests {
         // of `ScrollbackBackgroundPolicy::effective_cap` via `into_settings`.
         let raw = RawConfig::default();
         assert!(raw.into_settings().is_ok());
+#[cfg(test)]
+mod segment_tests {
+    //! `parse_status_bar_segments` coverage for the w15 additions (TabCount,
+    //! Zoom, Profile, Busy, Hostname, Custom) plus their aliases. Pre-existing
+    //! segment tokens are covered by `config::mod`'s `status_bar_segments_*`
+    //! integration tests; these are unit tests scoped to this function.
+    use super::*;
+    use crate::app::StatusBarSegment;
+
+    #[test]
+    fn parses_w15_segment_tokens() {
+        let segs = parse_status_bar_segments("tab_count zoom profile busy hostname custom");
+        assert_eq!(
+            segs,
+            vec![
+                StatusBarSegment::TabCount,
+                StatusBarSegment::Zoom,
+                StatusBarSegment::Profile,
+                StatusBarSegment::Busy,
+                StatusBarSegment::Hostname,
+                StatusBarSegment::Custom,
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_w15_segment_aliases() {
+        assert_eq!(
+            parse_status_bar_segments("tabs"),
+            vec![StatusBarSegment::TabCount]
+        );
+        assert_eq!(
+            parse_status_bar_segments("host"),
+            vec![StatusBarSegment::Hostname]
+        );
+    }
+
+    #[test]
+    fn every_segment_token_round_trips_through_display() {
+        // Inverse-of-inverse: every canonical token this parser accepts must
+        // parse back to the exact segment `token()` reports for it, the
+        // invariant `status_bar_segments_display`/`settings_save::SAVED_KEYS`
+        // depend on for a clean round trip through the settings form.
+        for seg in [
+            StatusBarSegment::Cwd,
+            StatusBarSegment::GitBranch,
+            StatusBarSegment::Process,
+            StatusBarSegment::Time,
+            StatusBarSegment::Mode,
+            StatusBarSegment::Broadcast,
+            StatusBarSegment::Selection,
+            StatusBarSegment::Scroll,
+            StatusBarSegment::Encoding,
+            StatusBarSegment::Progress,
+            StatusBarSegment::ExitStatus,
+            StatusBarSegment::KeyHints,
+            StatusBarSegment::TabCount,
+            StatusBarSegment::Zoom,
+            StatusBarSegment::Profile,
+            StatusBarSegment::Busy,
+            StatusBarSegment::Hostname,
+            StatusBarSegment::Custom,
+        ] {
+            assert_eq!(parse_status_bar_segments(seg.token()), vec![seg]);
+        }
     }
 }

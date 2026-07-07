@@ -117,6 +117,63 @@ Every verb replies on the same request/reply cycle as the existing ones —
 `OK [text]` or `ERR <message>` — so a script gets a clean success/failure
 signal without parsing terminal output.
 
+### Custom status-bar segments: `set-segment` / `clear-segment` (w15)
+
+Every verb above either reads glassy's state or mutates it the same way a
+keybinding would. `set-segment` is different: it's the first Phase-1 verb
+whose whole purpose is pushing content *into* glassy's UI from the outside —
+a CI status, a build result, a background job's progress — without glassy
+knowing anything about where that text came from.
+
+```text
+glassy @ set-segment <id> <text...>  # OK  — shows/updates a custom segment
+glassy @ clear-segment <id>          # OK  — removes it (no-op if unset)
+```
+
+- **`set-segment <id> <text...>`** — pushes (or updates, if `id` is already
+  set) the display text for a custom status-bar segment. `id` is an arbitrary
+  caller-chosen name (lower-cased), scoped only to this glassy instance; `text`
+  is the rest of the line verbatim, spaces included, mirroring `send-text`/
+  `set-config`'s rest-of-line handling. Two bounds keep an external script from
+  growing the bar without limit: at most 8 distinct ids at once (a `set-segment`
+  for a *new* id past that replies `ERR too many custom segments (max 8)`;
+  updating an existing id always succeeds, even at the cap), and each segment's
+  text is silently truncated to 64 chars (nothing clips segment text at paint
+  time, so this is the only guard against a long string pushing everything
+  else off-screen).
+- **`clear-segment <id>`** — removes a segment set by `set-segment`. Always
+  replies `OK`, even if `id` was never set or was already cleared.
+
+A custom segment shows in the status bar in one of two ways: if
+`status_bar_segments` includes the `custom` token, every active custom
+segment renders at that position (in the order they were first set); if it
+doesn't, any active custom segment(s) are appended at the end of the left
+side anyway, so `set-segment` output isn't silently dropped just because the
+user hasn't edited their `status_bar_segments` config.
+
+**Worked example** — a build script that reports its own status:
+
+```sh
+#!/bin/sh
+glassy @ set-segment build "building..."
+if make; then
+    glassy @ set-segment build "build ok"
+else
+    glassy @ set-segment build "build FAILED"
+fi
+# Clear it a few seconds later so it doesn't linger forever:
+sleep 5 && glassy @ clear-segment build &
+```
+
+With `status_bar_segments = cwd git_branch custom time` in `glassy.conf`, the
+bar shows `~/proj  main  building...  14:32` while the script runs, updating
+live as `set-segment` calls land — no glassy restart, no config edit per
+update.
+
+Like every Phase 1 verb, this is plain IPC: the segment is just a string
+`App` holds and the status-bar painter draws, not a hook into anything
+running inside glassy. See "What Phase 1 explicitly is not" below.
+
 ### What Phase 1 explicitly is not
 
 - **No plugin runtime.** Nothing is loaded into the glassy process. A script

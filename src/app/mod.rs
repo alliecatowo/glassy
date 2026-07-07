@@ -335,10 +335,14 @@ pub struct Config {
 
 /// Configurable segments for the status bar (config key `status_bar_segments`).
 /// The default set (when `status_bar_segments` is `None`) is:
-///   cwd, git_branch, mode, broadcast, selection, scroll, encoding.
+///   cwd, git_branch, mode, broadcast, selection, scroll, encoding, progress.
 ///
 /// Config string accepted by `apply_kv`: a comma- or space-separated list of
-/// segment names, e.g. `"cwd git_branch mode time encoding"`.
+/// segment names, e.g. `"cwd git_branch mode time encoding"`. Rendering (the
+/// content/color/placement of each) is table-driven — see `SEGMENT_SPECS` in
+/// `chrome.rs` — so this enum only names which segments exist; it carries no
+/// data itself (hence `Copy`, which a per-instance custom segment can't be —
+/// see `Custom` below and `CustomSegment`).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum StatusBarSegment {
     /// Last two path components of the current working directory.
@@ -365,6 +369,25 @@ pub enum StatusBarSegment {
     ExitStatus,
     /// Key-binding hint (shows the current mode's most useful bindings).
     KeyHints,
+    /// Total tab count (`N tabs`). w15.
+    TabCount,
+    /// `ZOOM` badge while the focused pane is zoomed. w15.
+    Zoom,
+    /// The active `[profile.NAME]` section, bracketed (e.g. `[work]`). `None`
+    /// (base config, no profile) renders nothing. w15.
+    Profile,
+    /// A running-command indicator: shows while the focused pane's most recent
+    /// OSC 133 command block has started (`C`) but not finished (`D`) yet.
+    /// w15.
+    Busy,
+    /// This machine's hostname (`uname` nodename, cached once at startup). w15.
+    Hostname,
+    /// Marker: renders every active custom segment pushed via `glassy @
+    /// set-segment` (see `CustomSegment`, `docs/plugins.md`) at this position
+    /// in the left-side order. If this marker isn't present in
+    /// `status_bar_segments` but a custom segment IS set, it's appended at the
+    /// end of the left side instead — see `App::paint_status_bar`. w15.
+    Custom,
 }
 
 impl StatusBarSegment {
@@ -386,8 +409,76 @@ impl StatusBarSegment {
             StatusBarSegment::Progress => "progress",
             StatusBarSegment::ExitStatus => "exit_status",
             StatusBarSegment::KeyHints => "key_hints",
+            StatusBarSegment::TabCount => "tab_count",
+            StatusBarSegment::Zoom => "zoom",
+            StatusBarSegment::Profile => "profile",
+            StatusBarSegment::Busy => "busy",
+            StatusBarSegment::Hostname => "hostname",
+            StatusBarSegment::Custom => "custom",
         }
     }
+}
+
+/// One custom status-bar segment pushed by an external script over the
+/// `glassy @` control socket (`set-segment <id> <text...>` / `clear-segment
+/// <id>`) — the Phase-1 plugin surface described in `docs/plugins.md`. Stored
+/// in `App::custom_segments`, a `Vec` (not a `HashMap`) so insertion order —
+/// and therefore render order — is stable and cheap to preserve at the small
+/// (`MAX_CUSTOM_SEGMENTS`-capped) sizes involved.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CustomSegment {
+    /// Caller-chosen identifier; case-lowered by the IPC parser. Re-setting an
+    /// existing id updates its text in place rather than adding a duplicate.
+    pub id: String,
+    /// Display text, already truncated to `CUSTOM_SEGMENT_TEXT_CAP` chars.
+    pub text: String,
+}
+
+/// Maximum number of distinct custom-segment ids `set-segment` will accept at
+/// once. Bounds an external script's footprint on the bar so a runaway/looping
+/// caller can't grow it without limit; a `set-segment` for a new id past the
+/// cap replies `ERR` and leaves the store unchanged.
+pub(crate) const MAX_CUSTOM_SEGMENTS: usize = 8;
+
+/// Maximum chars kept per custom-segment text. Longer text is silently
+/// truncated (not rejected) — nothing clips left-side segment text at paint
+/// time, so this is the only guard against a long string blowing out the
+/// bar's width.
+pub(crate) const CUSTOM_SEGMENT_TEXT_CAP: usize = 64;
+
+/// Insert or update `id`'s text in the bounded custom-segment store `segs`,
+/// truncating to `CUSTOM_SEGMENT_TEXT_CAP` chars. Updating an existing id
+/// always succeeds (no cap check); adding a new one past `MAX_CUSTOM_SEGMENTS`
+/// fails with `segs` left unchanged. A free function (not an `App` method) so
+/// the bounds/truncation behavior is unit-testable without a full `App` — see
+/// `tests.rs`.
+pub(crate) fn upsert_custom_segment(
+    segs: &mut Vec<CustomSegment>,
+    id: &str,
+    text: &str,
+) -> Result<(), String> {
+    let truncated: String = text.chars().take(CUSTOM_SEGMENT_TEXT_CAP).collect();
+    if let Some(existing) = segs.iter_mut().find(|s| s.id == id) {
+        existing.text = truncated;
+        return Ok(());
+    }
+    if segs.len() >= MAX_CUSTOM_SEGMENTS {
+        return Err(format!(
+            "too many custom segments (max {MAX_CUSTOM_SEGMENTS}); clear one first"
+        ));
+    }
+    segs.push(CustomSegment {
+        id: id.to_string(),
+        text: truncated,
+    });
+    Ok(())
+}
+
+/// Remove `id` from the custom-segment store, if present. A no-op (not an
+/// error) when `id` isn't currently set, matching `clear-segment`'s
+/// always-`OK` reply.
+pub(crate) fn remove_custom_segment(segs: &mut Vec<CustomSegment>, id: &str) {
+    segs.retain(|s| s.id != id);
 }
 
 /// The three user-facing default cursor shapes.
@@ -1081,6 +1172,19 @@ pub struct App {
     /// (`HoveredFileCancelled`). Drives the drop-hover overlay painted over the
     /// focused pane's content rect. See [`dragdrop`].
     drop_hover: bool,
+
+    // --- Status bar: w15 additions --------------------------------------------
+    /// This machine's hostname (`uname(2)` nodename), read once at startup for
+    /// `StatusBarSegment::Hostname`. `None` if the kernel call fails or the
+    /// nodename isn't valid UTF-8 — the segment simply renders nothing then.
+    hostname: Option<String>,
+    /// Custom status-bar segments pushed via `glassy @ set-segment`/
+    /// `clear-segment` (Phase 1 plugin surface, see `docs/plugins.md`).
+    /// Bounded to [`MAX_CUSTOM_SEGMENTS`] entries by
+    /// [`upsert_custom_segment`]. Rendered by `App::paint_status_bar` wherever
+    /// `StatusBarSegment::Custom` appears in `status_bar_segments`, or
+    /// appended at the end of the left side if it doesn't.
+    custom_segments: Vec<CustomSegment>,
 }
 
 /// Direction + progress of the quake window's slide animation.

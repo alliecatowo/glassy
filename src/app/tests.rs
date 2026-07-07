@@ -2,9 +2,10 @@
 
 use super::render::shake_forces_full_redraw;
 use super::{
-    MenuAction, StripItem, WheelAction, actions_to_entries, compact_cwd, compose_window_title,
-    image_dst_size, motion_button, move_in_order, split_indicator, strip_item_at, strip_layout_ex,
-    tab_tag_reserve, wheel_action,
+    CUSTOM_SEGMENT_TEXT_CAP, CustomSegment, MAX_CUSTOM_SEGMENTS, MenuAction, StripItem,
+    WheelAction, actions_to_entries, compact_cwd, compose_window_title, image_dst_size,
+    motion_button, move_in_order, remove_custom_segment, split_indicator, strip_item_at,
+    strip_layout_ex, tab_tag_reserve, upsert_custom_segment, wheel_action,
 };
 use crate::gui::MenuEntry;
 
@@ -494,4 +495,63 @@ fn window_effect_cycle_backward_from_zero_reaches_custom() {
         crate::renderer::WindowEffect::from_index(prev as usize),
         crate::renderer::WindowEffect::Custom
     );
+// --- w15: custom status-bar segments (glassy @ set-segment/clear-segment) --
+
+#[test]
+fn upsert_custom_segment_inserts_and_updates_in_place() {
+    let mut segs: Vec<CustomSegment> = Vec::new();
+    upsert_custom_segment(&mut segs, "build", "building...").unwrap();
+    assert_eq!(segs.len(), 1);
+    assert_eq!(segs[0].id, "build");
+    assert_eq!(segs[0].text, "building...");
+
+    // Re-setting the same id updates in place — no duplicate, same position.
+    upsert_custom_segment(&mut segs, "build", "done").unwrap();
+    assert_eq!(segs.len(), 1);
+    assert_eq!(segs[0].text, "done");
+
+    // A second distinct id appends, preserving insertion order (render order).
+    upsert_custom_segment(&mut segs, "ci", "2 running").unwrap();
+    assert_eq!(segs.len(), 2);
+    assert_eq!(segs[0].id, "build");
+    assert_eq!(segs[1].id, "ci");
+}
+
+#[test]
+fn upsert_custom_segment_enforces_max_cap() {
+    let mut segs: Vec<CustomSegment> = Vec::new();
+    for i in 0..MAX_CUSTOM_SEGMENTS {
+        upsert_custom_segment(&mut segs, &format!("seg{i}"), "x").unwrap();
+    }
+    assert_eq!(segs.len(), MAX_CUSTOM_SEGMENTS);
+
+    // A new (not-yet-present) id past the cap is rejected, store unchanged.
+    let err = upsert_custom_segment(&mut segs, "one-too-many", "x").unwrap_err();
+    assert!(err.contains("too many"));
+    assert_eq!(segs.len(), MAX_CUSTOM_SEGMENTS);
+
+    // Updating an EXISTING id at full capacity still succeeds (no cap check
+    // on updates, only on growing the set).
+    upsert_custom_segment(&mut segs, "seg0", "updated").unwrap();
+    assert_eq!(segs.len(), MAX_CUSTOM_SEGMENTS);
+    assert_eq!(segs[0].text, "updated");
+}
+
+#[test]
+fn upsert_custom_segment_truncates_long_text() {
+    let mut segs: Vec<CustomSegment> = Vec::new();
+    let long = "x".repeat(CUSTOM_SEGMENT_TEXT_CAP * 2);
+    upsert_custom_segment(&mut segs, "id", &long).unwrap();
+    assert_eq!(segs[0].text.chars().count(), CUSTOM_SEGMENT_TEXT_CAP);
+}
+
+#[test]
+fn remove_custom_segment_is_idempotent() {
+    let mut segs: Vec<CustomSegment> = Vec::new();
+    upsert_custom_segment(&mut segs, "build", "x").unwrap();
+    remove_custom_segment(&mut segs, "build");
+    assert!(segs.is_empty());
+    // Removing an id that isn't (or is no longer) present is a no-op, not a panic.
+    remove_custom_segment(&mut segs, "build");
+    assert!(segs.is_empty());
 }

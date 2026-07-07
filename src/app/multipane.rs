@@ -64,53 +64,10 @@ impl App {
             None => (0, 0),
         };
 
-        // Status-bar snapshot: term mode, scroll position, selection count.
-        // All taken here under the immutable `&self` borrow.
-        let (sb_mode, sb_disp_off, sb_hist, sb_sel_len) = match self.pty.as_ref() {
-            Some(pty) => {
-                let t = pty.term.lock();
-                let mode = *t.mode();
-                let disp = t.grid().display_offset() as i32;
-                let hist = t.grid().history_size();
-                let sel = t
-                    .selection_to_string()
-                    .map(|s| s.chars().count())
-                    .unwrap_or(0);
-                (mode, disp, hist, sel)
-            }
-            None => (TermMode::empty(), 0, 0, 0),
-        };
-        let sb_focused = self.focused;
-        let sb_broadcast = self.broadcast_input;
-        let sb_surface_h = self
-            .renderer
-            .as_ref()
-            .map(|r| r.surface_size().1)
-            .unwrap_or(0);
-        // Status-bar cwd + git branch (same as single-pane path in render.rs).
-        let sb_cwd: Option<std::path::PathBuf> = self
-            .pty
-            .as_ref()
-            .and_then(|p| p.pane_info.cwd.clone())
-            .or_else(|| self.active_cwd.clone());
-        // Branch is precomputed in PaneInfo (refreshed on the 2 s proc poll).
-        let sb_git_branch: Option<String> = self
-            .pty
-            .as_ref()
-            .and_then(|p| p.pane_info.git_branch.clone());
-        let sb_fg_process: Option<String> = self
-            .pty
-            .as_ref()
-            .and_then(|p| p.pane_info.process_name(None).map(str::to_owned));
-        let sb_exit_status: Option<i32> = self.pty.as_ref().and_then(|p| {
-            p.prompts
-                .lock()
-                .ok()
-                .and_then(|g| g.blocks.iter().rev().find_map(|b| b.exit_code))
-        });
-        let sb_time_format = self.config.status_bar_time_format.clone();
-        let sb_segments = self.config.status_bar_segments.clone();
-        let sb_progress = self.active_progress;
+        // Status-bar snapshot: every value `paint_status_bar` needs, built once
+        // here under the immutable `&self` borrow (same as the single-pane path
+        // in render.rs) — see `App::status_bar_inputs` (chrome.rs).
+        let sb_inputs = self.status_bar_inputs();
 
         // Tab-bar state snapshot (owned data) for the pixel-overlay painter, taken
         // under the immutable `&self` borrow.
@@ -557,23 +514,7 @@ impl App {
         // Status bar (§3.4): same as the single-pane path.
         // Only painted when enabled in the config.
         if self.config.status_bar {
-            Self::paint_status_bar(
-                renderer,
-                sb_surface_h,
-                sb_mode,
-                sb_disp_off,
-                sb_hist,
-                sb_sel_len,
-                sb_focused,
-                sb_cwd.as_deref(),
-                sb_git_branch.as_deref(),
-                sb_progress,
-                sb_broadcast,
-                sb_fg_process.as_deref(),
-                &sb_time_format,
-                sb_exit_status,
-                sb_segments.as_deref(),
-            );
+            Self::paint_status_bar(renderer, &sb_inputs);
         }
 
         // Settings form (§3.5): drawn over the split via the overlay pipeline,

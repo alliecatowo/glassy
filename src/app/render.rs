@@ -161,58 +161,10 @@ impl App {
                 .map(|r| r.has_tab_overlay())
                 .unwrap_or(false);
 
-        // Status-bar snapshot: term mode, scroll position, selection count.
-        // Taken here (under the `&self` borrow) before we take `&mut self.renderer`.
-        let (sb_mode, sb_disp_off, sb_hist, sb_sel_len) = match self.pty.as_ref() {
-            Some(pty) => {
-                let t = pty.term.lock();
-                let mode = *t.mode();
-                let disp = t.grid().display_offset() as i32;
-                let hist = t.grid().history_size();
-                let sel = t
-                    .selection_to_string()
-                    .map(|s| s.chars().count())
-                    .unwrap_or(0);
-                (mode, disp, hist, sel)
-            }
-            None => (TermMode::empty(), 0, 0, 0),
-        };
-        let sb_focused = self.focused;
-        let sb_surface_h = self
-            .renderer
-            .as_ref()
-            .map(|r| r.surface_size().1)
-            .unwrap_or(0);
-        // Status-bar cwd + git branch: read from the active PTY's cached PaneInfo.
-        // Evaluated here (before the renderer borrow) once per frame; PaneInfo is
-        // refreshed at most every 2 s (PROC_REFRESH_INTERVAL) by about_to_wait.
-        let sb_cwd: Option<std::path::PathBuf> = self
-            .pty
-            .as_ref()
-            .and_then(|p| p.pane_info.cwd.clone())
-            .or_else(|| self.active_cwd.clone()); // fallback to OSC 7 path
-        // Branch is precomputed in PaneInfo (refreshed on the 2 s proc poll), so
-        // the render path does no filesystem walk.
-        let sb_git_branch: Option<String> = self
-            .pty
-            .as_ref()
-            .and_then(|p| p.pane_info.git_branch.clone());
-        // Foreground process name (best-effort from PaneInfo).
-        let sb_fg_process: Option<String> = self
-            .pty
-            .as_ref()
-            .and_then(|p| p.pane_info.process_name(None).map(str::to_owned));
-        // Last command exit status from the OSC 133 block store (most recent block).
-        let sb_exit_status: Option<i32> = self.pty.as_ref().and_then(|p| {
-            p.prompts
-                .lock()
-                .ok()
-                .and_then(|g| g.blocks.iter().rev().find_map(|b| b.exit_code))
-        });
-        let sb_time_format = self.config.status_bar_time_format.clone();
-        let sb_segments = self.config.status_bar_segments.clone();
-        let sb_progress = self.active_progress;
-        let sb_broadcast = self.broadcast_input;
+        // Status-bar snapshot: every value `paint_status_bar` needs, built once
+        // here (under the `&self` borrow) before we take `&mut self.renderer` —
+        // see `App::status_bar_inputs` (chrome.rs) for the full field list.
+        let sb_inputs = self.status_bar_inputs();
 
         // Command-block badges + fold ranges (OSC 133/633 shell integration),
         // plus the opt-in card chrome bands (`command_blocks = cards`). Built
@@ -266,7 +218,7 @@ impl App {
         // `None` when the minimap is disabled / unavailable this frame.
         let minimap_inputs = if self.minimap_active() {
             self.minimap_rect()
-                .map(|rect| (rect, sb_disp_off, self.rows))
+                .map(|rect| (rect, sb_inputs.display_offset, self.rows))
         } else {
             None
         };
@@ -1014,23 +966,7 @@ impl App {
         // content because it is an overlay (drawn last, not a reserved cell row).
         // Only painted when enabled in the config.
         if self.config.status_bar {
-            Self::paint_status_bar(
-                renderer,
-                sb_surface_h,
-                sb_mode,
-                sb_disp_off,
-                sb_hist,
-                sb_sel_len,
-                sb_focused,
-                sb_cwd.as_deref(),
-                sb_git_branch.as_deref(),
-                sb_progress,
-                sb_broadcast,
-                sb_fg_process.as_deref(),
-                &sb_time_format,
-                sb_exit_status,
-                sb_segments.as_deref(),
-            );
+            Self::paint_status_bar(renderer, &sb_inputs);
         }
 
         // Scrollback minimap strip: a thin right-edge overview composited over the

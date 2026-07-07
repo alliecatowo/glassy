@@ -26,6 +26,16 @@
 //! glassy @ set-config opacity 0.8   # OK  — writes glassy.conf + applies live
 //! ```
 //!
+//! w15 adds a sixth: `set-segment`/`clear-segment`, the first Phase-1 verb
+//! whose purpose is pushing UI content into glassy rather than mutating its
+//! own state — see the "Custom status-bar segments" section of
+//! [`docs/plugins.md`](../../docs/plugins.md).
+//!
+//! ```text
+//! glassy @ set-segment build "building..."  # OK  — shows in the status bar
+//! glassy @ clear-segment build              # OK  — removes it
+//! ```
+//!
 //! `glassy msg <cmd> …` is accepted as a synonym for `glassy @ <cmd> …`.
 //!
 //! ## Wire protocol
@@ -86,6 +96,15 @@ pub enum ControlCommand {
     /// Write a single `glassy.conf` key: validated, persisted to disk, and
     /// applied live via the same path as [`ControlCommand::ReloadConfig`].
     SetConfig { key: String, value: String },
+    /// Push/update text for a custom status-bar segment (Phase 1 plugin
+    /// surface, `docs/plugins.md`). `id` identifies the segment for a later
+    /// `ClearSegment`; re-setting an existing `id` updates it in place.
+    /// Bounded to `MAX_CUSTOM_SEGMENTS` distinct ids and `text` is truncated to
+    /// `CUSTOM_SEGMENT_TEXT_CAP` chars — see `App::control_set_segment`.
+    SetSegment { id: String, text: String },
+    /// Remove a custom status-bar segment previously set by `SetSegment`. A
+    /// no-op (still replies `OK`) if `id` isn't currently set.
+    ClearSegment(String),
 }
 
 /// Split direction for the `split` remote command.
@@ -248,11 +267,33 @@ pub fn parse_request(line: &str) -> Result<ControlCommand, String> {
             }
             None => Err(format!("set-config: missing value for key '{rest}'")),
         },
+        // w15: `set-segment <id> <text...>` mirrors `set-config`'s "rest of the
+        // line after the first token is the payload verbatim" handling, so a
+        // segment's text can contain spaces without quoting.
+        "set-segment" => match rest.split_once(char::is_whitespace) {
+            Some((id, text)) if !id.trim().is_empty() => Ok(ControlCommand::SetSegment {
+                id: id.trim().to_ascii_lowercase(),
+                text: text.trim_start().to_string(),
+            }),
+            Some(_) => Err("set-segment: missing id".to_string()),
+            None if rest.is_empty() => {
+                Err("set-segment: usage 'set-segment <id> <text...>'".to_string())
+            }
+            None => Err(format!("set-segment: missing text for id '{rest}'")),
+        },
+        "clear-segment" => {
+            let id = rest.trim();
+            if id.is_empty() {
+                Err("clear-segment: missing id".to_string())
+            } else {
+                Ok(ControlCommand::ClearSegment(id.to_ascii_lowercase()))
+            }
+        }
         "" => Err("missing command".to_string()),
         other => Err(format!(
             "unknown command '{other}' (try: ls, open-tab, split, send-text, set-theme, \
              set-color, focus-tab, list-themes, reload-config, run-action, get-config, \
-             set-config)"
+             set-config, set-segment, clear-segment)"
         )),
     }
 }
@@ -376,9 +417,51 @@ mod tests {
             "run-action",
             "get-config",
             "set-config",
+            "set-segment",
+            "clear-segment",
         ] {
             assert!(err.contains(verb), "error '{err}' should mention '{verb}'");
         }
+    }
+
+    #[test]
+    fn parses_set_segment_and_clear_segment() {
+        assert_eq!(
+            parse_request("set-segment build building..."),
+            Ok(ControlCommand::SetSegment {
+                id: "build".to_string(),
+                text: "building...".to_string()
+            })
+        );
+        // Rest-of-line semantics: inner spaces in the text are preserved
+        // verbatim (only whitespace separating id from text is trimmed).
+        assert_eq!(
+            parse_request("@ set-segment ci  2 running,  1 queued"),
+            Ok(ControlCommand::SetSegment {
+                id: "ci".to_string(),
+                text: "2 running,  1 queued".to_string()
+            })
+        );
+        // The id is lowercased (matching get-config/set-config's key handling).
+        assert_eq!(
+            parse_request("set-segment BUILD ok"),
+            Ok(ControlCommand::SetSegment {
+                id: "build".to_string(),
+                text: "ok".to_string()
+            })
+        );
+        assert!(parse_request("set-segment").is_err());
+        assert!(parse_request("set-segment build").is_err());
+
+        assert_eq!(
+            parse_request("clear-segment build"),
+            Ok(ControlCommand::ClearSegment("build".to_string()))
+        );
+        assert_eq!(
+            parse_request("@ clear-segment BUILD"),
+            Ok(ControlCommand::ClearSegment("build".to_string()))
+        );
+        assert!(parse_request("clear-segment").is_err());
     }
 
     #[test]

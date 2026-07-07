@@ -167,6 +167,14 @@ impl App {
             opacity_before_toggle: None,
             pending_drop_files: Vec::new(),
             drop_hover: false,
+            // w15: cached once here (never re-read; a machine's hostname does
+            // not change at runtime) — see `StatusBarSegment::Hostname`.
+            hostname: rustix::system::uname()
+                .nodename()
+                .to_str()
+                .ok()
+                .map(str::to_string),
+            custom_segments: Vec::new(),
         }
     }
 
