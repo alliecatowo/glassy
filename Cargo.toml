@@ -7,10 +7,24 @@ license = "MIT"
 homepage = "https://github.com/alliecatowo/glassy"
 repository = "https://github.com/alliecatowo/glassy"
 
+[lib]
+name = "glassy"
+path = "src/lib.rs"
+
+[[bin]]
+name = "glassy"
+path = "src/main.rs"
+
 [dependencies]
 polling = "3.11"
 png = "0.17"
-alacritty_terminal = "0.26.0"
+# default-features=false drops alacritty_terminal's "serde" feature (Serialize/
+# Deserialize derives on its Grid/Cell/Term types, plus the bitflags/serde and
+# vte/serde propagation it enables): glassy never (de)serializes an
+# alacritty_terminal type directly — its own config/session serde is
+# independent, in src/config and src/session. See docs/benchmarks.md for the
+# measured size delta.
+alacritty_terminal = { version = "0.26.0", default-features = false }
 anyhow = "1.0.102"
 # arboard is split per target so macOS/Windows builds don't pull in Wayland/X11
 # system libraries that are absent on those platforms (primary macOS build blocker).
@@ -90,6 +104,16 @@ wgpu = { version = "29.0.3", default-features = false, features = ["dx12", "vulk
 [target.'cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))'.dependencies]
 arboard = { version = "3.6.1", default-features = false }
 wgpu = { version = "29.0.3", default-features = false, features = ["gles", "wgsl", "std", "parking_lot"] }
+
+[dev-dependencies]
+# Micro-benchmarks for the hot paths listed in docs/benchmarks.md. `html_reports`
+# gives a browsable target/criterion/report/index.html on top of the defaults
+# (cargo_bench_support + plotters).
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "hot_paths"
+harness = false
 
 [features]
 # Compile in the audible-bell backend. Requires audio dev libs (e.g. alsa-lib-devel

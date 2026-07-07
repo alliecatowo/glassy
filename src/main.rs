@@ -1,17 +1,8 @@
-mod app;
-mod bell;
-mod color;
-mod config;
-mod gui;
-mod image;
-mod input;
-mod ipc;
-mod pane;
-mod pty;
-mod renderer;
-mod session;
-mod text;
-
+// `glassy` is a thin binary over the `glassy` library crate (`src/lib.rs`):
+// this file only holds the CLI entry point / control-client logic. The
+// module tree (app, color, config, ipc, pty, …) lives in the lib so
+// `benches/hot_paths.rs` and other out-of-crate targets can reach it.
+use glassy::{app, color, config, ipc, pty};
 use winit::event_loop::{ControlFlow, EventLoop};
 
 fn main() -> anyhow::Result<()> {

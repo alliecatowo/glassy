@@ -1083,7 +1083,7 @@ impl App {
     /// The focused pane is always rebuilt (it owns the blinking cursor + selection,
     /// which are not part of alacritty's damage), so this is only consulted for the
     /// non-focused panes.
-    pub(crate) fn pane_damaged(pty: &Pty) -> bool {
+    pub fn pane_damaged(pty: &Pty) -> bool {
         let mut term = pty.term.lock();
         let damaged = match term.damage() {
             alacritty_terminal::term::TermDamage::Full => true,

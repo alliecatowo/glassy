@@ -264,6 +264,18 @@ pub fn profile_names() -> Vec<String> {
     parse::profile_names_from_text(&text)
 }
 
+/// Benchmark-only shim over [`parse::parse_config_file`] (`pub(super)`, so not
+/// itself reachable from `benches/hot_paths.rs`, a separate crate). Keeps
+/// `parse::RawConfig` — a large, `pub(super)` accumulator struct with fields the
+/// benchmark has no reason to touch — private, while still exercising the exact
+/// parse hot path (`Settings::resolve`'s step 2 above) for timing. Not part of
+/// glassy's supported API.
+#[doc(hidden)]
+pub fn parse_config_file_bench(text: &str) -> Result<()> {
+    let mut raw = parse::RawConfig::default();
+    parse::parse_config_file(text, &mut raw)
+}
+
 #[cfg(test)]
 mod tests {
     use super::cli::profile_from_args;

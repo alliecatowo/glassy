@@ -74,6 +74,12 @@ mod user_event;
 mod vi_mode;
 
 pub(crate) use helpers::*;
+// `collect_display_row` alone is re-exported crate-externally (`#[doc(hidden)]`,
+// not part of glassy's supported API) so `benches/hot_paths.rs` — a separate
+// crate — can reach it; every other `helpers` item stays `pub(crate)` via the
+// glob re-export above.
+#[doc(hidden)]
+pub use helpers::collect_display_row;
 pub(crate) use palette::PaletteState;
 pub(crate) use search::SearchState;
 pub(crate) use strip::*;
