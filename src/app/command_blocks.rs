@@ -561,11 +561,18 @@ pub(crate) fn block_at_abs_row(
 }
 
 /// Compute the `(start, end)` grid points for a `Lines`-granularity selection
-/// spanning a finished command's output body (`output_row + 1 ..= end_row`,
-/// translated from absolute rows to the live-viewport `Line` coordinates
-/// `Selection` uses — the same `abs - display_offset` transform
-/// [`build_fold_ranges`] uses for painting). Returns `None` for an empty output
-/// range (the command produced no output) or a zero-width grid.
+/// spanning a finished command's output body (`output_row + 1 ..= end_row`),
+/// translating the stored ABSOLUTE rows to the live-viewport `Line` coordinates
+/// `Selection` uses. Returns `None` for an empty output range (the command
+/// produced no output) or a zero-width grid.
+///
+/// The translation is TWO steps, matching `App::grid_point` / alacritty's
+/// `viewport_to_point`: first absolute → viewport (`abs - display_offset`, the
+/// inverse of the gutter click's `viewport + display_offset`), then viewport →
+/// `Line` (another `- display_offset`). Composing both is equivalent to
+/// subtracting `2 * display_offset`. Doing only one subtraction lands the
+/// selection on the wrong rows whenever the user has scrolled
+/// (`display_offset != 0`).
 pub(crate) fn output_selection_points(
     output_row: i32,
     end_row: i32,
@@ -575,8 +582,11 @@ pub(crate) fn output_selection_points(
     if end_row <= output_row || cols == 0 {
         return None;
     }
-    let start = Point::new(Line(output_row + 1 - display_offset), Column(0));
-    let end = Point::new(Line(end_row - display_offset), Column(cols - 1));
+    // abs -> viewport -> Line (two `- display_offset` steps).
+    let start_vp = output_row + 1 - display_offset;
+    let end_vp = end_row - display_offset;
+    let start = Point::new(Line(start_vp - display_offset), Column(0));
+    let end = Point::new(Line(end_vp - display_offset), Column(cols - 1));
     Some((start, end))
 }
 
@@ -769,6 +779,18 @@ mod tests {
         let (start, end) = output_selection_points(3, 8, 0, 40).expect("some range");
         assert_eq!(start, Point::new(Line(4), Column(0)));
         assert_eq!(end, Point::new(Line(8), Column(39)));
+    }
+
+    #[test]
+    fn output_selection_points_applies_display_offset_twice_when_scrolled() {
+        // REGRESSION: the abs->Line conversion is two `- display_offset` steps
+        // (abs->viewport, viewport->Line). With the user scrolled up 5 lines, an
+        // output body at absolute rows 4..=8 must resolve to Lines shifted by
+        // 2*5 = 10, not just 5 — otherwise a historical block's output selects the
+        // wrong rows. start = 3 + 1 - 2*5 = -6; end = 8 - 2*5 = -2.
+        let (start, end) = output_selection_points(3, 8, 5, 40).expect("some range");
+        assert_eq!(start, Point::new(Line(-6), Column(0)));
+        assert_eq!(end, Point::new(Line(-2), Column(39)));
     }
 
     #[test]
