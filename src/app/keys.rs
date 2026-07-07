@@ -254,8 +254,18 @@ impl App {
             );
             // The default `quake_toggle` bind (F12) must NOT swallow F12 from
             // terminal apps when this instance isn't in quake mode — there it is a
-            // no-op, so let the keypress fall through to the child instead.
+            // no-op, so let the keypress fall through to the child instead. It's
+            // still a dead end for a user who doesn't know quake mode exists, so
+            // hint at it with a toast (skip key-repeat so holding F12 doesn't spam
+            // the toast stack — a distinct press still shows one each time, but
+            // that's the rare/deliberate case, not the common one).
             let inert_quake = action == KeyAction::QuakeToggle && self.quake.is_none();
+            if inert_quake && !event.repeat {
+                self.push_toast(
+                    "Quake mode is off — enable in Settings > Quake; needs restart + a compositor bind on Wayland, see docs/quake-mode.md",
+                );
+                self.mark_dirty(event_loop);
+            }
             // Pane-focus chords (Cmd/Ctrl+arrow) are no-ops on a single-pane tab —
             // there they MUST fall through so the arrow reaches the child (e.g.
             // Ctrl+Left = word-jump in a shell). Only swallow them when split.

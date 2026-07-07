@@ -49,6 +49,15 @@ pub struct SettingsFields<'a> {
     /// Themes section: "Wallpaper theme" path field model + drag state.
     pub wallpaper_theme: &'a mut TextEdit,
     pub wallpaper_theme_ms: &'a mut TextInputMouse,
+    /// Profiles section: index (into `SettingsView::profile_names`) of the
+    /// profile row currently being renamed, or `None`. A plain `Copy` snapshot
+    /// value (not a `&mut` model like the fields above) — carried here rather
+    /// than added to `SettingsView` so wiring a Profiles-only affordance
+    /// doesn't grow `App::paint_settings`'s parameter list (and the two
+    /// call-site tuples that feed it in `render.rs`/`multipane.rs`). Set by
+    /// `App::profile_rename_start`; the shared `profile_name` field above is
+    /// repurposed in place to edit the new name while this is `Some`.
+    pub profile_rename_idx: Option<usize>,
 }
 
 impl<'r> Ui<'r> {

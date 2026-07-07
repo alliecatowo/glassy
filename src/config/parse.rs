@@ -693,6 +693,85 @@ pub fn save_into_section(section: Option<&str>, updates: &[(&str, String)]) -> R
     Ok(())
 }
 
+/// Remove an entire `[profile.NAME]` section (its header line + every line up
+/// to, but not including, the next `[section]` header or EOF) from the config
+/// file, preserving everything else — other sections, comments, blank lines —
+/// verbatim. A no-op (file left byte-for-byte as-is, `Ok`) when no matching
+/// section exists, so a caller racing a hand-edited file never errors on a
+/// profile that's already gone. Header matching mirrors [`save_into_section`]
+/// exactly (case-insensitive name, first-seen wins on a malformed duplicate).
+///
+/// Creates the parent directory and file if needed (matching the other
+/// `save`/`save_into_section` writers, though in practice this is only ever
+/// called against an existing file — there's nothing to remove otherwise).
+pub fn remove_section(name: &str) -> Result<()> {
+    let path = config_path().context("no config path (HOME/XDG unset)")?;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)
+            .with_context(|| format!("creating config dir {}", dir.display()))?;
+    }
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    let out = remove_section_text(&existing, name);
+    std::fs::write(&path, out).with_context(|| format!("writing config {}", path.display()))?;
+    Ok(())
+}
+
+/// Pure text-surgery half of [`remove_section`] (I/O-free for unit testing).
+/// Reuses [`profile_header_name`] / [`is_section_header`] — the exact same
+/// boundary-detection [`merge_into_section`] relies on — so a section removed
+/// here is always the same span a subsequent read (or a `save_into_section`
+/// write) would agree is "the" `[profile.name]` section.
+fn remove_section_text(existing: &str, name: &str) -> String {
+    let mut lines: Vec<String> = existing.lines().map(str::to_string).collect();
+    let key = name.to_ascii_lowercase();
+    let header_idx = lines
+        .iter()
+        .position(|l| profile_header_name(l).as_deref() == Some(key.as_str()));
+    if let Some(hi) = header_idx {
+        let end = lines[hi + 1..]
+            .iter()
+            .position(|l| is_section_header(l))
+            .map(|off| hi + 1 + off)
+            .unwrap_or(lines.len());
+        lines.drain(hi..end);
+    }
+    let mut out = lines.join("\n");
+    out.push('\n');
+    out
+}
+
+/// Rename a `[profile.OLD]` section's header IN PLACE to `[profile.NEW]`,
+/// leaving its body (and everything else in the file) untouched. `new_name`
+/// is lower-cased to match the case-insensitive name convention every other
+/// section-header reader/writer in this module uses. Errors if no
+/// `[profile.old_name]` section exists (mirrors [`RawConfig::activate_profile`]'s
+/// "unknown profile" error); does NOT validate `new_name`'s charset or check
+/// for a collision with an existing section — that's the caller's job (see
+/// `App::profile_rename_commit`), matching how `save_into_section`/
+/// `create_profile_from_current` split those concerns (this module does text
+/// surgery, the app layer does UX-facing validation).
+pub fn rename_section(old_name: &str, new_name: &str) -> Result<()> {
+    let path = config_path().context("no config path (HOME/XDG unset)")?;
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    let out = rename_section_text(&existing, old_name, new_name)?;
+    std::fs::write(&path, out).with_context(|| format!("writing config {}", path.display()))?;
+    Ok(())
+}
+
+/// Pure text-surgery half of [`rename_section`] (I/O-free for unit testing).
+fn rename_section_text(existing: &str, old_name: &str, new_name: &str) -> Result<String> {
+    let mut lines: Vec<String> = existing.lines().map(str::to_string).collect();
+    let key = old_name.to_ascii_lowercase();
+    let hi = lines
+        .iter()
+        .position(|l| profile_header_name(l).as_deref() == Some(key.as_str()))
+        .with_context(|| format!("unknown profile '{old_name}' (no [profile.{old_name}] section)"))?;
+    lines[hi] = format!("[profile.{}]", new_name.to_ascii_lowercase());
+    let mut out = lines.join("\n");
+    out.push('\n');
+    Ok(out)
+}
+
 /// Merge `updates` into the text of a config file's TOP-LEVEL scope: a present
 /// key is updated in place (preserving its position), a missing one is appended
 /// BEFORE the first `[section]` header (never inside one); comments, blank

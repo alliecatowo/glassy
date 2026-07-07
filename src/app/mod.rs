@@ -1097,6 +1097,15 @@ pub struct App {
     /// after a successful create.
     settings_profile_new: gui::TextEdit,
     settings_profile_new_ms: gui::TextInputMouse,
+    /// Index (into `settings_profiles`) of the profile row currently being
+    /// renamed (Profiles section), or `None`. While set, the "New profile" row
+    /// is repurposed to "Rename profile" and `settings_profile_new` edits the
+    /// pending new name instead of a brand-new profile's. Set by
+    /// `App::profile_rename_start`; cleared on commit/cancel or whenever
+    /// `settings_profiles` is refreshed after a list-changing action (delete/
+    /// create/rename), since a stale index could otherwise point at the wrong
+    /// row after the list re-indexes.
+    settings_profile_rename_idx: Option<usize>,
 
     // --- settings-sections stream: Terminal / Effects / Quake / Notifications /
     // Advanced text fields -----------------------------------------------------
