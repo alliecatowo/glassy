@@ -202,35 +202,52 @@ impl App {
         let sb_progress = self.active_progress;
         let sb_broadcast = self.broadcast_input;
 
-        // Command-block badges + fold ranges (OSC 133 shell integration). Built
+        // Command-block badges + fold ranges (OSC 133/633 shell integration),
+        // plus the opt-in card chrome bands (`command_blocks = cards`). Built
         // here under the `&self` borrow so the renderer gets plain owned data.
-        // Empty (and cheap) when no blocks exist or the feature is disabled.
-        let (cmd_badges, cmd_fold_ranges) = if self.config.command_badges {
-            self.pty
-                .as_ref()
-                .and_then(|p| {
-                    let disp = p.term.lock().grid().display_offset() as i32;
-                    p.prompts.lock().ok().map(|g| {
-                        (
-                            command_blocks::build_badges(
-                                &g.blocks,
-                                &self.fold_state,
-                                disp,
-                                self.rows,
-                            ),
-                            command_blocks::build_fold_ranges(
-                                &g.blocks,
-                                &self.fold_state,
-                                disp,
-                                self.rows,
-                            ),
-                        )
+        // Empty (and cheap) when no blocks exist or the relevant feature is
+        // disabled; the chrome bands are independent of `command_badges` (a
+        // user can want the card look without the exit-status chip).
+        let want_cards = self.config.command_blocks == CommandBlocksMode::Cards;
+        let (cmd_badges, cmd_fold_ranges, cmd_chrome_bands) =
+            if self.config.command_badges || want_cards {
+                self.pty
+                    .as_ref()
+                    .and_then(|p| {
+                        let disp = p.term.lock().grid().display_offset() as i32;
+                        p.prompts.lock().ok().map(|g| {
+                            let badges = if self.config.command_badges {
+                                command_blocks::build_badges(
+                                    &g.blocks,
+                                    &self.fold_state,
+                                    disp,
+                                    self.rows,
+                                )
+                            } else {
+                                Vec::new()
+                            };
+                            let folds = if self.config.command_badges {
+                                command_blocks::build_fold_ranges(
+                                    &g.blocks,
+                                    &self.fold_state,
+                                    disp,
+                                    self.rows,
+                                )
+                            } else {
+                                Vec::new()
+                            };
+                            let bands = if want_cards {
+                                command_blocks::build_chrome_bands(&g.blocks, disp, self.rows)
+                            } else {
+                                Vec::new()
+                            };
+                            (badges, folds, bands)
+                        })
                     })
-                })
-                .unwrap_or_default()
-        } else {
-            (Vec::new(), Vec::new())
-        };
+                    .unwrap_or_default()
+            } else {
+                (Vec::new(), Vec::new(), Vec::new())
+            };
 
         // Minimap snapshot: the strip rect (computed under `&self` before the
         // renderer borrow) plus the data to position the viewport indicator.
@@ -897,10 +914,11 @@ impl App {
             }
         }
 
-        // Command-block affordances (OSC 133): the dim+summary overlay for folded
-        // output and the exit-status/duration badges, anchored to the grid by the
-        // same pixel origin as the cells. Suppressed under a modal so they don't
-        // punch through. Painted after images so badges read on top.
+        // Command-block affordances (OSC 133/633): the opt-in card chrome band,
+        // the dim+summary overlay for folded output, and the exit-status/duration
+        // badges, anchored to the grid by the same pixel origin as the cells.
+        // Suppressed under a modal so they don't punch through. Painted after
+        // images so badges read on top.
         if !self.help_open && !self.settings_open && !self.menu_open && self.palette.is_none() {
             Self::paint_command_blocks(
                 renderer,
@@ -908,6 +926,7 @@ impl App {
                 self.rows,
                 &cmd_badges,
                 &cmd_fold_ranges,
+                &cmd_chrome_bands,
             );
         }
 

@@ -362,7 +362,8 @@ mod tests {
                 TapEvent::Display(_) => "display",
                 TapEvent::Delete(_) => "delete",
                 TapEvent::Cwd(_) => "cwd",
-                TapEvent::SemanticMark(_, _) => "mark",
+                TapEvent::SemanticMark(_, _, _) => "mark",
+                TapEvent::CommandLine(_) => "cmdline",
                 TapEvent::Notify(_) => "notification",
                 TapEvent::Progress(_) => "progress",
                 TapEvent::Peek(_) => "peek",
@@ -668,12 +669,12 @@ mod tests {
         })
     }
 
-    /// Helper: extract all SemanticMark chars.
+    /// Helper: extract all SemanticMark chars (either protocol).
     fn all_marks(events: &[TapEvent]) -> Vec<char> {
         events
             .iter()
             .filter_map(|e| match e {
-                TapEvent::SemanticMark(c, _) => Some(*c),
+                TapEvent::SemanticMark(c, _, _) => Some(*c),
                 _ => None,
             })
             .collect()
@@ -682,9 +683,25 @@ mod tests {
     /// Helper: extract the exit code carried by the first `D` SemanticMark.
     fn first_exit_code(events: &[TapEvent]) -> Option<i32> {
         events.iter().find_map(|e| match e {
-            TapEvent::SemanticMark('D', exit) => Some(*exit),
+            TapEvent::SemanticMark('D', exit, _) => Some(*exit),
             _ => None,
         })?
+    }
+
+    /// Helper: extract the `MarkSource` of the first SemanticMark, if any.
+    fn first_mark_source(events: &[TapEvent]) -> Option<MarkSource> {
+        events.iter().find_map(|e| match e {
+            TapEvent::SemanticMark(_, _, src) => Some(*src),
+            _ => None,
+        })
+    }
+
+    /// Helper: extract the first CommandLine (OSC 633;E) body, if any.
+    fn first_cmdline(events: &[TapEvent]) -> Option<String> {
+        events.iter().find_map(|e| match e {
+            TapEvent::CommandLine(s) => Some(s.clone()),
+            _ => None,
+        })
     }
 
     #[test]
@@ -881,6 +898,109 @@ mod tests {
         }
         let events = tap.process(&input, &store);
         assert_eq!(all_marks(&events), vec!['A', 'B', 'C', 'D']);
+    }
+
+    // -----------------------------------------------------------------------
+    // OSC 633 shell-integration tests (mirrors the OSC 133 cases above)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn osc633_mark_parsed() {
+        use super::store::parse_osc633_mark;
+        assert_eq!(parse_osc633_mark(b"633;A"), Some(('A', None)));
+        assert_eq!(parse_osc633_mark(b"633;B"), Some(('B', None)));
+        assert_eq!(parse_osc633_mark(b"633;C"), Some(('C', None)));
+        // D carries the exit code.
+        assert_eq!(parse_osc633_mark(b"633;D;0"), Some(('D', Some(0))));
+        assert_eq!(parse_osc633_mark(b"633;D;1"), Some(('D', Some(1))));
+        assert_eq!(parse_osc633_mark(b"633;D;130"), Some(('D', Some(130))));
+        // Bare D with no exit field → mark with no code.
+        assert_eq!(parse_osc633_mark(b"633;D"), Some(('D', None)));
+        // Non-numeric exit field is ignored (mark still recognized).
+        assert_eq!(parse_osc633_mark(b"633;D;err"), Some(('D', None)));
+        // `633;E;...` (command-line report) is a distinct sequence, not a mark.
+        assert_eq!(parse_osc633_mark(b"633;E;ls"), None);
+        // Wrong OSC code or unknown mark.
+        assert_eq!(parse_osc633_mark(b"633;X"), None);
+        assert_eq!(parse_osc633_mark(b"133;A"), None);
+    }
+
+    #[test]
+    fn tap_osc633_a_mark_passes_through_and_emits_mark() {
+        // OSC 633;A should pass through AND emit a SemanticMark('A') tagged Osc633.
+        let store = FairMutex::new(ImageStore::new());
+        let mut tap = StreamTap::new();
+        let events = tap.process(b"\x1b]633;A\x07", &store);
+        assert_eq!(vt_bytes(&events), b"\x1b]633;A\x07");
+        assert_eq!(all_marks(&events), vec!['A']);
+        assert_eq!(first_mark_source(&events), Some(MarkSource::Osc633));
+    }
+
+    #[test]
+    fn tap_osc633_d_mark_carries_exit_code() {
+        let store = FairMutex::new(ImageStore::new());
+        let mut tap = StreamTap::new();
+        let events = tap.process(b"\x1b]633;D;7\x07", &store);
+        assert_eq!(first_exit_code(&events), Some(7));
+    }
+
+    #[test]
+    fn tap_osc133_and_osc633_marks_carry_distinct_sources() {
+        // The same session emitting both protocols (e.g. a redundant integration
+        // source) must still be individually distinguishable at the tap level;
+        // it's the PTY loop's `MarkSourceGuard` (not the tap) that adjudicates
+        // which one wins.
+        let store = FairMutex::new(ImageStore::new());
+        let mut tap = StreamTap::new();
+        let events = tap.process(b"\x1b]133;A\x07\x1b]633;A\x07", &store);
+        let sources: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                TapEvent::SemanticMark(_, _, src) => Some(*src),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(sources, vec![MarkSource::Osc133, MarkSource::Osc633]);
+    }
+
+    #[test]
+    fn osc633_cmdline_parsed() {
+        use super::store::parse_osc633_cmdline;
+        // Bare command, no nonce.
+        assert_eq!(
+            parse_osc633_cmdline(b"633;E;ls -la"),
+            Some("ls -la".to_string())
+        );
+        // With a trailing nonce field.
+        assert_eq!(
+            parse_osc633_cmdline(b"633;E;cargo build;1234"),
+            Some("cargo build".to_string())
+        );
+        // Escaped semicolon (`\x3b`) round-trips to a literal `;`.
+        assert_eq!(
+            parse_osc633_cmdline(b"633;E;echo a\\x3bb;9"),
+            Some("echo a;b".to_string())
+        );
+        // Escaped backslash round-trips to a single `\`.
+        assert_eq!(
+            parse_osc633_cmdline(b"633;E;echo C:\\\\path"),
+            Some("echo C:\\path".to_string())
+        );
+        // Empty command line is rejected.
+        assert!(parse_osc633_cmdline(b"633;E;").is_none());
+        assert!(parse_osc633_cmdline(b"633;E;   ").is_none());
+        // Not an `E` report at all.
+        assert!(parse_osc633_cmdline(b"633;A").is_none());
+        assert!(parse_osc633_cmdline(b"133;E;ls").is_none());
+    }
+
+    #[test]
+    fn tap_osc633_e_emits_command_line_and_passes_through() {
+        let store = FairMutex::new(ImageStore::new());
+        let mut tap = StreamTap::new();
+        let events = tap.process(b"\x1b]633;E;git status;42\x07", &store);
+        assert_eq!(vt_bytes(&events), b"\x1b]633;E;git status;42\x07");
+        assert_eq!(first_cmdline(&events), Some("git status".to_string()));
     }
 
     // -----------------------------------------------------------------------

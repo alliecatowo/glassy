@@ -115,6 +115,17 @@ pub fn run_loop(
     // `133;D` so the command-finish desktop notification can name the command
     // that finished. Cleared when `D` consumes it (or overwritten by the next C).
     let mut last_command: Option<String> = None;
+    // "First protocol wins" guard between OSC 133 and OSC 633 (the VS Code /
+    // iTerm2-flavored superset carrying the identical A/B/C/D mark set): the
+    // first mark of either family locks in this session's source; marks from
+    // the other family are then ignored so a shell sourcing both integrations
+    // never double-counts a command block. See `image::MarkSourceGuard`.
+    let mut mark_guard = crate::image::MarkSourceGuard::default();
+    // The literal command line reported by an OSC 633;E ("VS Code shell-
+    // integration") sequence, kept until the matching `C` mark consumes it in
+    // place of glassy's own grid-scrape. `None` when no 633;E has arrived since
+    // the last `C` (either a 133-only session, or between commands).
+    let mut pending_e_cmdline: Option<String> = None;
     // ---- End command-zone capture -----------------------------------------------
 
     'main: loop {
@@ -287,9 +298,16 @@ pub fn run_loop(
                                 // new tabs/splits of this session can inherit it.
                                 proxy.send_user(crate::pty::UserEvent::Cwd(proxy.id, path));
                             }
-                            crate::image::TapEvent::SemanticMark(mark, exit) => {
-                                // OSC 133: drive the per-session command-block tracker
-                                // AND capture the typed command for the palette history.
+                            crate::image::TapEvent::SemanticMark(mark, exit, source) => {
+                                // OSC 133 or OSC 633 (VS Code / iTerm2-flavored superset,
+                                // same A/B/C/D mark set): drive the per-session
+                                // command-block tracker AND capture the typed command
+                                // for the palette history. `mark_guard` adjudicates which
+                                // protocol wins for this session (a shell sourcing BOTH
+                                // integrations would otherwise double-count every block);
+                                // a mark from the non-winning protocol is dropped here,
+                                // before it ever reaches `PromptTracker` or the UI thread.
+                                //
                                 // `A` opens a block (prompt start; also records the row
                                 // for jump-to-prompt). `B` records the command-zone start
                                 // so the matching `C` can read the typed command text.
@@ -298,6 +316,9 @@ pub fn run_loop(
                                 // exit code. All rows are absolute grid offsets
                                 // (display_offset + cursor.line); `term` is already locked
                                 // above, so read through the guard directly.
+                                if !mark_guard.accept(source) {
+                                    continue;
+                                }
                                 let row = {
                                     let c = term.renderable_content();
                                     c.cursor.point.line.0 + c.display_offset as i32
@@ -311,7 +332,8 @@ pub fn run_loop(
                                     'B' => {
                                         // Command start: record the cursor position so
                                         // the matching `C` can read the typed command
-                                        // text from the grid starting here.
+                                        // text from the grid starting here (used as a
+                                        // fallback if no OSC 633;E arrives before `C`).
                                         let cur = term.grid().cursor.point;
                                         cmd_start = Some(super::cmdzone::CmdStart {
                                             line: cur.line.0,
@@ -322,24 +344,35 @@ pub fn run_loop(
                                         if let Ok(mut p) = prompts.lock() {
                                             p.command_started(row, Instant::now());
                                         }
-                                        // Command executed: read the command text from
-                                        // the grid between the `B` point and the cursor,
-                                        // then forward it to the UI history ring.
-                                        if let Some(start) = cmd_start.take() {
-                                            let end = term.grid().cursor.point;
-                                            if let Some(cmd) = super::cmdzone::read_command_zone(
-                                                term.grid(),
-                                                start,
-                                                end,
-                                            ) {
-                                                // Remember the command text so the
-                                                // matching `D` can name it in the
-                                                // finish notification.
-                                                last_command = Some(cmd.clone());
-                                                proxy.send_user(crate::pty::UserEvent::CommandRun(
-                                                    proxy.id, cmd,
-                                                ));
+                                        // Command executed: prefer the literal command
+                                        // line an OSC 633;E already reported (strictly
+                                        // reliable — straight from the shell), otherwise
+                                        // fall back to reading the typed text from the
+                                        // grid between the `B` point and the cursor.
+                                        // Either way forward the result to the UI
+                                        // history ring.
+                                        let cmd = match pending_e_cmdline.take() {
+                                            Some(cmd) => {
+                                                cmd_start = None;
+                                                Some(cmd)
                                             }
+                                            None => cmd_start.take().and_then(|start| {
+                                                let end = term.grid().cursor.point;
+                                                super::cmdzone::read_command_zone(
+                                                    term.grid(),
+                                                    start,
+                                                    end,
+                                                )
+                                            }),
+                                        };
+                                        if let Some(cmd) = cmd {
+                                            // Remember the command text so the
+                                            // matching `D` can name it in the
+                                            // finish notification.
+                                            last_command = Some(cmd.clone());
+                                            proxy.send_user(crate::pty::UserEvent::CommandRun(
+                                                proxy.id, cmd,
+                                            ));
                                         }
                                     }
                                     'D' => {
@@ -371,6 +404,17 @@ pub fn run_loop(
                                 proxy.send_user(crate::pty::UserEvent::SemanticMark(
                                     proxy.id, mark, exit,
                                 ));
+                            }
+                            crate::image::TapEvent::CommandLine(cmd) => {
+                                // OSC 633;E: VS Code's explicit command-line report.
+                                // Only trust it once this session has committed to (or
+                                // not yet chosen) the 633 protocol — see `mark_guard` —
+                                // so a losing 633 snippet coexisting with a winning 133
+                                // integration can't inject a stray command line. Kept
+                                // until the matching `C` mark consumes it.
+                                if mark_guard.allows(crate::image::MarkSource::Osc633) {
+                                    pending_e_cmdline = Some(cmd);
+                                }
                             }
                             crate::image::TapEvent::Notify(spec) => {
                                 // OSC 9 / OSC 777: forward the structured spec to the

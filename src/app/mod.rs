@@ -319,6 +319,12 @@ pub struct Config {
     /// Power Mode effect strength in `[0, 1]` (particle count/size/speed + shake).
     /// Default 0.6. Config key `power_mode_intensity`.
     pub power_mode_intensity: f32,
+    /// Opt-in visual "chrome" level for OSC 133/633 command blocks, layered on
+    /// top of (not replacing) the existing `command_badges`/`command_fold`
+    /// affordances. Default [`CommandBlocksMode::Badges`] — today's appearance,
+    /// unchanged. Only `Cards` adds anything: a subtle glass band + accent rail
+    /// behind each finished command's row range. Config key `command_blocks`.
+    pub command_blocks: CommandBlocksMode,
 }
 
 /// Configurable segments for the status bar (config key `status_bar_segments`).
@@ -416,6 +422,28 @@ pub enum TabBarMode {
     Always,
     /// Never draw the strip (the grid uses the full window height).
     Never,
+}
+
+/// Opt-in visual chrome level for OSC 133/633 command blocks (config key
+/// `command_blocks`). Layers strictly on top of the pre-existing
+/// `command_badges` (exit-status chip) / `command_fold` (output folding)
+/// toggles rather than superseding them — `Off` and `Badges` both leave
+/// today's rendering untouched; only `Cards` draws anything new. See
+/// `app::command_blocks::build_chrome_bands`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum CommandBlocksMode {
+    /// No card chrome. Reserved for a future "hide command-block affordances
+    /// entirely" master switch; today identical to `Badges`.
+    Off,
+    /// Today's default appearance: the exit-status badge + fold caret (each
+    /// still independently gated by `command_badges`/`command_fold`), no card.
+    #[default]
+    Badges,
+    /// Additionally paint a subtle glass band + accent rail behind each
+    /// finished command's row range (prompt row through its `D` mark),
+    /// Warp-style. Presentation-only: draws no new invalidation, only what the
+    /// existing badge/fold overlay pass already repaints.
+    Cards,
 }
 
 /// A tab's split layout: the tiling tree (whose leaf ids are pty/pane ids) plus

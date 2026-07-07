@@ -297,6 +297,10 @@ pub(super) struct RawConfig {
     pub fx_vignette: Option<f32>,
     pub fx_grain: Option<f32>,
     pub fx_tint: Option<f32>,
+    /// Opt-in command-block visual chrome level: `off` | `badges` | `cards`.
+    /// Validated in `apply_kv`; resolved to [`crate::app::CommandBlocksMode`] by
+    /// [`parse_command_blocks_mode`] at finalization.
+    pub command_blocks: Option<String>,
 }
 
 impl RawConfig {
@@ -490,6 +494,7 @@ impl RawConfig {
                     0.6
                 }
             },
+            command_blocks: parse_command_blocks_mode(self.command_blocks.as_deref()),
         };
 
         // The activated profile name (if any) is attached by the caller
@@ -1254,6 +1259,13 @@ pub(super) fn apply_kv(key: &str, value: &str, raw: &mut RawConfig) -> Result<()
                 raw.font_variations = Some(parse_font_variations(value));
             }
         }
+        "command_blocks" => {
+            let v = value.to_ascii_lowercase();
+            match v.as_str() {
+                "off" | "badges" | "cards" => raw.command_blocks = Some(v),
+                _ => bail!("command_blocks must be off, badges, or cards; got '{value}'"),
+            }
+        }
         other => {
             log::warn!("glassy: ignoring unknown config key '{other}'");
         }
@@ -1310,6 +1322,18 @@ pub(super) fn parse_tab_bar_mode(value: Option<&str>) -> crate::app::TabBarMode 
         Some("always") => TabBarMode::Always,
         Some("never") => TabBarMode::Never,
         _ => TabBarMode::Auto,
+    }
+}
+
+/// Map a (validated) `command_blocks` token to the [`crate::app::CommandBlocksMode`]
+/// enum, defaulting to `Badges` (today's appearance) when unset. The validation
+/// already happened in [`apply_kv`].
+pub(super) fn parse_command_blocks_mode(value: Option<&str>) -> crate::app::CommandBlocksMode {
+    use crate::app::CommandBlocksMode;
+    match value {
+        Some("off") => CommandBlocksMode::Off,
+        Some("cards") => CommandBlocksMode::Cards,
+        _ => CommandBlocksMode::Badges,
     }
 }
 

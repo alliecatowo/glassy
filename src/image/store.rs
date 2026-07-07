@@ -202,14 +202,27 @@ pub enum TapEvent {
     /// only). Surfaced so the UI can store it per-session for new-tab/split cwd
     /// inheritance. The original OSC bytes are still passed through to the parser.
     Cwd(std::path::PathBuf),
-    /// OSC 133 shell-integration semantic mark. The mark character is one of:
-    /// `A` (prompt start), `B` (command start), `C` (command executed), `D`
-    /// (command finished). For a `D` mark the optional `i32` is the command's
-    /// exit code (`133;D;<exit>`); it is `None` for A/B/C and for a bare `D`
-    /// without an exit code. The original OSC bytes are still passed through to
-    /// the VT parser. Used to record per-command zones (prompt rows, exit status,
-    /// duration) for command-block grouping + jump-to-prompt navigation.
-    SemanticMark(char, Option<i32>),
+    /// Shell-integration semantic mark, from either OSC 133 or OSC 633 (the
+    /// VS Code / iTerm2-flavored superset — same mark set, different OSC
+    /// number). The mark character is one of: `A` (prompt start), `B` (command
+    /// start), `C` (command executed), `D` (command finished). For a `D` mark
+    /// the optional `i32` is the command's exit code (`133;D;<exit>` /
+    /// `633;D;<exit>`); it is `None` for A/B/C and for a bare `D` without an
+    /// exit code. [`MarkSource`] records which OSC family produced the mark, so
+    /// the PTY loop's `MarkSourceGuard` can ignore a session's non-winning
+    /// protocol (a shell that sources both integrations must not double-count
+    /// every command block). The original OSC bytes are still passed through to
+    /// the VT parser. Used to record per-command zones (prompt rows, exit
+    /// status, duration) for command-block grouping + jump-to-prompt navigation.
+    SemanticMark(char, Option<i32>, MarkSource),
+    /// OSC 633;E — VS Code shell-integration's explicit command-line report:
+    /// `633;E;<cmdline>;<nonce>`, where `<cmdline>` is the literal command text
+    /// the shell is about to run (escaped per VS Code's convention; see
+    /// [`parse_osc633_cmdline`]). Strictly more reliable than glassy's own
+    /// grid-scrape (`crate::pty::cmdzone::read_command_zone`) since it comes
+    /// straight from the shell rather than re-reading typed characters off the
+    /// grid. The original OSC bytes are still passed through to the VT parser.
+    CommandLine(String),
     /// OSC 9 (iTerm2 / ConEmu style) or OSC 777 (terminal-notifier style) desktop
     /// notification request from the running shell. The payload is a structured
     /// [`NotifySpec`] (title/body/icon/sound/urgency/actions) parsed from the
@@ -224,6 +237,55 @@ pub enum TapEvent {
     /// of the file and shows a syntax/markdown peek card near the cursor. The
     /// original OSC bytes are still passed through to the VT parser unchanged.
     Peek(std::path::PathBuf),
+}
+
+/// Which shell-integration OSC family produced a [`TapEvent::SemanticMark`]:
+/// the original OSC 133 or the VS Code / iTerm2-flavored OSC 633 superset.
+/// Both feed the identical `A`/`B`/`C`/`D` mark model; this only exists so a
+/// session's [`MarkSourceGuard`] can adjudicate which protocol wins when a
+/// shell (redundantly) sources both integrations.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MarkSource {
+    Osc133,
+    Osc633,
+}
+
+/// Per-session "first protocol wins" guard for [`MarkSource`]. A shell that
+/// sources both the OSC 133 and OSC 633 shell-integration scripts would
+/// otherwise emit two marks per prompt event, double-counting every
+/// [`crate::pty::CommandBlock`]. The PTY read loop holds one of these per PTY
+/// session: the first mark of either family locks in that session's source;
+/// marks from the other family are then silently ignored (including the OSC
+/// 633;E command-line report, gated separately via [`Self::allows`]).
+#[derive(Default)]
+pub struct MarkSourceGuard(Option<MarkSource>);
+
+impl MarkSourceGuard {
+    /// Whether a mark from `source` should be honored, LOCKING IN `source` as
+    /// the session's winner if none has been chosen yet. Call once per
+    /// incoming `A`/`B`/`C`/`D` mark; the mark must be dropped (not fed into
+    /// `PromptTracker`) when this returns `false`.
+    pub fn accept(&mut self, source: MarkSource) -> bool {
+        match self.0 {
+            None => {
+                self.0 = Some(source);
+                true
+            }
+            Some(winner) => winner == source,
+        }
+    }
+
+    /// Non-mutating check for ancillary data (the OSC 633;E command line) that
+    /// should only be trusted once `source` has already won (or no protocol
+    /// has been chosen yet — realistically `E` always follows a `B` mark that
+    /// already locked in the winner, but this stays permissive rather than
+    /// dropping a legitimately-first `E`).
+    pub fn allows(&self, source: MarkSource) -> bool {
+        match self.0 {
+            None => true,
+            Some(winner) => winner == source,
+        }
+    }
 }
 
 #[derive(PartialEq, Eq)]
@@ -510,7 +572,21 @@ impl StreamTap {
         }
         // OSC 133 — shell-integration semantic marks: `133;A`, `133;B`, etc.
         // (and `133;D;<exit>` carrying the command's exit code).
-        parse_osc133_mark(&osc).map(|(mark, exit)| TapEvent::SemanticMark(mark, exit))
+        if let Some((mark, exit)) = parse_osc133_mark(&osc) {
+            return Some(TapEvent::SemanticMark(mark, exit, MarkSource::Osc133));
+        }
+        // OSC 633 — the VS Code / iTerm2-flavored superset of 133: identical
+        // `A`/`B`/`C`/`D` mark set (`633;D;<exit>` for the exit code), so it
+        // feeds the exact same `TapEvent::SemanticMark` path tagged with its own
+        // `MarkSource`. Lets a session with a pre-existing vscode-shell-
+        // integration snippet sourced get glassy's command blocks for free.
+        if let Some((mark, exit)) = parse_osc633_mark(&osc) {
+            return Some(TapEvent::SemanticMark(mark, exit, MarkSource::Osc633));
+        }
+        // OSC 633;E — VS Code's explicit command-line report (`633;E;<cmdline>;
+        // <nonce>`), checked after the mark forms since its body also starts
+        // with "633;" but is not itself an A/B/C/D mark.
+        parse_osc633_cmdline(&osc).map(TapEvent::CommandLine)
     }
 }
 
@@ -641,6 +717,92 @@ pub(crate) fn parse_osc133_mark(body: &[u8]) -> Option<(char, Option<i32>)> {
         None
     };
     Some((mark, exit))
+}
+
+/// Parse an OSC 633 body (`633;<mark>`) into a shell-integration semantic mark
+/// plus an optional exit code. Identical grammar to [`parse_osc133_mark`] (VS
+/// Code's OSC 633 is a superset of OSC 133's `A`/`B`/`C`/`D` marks, adding `E`
+/// and `P` extensions handled separately); only the OSC number differs.
+///
+/// Returns `(mark, exit_code)`, or `None` if not a valid OSC 633 `A`/`B`/`C`/`D`
+/// mark (in particular, a `633;E;…` command-line report is NOT matched here —
+/// see [`parse_osc633_cmdline`]).
+pub(crate) fn parse_osc633_mark(body: &[u8]) -> Option<(char, Option<i32>)> {
+    let body = std::str::from_utf8(body).ok()?;
+    let rest = body.strip_prefix("633;")?;
+    let mark = rest.chars().next()?;
+    if !matches!(mark, 'A' | 'B' | 'C' | 'D') {
+        return None;
+    }
+    let exit = if mark == 'D' {
+        rest.strip_prefix("D;")
+            .map(|p| p.split(';').next().unwrap_or(""))
+            .and_then(|f| f.trim().parse::<i32>().ok())
+    } else {
+        None
+    };
+    Some((mark, exit))
+}
+
+/// Parse an OSC 633;E body (`633;E;<cmdline>;<nonce>`) into the literal command
+/// line the shell is about to run. VS Code shell-integration emits this right
+/// after the `B` (command-start) mark, once the user has finished editing the
+/// command line — a strictly more reliable source than glassy's own grid-scrape
+/// (`crate::pty::cmdzone::read_command_zone`) since it comes straight from the
+/// shell rather than re-reading typed characters back off the grid.
+///
+/// The trailing `;<nonce>` field (present in newer VS Code integrations to let
+/// the terminal verify the report against a value the extension also knows) is
+/// ignored — only the command-line field is read. The command line itself is
+/// escaped per VS Code's convention (`\` → `\\`, `;` → `\x3b`, since `;` is the
+/// OSC field separator); [`unescape_osc633_cmdline`] undoes it. Returns `None`
+/// for any non-`633;E` body or an empty (post-unescape, post-trim) command.
+pub(crate) fn parse_osc633_cmdline(body: &[u8]) -> Option<String> {
+    let body = std::str::from_utf8(body).ok()?;
+    let rest = body.strip_prefix("633;E;")?;
+    // The nonce (if any) follows the first unescaped `;`; a literal `;` inside
+    // the command line is always escaped as `\x3b`, so a plain split on `;`
+    // correctly isolates the command-line field.
+    let raw = rest.split(';').next().unwrap_or("");
+    let cmd = unescape_osc633_cmdline(raw);
+    let cmd = cmd.trim();
+    if cmd.is_empty() {
+        None
+    } else {
+        Some(cmd.to_string())
+    }
+}
+
+/// Undo VS Code shell-integration's OSC 633;E escaping: `\\` → `\`, `\x3b` →
+/// `;`. Any other backslash sequence is copied through literally (forward-
+/// compat with an escape this parser doesn't know about, rather than
+/// corrupting the text).
+fn unescape_osc633_cmdline(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' {
+            if s[i..].starts_with("\\x3b") {
+                out.push(';');
+                i += 4;
+                continue;
+            } else if s[i..].starts_with("\\\\") {
+                out.push('\\');
+                i += 2;
+                continue;
+            }
+        }
+        // Not an escape we recognize (or not a backslash at all): copy one
+        // full char, not just the byte, so multi-byte UTF-8 stays intact.
+        let ch = s[i..]
+            .chars()
+            .next()
+            .expect("i < bytes.len() so a char remains");
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
 }
 
 /// Whether an OSC 7 `file://` authority refers to the local machine: empty,

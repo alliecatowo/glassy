@@ -209,7 +209,11 @@ fn with_alpha(mut c: [f32; 4], a: f32) -> [f32; 4] {
 ///   (`base * amount`) lands in the same ballpark as the additive delta a
 ///   dark theme gets, so the perceived "how raised is this" contrast stays
 ///   comparable across light and dark themes.
-fn glass_elevate(base: [f32; 4], amount: f32) -> [f32; 4] {
+///
+/// `pub(crate)` (rather than private) so `app::command_blocks`'s opt-in
+/// command-block "card" chrome can derive its band tint from the same
+/// theme-aware elevation math instead of a hardcoded color.
+pub(crate) fn glass_elevate(base: [f32; 4], amount: f32) -> [f32; 4] {
     if luma(base) > 0.7 {
         darken(base, 1.0 - amount)
     } else {

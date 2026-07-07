@@ -389,6 +389,21 @@ impl App {
             return;
         }
 
+        // Warp-style "click the block to select its output" affordance (OSC
+        // 133/633 command blocks): a left press in the left-margin gutter next
+        // to a finished command's row range selects that command's output as
+        // one unit instead of starting a normal drag-selection at column 0.
+        if button == MouseButton::Left
+            && pressed
+            && let Some(prompt_row) =
+                self.command_block_gutter_click_at(self.mouse_px.0, self.mouse_px.1)
+        {
+            self.select_command_output(prompt_row);
+            self.last_click = None; // don't feed the double/triple-click escalation
+            self.mark_dirty(event_loop);
+            return;
+        }
+
         match (button, pressed) {
             // Left press: start (or extend the granularity of) a glassy
             // text selection. Double/triple clicks within the same cell

@@ -55,6 +55,7 @@
 //! copy_html   = false                  # also place a rich-text (HTML) flavor on the clipboard on copy
 //! power_mode  = false                  # fun typing effect: cursor particle bursts + streak shake
 //! power_mode_intensity = 0.6           # power-mode strength: 0.0 (subtle) .. 1.0 (max)
+//! command_blocks = badges              # command-block chrome: off | badges (default) | cards (adds a glass band)
 //! ```
 //!
 //! `follow_system` on Linux: winit never delivers a live theme-change event
@@ -615,6 +616,36 @@ mod tests {
         let mut raw_off = RawConfig::default();
         parse_config_file("command_history = 0\n", &mut raw_off).unwrap();
         assert_eq!(raw_off.command_history, Some(0));
+    }
+
+    #[test]
+    fn command_blocks_parses_and_defaults_to_badges() {
+        use crate::app::CommandBlocksMode;
+        // Default (unset) is Badges — today's appearance, unchanged.
+        let settings = RawConfig::default().into_settings().unwrap();
+        assert_eq!(settings.config.command_blocks, CommandBlocksMode::Badges);
+        // Explicit "off".
+        let mut raw_off = RawConfig::default();
+        parse_config_file("command_blocks = off\n", &mut raw_off).unwrap();
+        assert_eq!(raw_off.command_blocks, Some("off".to_string()));
+        assert_eq!(
+            raw_off.into_settings().unwrap().config.command_blocks,
+            CommandBlocksMode::Off
+        );
+        // Explicit "cards" opts into the new chrome.
+        let mut raw_cards = RawConfig::default();
+        parse_config_file("command_blocks = cards\n", &mut raw_cards).unwrap();
+        assert_eq!(
+            raw_cards.into_settings().unwrap().config.command_blocks,
+            CommandBlocksMode::Cards
+        );
+        // Case-insensitive.
+        let mut raw_upper = RawConfig::default();
+        parse_config_file("command_blocks = CARDS\n", &mut raw_upper).unwrap();
+        assert_eq!(raw_upper.command_blocks, Some("cards".to_string()));
+        // Anything else is a config error, not a silent fallback.
+        let mut raw_bad = RawConfig::default();
+        assert!(parse_config_file("command_blocks = full\n", &mut raw_bad).is_err());
     }
 
     #[test]
