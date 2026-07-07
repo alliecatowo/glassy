@@ -106,7 +106,39 @@ representative of relative hot-path cost). `cargo bench --bench hot_paths --
 executes cleanly, not a final statistically-tight baseline — see the caveat
 below).
 
-<!-- BENCH_RESULTS_PLACEHOLDER -->
+| Benchmark | Time |
+| --- | --- |
+| `collect_display_row/120x40` (whole-frame: 40 row calls) | 4.76 µs (≈119 ns/row) |
+| `collect_display_row/300x100` (whole-frame: 100 row calls) | 28.18 µs (≈282 ns/row) |
+| `parse_config_file/minimal` (2 keys) | 150.4 ns |
+| `parse_config_file/full` (~50 keys + 1 profile + keybindings) | 3.66 µs |
+| `parse_config_file/profiles_1` | 399.8 ns |
+| `parse_config_file/profiles_5` | 1.50 µs |
+| `parse_config_file/profiles_20` | 7.88 µs |
+| `theme_by_name/hit` (`"tokyo-night"`) | 88.7 ns |
+| `theme_by_name/miss` (unknown name) | 2.42 µs |
+| `theme_entries` (60-entry Vec alloc) | 3.06 µs |
+| `theme_names` (60-entry Vec alloc) | 3.10 µs |
+| `pane_damaged/idle` (no new PTY output) | 16.2 ns |
+
+A few things worth calling out:
+
+- **`theme_by_name` hit vs. miss is a ~27× gap** (88.7 ns vs 2.42 µs): a hit
+  short-circuits on the first user-theme/builtin match, while a miss walks
+  the entire 60-entry table (both user themes — empty here — and
+  `BUILTIN_THEMES`) doing a normalized string compare per entry before
+  concluding nothing matched. Not a problem in practice (called once at
+  startup + on theme switch, not per-frame), but a real, measured cost.
+- **`parse_config_file` scales roughly linearly with `[profile.*]` count**
+  (400 ns → 1.5 µs → 7.9 µs for 1/5/20 profiles, ~380-400 ns/profile),
+  consistent with a single top-to-bottom line scan — no evidence of
+  quadratic blowup from profile count.
+- **`pane_damaged` is genuinely cheap** (16 ns) — confirms the recon
+  characterization of it as "a thin wrapper," dominated by the `FairMutex`
+  lock/unlock rather than any real damage computation.
+- **`collect_display_row` cost scales with area, not just row count**: 300×100
+  is ~2.5× the rows of 120×40 but ~5.9× the cells, and its measured time is
+  ~5.9× — consistent with the O(cols) per-row loop, no surprises.
 
 > These are from a single short (`--measurement-time 1`) run for the
 > purposes of proving the benchmarks build and execute correctly against the
@@ -119,11 +151,35 @@ below).
 ### `[lib]` target (this change, item 1)
 
 Splitting the crate into a `glassy` library (`src/lib.rs`) plus a thin
-`glassy` binary (`src/main.rs`) is a build-graph change only — the compiled
-code reachable from `fn main` is identical, so the release binary should be
-byte-for-byte unaffected. Measured to confirm:
+`glassy` binary (`src/main.rs`) was expected to be size-neutral — same code
+reachable from `fn main`, just a different compilation-unit boundary.
+Measuring (both stripped, `cargo build --release`, isolated by toggling only
+`alacritty_terminal`'s `serde` feature back on so this row is lib-split-only,
+serde-drop-free):
 
-<!-- LIB_SPLIT_SIZE_PLACEHOLDER -->
+| Build | Size (bytes) | Δ vs. baseline |
+| --- | --- | --- |
+| Baseline (bin-only crate, pre-`[lib]`, pre-serde-drop) | 11,560,440 | — |
+| + `[lib]` target (this change, item 1) | 11,630,640 | **+70,200 (+0.61%)** |
+
+So: **not** byte-for-byte identical — there's a small, real regression. The
+most likely cause: the four hot-path functions bumped from `pub(crate)`/
+`pub(super)` to `pub` (`collect_display_row`, `App::pane_damaged`,
+`parse_config_file_bench`, plus the pre-existing `pub` `theme_by_name`) are
+now part of the *library's* external API surface, not just the final
+binary's internal call graph. Even under `lto = "fat"` + `codegen-units = 1`,
+a `pub` item in an rlib crate must be compiled with external linkage — the
+lib crate's own compilation can't prove nothing outside the final `glassy`
+bin will ever call it, so it can't be as aggressively deadcode-eliminated
+within the lib crate's own codegen unit as it could when everything lived in
+one bin-crate compilation unit. The final LTO link *does* still fold and
+prune where it can, hence a small (not large) delta, not something
+proportional to the whole four-function surface.
+
+This is a real, honestly-reported tradeoff of making these four functions
+externally reachable for `benches/hot_paths.rs` — 0.61% is a small price for
+gaining a criterion micro-benchmark suite, but it is not "no regression" as
+originally hoped, so it's recorded here rather than glossed over.
 
 ### Dropping alacritty_terminal's default `serde` feature (item 5)
 
@@ -131,11 +187,33 @@ byte-for-byte unaffected. Measured to confirm:
 (Serialize/Deserialize derives on `Grid`/`Cell`/`Term`, plus the `bitflags/
 serde` and `vte/serde` features it enables in turn). glassy never
 (de)serializes an alacritty_terminal type directly — its own config/session
-serde (`src/config`, `src/session`) is independent — so this is dead weight.
-Changed to `alacritty_terminal = { version = "0.26.0", default-features =
-false }`:
+serde (`src/config`, `src/session`) is independent — so this looked like dead
+weight. Changed to `alacritty_terminal = { version = "0.26.0",
+default-features = false }`:
 
-<!-- SERDE_DROP_SIZE_PLACEHOLDER -->
+| Build | Size (bytes) | Δ |
+| --- | --- | --- |
+| `[lib]` split, serde still on (isolated) | 11,630,640 | — |
+| `[lib]` split, serde off (this change's final state) | 11,630,640 | **0** |
+
+**Measured release-binary-size delta: zero bytes.** `cargo tree -e features -p
+alacritty_terminal` confirms the toggle takes effect at the dependency-graph
+level (`serde`/`serde_core`/`serde_derive` disappear from the tree entirely
+when off — three fewer crates to compile), and the two resulting binaries
+have different SHA-256 hashes (so it's not a stale/cached artifact — genuinely
+different bytes were compiled), yet strip to the identical final size. The
+explanation: nothing in glassy ever calls the generated `Serialize`/
+`Deserialize` impls, so `lto = "fat"` + `strip = true` was *already* eliminating
+100% of that dead code from the stripped release binary before this change —
+the feature flag just stops it from being compiled into the intermediate
+rlib in the first place. The real benefit of dropping it is **not** release
+binary size but a smaller `cargo build`/`check`/`clippy` dependency graph
+(three fewer crates: `serde`, `serde_core`, `serde_derive`, the latter a
+proc-macro crate) and a marginally smaller **debug** build (debug builds have
+no LTO to eliminate the dead derive code, so `serde`'s codegen — including
+the `serde_derive` proc-macro's own compile cost — is pure overhead there).
+Kept anyway: it's strictly cheaper along every axis except release-binary
+bytes, where it's a wash.
 
 ## Why it stays quiet
 

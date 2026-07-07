@@ -259,7 +259,10 @@ fn bench_pane_damaged(c: &mut Criterion) {
         24,
         8,
         16,
-        Some(alacritty_terminal::tty::Shell::new("true".to_string(), Vec::new())),
+        Some(alacritty_terminal::tty::Shell::new(
+            "true".to_string(),
+            Vec::new(),
+        )),
         None,
         1000,
         "",
