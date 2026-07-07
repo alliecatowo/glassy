@@ -56,6 +56,8 @@
 //! power_mode  = false                  # fun typing effect: cursor particle bursts + streak shake
 //! power_mode_intensity = 0.6           # power-mode strength: 0.0 (subtle) .. 1.0 (max)
 //! command_blocks = badges              # command-block chrome: off | badges (default) | cards (adds a glass band)
+//! scrollback_background_cap = 0        # lines kept for a backgrounded/idle pane; 0 = disabled (default)
+//! scrollback_background_idle_secs = 900 # seconds idle/backgrounded before the cap above applies
 //! ```
 //!
 //! `follow_system` on Linux: winit never delivers a live theme-change event

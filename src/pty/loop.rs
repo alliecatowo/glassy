@@ -191,6 +191,12 @@ pub(crate) fn run_loop(
                     // points. Advance the parser for each run, then anchor each
                     // image at the cursor cell it occupies at that point.
                     let tap_events = tap.process(&buf[..n], &images);
+                    // Audited (w15 alacritty-surface, FairMutex item): the
+                    // PTY thread's own lock stays fair, and is already taken
+                    // once per `read()` (covering every tap event below), not
+                    // per tiny VT op — so there is no tight relock loop for the
+                    // render thread to be starved by. Left as-is, per the
+                    // audit's "leave PTY-thread sites alone" guidance.
                     let mut term = term.lock();
                     let mut did_process = false;
 

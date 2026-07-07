@@ -15,6 +15,27 @@ use super::platform::Platform;
 
 const DEFAULT_FONT_SIZE: f32 = 14.0;
 const DEFAULT_SCROLLBACK: usize = 10_000;
+/// Upper clamp for the `scrollback` config value (lines). Lowered from an
+/// earlier 1,000,000 per the w15 alacritty-surface audit: alacritty's scrollback
+/// storage is an uncompressed `Vec<Row<Cell>>` at an estimated ~24 bytes/cell
+/// with no disk overflow, so 1,000,000 lines at a common 200-column width was a
+/// worst case of ~4.8 GB resident for a single pane. 200,000 lines (~960 MB
+/// worst case at 200 cols) is still generous — most terminals default in the
+/// low thousands — while capping the accidental-gigabytes-per-pane failure mode.
+/// Does not affect `DEFAULT_SCROLLBACK` (10,000); only configs that explicitly
+/// requested a very large value are affected.
+const SCROLLBACK_MAX: usize = 200_000;
+/// Default for `scrollback_background_cap`: `0` disables the background-
+/// scrollback-bounding policy outright (see `crate::pty::ScrollbackBackgroundPolicy`),
+/// so out of the box every pane keeps its full configured `scrollback` resident
+/// regardless of focus — this Phase-1 rec must not reduce anyone's default
+/// visible scrollback.
+const DEFAULT_SCROLLBACK_BACKGROUND_CAP: usize = 0;
+/// Default for `scrollback_background_idle_secs`: how long (seconds) a pane must
+/// be idle/backgrounded before `scrollback_background_cap` takes effect, once
+/// that cap is non-zero. 15 minutes — long enough that a pane the user merely
+/// glanced away from briefly is never trimmed.
+const DEFAULT_SCROLLBACK_BACKGROUND_IDLE_SECS: u64 = 900;
 /// Default number of recently-run commands retained for the command palette's
 /// history source (OSC 133 `B`..`C` capture). 0 disables it.
 const DEFAULT_COMMAND_HISTORY: usize = 200;
@@ -302,6 +323,13 @@ pub(super) struct RawConfig {
     /// Validated in `apply_kv`; resolved to [`crate::app::CommandBlocksMode`] by
     /// [`parse_command_blocks_mode`] at finalization.
     pub command_blocks: Option<String>,
+    // --- w15: scrollback memory bounding (Phase 1) ---
+    /// Lines of scrollback retained for a backgrounded/idle pane once trimmed;
+    /// `0` disables the policy. See `crate::pty::ScrollbackBackgroundPolicy`.
+    pub scrollback_background_cap: Option<usize>,
+    /// Seconds a pane must be idle/backgrounded before `scrollback_background_cap`
+    /// applies. Only meaningful when the cap is non-zero.
+    pub scrollback_background_idle_secs: Option<u64>,
 }
 
 impl RawConfig {
@@ -497,6 +525,29 @@ impl RawConfig {
             },
             command_blocks: parse_command_blocks_mode(self.command_blocks.as_deref()),
         };
+
+        // Resolve + validate the w15 scrollback-background policy at parse time,
+        // so a bad value is caught here rather than silently ignored. NOTE: this
+        // does not yet reach live `Pty` sessions — that requires threading the
+        // resolved policy through `crate::app::Config` and every `Pty::spawn`
+        // call site (`src/app/{panes,event_loop}.rs`, `src/app/tabs/{mod,session}.rs`),
+        // which is out of scope for the change that introduced this policy (see
+        // `crate::pty::ScrollbackBackgroundPolicy`). Logged at debug level so it
+        // is easy to confirm a configured value round-tripped through parsing
+        // without implying the feature is already active.
+        let scrollback_background_policy = crate::pty::ScrollbackBackgroundPolicy::new(
+            self.scrollback_background_cap
+                .unwrap_or(DEFAULT_SCROLLBACK_BACKGROUND_CAP),
+            self.scrollback_background_idle_secs
+                .unwrap_or(DEFAULT_SCROLLBACK_BACKGROUND_IDLE_SECS),
+        );
+        log::debug!(
+            "glassy: scrollback_background_policy resolved to {scrollback_background_policy:?}; \
+             effective_cap against this session's scrollback ({}) would be {} \
+             (parsed only; not yet wired to live sessions)",
+            config.scrollback,
+            scrollback_background_policy.effective_cap(config.scrollback),
+        );
 
         // The activated profile name (if any) is attached by the caller
         // (`Settings::resolve` / `resolve_with_profile`) — `RawConfig` itself
@@ -1155,7 +1206,7 @@ pub(super) fn apply_kv(key: &str, value: &str, raw: &mut RawConfig) -> Result<()
             let n: usize = value
                 .parse()
                 .with_context(|| format!("scrollback: invalid integer '{value}'"))?;
-            raw.scrollback = Some(n.clamp(0, 1_000_000));
+            raw.scrollback = Some(n.clamp(0, SCROLLBACK_MAX));
         }
         "command_history" => {
             let n: usize = value
@@ -1444,6 +1495,18 @@ pub(super) fn apply_kv(key: &str, value: &str, raw: &mut RawConfig) -> Result<()
                 "off" | "badges" | "cards" => raw.command_blocks = Some(v),
                 _ => bail!("command_blocks must be off, badges, or cards; got '{value}'"),
             }
+        // --- w15: scrollback memory bounding (Phase 1) ---
+        "scrollback_background_cap" => {
+            let n: usize = value
+                .parse()
+                .with_context(|| format!("scrollback_background_cap: invalid integer '{value}'"))?;
+            raw.scrollback_background_cap = Some(n.clamp(0, SCROLLBACK_MAX));
+        }
+        "scrollback_background_idle_secs" => {
+            let s: u64 = value.parse().with_context(|| {
+                format!("scrollback_background_idle_secs: invalid integer '{value}'")
+            })?;
+            raw.scrollback_background_idle_secs = Some(s);
         }
         other => {
             log::warn!("glassy: ignoring unknown config key '{other}'");
@@ -2165,5 +2228,65 @@ cwd = /home/me/work
         assert!(!is_section_header("theme = dracula"));
         assert!(!is_section_header(""));
         assert!(!is_section_header("[unterminated"));
+    }
+}
+
+// ---- w15: scrollback memory bounding (Phase 1) — config parsing ------------
+
+#[cfg(test)]
+mod scrollback_background_tests {
+    use super::*;
+
+    #[test]
+    fn scrollback_background_cap_defaults_to_disabled() {
+        let raw = RawConfig::default();
+        assert_eq!(raw.scrollback_background_cap, None);
+        assert_eq!(raw.scrollback_background_idle_secs, None);
+        // Unset in RawConfig resolves to the disabled policy (cap == 0) once
+        // `into_settings` builds it — see `into_settings_leaves_disabled_policy_by_default`.
+    }
+
+    #[test]
+    fn scrollback_background_cap_parses_and_clamps() {
+        let mut raw = RawConfig::default();
+        apply_kv("scrollback_background_cap", "5000", &mut raw).unwrap();
+        assert_eq!(raw.scrollback_background_cap, Some(5000));
+
+        // Clamped to SCROLLBACK_MAX, same ceiling as `scrollback` itself.
+        apply_kv("scrollback_background_cap", "999999999", &mut raw).unwrap();
+        assert_eq!(raw.scrollback_background_cap, Some(SCROLLBACK_MAX));
+    }
+
+    #[test]
+    fn scrollback_background_cap_rejects_non_integer() {
+        let mut raw = RawConfig::default();
+        assert!(apply_kv("scrollback_background_cap", "not-a-number", &mut raw).is_err());
+    }
+
+    #[test]
+    fn scrollback_background_idle_secs_parses_unclamped() {
+        let mut raw = RawConfig::default();
+        apply_kv("scrollback_background_idle_secs", "3600", &mut raw).unwrap();
+        assert_eq!(raw.scrollback_background_idle_secs, Some(3600));
+    }
+
+    #[test]
+    fn scrollback_max_clamp_lowered_from_legacy_one_million() {
+        // The w15 audit lowered `SCROLLBACK_MAX` from a prior 1,000,000; a value
+        // that would have survived the old clamp must now be capped lower, so a
+        // future change growing it back toward 1,000,000 does so deliberately.
+        let mut raw = RawConfig::default();
+        apply_kv("scrollback", "999999", &mut raw).unwrap();
+        assert_eq!(raw.scrollback, Some(SCROLLBACK_MAX));
+    }
+
+    #[test]
+    fn into_settings_leaves_disabled_policy_by_default() {
+        // `into_settings` resolves + logs the policy but does not (yet) surface
+        // it on `Config` — this test just guards that parsing an unset config
+        // doesn't panic or error, and implicitly exercises the default-cap path
+        // of `ScrollbackBackgroundPolicy::effective_cap` via `into_settings`.
+        let raw = RawConfig::default();
+        assert!(raw.into_settings().is_ok());
     }
 }

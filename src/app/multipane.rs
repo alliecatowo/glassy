@@ -1102,6 +1102,10 @@ impl App {
         blink_on: bool,
         hovered_link: Option<&str>,
     ) {
+        // Audited (w15 alacritty-surface, FairMutex item): every per-frame
+        // term-lock site in the render/UI path (here and in `render.rs`) keeps
+        // the fair `.lock()` intentionally rather than `lock_unfair()` — see the
+        // longer rationale on the equivalent lock in `render.rs::render`.
         let term = pty.term.lock();
         let content = term.renderable_content();
         let colors = content.colors;

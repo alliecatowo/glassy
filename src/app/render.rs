@@ -376,6 +376,20 @@ impl App {
         }
 
         // Hold the terminal lock only long enough to copy out renderable state.
+        //
+        // Audited (w15 alacritty-surface, FairMutex item): stays fair `.lock()`
+        // intentionally. `lock_unfair()` only skips the fairness queue safely
+        // when paired with a held `lease()` (see upstream
+        // `alacritty_terminal::event_loop::EventLoop::spawn`, which leases once
+        // per read burst and uses `lock_unfair()` only *inside* that lease) — it
+        // is not a bare drop-in for a reader that never leases. Using it here
+        // without a lease would let this per-frame acquisition cut ahead of a
+        // PTY writer thread's `.lock()` wait, which is the opposite of what
+        // fairness exists to prevent (a busy PTY writer starving the render
+        // thread during high-throughput output like `cat bigfile`). No
+        // measurable contention was found to justify the tradeoff, so every
+        // render/UI-thread site keeps the fair path; see `pty::loop::run_loop`
+        // for the one PTY-thread site.
         let mut term = pty.term.lock();
 
         // Collect the terminal's per-line damage BEFORE reading renderable
