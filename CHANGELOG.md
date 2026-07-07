@@ -15,7 +15,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### Settings
 - **Rename and delete profiles** from Settings > Profiles: each profile row now carries inline **Rename** (edit in place, Enter to save) and **Delete** (two-click confirm) affordances. Deleting the active profile falls back to the base config cleanly.
-- **Quake mode discoverability**: pressing the `quake_toggle` key (default F12) while quake mode is off now shows a toast pointing you at Settings > Quake instead of doing nothing, and the Settings > Quake section notes that Wayland users should bind a compositor key to `glassy toggle` (see `docs/quake-mode.md`).
+- **Quake mode discoverability**: pressing the `quake_toggle` key (default F12) while quake mode is off now shows a toast pointing you at Settings > Quake instead of doing nothing, and the Settings > Quake section notes that Wayland users should bind a compositor key to `glassy toggle` (see `docs/quake-mode.md`). The command palette also always lists a Quake entry now, regardless of mode.
+
+#### Terminal and appearance
+- **Live system light/dark following on Linux/GNOME.** `follow_system` now reacts to the desktop switching color scheme without a restart, via the XDG desktop portal over D-Bus (reusing the already-linked `dbus` crate — no new dependency). It also fixes the startup case where Linux always resolved to `theme_dark` regardless of the real preference.
+- **`opacity_scope = background | text`.** New key to make window opacity apply to terminal text too (glyphs, box-drawing, underlines), not just the background — the full-glass look, opt-in. Default `background` keeps text crisp.
+- **`unfocused_dim` (0.0–0.9).** Configurable strength for the unfocused-split dim (default 0.28).
+
+#### Status bar (first plugin surface)
+- **Data-driven segments** with five new built-ins — tab count, pane zoom, active profile, shell-integration busy state, hostname.
+- **`glassy @ set-segment <id> <text>` / `clear-segment <id>`** IPC verbs let external scripts push custom status-bar segments — the first Phase-1 plugin surface (see `docs/plugins.md`).
+
+#### Shell integration and panes
+- **OSC 633** (VS Code shell integration) parsed as a second prompt-mark source alongside OSC 133, and **click-to-select a command's whole output**. Opt-in `command_blocks = off | badges | cards` adds Warp-style glass bands behind completed commands.
+- **Pane headers** render as an overlay strip that no longer steals terminal rows, with a `pane_header_style = full | compact` option, an optional single-pane header, and pane-index numbers. New `cycle_layout` action steps a split through row/column/main/grid presets.
+
+#### Performance and tooling
+- **Scrollback memory bounding** (`scrollback_background_cap` / `scrollback_background_idle_secs`) caps resident scrollback for idle/backgrounded panes without reducing the default visible history.
+- **Benchmark suite**: criterion micro-benches for hot paths and a `scripts/bench.sh` vtebench harness comparing glassy vs alacritty vs ghostty (see `docs/benchmarks.md`). Internals moved behind a `[lib]` target so benches can reach them.
 
 ### Changed
 - Display name is now **"Glassy"** (title-cased) on every user-facing surface — window title, macOS Cmd-Tab / Dock / menu bar (`CFBundleName` + `CFBundleDisplayName`, bundle renamed `Glassy.app`), desktop notifications, and the Linux `.desktop` entry. All identifiers stay lowercase (`glassy` binary, `TERM_PROGRAM`, bundle id, terminfo, config paths, Wayland `app_id`).
@@ -30,6 +47,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Compact pane headers** are sized from the live cell height so their vertically-centered glyphs no longer render above the header band and bleed into the pane above (worse on HiDPI).
 - **Single-pane header** (`pane_headers_single`) insets its right edge to clear the floating Help/Settings/Menu icon cluster when the tab strip is hidden, instead of washing over the icons.
 - **Command-output selection** (gutter click-to-select) now lands on the correct rows when the scrollback is scrolled: the absolute→viewport→line translation applies the display offset twice, matching the rest of the selection math.
+- **Persistent full-row artifact under visual effects.** When the cursor or IME-preedit row was skipped by the per-row content loop, the overlay fallback wiped that row's cached cells and repainted nothing, leaving a blank/partial line that survived until unrelated output re-dirtied it. The fallback no longer destroys content it won't rebuild.
+- **Unfocused split pane appeared see-through instead of dimmed.** The dim overlay was drawn through the blend-less pass, replacing the pane's pixels (and punching the window alpha) rather than darkening them; it now composites in the overlay layer.
+- **Config saves preserve inline trailing comments**, surface write failures as a toast instead of only a log line, and re-read the file before writing so a settings Save can't clobber a concurrent external edit.
+- **GPU device loss** now registers a `device_lost` callback and degrades gracefully instead of relying on undocumented driver behavior.
 
 ---
 
