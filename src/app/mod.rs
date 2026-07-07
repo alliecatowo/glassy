@@ -1097,6 +1097,19 @@ pub struct App {
     /// after a successful create.
     settings_profile_new: gui::TextEdit,
     settings_profile_new_ms: gui::TextInputMouse,
+    /// Which cached-profile index is currently being renamed in place (Profiles
+    /// section), or `None` when no row is in rename mode. Drives the inline
+    /// rename [`gui::TextEdit`] below. Cleared on open, on commit/cancel, and
+    /// whenever a delete is armed.
+    settings_profile_rename_idx: Option<usize>,
+    /// Inline "rename this profile" field model + drag state (Profiles section),
+    /// seeded with the profile's current name when rename mode begins.
+    settings_profile_rename: gui::TextEdit,
+    settings_profile_rename_ms: gui::TextInputMouse,
+    /// Which cached-profile index has its Delete affordance armed (first click of
+    /// the two-click confirm), or `None`. Cleared on open, on the confirming
+    /// second click, and whenever a rename begins.
+    settings_profile_delete_armed: Option<usize>,
 
     // --- settings-sections stream: Terminal / Effects / Quake / Notifications /
     // Advanced text fields -----------------------------------------------------

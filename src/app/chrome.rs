@@ -849,6 +849,8 @@ impl App {
         custom_editing: usize,
         profile_names: &[String],
         active_profile: Option<&str>,
+        profile_rename_idx: Option<usize>,
+        profile_delete_armed: Option<usize>,
         popup_scroll: f32,
     ) -> gui::SettingsEvents {
         // Theme names + per-theme accent swatches (the cursor color each theme
@@ -979,6 +981,8 @@ impl App {
             custom_editing,
             profile_names: &profile_refs,
             active_profile,
+            profile_rename_idx,
+            profile_delete_armed,
             power_mode: config.power_mode,
             power_mode_intensity: config.power_mode_intensity,
             dim_unfocused: config.dim_unfocused,
@@ -1263,6 +1267,26 @@ impl App {
         }
         if ev.profile_create {
             self.create_profile_from_current();
+            changed = true;
+        }
+        if let Some(idx) = ev.profile_rename_begin {
+            self.begin_profile_rename(idx);
+            changed = true;
+        }
+        if ev.profile_rename_commit {
+            self.commit_profile_rename();
+            changed = true;
+        }
+        if ev.profile_rename_cancel {
+            self.cancel_profile_rename();
+            changed = true;
+        }
+        if let Some(idx) = ev.profile_delete_arm {
+            self.arm_profile_delete(idx);
+            changed = true;
+        }
+        if let Some(idx) = ev.profile_delete {
+            self.delete_profile(idx);
             changed = true;
         }
         if ev.copy_path {

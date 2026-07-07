@@ -128,6 +128,10 @@ impl App {
         self.settings_profiles = crate::config::profile_names();
         self.settings_profile_new = gui::TextEdit::default();
         self.settings_profile_new_ms = gui::TextInputMouse::default();
+        self.settings_profile_rename_idx = None;
+        self.settings_profile_rename = gui::TextEdit::default();
+        self.settings_profile_rename_ms = gui::TextInputMouse::default();
+        self.settings_profile_delete_armed = None;
         self.settings_section_scroll = 0.0;
         // Seed the click-outside hit rect to the WHOLE surface so a stray press
         // landing in the same frame the form opens (before the first paint sets
@@ -286,6 +290,9 @@ impl App {
             // behaviour of committing its pending value rather than falling
             // through to the general Save.
             self.create_profile_from_current();
+        } else if f == Some(gui::id("settings/profile_rename")) {
+            // Commit-on-enter for the inline rename field.
+            self.commit_profile_rename();
         } else {
             self.save_settings();
         }

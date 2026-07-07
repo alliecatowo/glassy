@@ -97,10 +97,17 @@ enum RowKind<'a> {
     /// A clickable runtime-profile row (Profiles section). Picking it switches
     /// the live profile via [`SettingsEvents::profile_pick`]. `active` marks the
     /// currently-active profile (accent checkmark + selected-row fill).
+    ///
+    /// Each row also carries per-row Rename/Delete affordances:
+    /// `armed_delete` shows the two-click Delete confirm state, and `renaming`
+    /// replaces the whole row with an inline name edit field (its model lives in
+    /// `SettingsFields::profile_rename`).
     Profile {
         index: usize,
         name: &'a str,
         active: bool,
+        armed_delete: bool,
+        renaming: bool,
     },
     /// The "(default)" row (Profiles section): the base config with no profile
     /// activated — the only way back once a profile has been switched to.
@@ -272,15 +279,86 @@ impl<'r> Ui<'r> {
                     index,
                     name,
                     active,
+                    armed_delete,
+                    renaming,
                 } => {
                     let inside = ry >= pane.y && ry + ctrl_h <= pane.y + pane.h;
-                    if inside {
+                    if inside && *renaming {
+                        // Inline rename: [ name field ......... ] [Save] [✕]
                         let rr = Rect::new(pane.x, ry, pane.w, ctrl_h);
+                        let cancel_w = (m.cell_w * 3.0).round();
+                        let save_w = (m.cell_w * 8.0).round();
+                        let cancel_x = rr.x + rr.w - cancel_w;
+                        let save_x = cancel_x - m.gap - save_w;
+                        let text_w = (save_x - m.gap - rr.x).max(m.cell_w * 6.0);
+                        let fr = Rect::new(rr.x, ry, text_w, ctrl_h);
+                        self.text_input(
+                            id("settings/profile_rename"),
+                            fr,
+                            fields.profile_rename,
+                            fields.profile_rename_ms,
+                            name,
+                            fields.blink_on,
+                            fields.double_click,
+                        );
+                        let save_r = Rect::new(save_x, ry, save_w, ctrl_h);
+                        if self
+                            .accent_button(id("settings/profile_rename_save"), save_r, "Save")
+                            .clicked
+                        {
+                            ev.profile_rename_commit = true;
+                        }
+                        let cancel_r = Rect::new(cancel_x, ry, cancel_w, ctrl_h);
+                        if self
+                            .icon_button(id("settings/profile_rename_cancel"), cancel_r, '✕')
+                            .clicked
+                        {
+                            ev.profile_rename_cancel = true;
+                        }
+                    } else if inside {
+                        // Normal row: switch-clickable label on the left, then
+                        // Rename + Delete action buttons on the right. The three
+                        // hit rects are disjoint so a button click never doubles as
+                        // a profile switch.
+                        let rr = Rect::new(pane.x, ry, pane.w, ctrl_h);
+                        let del_label = if *armed_delete { "Confirm?" } else { "Delete" };
+                        let del_w = (self.text_width(del_label) + m.cell_w * 1.5).round();
+                        let ren_w = (self.text_width("Rename") + m.cell_w * 1.5).round();
+                        let del_x = rr.x + rr.w - del_w;
+                        let ren_x = del_x - m.gap - ren_w;
+                        let switch_w = (ren_x - m.gap - rr.x).max(m.cell_w * 4.0);
+                        let switch_rect = Rect::new(rr.x, ry, switch_w, ctrl_h);
                         let wid = id_combine(id("settings/profile"), *index as u64);
-                        let it = self.interact(wid, rr, true);
-                        self.paint_profile_row(rr, &it, name, *active, fg());
+                        let it = self.interact(wid, switch_rect, true);
+                        self.paint_profile_row(switch_rect, &it, name, *active, fg());
                         if it.clicked && !*active {
                             ev.profile_pick = Some(*index);
+                        }
+                        let ren_r = Rect::new(ren_x, ry, ren_w, ctrl_h);
+                        if self
+                            .button(
+                                id_combine(id("settings/profile_rename_btn"), *index as u64),
+                                ren_r,
+                                "Rename",
+                            )
+                            .clicked
+                        {
+                            ev.profile_rename_begin = Some(*index);
+                        }
+                        let del_r = Rect::new(del_x, ry, del_w, ctrl_h);
+                        if self
+                            .button(
+                                id_combine(id("settings/profile_delete_btn"), *index as u64),
+                                del_r,
+                                del_label,
+                            )
+                            .clicked
+                        {
+                            if *armed_delete {
+                                ev.profile_delete = Some(*index);
+                            } else {
+                                ev.profile_delete_arm = Some(*index);
+                            }
                         }
                     }
                 }
@@ -1037,6 +1115,9 @@ fn build_section_rows<'a>(section: SettingsSection, v: &'a SettingsView<'a>) -> 
             rows.push(RowKind::Info(
                 "Restart required — quake mode is only armed at startup.",
             ));
+            rows.push(RowKind::Info(
+                "On Wayland, bind a compositor key to `glassy toggle` — see docs/quake-mode.md.",
+            ));
             rows.push(RowKind::Slider {
                 id: "settings/quake_height",
                 label: "Height",
@@ -1167,6 +1248,8 @@ fn build_section_rows<'a>(section: SettingsSection, v: &'a SettingsView<'a>) -> 
                     index: i,
                     name,
                     active: v.active_profile == Some(*name),
+                    armed_delete: v.profile_delete_armed == Some(i),
+                    renaming: v.profile_rename_idx == Some(i),
                 });
             }
             rows.push(RowKind::Heading("New profile"));
@@ -1322,6 +1405,8 @@ mod tests {
             custom_editing: usize::MAX,
             profile_names: &[],
             active_profile: None,
+            profile_rename_idx: None,
+            profile_delete_armed: None,
             power_mode: false,
             power_mode_intensity: 0.6,
             dim_unfocused: true,

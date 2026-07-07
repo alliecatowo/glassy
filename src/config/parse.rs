@@ -693,12 +693,93 @@ pub fn save_into_section(section: Option<&str>, updates: &[(&str, String)]) -> R
     Ok(())
 }
 
+/// Delete a whole `[profile.NAME]` section from the config file: its header line
+/// and body (up to but not including the next `[section]` header or EOF). A no-op
+/// (leaving the file byte-for-byte unchanged) when no matching section exists.
+/// The pure boundary logic lives in [`remove_section_text`] for unit testing.
+///
+/// Case rules mirror the rest of the section machinery: the `profile.` prefix is
+/// matched case-sensitively, the name after it case-insensitively.
+pub fn remove_section(name: &str) -> Result<()> {
+    let path = config_path().context("no config path (HOME/XDG unset)")?;
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    let out = remove_section_text(&existing, name);
+    std::fs::write(&path, &out).with_context(|| format!("writing config {}", path.display()))?;
+    record_loaded_snapshot(&out);
+    Ok(())
+}
+
+/// Rename a `[profile.OLD]` section's header to `[profile.NEW]` in place, leaving
+/// its body, every other section, and all comments verbatim. A no-op (file
+/// unchanged) when no `[profile.OLD]` header exists. The caller is responsible
+/// for rejecting a `new` name that collides with an existing profile (this
+/// function performs the surgery only). Pure logic in [`rename_section_text`].
+pub fn rename_section(old: &str, new: &str) -> Result<()> {
+    let path = config_path().context("no config path (HOME/XDG unset)")?;
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    let out = rename_section_text(&existing, old, new);
+    std::fs::write(&path, &out).with_context(|| format!("writing config {}", path.display()))?;
+    record_loaded_snapshot(&out);
+    Ok(())
+}
+
 /// Merge `updates` into the text of a config file's TOP-LEVEL scope: a present
 /// key is updated in place (preserving its position), a missing one is appended
 /// BEFORE the first `[section]` header (never inside one); comments, blank
 /// lines, unmanaged keys, and ordering are preserved. Pure for unit testing.
 fn merge_config(existing: &str, updates: &[(&str, String)]) -> String {
     merge_into_section(existing, None, updates)
+}
+
+/// The pure text surgery behind [`remove_section`]: splice out the
+/// `[profile.NAME]` header line and its body span (bounded by the next
+/// `[section]` header, reusing [`find_range`]'s boundary logic so removal and
+/// merge agree on where a section ends). Returns `existing` unchanged when no
+/// matching section exists, so a no-op never rewrites the file (or its trailing
+/// newline). On a real removal the result is normalized to exactly one trailing
+/// newline, matching [`merge_into_section`].
+fn remove_section_text(existing: &str, name: &str) -> String {
+    let mut lines: Vec<String> = existing.lines().map(str::to_string).collect();
+    let key = name.to_ascii_lowercase();
+    let Some(header_idx) = lines
+        .iter()
+        .position(|l| profile_header_name(l).as_deref() == Some(key.as_str()))
+    else {
+        return existing.to_string();
+    };
+    // The body ends at the next `[section]` header after the profile header, or
+    // EOF — the exact end `find_range` uses, so the removed span is header + body.
+    let end = lines[header_idx + 1..]
+        .iter()
+        .position(|l| is_section_header(l))
+        .map(|off| header_idx + 1 + off)
+        .unwrap_or(lines.len());
+    lines.drain(header_idx..end);
+    if lines.is_empty() {
+        return String::new();
+    }
+    let mut out = lines.join("\n");
+    out.push('\n');
+    out
+}
+
+/// The pure text surgery behind [`rename_section`]: rewrite the matched
+/// `[profile.OLD]` header line to `[profile.NEW]` (lower-cased, matching the
+/// canonical stored form) and leave everything else — body, other sections,
+/// comments — verbatim. Returns `existing` unchanged when no match exists.
+fn rename_section_text(existing: &str, old: &str, new: &str) -> String {
+    let mut lines: Vec<String> = existing.lines().map(str::to_string).collect();
+    let key = old.to_ascii_lowercase();
+    let Some(idx) = lines
+        .iter()
+        .position(|l| profile_header_name(l).as_deref() == Some(key.as_str()))
+    else {
+        return existing.to_string();
+    };
+    lines[idx] = format!("[profile.{}]", new.to_ascii_lowercase());
+    let mut out = lines.join("\n");
+    out.push('\n');
+    out
 }
 
 /// Whether a trimmed line is a `[...]` section header of any kind.
@@ -1971,6 +2052,173 @@ cwd = /home/me/work
             b_idx < home_idx,
             "insertions must land before the next section"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // remove_section_text (profile deletion)
+    // -----------------------------------------------------------------------
+
+    /// Deleting a MIDDLE profile splices out its header + body and the trailing
+    /// blank that separated it, leaving the surrounding top-level keys and the
+    /// following profile verbatim.
+    #[test]
+    fn remove_section_middle_preserves_neighbours_verbatim() {
+        let existing = "\
+# top comment
+theme = dracula
+
+[profile.work]
+font_size = 18
+cwd = /tmp
+
+[profile.home]
+font_size = 12
+";
+        let out = remove_section_text(existing, "work");
+        assert_eq!(
+            out,
+            "\
+# top comment
+theme = dracula
+
+[profile.home]
+font_size = 12
+"
+        );
+    }
+
+    /// Deleting the FIRST (top-level-adjacent) profile leaves the base config and
+    /// any later profile intact.
+    #[test]
+    fn remove_section_first_profile_keeps_base_and_rest() {
+        let existing =
+            "theme = dracula\n\n[profile.work]\nfont_size = 18\n\n[profile.home]\nfont_size = 12\n";
+        let out = remove_section_text(existing, "work");
+        assert_eq!(out, "theme = dracula\n\n[profile.home]\nfont_size = 12\n");
+    }
+
+    /// Deleting the LAST profile in the file removes its header + body; the base
+    /// config above it survives verbatim.
+    #[test]
+    fn remove_section_trailing_profile() {
+        let existing = "theme = dracula\n\n[profile.work]\nfont_size = 18\n";
+        let out = remove_section_text(existing, "work");
+        assert_eq!(out, "theme = dracula\n\n");
+    }
+
+    /// Removing the only content of the file yields an empty file (no spurious
+    /// trailing newline).
+    #[test]
+    fn remove_section_only_section_yields_empty() {
+        let existing = "[profile.work]\nfont_size = 18\n";
+        let out = remove_section_text(existing, "work");
+        assert_eq!(out, "");
+    }
+
+    /// A comment that lives INSIDE the removed section goes with it, but comments
+    /// and keys of OTHER sections are untouched.
+    #[test]
+    fn remove_section_takes_its_own_comments_only() {
+        let existing = "\
+[profile.work]
+# work-only note
+font_size = 18
+
+[profile.home]
+# home note
+font_size = 12
+";
+        let out = remove_section_text(existing, "home");
+        assert_eq!(
+            out,
+            "\
+[profile.work]
+# work-only note
+font_size = 18
+
+"
+        );
+    }
+
+    /// A missing section is a true no-op: the file is returned byte-for-byte,
+    /// including a source that lacks a trailing newline (nothing is normalized).
+    #[test]
+    fn remove_section_missing_is_verbatim_noop() {
+        let existing = "theme = dracula\n\n[profile.work]\nfont_size = 18";
+        let out = remove_section_text(existing, "nope");
+        assert_eq!(out, existing);
+    }
+
+    /// Section name match is case-insensitive on the name (case-sensitive on the
+    /// `profile.` prefix), mirroring the rest of the machinery.
+    #[test]
+    fn remove_section_name_match_case_insensitive() {
+        let existing = "[profile.Work]\nfont_size = 18\n";
+        let out = remove_section_text(existing, "WORK");
+        assert_eq!(out, "");
+    }
+
+    // -----------------------------------------------------------------------
+    // rename_section_text (profile rename)
+    // -----------------------------------------------------------------------
+
+    /// Renaming rewrites ONLY the header line; the body, other sections, and all
+    /// comments survive verbatim.
+    #[test]
+    fn rename_section_only_touches_header() {
+        let existing = "\
+# top comment
+theme = dracula
+
+[profile.work]
+# body comment
+font_size = 18
+cwd = /tmp
+
+[profile.home]
+font_size = 12
+";
+        let out = rename_section_text(existing, "work", "office");
+        assert_eq!(
+            out,
+            "\
+# top comment
+theme = dracula
+
+[profile.office]
+# body comment
+font_size = 18
+cwd = /tmp
+
+[profile.home]
+font_size = 12
+"
+        );
+    }
+
+    /// The new name is lower-cased to the canonical stored form.
+    #[test]
+    fn rename_section_lowercases_new_name() {
+        let existing = "[profile.work]\nfont_size = 18\n";
+        let out = rename_section_text(existing, "work", "Office");
+        assert_eq!(out, "[profile.office]\nfont_size = 18\n");
+    }
+
+    /// Old-name match is case-insensitive.
+    #[test]
+    fn rename_section_old_match_case_insensitive() {
+        let existing = "[profile.Work]\nfont_size = 18\n";
+        let out = rename_section_text(existing, "WORK", "home");
+        assert_eq!(out, "[profile.home]\nfont_size = 18\n");
+    }
+
+    /// A missing old section is a true no-op: the file is returned verbatim
+    /// (including a source without a trailing newline).
+    #[test]
+    fn rename_section_missing_is_verbatim_noop() {
+        let existing = "theme = dracula\n\n[profile.work]\nfont_size = 18";
+        let out = rename_section_text(existing, "nope", "whatever");
+        assert_eq!(out, existing);
     }
 
     // -----------------------------------------------------------------------

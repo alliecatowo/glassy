@@ -198,6 +198,8 @@ impl App {
                 self.settings_custom_editing,
                 self.settings_profiles.clone(),
                 self.active_profile.clone(),
+                self.settings_profile_rename_idx,
+                self.settings_profile_delete_armed,
                 self.settings_popup_scroll,
             ))
         } else {
@@ -557,6 +559,8 @@ impl App {
             custom_editing,
             ref profile_names,
             ref active_profile,
+            profile_rename_idx,
+            profile_delete_armed,
             popup_scroll,
         )) = settings_inputs
         {
@@ -572,6 +576,8 @@ impl App {
                 theme_hex_ms: &mut self.settings_theme_hex_ms,
                 profile_name: &mut self.settings_profile_new,
                 profile_name_ms: &mut self.settings_profile_new_ms,
+                profile_rename: &mut self.settings_profile_rename,
+                profile_rename_ms: &mut self.settings_profile_rename_ms,
                 hints_chars: &mut self.settings_hints_chars,
                 hints_chars_ms: &mut self.settings_hints_chars_ms,
                 font_bold: &mut self.settings_font_bold,
@@ -614,6 +620,8 @@ impl App {
                 custom_editing,
                 profile_names,
                 active_profile.as_deref(),
+                profile_rename_idx,
+                profile_delete_armed,
                 popup_scroll,
             ));
         } else if self.help_open {

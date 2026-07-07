@@ -517,6 +517,14 @@ pub struct SettingsView<'a> {
     /// base (no-profile) config is active. Drives the active-row indicator in
     /// the Profiles section (see `App::active_profile`).
     pub active_profile: Option<&'a str>,
+    /// Which `profile_names` index is being renamed in place (its row shows an
+    /// inline edit field instead of the switch/rename/delete affordances), or
+    /// `None`. Mirrors `App::settings_profile_rename_idx`.
+    pub profile_rename_idx: Option<usize>,
+    /// Which `profile_names` index has its Delete affordance armed (first click
+    /// of the two-click confirm), or `None`. Mirrors
+    /// `App::settings_profile_delete_armed`.
+    pub profile_delete_armed: Option<usize>,
 
     // --- settings-sections stream: Terminal / Effects / Quake / Notifications /
     // Advanced additions --------------------------------------------------------
@@ -739,6 +747,21 @@ pub struct SettingsEvents {
     /// `SettingsFields::profile_name` (App-owned, like the other editable text
     /// fields).
     pub profile_create: bool,
+    /// A profile row's "Rename" affordance was clicked: begin renaming that
+    /// `profile_names` index in place (index carried).
+    pub profile_rename_begin: Option<usize>,
+    /// The inline rename field's Save affordance fired (Enter or its button):
+    /// commit the pending rename (target index is `App::settings_profile_rename_idx`;
+    /// the new name lives in `SettingsFields::profile_rename`).
+    pub profile_rename_commit: bool,
+    /// The inline rename was cancelled (its ✕ button): drop back to the normal row.
+    pub profile_rename_cancel: bool,
+    /// A profile row's Delete affordance was clicked while NOT armed: arm the
+    /// two-click confirm for that `profile_names` index (index carried).
+    pub profile_delete_arm: Option<usize>,
+    /// The armed Delete affordance was clicked a second time: delete that
+    /// `profile_names` index (index carried).
+    pub profile_delete: Option<usize>,
 
     // --- settings-sections stream: Terminal / Effects / Quake / Notifications /
     // Advanced additions --------------------------------------------------------

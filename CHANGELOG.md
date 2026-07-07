@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Natural text editing** in the legacy (non-kitty) input path, matching mainstream terminals so word/line motion works at a bare shell prompt with no shell config: `Opt+←/→` word back/forward (`ESC b`/`ESC f`), `Cmd+←/→` line start/end (`^A`/`^E`), `Cmd+Backspace` delete-to-line-start (`^U`), `Opt+Backspace` backward-kill-word, `Ctrl+←/→` word motion. Suppressed when the kitty keyboard protocol is active so full-screen apps still receive raw key events.
 - **Shift+Enter** emits the modifyOtherKeys form `CSI 27 ; 2 ; 13 ~`, keeping it distinct from a submitting Enter, so prompts that recognise it (e.g. Claude Code) insert a newline instead of running the line.
 
+#### Settings
+- **Rename and delete profiles** from Settings > Profiles: each profile row now carries inline **Rename** (edit in place, Enter to save) and **Delete** (two-click confirm) affordances. Deleting the active profile falls back to the base config cleanly.
+- **Quake mode discoverability**: pressing the `quake_toggle` key (default F12) while quake mode is off now shows a toast pointing you at Settings > Quake instead of doing nothing, and the Settings > Quake section notes that Wayland users should bind a compositor key to `glassy toggle` (see `docs/quake-mode.md`).
+
 ### Changed
 - Display name is now **"Glassy"** (title-cased) on every user-facing surface — window title, macOS Cmd-Tab / Dock / menu bar (`CFBundleName` + `CFBundleDisplayName`, bundle renamed `Glassy.app`), desktop notifications, and the Linux `.desktop` entry. All identifiers stay lowercase (`glassy` binary, `TERM_PROGRAM`, bundle id, terminfo, config paths, Wayland `app_id`).
 

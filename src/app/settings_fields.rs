@@ -15,6 +15,7 @@ impl App {
             || f == gui::id("settings/font_features")
             || f == gui::id("settings/custom/hex")
             || f == gui::id("settings/profile_new_name")
+            || f == gui::id("settings/profile_rename")
             || f == gui::id("settings/hints_chars")
             || f == gui::id("settings/font_bold")
             || f == gui::id("settings/font_italic")
@@ -70,6 +71,8 @@ impl App {
             &mut self.settings_theme_hex
         } else if field == gui::id("settings/profile_new_name") {
             &mut self.settings_profile_new
+        } else if field == gui::id("settings/profile_rename") {
+            &mut self.settings_profile_rename
         } else if field == gui::id("settings/hints_chars") {
             &mut self.settings_hints_chars
         } else if field == gui::id("settings/font_bold") {

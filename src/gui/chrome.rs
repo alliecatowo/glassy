@@ -22,6 +22,10 @@ pub struct SettingsFields<'a> {
     /// "New profile" name field model + its mouse drag state (Profiles section).
     pub profile_name: &'a mut TextEdit,
     pub profile_name_ms: &'a mut TextInputMouse,
+    /// Inline "rename this profile" field model + drag state (Profiles section),
+    /// active only for the row whose index matches `SettingsView::profile_rename_idx`.
+    pub profile_rename: &'a mut TextEdit,
+    pub profile_rename_ms: &'a mut TextInputMouse,
     /// Terminal section: "Hint chars" field model + drag state.
     pub hints_chars: &'a mut TextEdit,
     pub hints_chars_ms: &'a mut TextInputMouse,
