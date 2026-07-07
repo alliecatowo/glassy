@@ -388,33 +388,61 @@ impl App {
     /// never crush a pane below a usable size.
     pub(crate) const PANE_MIN_PX: i32 = 120;
 
-    /// Overlay strip height for [`PaneHeaderStyle::Compact`] (focus dot + index +
-    /// title only, no cwd/comm annotation) — shorter than [`Self::PANE_HEADER_H`]
-    /// since it carries less text.
+    /// Floor for the [`PaneHeaderStyle::Compact`] overlay strip height (px). The
+    /// live height is derived from the cell height (see [`Self::compact_header_h`])
+    /// so it always fully contains a centered header glyph; this is only the lower
+    /// bound used at small font sizes.
     pub(crate) const PANE_HEADER_H_COMPACT: i32 = 14;
 
+    /// Extra vertical padding (px) added to the cell height when sizing the
+    /// compact header, so the centered glyph has a hair of breathing room top and
+    /// bottom rather than exactly filling the band.
+    const COMPACT_HEADER_PAD: f32 = 2.0;
+
+    /// Compact-header overlay height for a given cell height. The compact style is
+    /// deliberately short, but it MUST be at least as tall as a terminal cell's
+    /// glyph (`round(font_px * 1.30)` ≈ 18px at the default font) — otherwise the
+    /// header glyphs, which are vertically centered within the band, get a
+    /// NEGATIVE top offset and bleed up into the pane above (worse on HiDPI).
+    /// Derived from the live cell height like [`tab_bar_h`], with
+    /// [`Self::PANE_HEADER_H_COMPACT`] as a floor. Pure so it's unit-testable.
+    pub(crate) fn compact_header_h(cell_h: f32) -> i32 {
+        ((cell_h + Self::COMPACT_HEADER_PAD).ceil() as i32).max(Self::PANE_HEADER_H_COMPACT)
+    }
+
     /// The current pane-header overlay height in px: `0` when `pane_headers` is
-    /// off, else [`Self::PANE_HEADER_H`] or [`Self::PANE_HEADER_H_COMPACT`]
-    /// depending on `pane_header_style`. Headers are painted as an overlay band
-    /// on top of the grid's own top row(s) — this height drives hit-testing
-    /// (grip/menu/click zones) and the paint pass, but NEVER insets the PTY grid
-    /// (see `resize_panes`, which sizes every pane to its full tiled rect).
+    /// off, else [`Self::PANE_HEADER_H`] or the cell-height-derived compact height
+    /// ([`Self::compact_header_h`]) depending on `pane_header_style`. Headers are
+    /// painted as an overlay band on top of the grid's own top row(s) — this
+    /// height drives hit-testing (grip/menu/click zones) and the paint pass, but
+    /// NEVER insets the PTY grid (see `resize_panes`, which sizes every pane to
+    /// its full tiled rect).
     pub(crate) fn pane_header_h(&self) -> i32 {
-        Self::header_h_for(self.config.pane_headers, self.config.pane_header_style)
+        // Live cell height; a `0.0` fallback (no renderer yet) resolves compact to
+        // its floor, matching the old fixed value when nothing is painted anyway.
+        let cell_h = self
+            .renderer
+            .as_ref()
+            .map(|r| r.cell_metrics().height)
+            .unwrap_or(0.0);
+        Self::header_h_for(
+            self.config.pane_headers,
+            self.config.pane_header_style,
+            cell_h,
+        )
     }
 
     /// Pure config→height resolution behind [`Self::pane_header_h`]: `0` when
-    /// headers are off, else [`Self::PANE_HEADER_H`] or
-    /// [`Self::PANE_HEADER_H_COMPACT`] depending on `style`. Split out from the
-    /// `&self` method so the "off means zero, style picks 22 vs 14" mapping is
-    /// unit-testable without a renderer-backed `App`.
-    pub(crate) fn header_h_for(pane_headers: bool, style: PaneHeaderStyle) -> i32 {
+    /// headers are off, else [`Self::PANE_HEADER_H`] or the cell-height-derived
+    /// compact height depending on `style`. Split out from the `&self` method so
+    /// the mapping is unit-testable without a renderer-backed `App`.
+    pub(crate) fn header_h_for(pane_headers: bool, style: PaneHeaderStyle, cell_h: f32) -> i32 {
         if !pane_headers {
             return 0;
         }
         match style {
             PaneHeaderStyle::Full => Self::PANE_HEADER_H,
-            PaneHeaderStyle::Compact => Self::PANE_HEADER_H_COMPACT,
+            PaneHeaderStyle::Compact => Self::compact_header_h(cell_h),
         }
     }
 
@@ -679,22 +707,46 @@ mod header_geometry_tests {
 
     #[test]
     fn header_off_is_always_zero_height() {
-        assert_eq!(App::header_h_for(false, PaneHeaderStyle::Full), 0);
-        assert_eq!(App::header_h_for(false, PaneHeaderStyle::Compact), 0);
+        assert_eq!(App::header_h_for(false, PaneHeaderStyle::Full, 18.0), 0);
+        assert_eq!(App::header_h_for(false, PaneHeaderStyle::Compact, 18.0), 0);
     }
 
     #[test]
     fn header_on_picks_style_height() {
         assert_eq!(
-            App::header_h_for(true, PaneHeaderStyle::Full),
+            App::header_h_for(true, PaneHeaderStyle::Full, 18.0),
             App::PANE_HEADER_H
         );
+        // Compact derives from the live cell height (not the bare floor constant).
         assert_eq!(
-            App::header_h_for(true, PaneHeaderStyle::Compact),
-            App::PANE_HEADER_H_COMPACT
+            App::header_h_for(true, PaneHeaderStyle::Compact, 18.0),
+            App::compact_header_h(18.0)
         );
-        // Compact is strictly shorter than full (it's the whole point).
-        const { assert!(App::PANE_HEADER_H_COMPACT < App::PANE_HEADER_H) };
+        // Compact still stays shorter than full at the representative cell height.
+        assert!(App::compact_header_h(18.0) < App::PANE_HEADER_H);
+    }
+
+    #[test]
+    fn compact_header_contains_a_centered_cell_glyph() {
+        // REGRESSION: the compact header was a fixed 14px while the header glyph is
+        // a full cell tall (round(font_px*1.30) ≈ 18px at the default font). The
+        // header must be AT LEAST as tall as the cell so the vertically-centered
+        // glyph's top offset `(hdr_h - cell_h) / 2` never goes negative (which made
+        // the glyph bleed up into the pane above).
+        for &cell_h in &[14.0_f32, 16.0, 18.0, 24.0, 32.0] {
+            let hdr_h = App::compact_header_h(cell_h);
+            assert!(
+                hdr_h as f32 >= cell_h,
+                "compact header {hdr_h} shorter than cell {cell_h}"
+            );
+            let centering_offset = (hdr_h as f32 - cell_h) * 0.5;
+            assert!(
+                centering_offset >= 0.0,
+                "negative centering offset {centering_offset} at cell_h {cell_h}"
+            );
+        }
+        // Below the floor cell height, the compact height clamps to the floor.
+        assert_eq!(App::compact_header_h(0.0), App::PANE_HEADER_H_COMPACT);
     }
 
     #[test]

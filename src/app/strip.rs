@@ -247,6 +247,20 @@ pub(crate) fn floating_icon_segs(bar_w: f32, bar_h: f32) -> Vec<StripSeg> {
     segs
 }
 
+/// The width (px, measured in from the window's right edge) reserved by the
+/// floating Help/Settings/Menu icon cluster when the tab strip is hidden —
+/// including its trailing [`TAB_GAP`] and the pill backdrop's left pad (see
+/// [`floating_icon_segs`] and `App::paint_floating_icons`). Content painted
+/// full-width at `y == 0` (the single-pane header, which shares that top band
+/// when the strip is hidden) must inset its right edge by this much so it does
+/// not wash over the icons. Mirrors the icon cluster's own geometry so the two
+/// share one coordinate source.
+pub(crate) fn floating_icons_reserved_w() -> f32 {
+    const RIGHT_BTNS: f32 = 3.0; // Help / Settings / Menu
+    const PILL_PAD: f32 = 4.0; // matches `paint_floating_icons`' pill backdrop pad
+    CTRL_BTN * RIGHT_BTNS + TAB_GAP + PILL_PAD
+}
+
 /// Push the `+` new-tab button at `x` if it fits left of `limit`.
 fn push_new_tab(segs: &mut Vec<StripSeg>, x: f32, ctrl_y: f32, limit: f32) {
     let plus = gui::Rect::new(x, ctrl_y, CTRL_BTN, CTRL_BTN);
@@ -432,5 +446,43 @@ impl App {
         };
         let count = self.config.title_show_count.then(|| self.tab_count());
         compose_window_title(&primary, cwd.as_deref(), count)
+    }
+}
+
+#[cfg(test)]
+mod floating_icon_tests {
+    use super::{CTRL_BTN, TAB_GAP, floating_icon_segs, floating_icons_reserved_w};
+
+    #[test]
+    fn single_pane_header_inset_clears_the_floating_icon_cluster() {
+        // REGRESSION: with the tab strip hidden, the single-pane header is painted
+        // full-width at y=0, the same band as the floating Help/Settings/Menu icon
+        // cluster (top-right). Insetting the header's right edge by
+        // `floating_icons_reserved_w()` must keep it clear of the icons.
+        for &sw in &[800.0_f32, 1024.0, 1920.0, 640.0] {
+            let bar_h = 32.0;
+            let segs = floating_icon_segs(sw, bar_h);
+            assert_eq!(segs.len(), 3, "Help/Settings/Menu");
+
+            // The header's inset right edge (header starts at x=0, full width sw).
+            let header_right = sw - floating_icons_reserved_w();
+
+            // The leftmost pixel actually touched by the icon cluster is its pill
+            // backdrop, which starts 4px left of the first icon seg (see
+            // `paint_floating_icons`). The header must stop at or before it.
+            let leftmost_icon_x = segs.iter().map(|s| s.rect.x).fold(f32::INFINITY, f32::min);
+            let pill_left = leftmost_icon_x - 4.0;
+            assert!(
+                header_right <= pill_left + f32::EPSILON,
+                "header right {header_right} overlaps icon pill left {pill_left} (sw={sw})"
+            );
+        }
+    }
+
+    #[test]
+    fn reserved_width_matches_the_cluster_geometry() {
+        // The reserved width equals the three buttons + trailing gap + pill pad,
+        // so it stays in lock-step with `floating_icon_segs`' own layout.
+        assert_eq!(floating_icons_reserved_w(), CTRL_BTN * 3.0 + TAB_GAP + 4.0);
     }
 }

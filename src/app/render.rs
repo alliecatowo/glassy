@@ -330,7 +330,20 @@ impl App {
         // `render_split`, handles the header when the tab IS split).
         let single_pane_header_area = (self.config.pane_headers && self.config.pane_headers_single)
             .then(|| self.content_area())
-            .flatten();
+            .flatten()
+            .map(|mut area| {
+                // When the tab strip is hidden the header sits at y=0 — the same
+                // top band the floating Help/Settings/Menu icon cluster is painted
+                // over (top-right corner, drawn earlier this pass). Inset the
+                // header's right edge to clear the cluster's reserved width so it
+                // doesn't wash over the icons. When the strip is visible the header
+                // sits below it, so no inset is needed.
+                if !tab_strip_visible {
+                    let reserve = floating_icons_reserved_w();
+                    area.w = (area.w as f32 - reserve).max(0.0) as i32;
+                }
+                area
+            });
         let single_pane_header_h = self.pane_header_h() as f32;
 
         let (Some(renderer), Some(pty)) = (self.renderer.as_mut(), self.pty.as_ref()) else {
