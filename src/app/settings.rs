@@ -574,11 +574,13 @@ impl App {
         self.set_font_family_index(next);
     }
 
-    /// Adjust scrollback by `dir` in 1000-line steps, clamped to a sane range.
+    /// Adjust scrollback by `dir` in 1000-line steps, clamped to the SAME upper
+    /// bound the config-file parser enforces ([`crate::config::parse::SCROLLBACK_MAX`])
+    /// so a UI/palette adjustment can't push the live `Term` past the memory cap.
     pub(crate) fn adjust_scrollback(&mut self, dir: i32) {
         let step = 1000i64;
         let cur = self.config.scrollback as i64;
-        let next = (cur + dir as i64 * step).clamp(0, 1_000_000);
+        let next = (cur + dir as i64 * step).clamp(0, crate::config::parse::SCROLLBACK_MAX as i64);
         self.config.scrollback = next as usize;
         self.settings_saved = false;
     }

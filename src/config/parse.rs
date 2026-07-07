@@ -24,7 +24,12 @@ const DEFAULT_SCROLLBACK: usize = 10_000;
 /// low thousands — while capping the accidental-gigabytes-per-pane failure mode.
 /// Does not affect `DEFAULT_SCROLLBACK` (10,000); only configs that explicitly
 /// requested a very large value are affected.
-const SCROLLBACK_MAX: usize = 200_000;
+///
+/// `pub(crate)` so the live settings/palette scrollback adjuster
+/// (`App::adjust_scrollback`) clamps to the SAME upper bound the config-file
+/// parser enforces — otherwise a UI adjustment could push the live `Term` past
+/// this memory cap.
+pub(crate) const SCROLLBACK_MAX: usize = 200_000;
 /// Default for `scrollback_background_cap`: `0` disables the background-
 /// scrollback-bounding policy outright (see `crate::pty::ScrollbackBackgroundPolicy`),
 /// so out of the box every pane keeps its full configured `scrollback` resident
@@ -868,20 +873,55 @@ fn merge_into_section(existing: &str, section: Option<&str>, updates: &[(&str, S
     out
 }
 
-/// Locate the first unquoted `#` or `;` in `s` — scanning a config value
-/// substring for a trailing inline comment. A marker inside a matched
-/// `'...'`/`"..."` span is part of the value, not a comment, and is skipped;
-/// an unterminated quote runs to the end of the string (so any `#`/`;` after
-/// an opening quote with no matching close is treated as still-quoted).
+/// Locate the first unquoted `#` or `;` that begins a trailing inline comment in
+/// a config value substring `s`. A marker inside a matched `'...'`/`"..."` span
+/// is part of the value, not a comment, and is skipped; an unterminated quote
+/// runs to the end of the string (so any `#`/`;` after an opening quote with no
+/// matching close is treated as still-quoted).
+///
+/// A marker only counts as a comment when it is preceded by whitespace that
+/// itself follows real (non-whitespace) value content — i.e. a marker that is
+/// the FIRST non-whitespace character of the value is NOT a comment. This is
+/// what lets a bare unquoted hex color value (`color.ansi0 = #15161e`) survive:
+/// its leading `#` is value content, while a genuine trailing comment
+/// (`#15161e  # black`) is still detected. A marker glued to preceding value
+/// content with no whitespace (`foo#bar`) is likewise treated as value.
 fn find_inline_comment_start(s: &str) -> Option<usize> {
     let mut in_single = false;
     let mut in_double = false;
+    // Whether we've seen any real (non-whitespace) value content yet, and whether
+    // the immediately-preceding character was whitespace. A comment marker needs
+    // both: content before it AND a whitespace gap separating it from that content.
+    let mut seen_content = false;
+    let mut prev_ws = true;
     for (idx, ch) in s.char_indices() {
         match ch {
-            '\'' if !in_double => in_single = !in_single,
-            '"' if !in_single => in_double = !in_double,
-            '#' | ';' if !in_single && !in_double => return Some(idx),
-            _ => {}
+            '\'' if !in_double => {
+                in_single = !in_single;
+                seen_content = true;
+                prev_ws = false;
+            }
+            '"' if !in_single => {
+                in_double = !in_double;
+                seen_content = true;
+                prev_ws = false;
+            }
+            '#' | ';' if !in_single && !in_double => {
+                if seen_content && prev_ws {
+                    return Some(idx);
+                }
+                // Otherwise the marker is part of the value (a leading bare `#`
+                // hex color, or a marker glued to preceding content).
+                seen_content = true;
+                prev_ws = false;
+            }
+            c if c.is_whitespace() => {
+                prev_ws = true;
+            }
+            _ => {
+                seen_content = true;
+                prev_ws = false;
+            }
         }
     }
     None
@@ -2294,6 +2334,27 @@ font_size = 12
         assert_eq!(out, "[profile.work]\nfont_size = 22  # laptop screen\n");
     }
 
+    #[test]
+    fn merge_config_rewrites_bare_hex_color_value_without_treating_it_as_a_comment() {
+        // REGRESSION: color keys store a bare, unquoted hex value whose leading '#'
+        // must NOT be misread as a comment marker. If it were, rewriting the line
+        // would sandwich the old value in as a fake trailing comment
+        // (`color.ansi0 = #ff0000  #15161e`), which then fails to parse on the next
+        // load and the app refuses to start.
+        let existing = "color.ansi0 = #15161e\n";
+        let out = merge_config(existing, &upd(&[("color.ansi0", "#ff0000")]));
+        assert_eq!(out, "color.ansi0 = #ff0000\n");
+    }
+
+    #[test]
+    fn merge_config_preserves_real_trailing_comment_after_a_bare_hex_value() {
+        // The leading '#' is value; the space-separated '#' after it is the real
+        // trailing comment and must survive the rewrite.
+        let existing = "color.ansi0 = #15161e  # black\n";
+        let out = merge_config(existing, &upd(&[("color.ansi0", "#ff0000")]));
+        assert_eq!(out, "color.ansi0 = #ff0000  # black\n");
+    }
+
     // -----------------------------------------------------------------------
     // External-edit guard (protect_against_external_edit /
     // filter_updates_against_baseline) — see that function's doc comment.
@@ -2425,6 +2486,22 @@ font_size = 12
         assert_eq!(find_inline_comment_start(" 0.5  # note"), Some(6));
         assert_eq!(find_inline_comment_start(" 0.5  ; note"), Some(6));
         assert_eq!(find_inline_comment_start(" 0.5"), None);
+    }
+
+    #[test]
+    fn find_inline_comment_start_leading_marker_is_value_not_comment() {
+        // A bare hex color's leading '#' is the FIRST non-whitespace char of the
+        // value — it is value content, not a comment marker.
+        assert_eq!(find_inline_comment_start(" #15161e"), None);
+        assert_eq!(find_inline_comment_start("#15161e"), None);
+        // A real trailing comment after the bare value is still found (at the
+        // second, whitespace-separated marker).
+        assert_eq!(
+            find_inline_comment_start(" #15161e  # black"),
+            Some(" #15161e  ".len())
+        );
+        // A marker glued to preceding content (no whitespace gap) is value too.
+        assert_eq!(find_inline_comment_start(" foo#bar"), None);
     }
 
     #[test]
