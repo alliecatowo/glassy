@@ -496,12 +496,21 @@ impl App {
 
         // Zoom indicator: a small accent badge in the top-right of the focused
         // pane's body, so it's visible whether or not pane headers are on. Cheap
-        // (a rounded quad + a glyph run) and only drawn while zoomed.
+        // (a rounded quad + a glyph run) and only drawn while zoomed. The header
+        // is an overlay on top of `body` now (it no longer insets it), so nudge
+        // the badge's placement rect below the header band to avoid colliding
+        // with the ⋮ button / annotation there.
         if zoomed
             && let Some((_, _full, body, _, _)) =
                 pane_specs.iter().find(|(id, ..)| *id == focused_pane)
         {
-            Self::paint_zoom_badge(renderer, *body);
+            let below_header = pane::Rect {
+                x: body.x,
+                y: body.y + hdr_h.round() as i32,
+                w: body.w,
+                h: (body.h - hdr_h.round() as i32).max(0),
+            };
+            Self::paint_zoom_badge(renderer, below_header);
         }
 
         // Inline file peek card (OSC 1337 Peek): drawn over the focused pane's

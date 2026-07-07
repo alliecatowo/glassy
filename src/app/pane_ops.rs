@@ -53,6 +53,9 @@ impl App {
     /// [`pane::LayoutPreset`]), preserving the current pane order. A no-op when
     /// not split. The "cycle layout" action (`cycle_layout` key/palette command).
     pub(crate) fn cycle_layout(&mut self, event_loop: &ActiveEventLoop) {
+        if !self.is_split() {
+            return;
+        }
         let Some(g) = self.panes.as_mut() else {
             return;
         };

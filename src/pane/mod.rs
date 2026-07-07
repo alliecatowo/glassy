@@ -757,9 +757,33 @@ mod tests {
         assert_eq!(l.leaves(), vec![1, 2, 3]);
         let map: std::collections::HashMap<usize, Rect> = l.rects(AREA, 0).into_iter().collect();
         // Three even horizontal bands, top to bottom, full width each.
-        assert_eq!(map[&1], Rect { x: 0, y: 0, w: 1000, h: 200 });
-        assert_eq!(map[&2], Rect { x: 0, y: 200, w: 1000, h: 200 });
-        assert_eq!(map[&3], Rect { x: 0, y: 400, w: 1000, h: 200 });
+        assert_eq!(
+            map[&1],
+            Rect {
+                x: 0,
+                y: 0,
+                w: 1000,
+                h: 200
+            }
+        );
+        assert_eq!(
+            map[&2],
+            Rect {
+                x: 0,
+                y: 200,
+                w: 1000,
+                h: 200
+            }
+        );
+        assert_eq!(
+            map[&3],
+            Rect {
+                x: 0,
+                y: 400,
+                w: 1000,
+                h: 200
+            }
+        );
         assert_eq!(l.classify_preset(), Some(LayoutPreset::Rows));
     }
 
@@ -771,9 +795,33 @@ mod tests {
         assert!(l.apply_preset(LayoutPreset::Columns));
         assert_eq!(l.leaves(), vec![1, 2, 3]);
         let map: std::collections::HashMap<usize, Rect> = l.rects(AREA, 0).into_iter().collect();
-        assert_eq!(map[&1], Rect { x: 0, y: 0, w: 333, h: 600 });
-        assert_eq!(map[&2], Rect { x: 333, y: 0, w: 334, h: 600 });
-        assert_eq!(map[&3], Rect { x: 667, y: 0, w: 333, h: 600 });
+        assert_eq!(
+            map[&1],
+            Rect {
+                x: 0,
+                y: 0,
+                w: 333,
+                h: 600
+            }
+        );
+        assert_eq!(
+            map[&2],
+            Rect {
+                x: 333,
+                y: 0,
+                w: 334,
+                h: 600
+            }
+        );
+        assert_eq!(
+            map[&3],
+            Rect {
+                x: 667,
+                y: 0,
+                w: 333,
+                h: 600
+            }
+        );
         assert_eq!(l.classify_preset(), Some(LayoutPreset::Columns));
     }
 
@@ -786,7 +834,15 @@ mod tests {
         assert_eq!(l.leaves(), vec![1, 2, 3]);
         let map: std::collections::HashMap<usize, Rect> = l.rects(AREA, 0).into_iter().collect();
         // Leaf 1 is the main pane: full height, left half.
-        assert_eq!(map[&1], Rect { x: 0, y: 0, w: 500, h: 600 });
+        assert_eq!(
+            map[&1],
+            Rect {
+                x: 0,
+                y: 0,
+                w: 500,
+                h: 600
+            }
+        );
         // 2 and 3 stack evenly in the right column.
         assert_eq!(map[&2].x, 500);
         assert_eq!(map[&3].x, 500);

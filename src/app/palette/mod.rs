@@ -155,9 +155,7 @@ impl PaletteCmd {
             NewTab | CloseTab | NextTab | PrevTab => "Tab",
             SplitVertical | SplitHorizontal | ClosePane | ToggleBroadcastInput | ToggleZoom
             | RotatePanes | EqualizePanes | CycleLayout | ToggleDimUnfocused | SaveLayout
-            | RestoreLayout => {
-                "Pane"
-            }
+            | RestoreLayout => "Pane",
             OpenSettings | OpenHelp | OpenSearch => "View",
             Copy | Paste => "Edit",
             ToggleFullscreen | ToggleQuake | QuakeInfo => "Window",

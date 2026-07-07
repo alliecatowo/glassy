@@ -694,7 +694,7 @@ mod header_geometry_tests {
             App::PANE_HEADER_H_COMPACT
         );
         // Compact is strictly shorter than full (it's the whole point).
-        assert!(App::PANE_HEADER_H_COMPACT < App::PANE_HEADER_H);
+        const { assert!(App::PANE_HEADER_H_COMPACT < App::PANE_HEADER_H) };
     }
 
     #[test]
