@@ -1,5 +1,6 @@
 //! Unit tests for the App module. Extracted from mod.rs to keep it under 700 lines.
 
+use super::render::shake_forces_full_redraw;
 use super::{
     MenuAction, StripItem, WheelAction, actions_to_entries, compact_cwd, compose_window_title,
     image_dst_size, motion_button, move_in_order, split_indicator, strip_item_at, strip_layout_ex,
@@ -419,4 +420,78 @@ fn drag_reports_held_button_under_motion_modes() {
     assert_eq!(motion_button(TermMode::MOUSE_MOTION, Some(2)), Some(2));
     // Click-only mode does not report drags.
     assert_eq!(motion_button(TermMode::MOUSE_REPORT_CLICK, Some(0)), None);
+}
+
+// ---- Power Mode screen-shake settle transition --------------------------
+//
+// `shake_forces_full_redraw` drives whether `render()` forces a full grid
+// rebuild this frame. A live shake always forces one; the settle frame (the
+// exact frame `shake_offset()` clamps to zero) must force exactly one more,
+// or rows not otherwise re-dirtied that frame keep their stale shaken-origin
+// quads (see `was_shaking`'s doc comment in `app/mod.rs`).
+
+#[test]
+fn shake_forces_redraw_while_actively_shaking() {
+    assert!(shake_forces_full_redraw(true, true));
+    assert!(shake_forces_full_redraw(true, false));
+}
+
+#[test]
+fn shake_forces_one_last_redraw_on_settle_frame() {
+    // shaking just became false, but the previous frame was still shaking.
+    assert!(shake_forces_full_redraw(false, true));
+}
+
+#[test]
+fn shake_does_not_force_redraw_at_rest() {
+    // Neither this frame nor the last was shaking: no extra redraw forced,
+    // preserving the incremental (0%-idle) path.
+    assert!(!shake_forces_full_redraw(false, false));
+}
+
+// ---- WindowEffect settings-cycle off-by-one -----------------------------
+//
+// `settings_advance_focused`/`settings_activate_focused` step the segmented
+// Window Effect control via `(cur + dir).rem_euclid(9)` (app/settings.rs).
+// `WindowEffect` has 9 variants (index 0..=8, Custom = 8); the old
+// `rem_euclid(8)` made Custom unreachable by cycling. These tests exercise
+// the same modulus arithmetic directly (no `App` instance needed).
+
+#[test]
+fn window_effect_cycle_visits_all_nine_variants() {
+    use crate::renderer::WindowEffect;
+
+    let mut seen = std::collections::HashSet::new();
+    let mut cur = 0i32;
+    for _ in 0..9 {
+        seen.insert(cur);
+        cur = (cur + 1).rem_euclid(9);
+    }
+    assert_eq!(
+        seen.len(),
+        9,
+        "cycling forward 9 steps must visit every index"
+    );
+    assert_eq!(cur, 0, "9 steps of +1 must wrap back to the start");
+    // Every visited index must resolve to a valid variant — in particular
+    // index 8 (Custom), which `rem_euclid(8)` could never reach.
+    assert!(
+        seen.iter()
+            .any(|&i| WindowEffect::from_index(i as usize) == WindowEffect::Custom),
+        "Custom (index 8) must be reachable by forward cycling"
+    );
+}
+
+#[test]
+fn window_effect_cycle_backward_from_zero_reaches_custom() {
+    // Left-arrow at None (index 0) must wrap to Custom (index 8), matching
+    // the settings.rs comment ("wrap with rem_euclid so Left at 0 lands on
+    // Custom").
+    let cur = 0i32;
+    let prev = (cur - 1).rem_euclid(9);
+    assert_eq!(prev, 8);
+    assert_eq!(
+        crate::renderer::WindowEffect::from_index(prev as usize),
+        crate::renderer::WindowEffect::Custom
+    );
 }

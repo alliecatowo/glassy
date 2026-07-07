@@ -1082,3 +1082,135 @@ fn fg_color_writemask_preserves_surface_alpha() {
         "ALL mask raises surface alpha to ~1.0, got {a_all}"
     );
 }
+
+// ---- retarget_row: cursor/preedit overlay fallback must not wipe cached
+// row content it isn't about to rebuild (see `Renderer::resume_row`) --------
+
+/// A row that already has cached bg/fg instances (as if built in an earlier
+/// frame, or by this frame's content loop) followed by `retarget_row(...,
+/// clear = false)` — `resume_row`'s semantics — must keep every existing
+/// instance. This is the exact fix for the reported full-row blank-plus-cursor
+/// artifact: the old code path unconditionally called `begin_row` (`clear =
+/// true`) here and wiped the row down to nothing.
+#[test]
+fn resume_row_semantics_preserve_cached_row_content() {
+    let mut rows = vec![RowInstances::default(), RowInstances::default()];
+    rows[1].bg.push(BgInstance {
+        pos: [0.0, 0.0],
+        size: [8.0, 16.0],
+        color: [1.0, 1.0, 1.0, 1.0],
+    });
+    rows[1].fg.push(FgInstance {
+        pos: [0.0, 0.0],
+        size: [8.0, 16.0],
+        uv_min: [0.0, 0.0],
+        uv_max: [1.0, 1.0],
+        color: [1.0, 1.0, 1.0, 1.0],
+        flags: 0,
+        _pad: [0; 3],
+    });
+    let mut bg_off = Vec::new();
+    let mut fg_off = Vec::new();
+    let mut dirty = Vec::new();
+
+    Renderer::retarget_row(&mut rows, &mut bg_off, &mut fg_off, &mut dirty, 1, false);
+
+    assert_eq!(rows[1].bg.len(), 1, "resume semantics must not clear bg");
+    assert_eq!(rows[1].fg.len(), 1, "resume semantics must not clear fg");
+    // Still marked dirty so `end_frame` re-uploads the row (the overlay quad
+    // appended on top by the caller afterward must reach the GPU).
+    assert_eq!(dirty, vec![1]);
+}
+
+/// Contrast case: `retarget_row(..., clear = true)` is `begin_row`'s own
+/// semantics and must still destroy prior content — confirms the two modes
+/// genuinely differ and the fix didn't accidentally neuter `begin_row` too.
+#[test]
+fn begin_row_semantics_still_clear_row_content() {
+    let mut rows = vec![RowInstances::default()];
+    rows[0].bg.push(BgInstance {
+        pos: [0.0, 0.0],
+        size: [8.0, 16.0],
+        color: [1.0, 1.0, 1.0, 1.0],
+    });
+    let mut bg_off = Vec::new();
+    let mut fg_off = Vec::new();
+    let mut dirty = Vec::new();
+
+    Renderer::retarget_row(&mut rows, &mut bg_off, &mut fg_off, &mut dirty, 0, true);
+
+    assert!(rows[0].bg.is_empty(), "begin_row semantics must clear bg");
+    assert_eq!(dirty, vec![0]);
+}
+
+/// A row past the current end of `rows` (e.g. a transient resize desync) must
+/// still self-heal (grow) under resume semantics rather than panicking or
+/// silently dropping the overlay, mirroring `begin_row`'s existing self-heal.
+#[test]
+fn resume_row_grows_rows_vec_when_out_of_range() {
+    let mut rows: Vec<RowInstances> = vec![RowInstances::default()];
+    let mut bg_off = vec![0, 0]; // stale layout, must be invalidated by growth
+    let mut fg_off = vec![0, 0];
+    let mut dirty = Vec::new();
+
+    Renderer::retarget_row(&mut rows, &mut bg_off, &mut fg_off, &mut dirty, 2, false);
+
+    assert_eq!(rows.len(), 3, "row 2 must be a valid index after self-heal");
+    assert!(
+        bg_off.is_empty(),
+        "growth must invalidate the stale offset cache"
+    );
+    assert!(fg_off.is_empty());
+    assert_eq!(dirty, vec![2]);
+}
+
+/// End-to-end simulation of the reported bug: a row carries real cell content
+/// that the per-row content loop did NOT rebuild this frame (the
+/// `dirty[row]==true && collect_display_row(...)==false` desync from the
+/// audit), and the cursor happens to land on that row. The fallback must
+/// resume (not begin) the row so the cursor overlay quad lands ALONGSIDE the
+/// pre-existing cell content rather than on a blanked row.
+#[test]
+fn cursor_overlay_fallback_on_skipped_row_keeps_prior_cell_content() {
+    let mut rows = vec![RowInstances::default(), RowInstances::default()];
+    // Content pushed by an earlier frame's per-row loop for row 1 (the row
+    // this frame's content loop failed to rebuild).
+    let prior_cell = BgInstance {
+        pos: [16.0, 32.0],
+        size: [8.0, 16.0],
+        color: [0.2, 0.2, 0.2, 1.0],
+    };
+    rows[1].bg.push(prior_cell);
+    let mut bg_off = Vec::new();
+    let mut fg_off = Vec::new();
+    let mut dirty = Vec::new();
+
+    // This frame: the content loop never called begin_row(1) (row_started[1]
+    // stayed false), but the cursor's fallback still resumes it and appends
+    // a cursor overlay quad on top, exactly as the fixed render.rs/multipane.rs
+    // fallback branches now do via `renderer.resume_row(scr)`.
+    Renderer::retarget_row(&mut rows, &mut bg_off, &mut fg_off, &mut dirty, 1, false);
+    rows[1].bg.push(BgInstance {
+        pos: [16.0, 32.0],
+        size: [1.0, 16.0],
+        color: [1.0, 1.0, 1.0, 1.0],
+    });
+
+    assert_eq!(
+        rows[1].bg.len(),
+        2,
+        "the row must retain its prior cell content AND the new cursor quad"
+    );
+    let survived = &rows[1].bg[0];
+    assert_eq!(
+        survived.pos, prior_cell.pos,
+        "prior cell content must survive untouched"
+    );
+    assert_eq!(survived.size, prior_cell.size);
+    assert_eq!(survived.color, prior_cell.color);
+    assert_eq!(
+        dirty,
+        vec![1],
+        "row must be marked dirty so the overlay reaches the GPU"
+    );
+}

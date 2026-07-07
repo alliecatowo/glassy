@@ -2,6 +2,18 @@
 
 use super::*;
 
+/// Whether Power Mode's screen shake requires forcing a full grid rebuild this
+/// frame: every frame it's actively displacing the grid origin (`shaking`),
+/// plus exactly the one settle frame where it just stopped (`was_shaking &&
+/// !shaking`). Without that settle-frame case, the exact frame `shake_offset()`
+/// clamps to `(0, 0)` would compute `shaking == false` and skip the forced
+/// rebuild, leaving any row not independently re-dirtied that frame baked in
+/// at the previous (still-shaking) origin. A pure function of the two latched
+/// booleans so it's unit-testable without a full `App`/`Renderer`.
+pub(crate) fn shake_forces_full_redraw(shaking: bool, was_shaking: bool) -> bool {
+    shaking || was_shaking
+}
+
 impl App {
     pub(crate) fn render(&mut self) {
         // Split tabs take the dedicated multi-pane path; a single-pane tab (the
@@ -371,9 +383,13 @@ impl App {
         // would leave un-repainted rows at the previous offset (tearing). Force a
         // full rebuild while shaking so the whole grid re-lands at the new origin;
         // a no-op at rest (`shaking == false`), preserving the incremental path.
-        if shaking {
+        // Also forces one extra rebuild on the settle transition frame (see
+        // `shake_forces_full_redraw`) so a row that isn't otherwise re-dirtied
+        // doesn't keep its stale shaken-origin quads after the shake ends.
+        if shake_forces_full_redraw(shaking, self.was_shaking) {
             self.force_full_redraw = true;
         }
+        self.was_shaking = shaking;
 
         // Hold the terminal lock only long enough to copy out renderable state.
         //
@@ -837,14 +853,16 @@ impl App {
             // re-target it WITHOUT clearing so the overlay appends on top of
             // that row's cell backgrounds. On a partial-dirty frame (e.g. a
             // resize) the cursor's row can have no in-bounds cells and so was
-            // never begun this frame — begin it now so the overlay still
-            // paints instead of being dropped for a frame.
+            // never begun this frame — resume it (without wiping any cached
+            // cell content: `begin_row` here would leave the row blank but
+            // for the cursor quad) so the overlay still paints instead of
+            // being dropped for a frame.
             let scr = cr;
             if cr < rows {
                 if row_started[scr] {
                     renderer.set_cur_row(scr);
                 } else {
-                    renderer.begin_row(scr);
+                    renderer.resume_row(scr);
                     row_started[scr] = true;
                 }
                 // gpu-fx cursor trail: the smear tail + a soft gliding head block
@@ -882,7 +900,10 @@ impl App {
                 if row_started[pr] {
                     renderer.set_cur_row(pr);
                 } else {
-                    renderer.begin_row(pr);
+                    // Same rationale as the cursor overlay fallback above: never
+                    // wipe a row's cached cell content via `begin_row` when we
+                    // are not about to rebuild it.
+                    renderer.resume_row(pr);
                     row_started[pr] = true;
                 }
                 ime::paint_preedit(renderer, preedit, pc, pr, self.cols);

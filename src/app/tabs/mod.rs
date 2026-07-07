@@ -98,6 +98,7 @@ impl App {
             prev_cursor: None,
             prev_display_offset: 0,
             prev_has_selection: false,
+            was_shaking: false,
             gui_pressed: None,
             gui_focused: None,
             gui_anims: std::collections::HashMap::new(),

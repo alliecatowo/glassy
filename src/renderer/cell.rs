@@ -333,22 +333,48 @@ impl Renderer {
         self.overlay_text.clear();
     }
 
+    /// Shared self-heal + dirty-marking for [`Renderer::begin_row`] and
+    /// [`Renderer::resume_row`], factored out as a free function of plain
+    /// row-storage state (no GPU handles involved) so it is unit-testable
+    /// without a full `Renderer`. `clear` selects `begin_row`'s destructive
+    /// rebuild semantics (`true`) vs `resume_row`'s append-only, non-destructive
+    /// semantics (`false`) — see each method's doc comment for when to use which.
+    pub(crate) fn retarget_row(
+        rows: &mut Vec<RowInstances>,
+        bg_row_offsets: &mut Vec<u32>,
+        fg_row_offsets: &mut Vec<u32>,
+        dirty_rows: &mut Vec<usize>,
+        row: usize,
+        clear: bool,
+    ) {
+        if row >= rows.len() {
+            // Should not happen if the app keeps the grid in sync, but stay safe:
+            // grow so the index is valid rather than panicking mid-frame.
+            rows.resize_with(row + 1, RowInstances::default);
+            bg_row_offsets.clear();
+            fg_row_offsets.clear();
+        }
+        if clear {
+            rows[row].bg.clear();
+            rows[row].fg.clear();
+        }
+        dirty_rows.push(row);
+    }
+
     /// Begin (re)building grid row `row`: subsequent `push_cell`/`push_cursor`
     /// calls land in this row's instance storage, replacing its previous contents.
     /// Out-of-range rows are ignored (clamped to a scratch slot) so a stale cursor
     /// row past a shrink never panics.
     pub fn begin_row(&mut self, row: usize) {
-        if row >= self.rows.len() {
-            // Should not happen if the app keeps the grid in sync, but stay safe:
-            // grow so the index is valid rather than panicking mid-frame.
-            self.rows.resize_with(row + 1, RowInstances::default);
-            self.bg_row_offsets.clear();
-            self.fg_row_offsets.clear();
-        }
+        Self::retarget_row(
+            &mut self.rows,
+            &mut self.bg_row_offsets,
+            &mut self.fg_row_offsets,
+            &mut self.dirty_rows,
+            row,
+            true,
+        );
         self.cur_row = row;
-        self.rows[row].bg.clear();
-        self.rows[row].fg.clear();
-        self.dirty_rows.push(row);
     }
 
     /// Re-target pushes at an already-built row WITHOUT clearing it, so callers can
@@ -359,6 +385,33 @@ impl Renderer {
         if row < self.rows.len() {
             self.cur_row = row;
         }
+    }
+
+    /// Re-target pushes at `row` for an overlay-only append (cursor bar/outline,
+    /// IME preedit) when the row was NOT rebuilt by the main per-cell content
+    /// loop this frame. Unlike [`Renderer::begin_row`], this never clears the
+    /// row's existing cached cell instances — `begin_row` may only destroy a
+    /// row's content when the caller is about to immediately repopulate it via
+    /// `push_cell`, which the overlay-only fallback paths never do. Left
+    /// unchecked, `begin_row` here would wipe the row down to just the overlay
+    /// quad: a full-row blank-plus-cursor artifact that persists until the row
+    /// is independently marked dirty again.
+    ///
+    /// Still grows `self.rows` (mirroring `begin_row`'s self-heal) so a row
+    /// past a recent resize is a valid index rather than being silently
+    /// dropped, and marks the row dirty so `end_frame` re-uploads it — the
+    /// overlay quad appended on top below must reach the GPU even though the
+    /// row's own cached cell content is unchanged.
+    pub fn resume_row(&mut self, row: usize) {
+        Self::retarget_row(
+            &mut self.rows,
+            &mut self.bg_row_offsets,
+            &mut self.fg_row_offsets,
+            &mut self.dirty_rows,
+            row,
+            false,
+        );
+        self.cur_row = row;
     }
 
     /// Apply the window opacity to a cell-background color.

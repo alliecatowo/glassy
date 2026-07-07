@@ -215,9 +215,10 @@ impl App {
             let cur = self.cursor_style_index() as i32;
             self.set_cursor_style_index(((cur + dir).rem_euclid(3)) as usize);
         } else if f == Some(gui::id("settings/window_effect")) {
-            // 8 modes (None..Bloom); wrap with rem_euclid so Left at 0 lands on Bloom.
+            // 9 modes (None..Custom); wrap with rem_euclid so Left at 0 lands on
+            // Custom (off-by-one: there are 9 variants, index 0..=8, not 8).
             let cur = self.config.window_effect.index() as i32;
-            self.set_window_effect_index(((cur + dir).rem_euclid(8)) as usize);
+            self.set_window_effect_index(((cur + dir).rem_euclid(9)) as usize);
         }
     }
 
@@ -276,9 +277,9 @@ impl App {
             self.config.cursor_blink = !self.config.cursor_blink;
             self.settings_saved = false;
         } else if f == Some(gui::id("settings/window_effect")) {
-            // Segmented: Enter/Space advances to the next of the 8 effect modes.
+            // Segmented: Enter/Space advances to the next of the 9 effect modes.
             let cur = self.config.window_effect.index() as i32;
-            self.set_window_effect_index(((cur + 1).rem_euclid(8)) as usize);
+            self.set_window_effect_index(((cur + 1).rem_euclid(9)) as usize);
         } else if f == Some(gui::id("settings/profile_new_name")) {
             // Commit-on-enter: Enter in the "duplicate as profile" name field
             // creates the profile, mirroring the custom-theme hex field's Enter

@@ -781,6 +781,15 @@ pub struct App {
     /// rebuild (selections only change during interactive drags, which are rare
     /// relative to streaming output).
     prev_has_selection: bool,
+    /// Whether Power Mode's screen shake was offsetting the grid origin last
+    /// frame. Shake forces a full redraw every frame it moves the origin (see
+    /// `render.rs`), but the settle frame — where `shake_offset()` first snaps
+    /// back to exactly `(0, 0)` — computes `shaking == false` and would skip
+    /// that forced rebuild, leaving any row not independently re-dirtied that
+    /// frame baked in at the previous (still-shaking) origin. Latching the
+    /// prior frame's state lets that transition frame force one last full
+    /// redraw too.
+    was_shaking: bool,
 
     // --- Real-GUI chrome layer (immediate-mode; see src/gui.rs). ---
     /// The widget currently latched by a left-button press, carried across frames

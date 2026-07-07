@@ -1279,7 +1279,10 @@ impl App {
                     if row_started[r] {
                         renderer.set_cur_row(r);
                     } else {
-                        renderer.begin_row(r);
+                        // Never wipe the row's cached cell content via
+                        // `begin_row` here; see the single-pane cursor overlay
+                        // fallback (src/app/render.rs) for the full rationale.
+                        renderer.resume_row(r);
                     }
                     renderer.push_cursor(cursor_col as usize, r, overlay, cursor_color);
                 }
