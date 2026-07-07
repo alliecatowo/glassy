@@ -143,7 +143,6 @@ impl App {
             settings_profiles: Vec::new(),
             settings_profile_new: gui::TextEdit::default(),
             settings_profile_new_ms: gui::TextInputMouse::default(),
-            settings_profile_rename_idx: None,
             settings_hints_chars: gui::TextEdit::default(),
             settings_hints_chars_ms: gui::TextInputMouse::default(),
             settings_font_bold: gui::TextEdit::default(),

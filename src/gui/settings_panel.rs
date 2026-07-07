@@ -96,11 +96,7 @@ enum RowKind<'a> {
     Info(&'a str),
     /// A clickable runtime-profile row (Profiles section). Picking it switches
     /// the live profile via [`SettingsEvents::profile_pick`]. `active` marks the
-    /// currently-active profile (accent checkmark + selected-row fill). Also
-    /// carries trailing rename (✎) / delete (🗑) icon affordances, or — while
-    /// `SettingsView::profile_delete_armed` names this row's index — a two-click
-    /// confirm/cancel pair in their place (see the row's paint arm for the full
-    /// state machine: idle → armed → confirm-or-cancel).
+    /// currently-active profile (accent checkmark + selected-row fill).
     Profile {
         index: usize,
         name: &'a str,
@@ -113,11 +109,7 @@ enum RowKind<'a> {
     /// "Duplicate current settings as a new profile" row (Profiles section): a
     /// name [`TextEdit`] + an inline accent Save button. Enter in the field or
     /// the button both fire [`SettingsEvents::profile_create`]; the pending name
-    /// lives in `SettingsFields::profile_name`. While
-    /// `SettingsView::profile_rename_idx` is set, this SAME row is repurposed
-    /// to rename that profile instead: the label/button read "Rename", a
-    /// trailing ✕ cancels, and the button fires
-    /// [`SettingsEvents::profile_rename_commit`] instead of `profile_create`.
+    /// lives in `SettingsFields::profile_name`.
     ProfileCreate {
         text_id: &'static str,
         button_id: &'static str,
@@ -227,7 +219,7 @@ impl<'r> Ui<'r> {
 
         // Build the rows for the active section.
         let section = SettingsSection::from_index(active_section);
-        let rows = build_section_rows(section, v, fields.profile_rename_idx);
+        let rows = build_section_rows(section, v);
 
         // Row geometry: heading rows are a touch shorter than control rows.
         let ctrl_h = (m.row_h - m.gap).max(m.cell_h);
@@ -284,83 +276,9 @@ impl<'r> Ui<'r> {
                     let inside = ry >= pane.y && ry + ctrl_h <= pane.y + pane.h;
                     if inside {
                         let rr = Rect::new(pane.x, ry, pane.w, ctrl_h);
-                        let renaming = fields.profile_rename_idx == Some(*index);
-                        let icon_w = m.row_h.min(ctrl_h);
-                        let right_r = Rect::new(rr.x + rr.w - icon_w, ry, icon_w, ctrl_h);
-                        let left_r = Rect::new(rr.x + rr.w - icon_w * 2.0, ry, icon_w, ctrl_h);
-                        let rename_wid = id_combine(id("settings/profile_rename"), *index as u64);
-                        let delete_wid = id_combine(id("settings/profile_delete"), *index as u64);
-                        let cancel_wid =
-                            id_combine(id("settings/profile_delete_cancel"), *index as u64);
-                        // "Armed" (this row's delete is one click from confirming) is
-                        // derived from keyboard FOCUS rather than new persistent state:
-                        // `delete_wid` claims focus on its first click (`Ui::interact`'s
-                        // press latch), and that focus IS the two-click confirm's
-                        // memory — any OTHER click (a different row's icon, another
-                        // section, Tab) naturally moves focus elsewhere and disarms it
-                        // for free. Read BEFORE this frame's own interacts below, which
-                        // is what may change it (a fresh click here re-arms/confirms).
-                        let armed = !renaming && self.is_focused(delete_wid);
-                        // Reserve trailing icon slots and INTERACT them before the
-                        // row-wide interact below — `Ui::interact`'s press-latch claims
-                        // a widget on the mouse-down frame in CALL order, so an icon
-                        // must get first refusal or the row's full-width hit rect
-                        // (which contains the icon rects) would always win the click
-                        // and switch profiles instead. Painting happens later, in
-                        // proper z-order, using these already-resolved `Interaction`s.
-                        let (left_it, right_it) = if renaming {
-                            (Interaction::default(), Interaction::default())
-                        } else if armed {
-                            (
-                                self.interact(cancel_wid, left_r, true),
-                                self.interact(delete_wid, right_r, true),
-                            )
-                        } else {
-                            (
-                                self.interact(rename_wid, left_r, true),
-                                self.interact(delete_wid, right_r, true),
-                            )
-                        };
                         let wid = id_combine(id("settings/profile"), *index as u64);
                         let it = self.interact(wid, rr, true);
-                        let reserved = if renaming { 0.0 } else { icon_w * 2.0 };
-                        let label_text = if armed { "Delete this profile?" } else { *name };
-                        let hint_override = renaming.then_some(("Renaming…", fg_dim()));
-                        if armed {
-                            self.rrect(rr, m.radius, with_alpha(danger(), 0.12));
-                        }
-                        self.paint_profile_row(
-                            rr,
-                            &it,
-                            label_text,
-                            *active,
-                            fg(),
-                            reserved,
-                            hint_override,
-                        );
-                        if !renaming && armed {
-                            self.paint_icon(cancel_wid, left_r, '✕', &left_it);
-                            self.rrect(right_r, m.radius, with_alpha(danger(), 0.28));
-                            self.paint_icon(delete_wid, right_r, '⌫', &right_it);
-                            if left_it.clicked {
-                                ev.profile_delete_cancel = true;
-                            }
-                            if right_it.clicked {
-                                ev.profile_delete_confirm = Some(*index);
-                            }
-                        } else if !renaming {
-                            self.paint_icon(rename_wid, left_r, '✎', &left_it);
-                            self.paint_icon(delete_wid, right_r, '⌫', &right_it);
-                            if left_it.clicked {
-                                ev.profile_rename_start = Some(*index);
-                            }
-                            if right_it.clicked {
-                                // The click itself already claimed focus (arming for
-                                // next click); nothing else to persist, just force a
-                                // repaint so the confirm state shows immediately.
-                                ev.profile_delete_arm = Some(*index);
-                            }
-                        }
+                        self.paint_profile_row(rr, &it, name, *active, fg());
                         if it.clicked && !*active {
                             ev.profile_pick = Some(*index);
                         }
@@ -372,7 +290,7 @@ impl<'r> Ui<'r> {
                         let rr = Rect::new(pane.x, ry, pane.w, ctrl_h);
                         let wid = id("settings/profile_default");
                         let it = self.interact(wid, rr, true);
-                        self.paint_profile_row(rr, &it, "(default)", *active, fg_dim(), 0.0, None);
+                        self.paint_profile_row(rr, &it, "(default)", *active, fg_dim());
                         if it.clicked && !*active {
                             ev.profile_pick_default = true;
                         }
@@ -385,26 +303,16 @@ impl<'r> Ui<'r> {
                 } => {
                     let inside = ry >= pane.y && ry + ctrl_h <= pane.y + pane.h;
                     if inside {
-                        // Mirrors `build_section_rows`'s bounds check: a stale
-                        // `profile_rename_idx` (list shrank since it was armed)
-                        // falls back to plain create mode rather than showing an
-                        // orphaned "Rename" row nothing else points at.
-                        let renaming = fields
-                            .profile_rename_idx
-                            .is_some_and(|i| i < v.profile_names.len());
                         let ly = (ry + (ctrl_h - m.cell_h) * 0.5).round();
                         self.label_clip(
                             pane.x.round(),
                             ly,
-                            if renaming { "Rename" } else { "New profile" },
+                            "New profile",
                             label_w - m.gap,
                             fg_dim(),
                         );
                         let btn_w = (m.cell_w * 10.0).round();
-                        let cancel_w = if renaming { m.row_h } else { 0.0 };
-                        let gaps = if renaming { 2.0 } else { 1.0 };
-                        let text_w =
-                            (ctrl_w - btn_w - cancel_w - m.gap * gaps).max(m.cell_w * 6.0);
+                        let text_w = (ctrl_w - btn_w - m.gap).max(m.cell_w * 6.0);
                         let fr = Rect::new(ctrl_x, ry, text_w, ctrl_h);
                         self.text_input(
                             id(text_id),
@@ -416,23 +324,8 @@ impl<'r> Ui<'r> {
                             fields.double_click,
                         );
                         let btn_r = Rect::new(ctrl_x + text_w + m.gap, ry, btn_w, ctrl_h);
-                        let btn_label = if renaming { "Rename" } else { "Save as" };
-                        if self.accent_button(id(button_id), btn_r, btn_label).clicked {
-                            if renaming {
-                                ev.profile_rename_commit = true;
-                            } else {
-                                ev.profile_create = true;
-                            }
-                        }
-                        if renaming {
-                            let cancel_r =
-                                Rect::new(btn_r.x + btn_w + m.gap, ry, cancel_w, ctrl_h);
-                            if self
-                                .icon_button(id("settings/profile_rename_cancel"), cancel_r, '✕')
-                                .clicked
-                            {
-                                ev.profile_rename_cancel = true;
-                            }
+                        if self.accent_button(id(button_id), btn_r, "Save as").clicked {
+                            ev.profile_create = true;
                         }
                     }
                 }
@@ -734,13 +627,6 @@ impl<'r> Ui<'r> {
     /// ([`Ui::dropdown_popup`]) — the same accent-checkmark language used
     /// elsewhere in this file for "this is the current one", scaled down from
     /// the active-tab-chip's accent crown to a single-row list affordance.
-    ///
-    /// `right_reserved` shrinks the trailing hint's available width so it
-    /// doesn't draw under the rename/delete icons a `RowKind::Profile` row
-    /// paints on top afterward (`0.0` for `ProfileDefault`, which has none).
-    /// `hint_override`, when set, replaces the usual "Active"/"Switch →" hint
-    /// (used for the "Renaming…" marker so it doesn't get drawn on top of —
-    /// and garbled together with — the normal hint at the same anchor).
     fn paint_profile_row(
         &mut self,
         rr: Rect,
@@ -748,8 +634,6 @@ impl<'r> Ui<'r> {
         label_text: &str,
         active: bool,
         label_color: [f32; 4],
-        right_reserved: f32,
-        hint_override: Option<(&str, [f32; 4])>,
     ) {
         let m = self.m;
         if active {
@@ -763,48 +647,13 @@ impl<'r> Ui<'r> {
             self.label(tx, ty, "✓", fill_on());
             tx += m.cell_w * 1.4;
         }
-        let (hint, hint_color) = hint_override.unwrap_or_else(|| {
-            if active {
-                ("Active", fill_on())
-            } else {
-                ("Switch →", fg_dim())
-            }
-        });
-        let hint_x = (rr.x + rr.w - right_reserved - m.pad).round();
-        let label_max_w = (hint_x - tx - m.gap).max(0.0);
-        self.label_clip(tx, ty, label_text, label_max_w, label_color);
-        self.label_right(hint_x, ty, hint, hint_color);
-    }
-
-    /// Paint an icon glyph button's hover/press/focus chrome from an ALREADY-
-    /// COMPUTED [`Interaction`] — the paint half of [`Ui::icon_button`], split
-    /// out so a caller can control INTERACT call order independent of PAINT
-    /// order. `RowKind::Profile`'s rename/delete icons need exactly this: they
-    /// must interact (and so claim a press) before the row's own full-width
-    /// hit-rect gets a chance to, but must paint (so they're visible) after the
-    /// row's background fill, which would otherwise draw over them.
-    fn paint_icon(&mut self, wid: WidgetId, rect: Rect, glyph: char, it: &Interaction) {
-        let st = self.wstate(wid, it, true);
-        let hover_t = self.anim(
-            wid,
-            if matches!(st, WState::Hover | WState::Press) {
-                1.0
-            } else {
-                0.0
-            },
-        );
-        if hover_t > 0.0 || it.pressed {
-            let fill = state_fill(glass_raised(), hover_t, it.pressed);
-            self.rrect(rect, self.m.radius, fill);
-        }
-        if matches!(st, WState::Focus) {
-            self.focus_ring(rect, self.m.radius);
-        }
-        let nudge = if it.pressed { 1.0 } else { 0.0 };
-        let cx = rect.x + (rect.w - self.m.cell_w) * 0.5;
-        let cy = rect.center_y() - self.m.cell_h * 0.5 + nudge;
-        self.r
-            .push_overlay_glyph_px(cx.round(), cy.round(), glyph, fg());
+        self.label(tx, ty, label_text, label_color);
+        let (hint, hint_color) = if active {
+            ("Active", fill_on())
+        } else {
+            ("Switch →", fg_dim())
+        };
+        self.label_right(rr.x + rr.w - m.pad, ty, hint, hint_color);
     }
 
     /// Draw the floating custom-theme color editor: a swatch grid (click a swatch
@@ -895,16 +744,8 @@ fn theme_index(names: &[&str], name: &str) -> usize {
 }
 
 /// Build the row list for a section. Borrows the [`SettingsView`] so labels and
-/// values come straight from the live config snapshot. `profile_rename_idx` is
-/// [`SettingsFields::profile_rename_idx`] (a plain snapshot value, passed
-/// separately rather than added to `SettingsView` — see that field's doc
-/// comment for why) — which profile row, if any, the Profiles section's shared
-/// create/rename row is currently repurposed for.
-fn build_section_rows<'a>(
-    section: SettingsSection,
-    v: &'a SettingsView<'a>,
-    profile_rename_idx: Option<usize>,
-) -> Vec<RowKind<'a>> {
+/// values come straight from the live config snapshot.
+fn build_section_rows<'a>(section: SettingsSection, v: &'a SettingsView<'a>) -> Vec<RowKind<'a>> {
     let mut rows: Vec<RowKind<'a>> = Vec::new();
     match section {
         SettingsSection::General => {
@@ -1196,11 +1037,6 @@ fn build_section_rows<'a>(
             rows.push(RowKind::Info(
                 "Restart required — quake mode is only armed at startup.",
             ));
-            rows.push(RowKind::Info(
-                "Wayland has no global-hotkey API: bind `glassy toggle` to a key in your \
-                 compositor config so it can show/hide the window from outside — see \
-                 docs/quake-mode.md for per-compositor recipes.",
-            ));
             rows.push(RowKind::Slider {
                 id: "settings/quake_height",
                 label: "Height",
@@ -1333,26 +1169,15 @@ fn build_section_rows<'a>(
                     active: v.active_profile == Some(*name),
                 });
             }
-            // The create/rename row is ONE shared TextEdit + button (see
-            // `RowKind::ProfileCreate`'s doc comment): while a rename is armed
-            // (`profile_rename_idx`), it's repurposed in place rather than
-            // adding a second, parallel text field.
-            let renaming = profile_rename_idx.is_some_and(|i| i < v.profile_names.len());
-            rows.push(RowKind::Heading(if renaming {
-                "Rename profile"
-            } else {
-                "New profile"
-            }));
+            rows.push(RowKind::Heading("New profile"));
             rows.push(RowKind::ProfileCreate {
                 text_id: "settings/profile_new_name",
                 button_id: "settings/profile_new_save",
-                placeholder: if renaming { "new name" } else { "name" },
+                placeholder: "name",
             });
-            rows.push(RowKind::Info(if renaming {
-                "Renaming an existing profile — type a new name and Rename, or ✕ to cancel."
-            } else {
-                "Duplicates the CURRENT live settings into a new [profile.NAME] section."
-            }));
+            rows.push(RowKind::Info(
+                "Duplicates the CURRENT live settings into a new [profile.NAME] section.",
+            ));
         }
     }
     rows
@@ -1497,8 +1322,6 @@ mod tests {
             custom_editing: usize::MAX,
             profile_names: &[],
             active_profile: None,
-            profile_delete_armed: None,
-            profile_rename_idx: None,
             power_mode: false,
             power_mode_intensity: 0.6,
             dim_unfocused: true,
@@ -1527,7 +1350,7 @@ mod tests {
             popup_scroll: 0.0,
         };
         for sec in SettingsSection::ALL {
-            let rows = build_section_rows(*sec, &v, None);
+            let rows = build_section_rows(*sec, &v);
             assert!(!rows.is_empty(), "{:?} should build rows", sec);
         }
     }

@@ -128,7 +128,6 @@ impl App {
         self.settings_profiles = crate::config::profile_names();
         self.settings_profile_new = gui::TextEdit::default();
         self.settings_profile_new_ms = gui::TextInputMouse::default();
-        self.settings_profile_rename_idx = None;
         self.settings_section_scroll = 0.0;
         // Seed the click-outside hit rect to the WHOLE surface so a stray press
         // landing in the same frame the form opens (before the first paint sets
@@ -282,15 +281,11 @@ impl App {
             let cur = self.config.window_effect.index() as i32;
             self.set_window_effect_index(((cur + 1).rem_euclid(9)) as usize);
         } else if f == Some(gui::id("settings/profile_new_name")) {
-            // Commit-on-enter: Enter in the shared create/rename name field
-            // commits whichever mode is active, mirroring the custom-theme hex
-            // field's Enter behaviour of committing its pending value rather
-            // than falling through to the general Save.
-            if self.settings_profile_rename_idx.is_some() {
-                self.profile_rename_commit();
-            } else {
-                self.create_profile_from_current();
-            }
+            // Commit-on-enter: Enter in the "duplicate as profile" name field
+            // creates the profile, mirroring the custom-theme hex field's Enter
+            // behaviour of committing its pending value rather than falling
+            // through to the general Save.
+            self.create_profile_from_current();
         } else {
             self.save_settings();
         }
@@ -1108,121 +1103,5 @@ impl App {
             r.reset_cursor_trail();
         }
         self.mark_dirty(event_loop);
-    }
-
-    /// Start renaming the profile at `idx` (Profiles section rename icon):
-    /// seed the shared "New profile" field with its current name and
-    /// repurpose that row to "Rename profile" (see
-    /// `gui::SettingsFields::profile_rename_idx`'s doc comment for why this
-    /// reuses the existing field rather than adding a second, parallel one).
-    /// A no-op for an out-of-range index.
-    pub(crate) fn profile_rename_start(&mut self, idx: usize) {
-        let Some(name) = self.settings_profiles.get(idx).cloned() else {
-            return;
-        };
-        self.settings_profile_rename_idx = Some(idx);
-        self.settings_profile_new = gui::TextEdit::new(&name);
-        self.settings_profile_new_ms = gui::TextInputMouse::default();
-        self.force_full_redraw = true;
-    }
-
-    /// Cancel an in-progress profile rename (the ✕ next to the repurposed
-    /// Save button): revert the shared field back to plain "New profile" mode
-    /// without changing anything on disk.
-    pub(crate) fn profile_rename_cancel(&mut self) {
-        self.settings_profile_rename_idx = None;
-        self.settings_profile_new = gui::TextEdit::default();
-        self.settings_profile_new_ms = gui::TextInputMouse::default();
-        self.force_full_redraw = true;
-    }
-
-    /// Commit the pending rename: validate + apply `settings_profile_new`'s
-    /// text as the new name for the profile at `settings_profile_rename_idx`,
-    /// mirroring [`Self::create_profile_from_current`]'s name validation
-    /// exactly (alnum/-/_ only, case-insensitive duplicate check against a
-    /// freshly re-read profile list so a stale cached list can't clobber an
-    /// existing section). A no-op (silently returns) when no rename is armed
-    /// or its index is stale; invalid/duplicate names surface as a toast and
-    /// leave the field open for another try, matching the create flow.
-    pub(crate) fn profile_rename_commit(&mut self) {
-        let Some(idx) = self.settings_profile_rename_idx else {
-            return;
-        };
-        let Some(old_name) = self.settings_profiles.get(idx).cloned() else {
-            self.settings_profile_rename_idx = None;
-            return;
-        };
-        let new_name = self
-            .settings_profile_new
-            .text()
-            .trim()
-            .to_ascii_lowercase();
-        if new_name.is_empty()
-            || !new_name
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-        {
-            self.push_toast("Profile name must be letters, numbers, - or _");
-            return;
-        }
-        if new_name != old_name {
-            let existing = crate::config::profile_names();
-            if existing.iter().any(|p| p.eq_ignore_ascii_case(&new_name)) {
-                self.push_toast(format!("Profile '{new_name}' already exists"));
-                return;
-            }
-        }
-        match crate::config::parse::rename_section(&old_name, &new_name) {
-            Ok(()) => {
-                self.settings_profiles = crate::config::profile_names();
-                self.settings_profile_rename_idx = None;
-                self.settings_profile_new = gui::TextEdit::default();
-                self.settings_profile_new_ms = gui::TextInputMouse::default();
-                if self.active_profile.as_deref() == Some(old_name.as_str()) {
-                    self.active_profile = Some(new_name.clone());
-                }
-                self.settings_saved = false;
-                self.force_full_redraw = true;
-                self.push_toast(format!("Profile renamed to '{new_name}'"));
-            }
-            Err(e) => {
-                log::error!("rename profile '{old_name}' -> '{new_name}' failed: {e:#}");
-                self.push_toast(format!("Rename profile '{old_name}' failed"));
-            }
-        }
-    }
-
-    /// Delete the profile at `idx` (Profiles section delete icon's SECOND
-    /// click, once armed — see the row's paint code in `settings_panel.rs` for
-    /// the two-click state machine): removes its `[profile.NAME]` section
-    /// from the config file entirely, preserving everything else verbatim.
-    /// If it was the active profile, falls back to the base config
-    /// ([`Self::switch_to_base_profile`]) so runtime state never references a
-    /// section that no longer exists. Also cancels any in-progress rename
-    /// (mutual exclusion) and clears GUI focus so a DIFFERENT profile that
-    /// shifts into this row's list index next frame isn't mistaken for still
-    /// being armed (armed-ness is derived from the delete icon's widget id
-    /// holding keyboard focus).
-    pub(crate) fn profile_delete_confirm(&mut self, idx: usize) {
-        self.settings_profile_rename_idx = None;
-        let Some(name) = self.settings_profiles.get(idx).cloned() else {
-            return;
-        };
-        match crate::config::parse::remove_section(&name) {
-            Ok(()) => {
-                self.settings_profiles = crate::config::profile_names();
-                self.gui_focused = None;
-                self.settings_saved = false;
-                self.force_full_redraw = true;
-                if self.active_profile.as_deref() == Some(name.as_str()) {
-                    self.switch_to_base_profile();
-                }
-                self.push_toast(format!("Profile '{name}' deleted"));
-            }
-            Err(e) => {
-                log::error!("delete profile '{name}' failed: {e:#}");
-                self.push_toast(format!("Delete profile '{name}' failed"));
-            }
-        }
     }
 }

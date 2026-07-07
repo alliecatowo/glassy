@@ -739,25 +739,6 @@ pub struct SettingsEvents {
     /// `SettingsFields::profile_name` (App-owned, like the other editable text
     /// fields).
     pub profile_create: bool,
-    /// A profile row's delete (🗑) icon was clicked while NOT armed: arm the
-    /// two-click confirm for it (index into `profile_names`).
-    pub profile_delete_arm: Option<usize>,
-    /// The confirm icon was clicked on an ALREADY-armed row (same index as
-    /// `SettingsView::profile_delete_armed`): actually delete that profile.
-    pub profile_delete_confirm: Option<usize>,
-    /// The ✕ cancel icon was clicked on an armed row: disarm without deleting.
-    pub profile_delete_cancel: bool,
-    /// A profile row's rename (✎) icon was clicked: start renaming it (index
-    /// into `profile_names`) — seeds the shared "New profile" field with its
-    /// current name and repurposes that row to "Rename profile".
-    pub profile_rename_start: Option<usize>,
-    /// The repurposed Save affordance fired while a rename is in progress
-    /// (`SettingsView::profile_rename_idx` set): commit the pending name from
-    /// `SettingsFields::profile_name` as that profile's new name.
-    pub profile_rename_commit: bool,
-    /// The ✕ next to the repurposed Save button fired: cancel the rename
-    /// without renaming anything.
-    pub profile_rename_cancel: bool,
 
     // --- settings-sections stream: Terminal / Effects / Quake / Notifications /
     // Advanced additions --------------------------------------------------------

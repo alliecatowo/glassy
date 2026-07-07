@@ -1265,34 +1265,6 @@ impl App {
             self.create_profile_from_current();
             changed = true;
         }
-        if ev.profile_delete_arm.is_some() {
-            // The click itself already claimed keyboard focus on the delete
-            // icon (the two-click arm/confirm's memory — see the row's paint
-            // code); nothing else to persist here, just force the repaint that
-            // shows the confirm state.
-            changed = true;
-        }
-        if let Some(idx) = ev.profile_delete_confirm {
-            self.profile_delete_confirm(idx);
-            changed = true;
-        }
-        if ev.profile_delete_cancel {
-            // Disarming is also just a focus side-effect (clicking ✕ moves
-            // focus off the delete icon); only the repaint is needed here.
-            changed = true;
-        }
-        if let Some(idx) = ev.profile_rename_start {
-            self.profile_rename_start(idx);
-            changed = true;
-        }
-        if ev.profile_rename_commit {
-            self.profile_rename_commit();
-            changed = true;
-        }
-        if ev.profile_rename_cancel {
-            self.profile_rename_cancel();
-            changed = true;
-        }
         if ev.copy_path {
             self.copy_config_path();
             changed = true;

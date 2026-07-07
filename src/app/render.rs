@@ -1108,7 +1108,6 @@ impl App {
                 status_bar_time_format_ms: &mut self.settings_status_bar_time_format_ms,
                 wallpaper_theme: &mut self.settings_wallpaper_theme,
                 wallpaper_theme_ms: &mut self.settings_wallpaper_theme_ms,
-                profile_rename_idx: self.settings_profile_rename_idx,
             };
             settings_events = Some(Self::paint_settings(
                 renderer,
