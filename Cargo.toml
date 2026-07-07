@@ -48,6 +48,14 @@ notify-rust = { version = "4", default-features = false, features = ["d"] }
 # Linux: Vulkan backend + Wayland clipboard.
 [target.'cfg(target_os = "linux")'.dependencies]
 arboard = { version = "3.6.1", default-features = false, features = ["wayland-data-control"] }
+# Session D-Bus client for the system light/dark theme watcher
+# (src/app/system_theme.rs), which reads/subscribes to
+# org.freedesktop.portal.Settings so `follow_system` works on Linux (winit
+# never emits WindowEvent::ThemeChanged there). Already a transitive
+# dependency at this exact version via notify-rust's "d" feature above;
+# promoted to a direct dependency since glassy now calls it directly too —
+# zero new dependency, zero Cargo.lock churn.
+dbus = "0.9.11"
 wgpu = { version = "29.0.3", default-features = false, features = ["vulkan", "wgsl", "std", "parking_lot"] }
 
 # macOS: Metal backend only — no Vulkan/DX12/OpenGL/WebGPU needed.

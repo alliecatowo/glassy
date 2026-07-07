@@ -211,6 +211,20 @@ pub(super) fn dispatch(
             }
             return;
         }
+        UserEvent::SystemThemeChanged(scheme) => {
+            // Linux equivalent of `WindowEvent::ThemeChanged` (event_loop.rs),
+            // which winit never emits on that platform: the system light/dark
+            // preference changed, or this is the initial read at startup
+            // (`crate::app::system_theme`). Same apply-or-reassert logic as the
+            // native handler, so a pinned (non-follow_system) `theme` still
+            // gets its CSD titlebar recoherenced.
+            if !app.apply_system_theme(Some(scheme))
+                && let Some(theme) = color::theme_by_name(&app.config.theme)
+            {
+                color::set_theme(theme);
+            }
+            app.force_full_redraw = true;
+        }
         UserEvent::Ipc(cmd) => {
             // A `glassy toggle/show/hide` from a compositor hotkey (or a second
             // launch) arrived over the single-instance socket. Drive the quake

@@ -57,6 +57,15 @@
 //! power_mode_intensity = 0.6           # power-mode strength: 0.0 (subtle) .. 1.0 (max)
 //! ```
 //!
+//! `follow_system` on Linux: winit never delivers a live theme-change event
+//! there (and never reports the real GNOME/GTK preference at all), so glassy
+//! reads and subscribes to `org.freedesktop.portal.Settings`'s color-scheme
+//! key over the session D-Bus itself (`app::system_theme`), covering both
+//! GNOME and KDE via the XDG desktop portal. This drives both the startup
+//! pick and live updates on Light/Dark toggle; with no portal/bus available
+//! it degrades quietly to the configured `theme_dark`. macOS and Windows
+//! already get this live from winit and need no help from that module.
+//!
 //! Quake / dropdown mode (see `docs/quake-mode.md`): with `quake = true` glassy
 //! opens as a borderless window that slides down from the top edge. Wayland has no
 //! portable global hotkey, so bind `glassy toggle` (or `glassy --toggle`) to a key

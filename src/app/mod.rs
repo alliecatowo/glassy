@@ -65,6 +65,8 @@ mod settings_fields;
 pub(crate) mod settings_save;
 mod settings_themes;
 mod strip;
+#[cfg(target_os = "linux")]
+pub(crate) mod system_theme;
 mod tab_paint;
 mod tabs;
 pub(crate) mod toast;

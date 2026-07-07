@@ -87,6 +87,15 @@ fn main() -> anyhow::Result<()> {
         Err(e) => log::warn!("ipc: failed to start control server: {e}"),
     }
 
+    // Linux: winit never emits WindowEvent::ThemeChanged there (and its
+    // Window::theme() never reflects the real GNOME/GTK preference), so
+    // `follow_system` needs its own live source. Reads/subscribes to the XDG
+    // desktop portal's color-scheme setting over D-Bus and posts updates back
+    // through `proxy`; a non-fatal no-op when no portal/bus is available
+    // (see `app::system_theme`).
+    #[cfg(target_os = "linux")]
+    app::system_theme::spawn(proxy.clone());
+
     // Clone a proxy for the macOS menu bar before `proxy` is moved into the app.
     #[cfg(target_os = "macos")]
     let menu_proxy = proxy.clone();

@@ -586,6 +586,15 @@ pub enum UserEvent {
         exit: Option<i32>,
         duration: Duration,
     },
+    /// Linux only: the system light/dark color-scheme preference changed (or
+    /// was read for the first time at startup), as reported by
+    /// `org.freedesktop.portal.Settings` over D-Bus (see
+    /// `crate::app::system_theme`). winit never emits
+    /// `WindowEvent::ThemeChanged` on Linux, so this is the Linux equivalent
+    /// of that event; the UI thread applies it via the same
+    /// `App::apply_system_theme` path. Carries no session id (window-level).
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    SystemThemeChanged(winit::window::Theme),
 }
 
 /// Wraps the `ClipboardLoad` reply-builder closure so `UserEvent` can keep its

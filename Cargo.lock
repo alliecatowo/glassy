@@ -876,6 +876,7 @@ dependencies = [
  "core-graphics",
  "core-text",
  "cosmic-text",
+ "dbus",
  "env_logger",
  "log",
  "notify",
