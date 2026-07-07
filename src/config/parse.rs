@@ -672,9 +672,41 @@ fn merge_into_section(existing: &str, section: Option<&str>, updates: &[(&str, S
     out
 }
 
+/// Locate the first unquoted `#` or `;` in `s` — scanning a config value
+/// substring for a trailing inline comment. A marker inside a matched
+/// `'...'`/`"..."` span is part of the value, not a comment, and is skipped;
+/// an unterminated quote runs to the end of the string (so any `#`/`;` after
+/// an opening quote with no matching close is treated as still-quoted).
+fn find_inline_comment_start(s: &str) -> Option<usize> {
+    let mut in_single = false;
+    let mut in_double = false;
+    for (idx, ch) in s.char_indices() {
+        match ch {
+            '\'' if !in_double => in_single = !in_single,
+            '"' if !in_single => in_double = !in_double,
+            '#' | ';' if !in_single && !in_double => return Some(idx),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Split a raw, unquoted-scan value substring (the text after a config line's
+/// `=`) into `(value, trailing_comment)`. `trailing_comment` is `Some` (right-
+/// trimmed, marker included) when an unquoted `#`/`;` was found; `value` still
+/// carries its own surrounding whitespace — callers trim as needed.
+fn split_value_and_comment(raw_value: &str) -> (&str, Option<&str>) {
+    match find_inline_comment_start(raw_value) {
+        Some(idx) => (&raw_value[..idx], Some(raw_value[idx..].trim_end())),
+        None => (raw_value, None),
+    }
+}
+
 /// Update-in-place (or append-at-range-end) the `(key, value)` pairs within
 /// `lines[range.0..range.1]`. A key found in the range (skipping comments/blank
-/// lines) is rewritten in place; a key not found is appended just before any
+/// lines) is rewritten in place, preserving any inline trailing `#`/`;` comment
+/// on that line (a `#`/`;` inside a quoted value doesn't count — see
+/// [`find_inline_comment_start`]); a key not found is appended just before any
 /// TRAILING blank lines at the end of the range (so a blank-line separator
 /// before the next section, or the file's end, stays trailing instead of
 /// getting sandwiched between old and newly-appended content), preserving
@@ -692,15 +724,22 @@ fn apply_updates_in_range(
         if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with(';') {
             continue;
         }
-        let Some((key, _)) = trimmed.split_once('=') else {
+        let Some((key, raw_value)) = trimmed.split_once('=') else {
             continue;
         };
         let key = key.trim().to_ascii_lowercase();
+        // Computed (and owned) BEFORE the `*line` reassignment below so the
+        // borrow of `line` via `trimmed`/`raw_value` ends here, not at the
+        // assignment (which would otherwise conflict under NLL).
+        let comment: Option<String> = split_value_and_comment(raw_value).1.map(str::to_string);
         for (i, (k, v)) in updates.iter().enumerate() {
             if !written[i] && key == *k {
                 // Strip newlines and carriage returns from value to prevent injection.
                 let clean_v = v.replace(['\n', '\r'], "");
-                *line = format!("{k} = {clean_v}");
+                *line = match &comment {
+                    Some(c) => format!("{k} = {clean_v}  {c}"),
+                    None => format!("{k} = {clean_v}"),
+                };
                 written[i] = true;
             }
         }
@@ -1703,8 +1742,118 @@ cwd = /home/me/work
     }
 
     // -----------------------------------------------------------------------
+    // Inline trailing comment preservation (apply_updates_in_range)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn merge_config_preserves_inline_hash_comment_on_rewritten_key() {
+        let existing = "opacity = 0.5  # my note\n";
+        let out = merge_config(existing, &upd(&[("opacity", "0.9")]));
+        assert_eq!(out, "opacity = 0.9  # my note\n");
+    }
+
+    #[test]
+    fn merge_config_preserves_inline_semicolon_comment_on_rewritten_key() {
+        let existing = "opacity = 0.5  ; my note\n";
+        let out = merge_config(existing, &upd(&[("opacity", "0.9")]));
+        assert_eq!(out, "opacity = 0.9  ; my note\n");
+    }
+
+    #[test]
+    fn merge_config_no_comment_present_behaves_identically_to_before() {
+        let existing = "opacity = 0.5\n";
+        let out = merge_config(existing, &upd(&[("opacity", "0.9")]));
+        assert_eq!(out, "opacity = 0.9\n");
+    }
+
+    #[test]
+    fn merge_config_hash_inside_single_quoted_value_is_not_a_comment() {
+        // The '#' is part of the quoted value (a literal separator string), not
+        // a trailing comment — nothing should be preserved/appended after the
+        // rewritten value.
+        let existing = "word_separator = '#separator#'\n";
+        let out = merge_config(existing, &upd(&[("word_separator", "/,")]));
+        assert_eq!(out, "word_separator = /,\n");
+    }
+
+    #[test]
+    fn merge_config_hash_inside_double_quoted_value_is_not_a_comment() {
+        let existing = "font_family = \"Comic # Sans\"\n";
+        let out = merge_config(existing, &upd(&[("font_family", "Fira Code")]));
+        assert_eq!(out, "font_family = Fira Code\n");
+    }
+
+    #[test]
+    fn merge_config_preserves_real_comment_after_a_quoted_value_containing_hash() {
+        // A '#' inside the quotes is part of the value; the SPACE-separated '#'
+        // after the closing quote is the real trailing comment and must survive.
+        let existing = "font_family = \"Comic # Sans\"  # actually use this one\n";
+        let out = merge_config(existing, &upd(&[("font_family", "Fira Code")]));
+        assert_eq!(out, "font_family = Fira Code  # actually use this one\n");
+    }
+
+    #[test]
+    fn merge_config_semicolon_inside_quotes_is_not_a_comment() {
+        let existing = "word_separator = ';sep;'\n";
+        let out = merge_config(existing, &upd(&[("word_separator", "/,")]));
+        assert_eq!(out, "word_separator = /,\n");
+    }
+
+    #[test]
+    fn merge_config_appended_missing_key_never_gets_a_comment() {
+        // A freshly-appended key has no prior line to read a comment from.
+        let existing = "theme = dracula\n";
+        let out = merge_config(existing, &upd(&[("opacity", "0.9")]));
+        assert_eq!(out, "theme = dracula\nopacity = 0.9\n");
+    }
+
+    #[test]
+    fn section_preserves_inline_comment_within_profile_section() {
+        let existing = "[profile.work]\nfont_size = 18  # laptop screen\n";
+        let out = merge_into_section(existing, Some("work"), &upd(&[("font_size", "22")]));
+        assert_eq!(out, "[profile.work]\nfont_size = 22  # laptop screen\n");
+    }
+
+    // -----------------------------------------------------------------------
     // Helper unit tests
     // -----------------------------------------------------------------------
+
+    #[test]
+    fn find_inline_comment_start_finds_unquoted_hash() {
+        assert_eq!(find_inline_comment_start(" 0.5  # note"), Some(6));
+        assert_eq!(find_inline_comment_start(" 0.5  ; note"), Some(6));
+        assert_eq!(find_inline_comment_start(" 0.5"), None);
+    }
+
+    #[test]
+    fn find_inline_comment_start_ignores_hash_inside_quotes() {
+        assert_eq!(find_inline_comment_start(" '#not a comment'"), None);
+        assert_eq!(find_inline_comment_start(" \"#not a comment\""), None);
+        // Real comment AFTER the closing quote is still found.
+        assert_eq!(
+            find_inline_comment_start(" \"a#b\" # real"),
+            Some(" \"a#b\" ".len())
+        );
+    }
+
+    #[test]
+    fn find_inline_comment_start_unterminated_quote_runs_to_end() {
+        // No closing quote: the rest of the line (including any '#') is
+        // treated as still inside the quote, so no comment is found.
+        assert_eq!(
+            find_inline_comment_start(" 'unterminated # not a comment"),
+            None
+        );
+    }
+
+    #[test]
+    fn split_value_and_comment_splits_on_unquoted_marker() {
+        assert_eq!(
+            split_value_and_comment(" 0.5  # note"),
+            (" 0.5  ", Some("# note"))
+        );
+        assert_eq!(split_value_and_comment(" 0.5"), (" 0.5", None));
+    }
 
     #[test]
     fn profile_header_name_parses_only_the_profile_prefix() {
