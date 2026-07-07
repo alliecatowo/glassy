@@ -40,6 +40,9 @@ pub(crate) enum PaletteCmd {
     RotatePanes,
     /// Reset all split ratios to an even 50/50 partition.
     EqualizePanes,
+    /// Rebuild the split tree into the next layout preset (rows / columns /
+    /// main-vertical / grid), preserving pane order.
+    CycleLayout,
     /// Toggle dimming of unfocused pane content.
     ToggleDimUnfocused,
     /// Save the current split shape under a name (carried in the entry payload).
@@ -151,7 +154,8 @@ impl PaletteCmd {
         match self {
             NewTab | CloseTab | NextTab | PrevTab => "Tab",
             SplitVertical | SplitHorizontal | ClosePane | ToggleBroadcastInput | ToggleZoom
-            | RotatePanes | EqualizePanes | ToggleDimUnfocused | SaveLayout | RestoreLayout => {
+            | RotatePanes | EqualizePanes | CycleLayout | ToggleDimUnfocused | SaveLayout
+            | RestoreLayout => {
                 "Pane"
             }
             OpenSettings | OpenHelp | OpenSearch => "View",
@@ -191,6 +195,7 @@ impl PaletteCmd {
             ToggleZoom => "Zoom / unzoom focused pane".into(),
             RotatePanes => "Rotate panes (swap with sibling)".into(),
             EqualizePanes => "Equalize splits (even sizes)".into(),
+            CycleLayout => "Cycle layout preset (rows/columns/main/grid)".into(),
             ToggleDimUnfocused => "Toggle dim unfocused panes".into(),
             // Save/Restore labels are filled in by the registry from the payload.
             SaveLayout | RestoreLayout => String::new(),
@@ -379,6 +384,7 @@ impl App {
             ToggleZoom,
             RotatePanes,
             EqualizePanes,
+            CycleLayout,
             ToggleDimUnfocused,
             OpenSettings,
             OpenHelp,
@@ -765,6 +771,7 @@ impl App {
             ToggleZoom => self.toggle_zoom(event_loop),
             RotatePanes => self.rotate_panes(event_loop),
             EqualizePanes => self.equalize_panes(event_loop),
+            CycleLayout => self.cycle_layout(event_loop),
             ToggleDimUnfocused => {
                 self.toggle_dim_unfocused();
                 self.mark_dirty(event_loop);
@@ -1018,6 +1025,7 @@ mod tests {
             ToggleZoom,
             RotatePanes,
             EqualizePanes,
+            CycleLayout,
             ToggleDimUnfocused,
             OpenSettings,
             OpenHelp,

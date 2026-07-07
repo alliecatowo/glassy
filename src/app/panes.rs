@@ -2,6 +2,43 @@
 
 use super::*;
 
+/// Pane header information density (config key `pane_header_style`). `Full` is
+/// the original title+cwd+comm+grip+menu strip; `Compact` slims the strip down
+/// to just the focus dot, pane index, and title (no cwd/comm annotation), at a
+/// shorter [`App::PANE_HEADER_H_COMPACT`] height. Both styles render as an
+/// overlay band (see [`App::pane_header_h`]) and never reserve PTY grid rows.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum PaneHeaderStyle {
+    #[default]
+    Full,
+    Compact,
+}
+
+impl PaneHeaderStyle {
+    /// Parse a config-file value (`full` | `compact`); unrecognized strings
+    /// fall back to `Full` at the call site, matching the config layer's usual
+    /// forgiving-default pattern for enum-like keys.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "full" => Some(Self::Full),
+            "compact" => Some(Self::Compact),
+            _ => None,
+        }
+    }
+
+    /// Round-trips `parse`'s output back to a config-file value. Not called yet
+    /// (there's no settings-UI row for this key — see the house rule against
+    /// adding one outside a dedicated UI-exposure stream — so nothing persists it
+    /// via `SAVED_KEYS`), kept for API symmetry and that future stream.
+    #[allow(dead_code)]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::Compact => "compact",
+        }
+    }
+}
+
 impl App {
     /// The content rectangle (surface pixels) that panes tile: the whole surface
     /// below the tab strip. Each pane is internally inset by the renderer pad (the
@@ -65,21 +102,8 @@ impl App {
         let m = r.cell_metrics();
         let (cw, ch) = (m.width.round() as u16, m.height.round() as u16);
         let focused = self.panes.as_ref().unwrap().layout.focused();
-        let hdr_h = if self.config.pane_headers {
-            Self::PANE_HEADER_H
-        } else {
-            0
-        };
         for (id, rect) in rects {
-            // Mirror render_split's body rect: the cell grid starts below the
-            // (optional) pane header, so the PTY must be sized to that body height.
-            let body = pane::Rect {
-                x: rect.x,
-                y: rect.y + hdr_h,
-                w: rect.w,
-                h: (rect.h - hdr_h).max(0),
-            };
-            let (cols, rows) = self.pane_grid(body);
+            let (cols, rows) = self.pane_grid(Self::pane_body_rect(rect));
             if id == focused {
                 if let Some(pty) = &self.pty {
                     pty.resize(cols, rows, cw, ch);
@@ -364,6 +388,48 @@ impl App {
     /// never crush a pane below a usable size.
     pub(crate) const PANE_MIN_PX: i32 = 120;
 
+    /// Overlay strip height for [`PaneHeaderStyle::Compact`] (focus dot + index +
+    /// title only, no cwd/comm annotation) — shorter than [`Self::PANE_HEADER_H`]
+    /// since it carries less text.
+    pub(crate) const PANE_HEADER_H_COMPACT: i32 = 14;
+
+    /// The current pane-header overlay height in px: `0` when `pane_headers` is
+    /// off, else [`Self::PANE_HEADER_H`] or [`Self::PANE_HEADER_H_COMPACT`]
+    /// depending on `pane_header_style`. Headers are painted as an overlay band
+    /// on top of the grid's own top row(s) — this height drives hit-testing
+    /// (grip/menu/click zones) and the paint pass, but NEVER insets the PTY grid
+    /// (see `resize_panes`, which sizes every pane to its full tiled rect).
+    pub(crate) fn pane_header_h(&self) -> i32 {
+        Self::header_h_for(self.config.pane_headers, self.config.pane_header_style)
+    }
+
+    /// Pure config→height resolution behind [`Self::pane_header_h`]: `0` when
+    /// headers are off, else [`Self::PANE_HEADER_H`] or
+    /// [`Self::PANE_HEADER_H_COMPACT`] depending on `style`. Split out from the
+    /// `&self` method so the "off means zero, style picks 22 vs 14" mapping is
+    /// unit-testable without a renderer-backed `App`.
+    pub(crate) fn header_h_for(pane_headers: bool, style: PaneHeaderStyle) -> i32 {
+        if !pane_headers {
+            return 0;
+        }
+        match style {
+            PaneHeaderStyle::Full => Self::PANE_HEADER_H,
+            PaneHeaderStyle::Compact => Self::PANE_HEADER_H_COMPACT,
+        }
+    }
+
+    /// The PTY body rect for a pane's tile: ALWAYS the full tile rect. Pane
+    /// headers are an overlay band painted ON TOP of the grid's own top row(s)
+    /// (see [`Self::pane_header_h`]), never a reservation — so a pane's terminal
+    /// grid is NEVER shrunk by turning headers on, regardless of
+    /// `pane_headers`/`pane_header_style`. Kept as its own (trivial) pure
+    /// function, used by both [`Self::resize_panes`] (PTY sizing) and
+    /// `render_split` (render sizing), so that invariant stays in lock-step
+    /// between the two AND is directly unit-testable.
+    pub(crate) fn pane_body_rect(rect: pane::Rect) -> pane::Rect {
+        rect
+    }
+
     /// Hit-test the resize gutters of the active split at pointer `(x, y)`,
     /// returning the handle under it (within [`GUTTER_TOL`]). `None` when not split
     /// or off any gutter.
@@ -399,7 +465,7 @@ impl App {
         // Zoom-aware: only the focused pane's header exists while zoomed.
         let rects = g.rects(area, Self::PANE_GAP);
         let (xi, yi) = (x as f32, y as f32);
-        let hdr_h = Self::PANE_HEADER_H as f32;
+        let hdr_h = self.pane_header_h() as f32;
         for (id, r) in rects {
             let rx = r.x as f32;
             let ry = r.y as f32;
@@ -455,7 +521,7 @@ impl App {
         let (id, r) = rects.into_iter().find(|(id, _)| *id == open_pane)?;
         let _ = id;
         let m = self.renderer.as_ref()?.cell_metrics();
-        let hdr_h = Self::PANE_HEADER_H as f32;
+        let hdr_h = self.pane_header_h() as f32;
         let menu_btn_w = hdr_h;
         let ax = r.x as f32 + r.w as f32 - menu_btn_w;
         let ay = r.y as f32 + hdr_h;
@@ -604,5 +670,53 @@ impl App {
             }
         }
         None
+    }
+}
+
+#[cfg(test)]
+mod header_geometry_tests {
+    use super::*;
+
+    #[test]
+    fn header_off_is_always_zero_height() {
+        assert_eq!(App::header_h_for(false, PaneHeaderStyle::Full), 0);
+        assert_eq!(App::header_h_for(false, PaneHeaderStyle::Compact), 0);
+    }
+
+    #[test]
+    fn header_on_picks_style_height() {
+        assert_eq!(
+            App::header_h_for(true, PaneHeaderStyle::Full),
+            App::PANE_HEADER_H
+        );
+        assert_eq!(
+            App::header_h_for(true, PaneHeaderStyle::Compact),
+            App::PANE_HEADER_H_COMPACT
+        );
+        // Compact is strictly shorter than full (it's the whole point).
+        assert!(App::PANE_HEADER_H_COMPACT < App::PANE_HEADER_H);
+    }
+
+    #[test]
+    fn pane_body_rect_never_insets_for_a_header() {
+        // The core "overlay, don't steal rows" invariant: the PTY body rect for
+        // a pane's tile is ALWAYS the full tile rect, regardless of whether a
+        // header would be painted on top of it. A future edit that reintroduces
+        // a header inset (`y += hdr_h, h -= hdr_h`) here would fail this test.
+        let full = pane::Rect {
+            x: 3,
+            y: 5,
+            w: 200,
+            h: 100,
+        };
+        assert_eq!(App::pane_body_rect(full), full);
+        // Even a tiny pane (smaller than a header would be) is untouched.
+        let tiny = pane::Rect {
+            x: 0,
+            y: 0,
+            w: 10,
+            h: 10,
+        };
+        assert_eq!(App::pane_body_rect(tiny), tiny);
     }
 }

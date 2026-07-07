@@ -321,6 +321,16 @@ impl App {
         // it is moved back at the end of the frame. Cheap (a Vec pointer swap).
         let minimap_cache = std::mem::take(&mut self.minimap_cache);
 
+        // Single-pane header overlay snapshot (feature: `pane_headers_single`):
+        // the content area + effective header height, resolved via `&self`
+        // methods before the disjoint renderer/pty borrows below. `None` unless
+        // both `pane_headers` and `pane_headers_single` are on (the split path,
+        // `render_split`, handles the header when the tab IS split).
+        let single_pane_header_area = (self.config.pane_headers && self.config.pane_headers_single)
+            .then(|| self.content_area())
+            .flatten();
+        let single_pane_header_h = self.pane_header_h() as f32;
+
         let (Some(renderer), Some(pty)) = (self.renderer.as_mut(), self.pty.as_ref()) else {
             self.minimap_cache = minimap_cache;
             return;
@@ -954,6 +964,21 @@ impl App {
         // renamed, on top of the (cached) tab bar so the caret/edits are live.
         if let Some((rect, buf, caret, sel)) = &rename_inputs {
             Self::paint_tab_rename(renderer, *rect, buf, *caret, *sel);
+        }
+
+        // Single-pane header overlay (feature: `pane_headers_single`): a
+        // lightweight title + focus dot + index("1") strip so `pane_headers` has
+        // an immediate visible effect even before the tab is ever split. Always
+        // redrawn (cheap: one fill + a couple of glyph runs), unlike the tab bar's
+        // cached overlay.
+        if let Some(area) = single_pane_header_area {
+            Self::paint_single_pane_header(
+                renderer,
+                area,
+                single_pane_header_h,
+                &self.active_title,
+                self.focused,
+            );
         }
 
         // Modifier-HOLD numbered tab overlay: stamped over the (cached) tab bar

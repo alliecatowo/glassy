@@ -582,6 +582,7 @@ impl App {
             }
             ToggleOpacity => self.toggle_opacity(event_loop),
             SaveScrollback => self.save_scrollback_to_file(event_loop),
+            CycleLayout => self.cycle_layout(event_loop),
         }
     }
 

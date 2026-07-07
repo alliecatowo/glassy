@@ -261,6 +261,10 @@ pub enum KeyAction {
     ToggleOpacity,
     /// Save the active pane's scrollback history to a temporary file and print its path.
     SaveScrollback,
+    /// Cycle the active tab's split tree through a fixed sequence of layout
+    /// presets (rows / columns / main-vertical / grid), preserving pane order.
+    /// A no-op when the active tab isn't split.
+    CycleLayout,
 }
 
 impl KeyAction {
@@ -313,6 +317,7 @@ impl KeyAction {
             DecreaseOpacity => "Decrease opacity",
             ToggleOpacity => "Toggle opacity (transparent ↔ opaque)",
             SaveScrollback => "Save scrollback to file",
+            CycleLayout => "Cycle layout preset (rows/columns/main/grid)",
         }
     }
 
@@ -324,9 +329,8 @@ impl KeyAction {
                 "Tabs"
             }
             SplitVertical | SplitHorizontal | BroadcastInput | ToggleZoom | FocusPaneLeft
-            | FocusPaneRight | FocusPaneUp | FocusPaneDown | RotatePanes | EqualizePanes => {
-                "Split panes"
-            }
+            | FocusPaneRight | FocusPaneUp | FocusPaneDown | RotatePanes | EqualizePanes
+            | CycleLayout => "Split panes",
             Copy | Paste | SelectAll | ViMode => "Edit",
             ToggleFullscreen | ToggleMaximize | FontIncrease | FontDecrease | FontReset
             | ToggleStatusBar | ToggleMinimap | ScrollUp | ScrollDown | ScrollTop
@@ -389,6 +393,7 @@ pub(crate) fn parse_action(s: &str) -> Result<Option<KeyAction>> {
         "decrease_opacity" | "opacity_down" => DecreaseOpacity,
         "toggle_opacity" => ToggleOpacity,
         "save_scrollback" | "scrollback_to_file" => SaveScrollback,
+        "cycle_layout" | "cycle_layout_preset" => CycleLayout,
         // go_to_tab_1 .. go_to_tab_9 select a tab by 1-based position.
         s if s.starts_with("go_to_tab_") => match s["go_to_tab_".len()..].parse::<u8>() {
             Ok(n @ 1..=9) => GoToTab(n),
@@ -585,6 +590,7 @@ fn pc_default_binds() -> &'static [(&'static str, KeyAction)] {
         ("ctrl+7", GoToTab(7)),
         ("ctrl+8", GoToTab(8)),
         ("ctrl+9", GoToTab(9)),
+        ("ctrl+shift+l", CycleLayout),
     ]
 }
 
@@ -632,6 +638,7 @@ fn mac_default_binds() -> &'static [(&'static str, KeyAction)] {
         ("cmd+7", GoToTab(7)),
         ("cmd+8", GoToTab(8)),
         ("cmd+9", GoToTab(9)),
+        ("cmd+shift+l", CycleLayout),
     ]
 }
 
@@ -825,5 +832,29 @@ mod tests {
         );
         let pc = default_keymap(Platform::Linux);
         assert!(!pc.values().any(|&a| a == KeyAction::SelectAll));
+    }
+
+    #[test]
+    fn cycle_layout_action_round_trips_and_has_platform_default_binding() {
+        assert_eq!(
+            parse_action("cycle_layout").unwrap(),
+            Some(KeyAction::CycleLayout)
+        );
+        assert_eq!(
+            parse_action("cycle_layout_preset").unwrap(),
+            Some(KeyAction::CycleLayout)
+        );
+        assert!(!KeyAction::CycleLayout.description().is_empty());
+        assert_eq!(KeyAction::CycleLayout.section(), "Split panes");
+        let pc = default_keymap(Platform::Linux);
+        assert_eq!(
+            pc.get(&parse_chord("ctrl+shift+l").unwrap()),
+            Some(&KeyAction::CycleLayout)
+        );
+        let mac = default_keymap(Platform::Mac);
+        assert_eq!(
+            mac.get(&parse_chord("cmd+shift+l").unwrap()),
+            Some(&KeyAction::CycleLayout)
+        );
     }
 }

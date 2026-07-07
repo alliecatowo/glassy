@@ -34,6 +34,8 @@
 //! theme_dark  = tokyo-night            # theme used in system Dark mode
 //! status_bar  = false                  # show status bar at the bottom (default off)
 //! pane_headers= false                  # show per-pane title bars + accent rail in splits (default off)
+//! pane_header_style = full             # pane header density: full | compact (default full)
+//! pane_headers_single = false          # also show a header for a single, unsplit pane (default off)
 //! dim_unfocused = true                 # dim unfocused pane content in a split (default on)
 //! unfocused_dim = 0.28                 # dim strength 0..0.9 (0 = invisible; needs dim_unfocused)
 //! opacity_scope = background           # what window opacity affects: background | text (text = glyphs too)
@@ -546,6 +548,38 @@ mod tests {
         parse_config_file("pane_headers = on\n", &mut raw_on).unwrap();
         let settings_on = raw_on.into_settings().unwrap();
         assert!(settings_on.config.pane_headers);
+    }
+
+    #[test]
+    fn pane_header_style_parses_and_defaults_full() {
+        use crate::app::panes::PaneHeaderStyle;
+        // Default (unset) is Full.
+        let settings = RawConfig::default().into_settings().unwrap();
+        assert_eq!(settings.config.pane_header_style, PaneHeaderStyle::Full);
+        // Explicit compact/full both round-trip.
+        let mut raw_compact = RawConfig::default();
+        parse_config_file("pane_header_style = compact\n", &mut raw_compact).unwrap();
+        let s = raw_compact.into_settings().unwrap();
+        assert_eq!(s.config.pane_header_style, PaneHeaderStyle::Compact);
+        let mut raw_full = RawConfig::default();
+        parse_config_file("pane_header_style = FULL\n", &mut raw_full).unwrap();
+        let s = raw_full.into_settings().unwrap();
+        assert_eq!(s.config.pane_header_style, PaneHeaderStyle::Full);
+        // An unrecognized value falls back to Full instead of failing to load.
+        let mut raw_bad = RawConfig::default();
+        parse_config_file("pane_header_style = weird\n", &mut raw_bad).unwrap();
+        let s = raw_bad.into_settings().unwrap();
+        assert_eq!(s.config.pane_header_style, PaneHeaderStyle::Full);
+    }
+
+    #[test]
+    fn pane_headers_single_parses_and_defaults_off() {
+        let settings = RawConfig::default().into_settings().unwrap();
+        assert!(!settings.config.pane_headers_single);
+        let mut raw = RawConfig::default();
+        parse_config_file("pane_headers_single = on\n", &mut raw).unwrap();
+        let s = raw.into_settings().unwrap();
+        assert!(s.config.pane_headers_single);
     }
 
     #[test]

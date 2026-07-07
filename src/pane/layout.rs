@@ -3,7 +3,7 @@
 //! recursive tree work to [`super::tree::Node`].
 
 use super::tree::{LayoutDesc, Node};
-use super::{Dir, Move, Rect, SplitHandle};
+use super::{Dir, LayoutPreset, Move, Rect, SplitHandle};
 
 /// The full layout: a tree plus the currently focused leaf id.
 pub struct Layout {
@@ -344,6 +344,52 @@ impl Layout {
     /// tree. Focus and structure are untouched. Used by the "equalize splits" action.
     pub fn equalize(&mut self) {
         self.root.equalize();
+    }
+
+    /// Which [`LayoutPreset`] (if any) the live tree currently matches,
+    /// comparing shape + leaf-id positions but ignoring split ratios. `None`
+    /// when the tree doesn't match any preset exactly (e.g. after a manual
+    /// drag-resize, or a shape the presets don't produce).
+    pub fn classify_preset(&self) -> Option<LayoutPreset> {
+        let ids = self.leaves();
+        [
+            LayoutPreset::Rows,
+            LayoutPreset::Columns,
+            LayoutPreset::MainVertical,
+            LayoutPreset::Grid,
+        ]
+        .into_iter()
+        .find(|&p| self.root.same_shape(&Node::build_preset(&ids, p)))
+    }
+
+    /// Rebuild the tree into `preset`'s shape, preserving the CURRENT DFS pane
+    /// order (leaf ids keep their left-to-right/top-to-bottom order; nothing is
+    /// spawned, closed, or reordered). Focus stays on the same leaf id. A no-op
+    /// (returns false) when there's only one pane (nothing to reshape).
+    pub fn apply_preset(&mut self, preset: LayoutPreset) -> bool {
+        let ids = self.leaves();
+        if ids.len() <= 1 {
+            return false;
+        }
+        self.root = Node::build_preset(&ids, preset);
+        true
+    }
+
+    /// Step to the NEXT preset in [`LayoutPreset`]'s fixed cycle order, applying
+    /// it to the tree. When the live tree doesn't currently match any preset,
+    /// starts the cycle at the first one ([`LayoutPreset::Rows`]). Returns the
+    /// preset that was applied, or `None` when there's only one pane (no-op,
+    /// same condition as [`Self::apply_preset`]).
+    pub fn cycle_preset(&mut self) -> Option<LayoutPreset> {
+        if self.len() <= 1 {
+            return None;
+        }
+        let next = match self.classify_preset() {
+            Some(p) => p.next(),
+            None => LayoutPreset::Rows,
+        };
+        self.apply_preset(next);
+        Some(next)
     }
 
     /// Serialize the tree into a flat [`LayoutDesc`] for session persistence. Leaf

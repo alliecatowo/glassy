@@ -337,6 +337,12 @@ pub(super) struct RawConfig {
     /// Seconds a pane must be idle/backgrounded before `scrollback_background_cap`
     /// applies. Only meaningful when the cap is non-zero.
     pub scrollback_background_idle_secs: Option<u64>,
+    /// Pane header information density: `full` | `compact`. See
+    /// [`crate::app::panes::PaneHeaderStyle`]. Default `full`.
+    pub pane_header_style: Option<String>,
+    /// Show a lightweight header for a single, unsplit pane too (not just
+    /// splits). Default false.
+    pub pane_headers_single: Option<bool>,
 }
 
 impl RawConfig {
@@ -531,6 +537,12 @@ impl RawConfig {
                 }
             },
             command_blocks: parse_command_blocks_mode(self.command_blocks.as_deref()),
+            pane_header_style: self
+                .pane_header_style
+                .as_deref()
+                .and_then(crate::app::panes::PaneHeaderStyle::parse)
+                .unwrap_or_default(),
+            pane_headers_single: self.pane_headers_single.unwrap_or(false),
         };
 
         // Resolve + validate the w15 scrollback-background policy at parse time,
@@ -1514,6 +1526,14 @@ pub(super) fn apply_kv(key: &str, value: &str, raw: &mut RawConfig) -> Result<()
                 format!("scrollback_background_idle_secs: invalid integer '{value}'")
             })?;
             raw.scrollback_background_idle_secs = Some(s);
+        "pane_header_style" => {
+            // Unrecognized values are accepted here (stored verbatim) and fall
+            // back to `Full` in `into_settings` — same forgiving pattern as
+            // `window_effect` — so a typo doesn't hard-fail config load.
+            raw.pane_header_style = Some(value.to_ascii_lowercase());
+        }
+        "pane_headers_single" => {
+            raw.pane_headers_single = Some(parse_bool(value, "pane_headers_single")?);
         }
         other => {
             log::warn!("glassy: ignoring unknown config key '{other}'");

@@ -51,7 +51,7 @@ mod mouse;
 mod multipane;
 mod palette;
 mod pane_ops;
-mod panes;
+pub(crate) mod panes;
 pub(crate) mod peek;
 mod power;
 mod quake;
@@ -137,8 +137,19 @@ pub struct Config {
     /// Show per-pane title bars (with the close box / split menu) and the accent
     /// top-rail on each pane when the tab is split. Default false (off by
     /// default; enable via `pane_headers = true` in the config or the settings
-    /// toggle). When false, panes use their full height with no header chrome.
+    /// toggle). Headers are painted as an OVERLAY band on top of the grid's own
+    /// top row(s) (see `App::pane_header_h`) — turning this on never costs a
+    /// pane real terminal rows.
     pub pane_headers: bool,
+    /// Pane header information density: `full` (title+cwd+comm+grip+menu, the
+    /// original layout) or `compact` (focus dot + pane index + title only, at a
+    /// shorter strip height). Config key `pane_header_style`. Default `full`.
+    pub pane_header_style: panes::PaneHeaderStyle,
+    /// Show a lightweight header (title + focus dot, no grip/menu/annotation)
+    /// even for a single, unsplit pane, so `pane_headers` has an immediate
+    /// visible effect before the user ever splits. Config key
+    /// `pane_headers_single`. Default false.
+    pub pane_headers_single: bool,
     /// Word separator characters for text selection. Whitespace chars from this string
     /// (plus the default whitespace + punctuation) are used as word boundaries.
     /// Empty string means use defaults only.

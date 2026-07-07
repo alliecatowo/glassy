@@ -267,7 +267,7 @@ OPTIONS:
     --theme-light <NAME>   Theme used in system Light mode (e.g. rose-pine-dawn)
     --theme-dark <NAME>    Theme used in system Dark mode (e.g. tokyo-night)
     --status-bar <BOOL>    Show status bar at the bottom (default false)
-    --pane-headers <BOOL>  Show per-pane title bars in splits (default true)
+    --pane-headers <BOOL>  Show per-pane title bars in splits (default false)
     --word-separator <STR> Extra word separators for text selection
     --font-features <LIST> OpenType feature tags, e.g. \"ss01,calt=0\" (comma/space separated)
     --import-theme <PATH>  Import Alacritty/base16 theme from TOML/YAML file
