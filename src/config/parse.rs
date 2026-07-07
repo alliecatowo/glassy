@@ -4,6 +4,7 @@ use alacritty_terminal::tty::Shell;
 use anyhow::{Context, Result, bail};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
 
 use crate::app::Config;
 use crate::color;
@@ -537,6 +538,37 @@ pub(crate) fn config_dir() -> Option<PathBuf> {
     config_path().and_then(|p| p.parent().map(PathBuf::from))
 }
 
+/// The full on-disk config text as of the last successful [`parse_config_file`]
+/// call (startup load, live-reload, or a runtime profile switch) — i.e. what
+/// the in-memory `Config` currently reflects. `save`/`save_into_section`
+/// compare a fresh read against this right before writing to detect an
+/// external edit (a manual `glassy.conf` tweak) that landed inside the
+/// config-watcher's ~500ms debounce window, so a Settings-panel Save — which
+/// always writes every `SAVED_KEYS` value, not just the ones the user actually
+/// changed — doesn't silently stomp that edit. See [`protect_against_external_edit`].
+static LAST_LOADED_TEXT: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+
+fn last_loaded_slot() -> &'static Mutex<Option<String>> {
+    LAST_LOADED_TEXT.get_or_init(|| Mutex::new(None))
+}
+
+/// Stash `text` as the most recent successfully-parsed config snapshot.
+/// Called once from [`parse_config_file`]; a poisoned lock (impossible short of
+/// a panic mid-assignment, which never happens here) just leaves the previous
+/// snapshot in place rather than propagating.
+fn record_loaded_snapshot(text: &str) {
+    if let Ok(mut slot) = last_loaded_slot().lock() {
+        *slot = Some(text.to_string());
+    }
+}
+
+/// A cheap clone of the last recorded load snapshot, or `None` if the process
+/// hasn't loaded a config file yet (in which case there is nothing to compare
+/// against, so the external-edit guard is a no-op).
+fn peek_loaded_snapshot() -> Option<String> {
+    last_loaded_slot().lock().ok().and_then(|g| g.clone())
+}
+
 /// Persist `updates` (`(key, value)` pairs) into the config file's TOP-LEVEL
 /// scope, preserving all other lines, comments, and ordering. A key already
 /// present is updated in place; a missing key is appended before the first
@@ -550,8 +582,10 @@ pub fn save(updates: &[(&str, String)]) -> Result<()> {
             .with_context(|| format!("creating config dir {}", dir.display()))?;
     }
     let existing = std::fs::read_to_string(&path).unwrap_or_default();
-    let out = merge_config(&existing, updates);
-    std::fs::write(&path, out).with_context(|| format!("writing config {}", path.display()))?;
+    let protected = protect_against_external_edit(&existing, None, updates);
+    let out = merge_config(&existing, &protected);
+    std::fs::write(&path, &out).with_context(|| format!("writing config {}", path.display()))?;
+    record_loaded_snapshot(&out);
     Ok(())
 }
 
@@ -582,8 +616,10 @@ pub fn save_into_section(section: Option<&str>, updates: &[(&str, String)]) -> R
             .with_context(|| format!("creating config dir {}", dir.display()))?;
     }
     let existing = std::fs::read_to_string(&path).unwrap_or_default();
-    let out = merge_into_section(&existing, section, updates);
-    std::fs::write(&path, out).with_context(|| format!("writing config {}", path.display()))?;
+    let protected = protect_against_external_edit(&existing, section, updates);
+    let out = merge_into_section(&existing, section, &protected);
+    std::fs::write(&path, &out).with_context(|| format!("writing config {}", path.display()))?;
+    record_loaded_snapshot(&out);
     Ok(())
 }
 
@@ -619,6 +655,37 @@ fn profile_header_name(line: &str) -> Option<String> {
     }
 }
 
+/// Resolve the (start, end) half-open line-index range for `section`'s body —
+/// the TOP-LEVEL scope (`section = None`, bounded by the first `[section]`
+/// header) or a specific `[profile.NAME]` section's body (bounded by the next
+/// `[section]` header after its own) — WITHOUT mutating `lines`. Returns `None`
+/// only when `section = Some(name)` and no matching header exists yet (a
+/// lookup-only caller has nothing to find; [`merge_into_section`] is the one
+/// place that creates a missing section on write).
+fn find_range(lines: &[String], section: Option<&str>) -> Option<(usize, usize)> {
+    match section {
+        None => {
+            let end = lines
+                .iter()
+                .position(|l| is_section_header(l))
+                .unwrap_or(lines.len());
+            Some((0, end))
+        }
+        Some(name) => {
+            let key = name.to_ascii_lowercase();
+            let header_idx = lines
+                .iter()
+                .position(|l| profile_header_name(l).as_deref() == Some(key.as_str()))?;
+            let end = lines[header_idx + 1..]
+                .iter()
+                .position(|l| is_section_header(l))
+                .map(|off| header_idx + 1 + off)
+                .unwrap_or(lines.len());
+            Some((header_idx + 1, end))
+        }
+    }
+}
+
 /// Merge `updates` into `existing`'s target range: the TOP-LEVEL scope
 /// (`section = None`, bounded by the first `[section]` header) or a specific
 /// `[profile.NAME]` section's body (`section = Some(name)`, bounded by the next
@@ -627,41 +694,19 @@ fn profile_header_name(line: &str) -> Option<String> {
 fn merge_into_section(existing: &str, section: Option<&str>, updates: &[(&str, String)]) -> String {
     let mut lines: Vec<String> = existing.lines().map(str::to_string).collect();
 
-    // Resolve the (start, end) half-open line-index range to operate within.
-    let range: (usize, usize) = match section {
+    let range: (usize, usize) = match find_range(&lines, section) {
+        Some(r) => r,
         None => {
-            let end = lines
-                .iter()
-                .position(|l| is_section_header(l))
-                .unwrap_or(lines.len());
-            (0, end)
-        }
-        Some(name) => {
-            let key = name.to_ascii_lowercase();
-            let header_idx = lines
-                .iter()
-                .position(|l| profile_header_name(l).as_deref() == Some(key.as_str()));
-            match header_idx {
-                Some(hi) => {
-                    let end = lines[hi + 1..]
-                        .iter()
-                        .position(|l| is_section_header(l))
-                        .map(|off| hi + 1 + off)
-                        .unwrap_or(lines.len());
-                    (hi + 1, end)
-                }
-                None => {
-                    // No existing section for this profile: append a brand-new
-                    // one at the end of the file (separated by a blank line
-                    // unless the file already ends in blank/empty content).
-                    if lines.last().is_some_and(|l| !l.is_empty()) {
-                        lines.push(String::new());
-                    }
-                    lines.push(format!("[profile.{name}]"));
-                    let start = lines.len();
-                    (start, start)
-                }
+            // `section = Some(name)` and no existing header: append a brand-new
+            // one at the end of the file (separated by a blank line unless the
+            // file already ends in blank/empty content).
+            let name = section.expect("find_range only returns None when section is Some");
+            if lines.last().is_some_and(|l| !l.is_empty()) {
+                lines.push(String::new());
             }
+            lines.push(format!("[profile.{name}]"));
+            let start = lines.len();
+            (start, start)
         }
     };
 
@@ -700,6 +745,94 @@ fn split_value_and_comment(raw_value: &str) -> (&str, Option<&str>) {
         Some(idx) => (&raw_value[..idx], Some(raw_value[idx..].trim_end())),
         None => (raw_value, None),
     }
+}
+
+/// Look up `key`'s current value within `lines[range.0..range.1]`, the same
+/// way [`apply_updates_in_range`] finds a matching line — but read-only, and
+/// with any inline trailing comment stripped. Used by
+/// [`protect_against_external_edit`] to compare a baseline snapshot's value
+/// for a key against the value about to be written.
+fn find_key_value_in_range(lines: &[String], range: (usize, usize), key: &str) -> Option<String> {
+    let (start, end) = range;
+    let end = end.min(lines.len());
+    if start >= end {
+        return None;
+    }
+    for line in &lines[start..end] {
+        let trimmed = line.trim_start();
+        if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with(';') {
+            continue;
+        }
+        let Some((k, raw_value)) = trimmed.split_once('=') else {
+            continue;
+        };
+        if k.trim().eq_ignore_ascii_case(key) {
+            let (value, _) = split_value_and_comment(raw_value);
+            return Some(value.trim().to_string());
+        }
+    }
+    None
+}
+
+/// Filter `updates` down to the keys that genuinely changed since the last
+/// successful config load, guarding against clobbering a fresh external edit.
+///
+/// `save`/`save_into_section` always forward the settings UI's FULL live
+/// snapshot (every `SAVED_KEYS` value, via `App::save_settings`), not a diff —
+/// so if a manual `glassy.conf` edit lands inside the config-watcher's ~500ms
+/// debounce window (after the in-memory `Config` was last loaded but before a
+/// Settings-panel Save fires), a naive merge would silently overwrite that
+/// edit with the stale in-memory value for every key the UI didn't actually
+/// touch. Comparing `existing` (freshly re-read right before this call) against
+/// the snapshot recorded at the last load detects that window: when they
+/// differ, a key is only forwarded if its new value differs from what was
+/// loaded (a real settings-UI change — last-writer-wins for that narrow same-
+/// key race is acceptable); an update whose value merely matches the stale
+/// load is dropped so it doesn't stomp whatever the external edit just wrote.
+///
+/// When nothing has been loaded yet, the file is unchanged since the last
+/// load, or the target section doesn't exist in the loaded baseline (e.g. a
+/// brand-new profile), every update is forwarded unmodified — today's
+/// behavior.
+fn protect_against_external_edit<'a>(
+    existing: &str,
+    section: Option<&str>,
+    updates: &'a [(&'a str, String)],
+) -> Vec<(&'a str, String)> {
+    let Some(baseline) = peek_loaded_snapshot() else {
+        return updates.to_vec();
+    };
+    filter_updates_against_baseline(&baseline, existing, section, updates)
+}
+
+/// The pure filtering logic behind [`protect_against_external_edit`], taking
+/// the baseline snapshot as a plain argument instead of reading the process-
+/// global [`LAST_LOADED_TEXT`] — split out so tests can drive it directly
+/// without contending over shared global state with other tests running in
+/// parallel. See [`protect_against_external_edit`] for the full contract.
+fn filter_updates_against_baseline<'a>(
+    baseline: &str,
+    existing: &str,
+    section: Option<&str>,
+    updates: &'a [(&'a str, String)],
+) -> Vec<(&'a str, String)> {
+    if baseline == existing {
+        return updates.to_vec();
+    }
+    let baseline_lines: Vec<String> = baseline.lines().map(str::to_string).collect();
+    let Some(range) = find_range(&baseline_lines, section) else {
+        return updates.to_vec();
+    };
+    updates
+        .iter()
+        .filter(
+            |(k, v)| match find_key_value_in_range(&baseline_lines, range, k) {
+                Some(old) => old != *v,
+                None => true,
+            },
+        )
+        .cloned()
+        .collect()
 }
 
 /// Update-in-place (or append-at-range-end) the `(key, value)` pairs within
@@ -851,6 +984,13 @@ pub(super) fn parse_config_file(text: &str, raw: &mut RawConfig) -> Result<()> {
             }
         }
     }
+    // Only stash the snapshot on a successful parse: every real load path
+    // (`Settings::resolve`, `resolve_with_profile`, `resolve_base`) routes
+    // through here, so this is the one place that sees exactly what the
+    // in-memory `Config` now reflects. A failed parse leaves the app's config
+    // unchanged, so it must not overwrite the snapshot either — see
+    // `save`/`save_into_section`'s external-edit guard below.
+    record_loaded_snapshot(text);
     Ok(())
 }
 
@@ -1815,6 +1955,128 @@ cwd = /home/me/work
     }
 
     // -----------------------------------------------------------------------
+    // External-edit guard (protect_against_external_edit /
+    // filter_updates_against_baseline) — see that function's doc comment.
+    //
+    // `filter_updates_against_baseline` takes the "last loaded" baseline as a
+    // plain argument rather than reading the process-global snapshot recorded
+    // by `parse_config_file`, so these tests exercise the exact same filtering
+    // logic `save`/`save_into_section` use without contending over shared
+    // global state with other tests running in parallel — the same reason
+    // `save`/`save_into_section` themselves (env/fs-dependent) are untested
+    // directly elsewhere in this module, in favor of the pure `merge_config`/
+    // `merge_into_section` they wrap.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn filter_forwards_everything_when_file_unchanged_since_load() {
+        let baseline = "opacity = 0.5\nscrollback = 5000\n";
+        let updates = upd(&[("opacity", "0.5"), ("scrollback", "5000")]);
+        // `existing` (a fresh read right before save) is identical to the
+        // baseline: no external edit happened, so every update is forwarded
+        // even though none of them actually changed the value.
+        let out = filter_updates_against_baseline(baseline, baseline, None, &updates);
+        assert_eq!(out, updates);
+    }
+
+    #[test]
+    fn filter_drops_stale_key_that_would_clobber_an_external_edit() {
+        let baseline = "opacity = 0.5\n";
+        // External edit: opacity is now 0.6 on disk, but the in-memory Config
+        // (and therefore the settings-UI snapshot) still thinks it's 0.5.
+        let existing = "opacity = 0.6\n";
+        let updates = upd(&[("opacity", "0.5")]);
+        let out = filter_updates_against_baseline(baseline, existing, None, &updates);
+        assert!(
+            out.is_empty(),
+            "an update that only re-affirms the stale baseline value must be \
+             dropped so it doesn't stomp the external edit"
+        );
+    }
+
+    #[test]
+    fn filter_keeps_a_genuine_settings_ui_change_even_if_file_diverged() {
+        let baseline = "opacity = 0.5\n";
+        // Someone hand-edited a DIFFERENT setting in the meantime; opacity
+        // itself is untouched on disk...
+        let existing = "opacity = 0.5\nscrollback = 9000\n";
+        // ...but the settings UI genuinely changed opacity (0.5 -> 0.9): this
+        // is a real change and must still be forwarded (last-writer-wins for
+        // this narrow same-key case is acceptable).
+        let updates = upd(&[("opacity", "0.9")]);
+        let out = filter_updates_against_baseline(baseline, existing, None, &updates);
+        assert_eq!(out, updates);
+    }
+
+    /// The scenario the guard exists for: a settings-panel Save always writes
+    /// EVERY `SAVED_KEYS` value (see `App::save_settings`), not a diff. Prove
+    /// that a concurrent external edit to a key the UI did NOT touch survives
+    /// the save, while a key the UI DID touch is still written.
+    #[test]
+    fn concurrent_external_edit_to_a_different_key_survives_settings_save() {
+        // What the in-memory Config was last loaded from.
+        let baseline = "opacity = 0.5\nscrollback = 5000\n";
+        // The file right before Save: an external hand-edit bumped scrollback
+        // to 9000 inside the watcher's debounce window. opacity is untouched.
+        let existing = "opacity = 0.5\nscrollback = 9000\n";
+        // The settings UI's full live snapshot: opacity was actually changed
+        // (0.5 -> 0.9); scrollback was NOT touched by the user, so it's still
+        // the stale 5000 from the last load.
+        let updates = upd(&[("opacity", "0.9"), ("scrollback", "5000")]);
+
+        let filtered = filter_updates_against_baseline(baseline, existing, None, &updates);
+        let out = merge_config(existing, &filtered);
+
+        assert!(
+            out.contains("opacity = 0.9"),
+            "the genuine settings-UI change must still be written"
+        );
+        assert!(
+            out.contains("scrollback = 9000"),
+            "the external edit to a key the UI didn't touch must survive: {out}"
+        );
+        assert!(
+            !out.contains("scrollback = 5000"),
+            "the stale in-memory value must NOT clobber the external edit: {out}"
+        );
+    }
+
+    #[test]
+    fn filter_forwards_new_key_absent_from_baseline() {
+        let baseline = "opacity = 0.5\n";
+        let existing = "opacity = 0.5\n";
+        // `minimap` wasn't a SAVED_KEYS entry (or wasn't set) at the last load —
+        // nothing to compare against, so it's forwarded like any other update.
+        let updates = upd(&[("minimap", "true")]);
+        let out = filter_updates_against_baseline(baseline, existing, None, &updates);
+        assert_eq!(out, updates);
+    }
+
+    #[test]
+    fn filter_forwards_everything_when_target_section_absent_from_baseline() {
+        // The baseline predates the `[profile.work]` section entirely (e.g. it
+        // was just created via `create_profile_from_current`): there is nothing
+        // to guard, so every update goes through.
+        let baseline = "theme = dracula\n";
+        let existing = "theme = dracula\n\n[profile.work]\nfont_size = 18\n";
+        let updates = upd(&[("font_size", "20")]);
+        let out = filter_updates_against_baseline(baseline, existing, Some("work"), &updates);
+        assert_eq!(out, updates);
+    }
+
+    #[test]
+    fn filter_within_profile_section_only_compares_that_sections_key() {
+        let baseline = "scrollback = 5000\n\n[profile.work]\nfont_size = 18\n";
+        // External edit changed the TOP-LEVEL scrollback, not the profile's.
+        let existing = "scrollback = 9000\n\n[profile.work]\nfont_size = 18\n";
+        // Saving into [profile.work]'s font_size — unrelated to the top-level
+        // scrollback edit, so it must be forwarded regardless.
+        let updates = upd(&[("font_size", "22")]);
+        let out = filter_updates_against_baseline(baseline, existing, Some("work"), &updates);
+        assert_eq!(out, updates);
+    }
+
+    // -----------------------------------------------------------------------
     // Helper unit tests
     // -----------------------------------------------------------------------
 
@@ -1853,6 +2115,31 @@ cwd = /home/me/work
             (" 0.5  ", Some("# note"))
         );
         assert_eq!(split_value_and_comment(" 0.5"), (" 0.5", None));
+    }
+
+    #[test]
+    fn find_key_value_in_range_strips_inline_comment_and_whitespace() {
+        let lines: Vec<String> = "opacity = 0.5  # note\nfont_size = 14\n"
+            .lines()
+            .map(str::to_string)
+            .collect();
+        let range = (0, lines.len());
+        assert_eq!(
+            find_key_value_in_range(&lines, range, "opacity"),
+            Some("0.5".to_string())
+        );
+        assert_eq!(
+            find_key_value_in_range(&lines, range, "font_size"),
+            Some("14".to_string())
+        );
+        assert_eq!(find_key_value_in_range(&lines, range, "missing"), None);
+    }
+
+    #[test]
+    fn find_range_none_for_missing_section_some_for_top_level() {
+        let lines: Vec<String> = "theme = dracula\n".lines().map(str::to_string).collect();
+        assert_eq!(find_range(&lines, None), Some((0, 1)));
+        assert_eq!(find_range(&lines, Some("work")), None);
     }
 
     #[test]
