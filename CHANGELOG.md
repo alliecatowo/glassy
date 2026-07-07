@@ -5,7 +5,110 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.5.0] - Unreleased
+
+### Added
+
+#### Keyboard and input
+- **Natural text editing** in the legacy (non-kitty) input path, matching mainstream terminals so word/line motion works at a bare shell prompt with no shell config: `Opt+←/→` word back/forward (`ESC b`/`ESC f`), `Cmd+←/→` line start/end (`^A`/`^E`), `Cmd+Backspace` delete-to-line-start (`^U`), `Opt+Backspace` backward-kill-word, `Ctrl+←/→` word motion. Suppressed when the kitty keyboard protocol is active so full-screen apps still receive raw key events.
+- **Shift+Enter** emits the modifyOtherKeys form `CSI 27 ; 2 ; 13 ~`, keeping it distinct from a submitting Enter, so prompts that recognise it (e.g. Claude Code) insert a newline instead of running the line.
+
+### Changed
+- Display name is now **"Glassy"** (title-cased) on every user-facing surface — window title, macOS Cmd-Tab / Dock / menu bar (`CFBundleName` + `CFBundleDisplayName`, bundle renamed `Glassy.app`), desktop notifications, and the Linux `.desktop` entry. All identifiers stay lowercase (`glassy` binary, `TERM_PROGRAM`, bundle id, terminfo, config paths, Wayland `app_id`).
+
+### Fixed
+- **Kitty keyboard protocol negotiation** now actually works: `kitty_keyboard` is enabled at the root (via a shared `term_config_base()` so a resize or settings change can't silently reset it), so glassy answers the `CSI ? u` progressive-enhancement query and latches the mode flags. Previously the flag defaulted off, leaving the CSI-u encoder permanently inert and the query unanswered.
+- **macOS menu bar** (Glassy / File / Edit / View / Window) now appears. winit's built-in default menu was overwriting glassy's during launch; disabled with `with_default_menu(false)`.
+- **Links now read and behave as links.** Explicit OSC 8 hyperlinks are always underlined (previously nothing marked them). The hover underline is forced to repaint on the link row (it's a render overlay that carries no terminal damage, so damage-only frames — common under mouse-mode apps — skipped it). Inside apps that capture the mouse (Claude Code, vim, …) the affordance + click were fully suppressed; they now work while the link-open modifier is held (revealed immediately on modifier press under a stationary pointer). Link-open is **⌘+Click on macOS** (Ctrl elsewhere), matching iTerm2/ghostty — previously Ctrl+Click everywhere, which on macOS is a secondary click.
+
+---
+
+## [0.4.4] - 2026-07-02
+
+### Fixed
+
+- **Window resize** no longer pushes the prompt/last row below the window when tab bar is hidden.
+- **Command palette** now shows the real platform chord (`Cmd` on macOS, `Ctrl` elsewhere) instead of a hardcoded label.
+
+## [0.4.3] - 2026-07-02
+
+### Fixed
+
+- **Homebrew Cask** now auto-strips quarantine attributes, so installation "just works" without manual `xattr` removal.
+
+## [0.4.2] - 2026-07-02
+
+### Added
+
+- **Homebrew Cask** distribution: `brew install --cask glassy` installs a properly signed macOS app bundle.
+
+### Fixed
+
+- Code signing verification for Homebrew Cask distribution.
+
+## [0.4.1] - 2026-07-02
+
+### Added
+
+- **macOS universal binary** (arm64/x86_64) distributed as per-architecture `.app` bundle and `.dmg` installer.
+- **Prebuilt Homebrew binary** formula with SHA-256 verification.
+
+---
+
+## [0.4.0] - 2026-07-01
+
+### Added
+
+#### Effects and visual enhancements
+- **Power Mode** typing effect (opt-in): particle bursts and screen shake on keystroke.
+- **Custom window effects**: stack any combination of effects (CRT, scan, bloom, blur) with per-channel intensity sliders.
+- **CRT barrel warp** effect with configurable curvature and scanline intensity.
+
+#### Keyboard and pane management
+- **Pane navigation chords**: multi-key leader sequences for split pane control.
+- **macOS menu bar**: Glassy / File / Edit / View / Window menus with native shortcuts.
+- **`⌘`-hold tab numbers**: hold Command while pressing a number to switch tabs on macOS.
+- **Pane drag-reorder**: drag pane dividers to rearrange split layout; `swap`, `rotate`, and `equalize` pane commands.
+
+#### Visual and input improvements
+- **Better unfocused pane dimming**: more visible distinction (0.10 → 0.28 opacity).
+- **SGR 53/55 overline** support: complementary to underline decorations.
+- **SGR-Pixel mouse** mode (1016): fine-grained mouse position reporting.
+- **Improved cursor**: arrow cursor over content (was I-beam); better icon set.
+- **Variable-font axes**: per-style font families with OpenType axis control and symbol/codepoint mapping.
+
+#### Configuration and palette
+- **Sectioned settings window**: organized config UI with custom-theme editor.
+- **Configurable palette/status bar segments**: opacity actions, effects toggles, scrollback save features.
+- **Light/dark theme switching**: `follow_system` config with `theme_light` / `theme_dark` selection.
+
+#### Remote control and notifications
+- **IPC/remote control**: kitty-style remote-control commands.
+- **Rich notifications**: OSC 9/777 desktop alerts and command-finish notifications via `notify-rust`.
+
+#### Copy mode and clipboard
+- **Keyboard copy mode** (vi-style navigation): hjkl/arrow keys to select text, Enter to copy.
+- **HTML clipboard flavor**: paste rich text with formatting.
+
+### Changed
+
+- Settings window uses immediate-mode GUI (`src/gui/`) with animated feedback and keyboard navigation.
+- PTY read loop now owned by glassy (pre-processes images/OSC/protocol sequences before alacritty_terminal).
+- Visual bell is now softer, accent-tinted (previously stark white flash).
+- Narrow-base emoji (e.g. trans flag) render at full size.
+- Tab bar activity dots and busy spinner animate only during active background output (event loop parks at `ControlFlow::Wait`, 0% idle).
+
+---
+
+## [0.2.1] - 2026-06-25
+
+### Fixed
+
+- **Debian/Ubuntu dependency**: declared `libdbus-1-3` runtime dependency for desktop notifications.
+
+---
+
+## [0.2.0] - 2026-06-25
 
 ### Added (w14 wave)
 
@@ -101,14 +204,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Dropped the `image` and `regex` crate stacks (smaller binary).
 - **iGPU by default**: renderer selects the low-power (integrated) GPU adapter; override with `GLASSY_GPU=high`.
 
-### Changed
-
-- glassy now owns its PTY read loop (taps image/OSC/protocol sequences before alacritty_terminal sees them).
-- Softer, accent-tinted visual bell (was a stark white full-screen flash).
-- Narrow-base emoji (e.g. the trans flag) render at full size.
-- The settings overlay uses an immediate-mode GUI layer (`src/gui/`) with animated hover/toggle feedback and real keyboard navigation.
-- Tab bar activity dots and busy spinner animate only while a background tab is producing output; the event loop parks at `ControlFlow::Wait` (0% idle) otherwise.
-
 ---
 
 ## [0.1.0] - 2026-06-19
@@ -140,5 +235,12 @@ Initial release.
 - Kitty keyboard protocol level 1 (DISAMBIGUATE_ESC_CODES).
 - DECCKM application cursor-key mode.
 
-[Unreleased]: https://github.com/alliecatowo/glassy/compare/v0.1.0...HEAD
+[0.5.0]: https://github.com/alliecatowo/glassy/compare/v0.4.1...HEAD
+[0.4.4]: https://github.com/alliecatowo/glassy/compare/v0.4.1...fc5fb89
+[0.4.3]: https://github.com/alliecatowo/glassy/compare/v0.4.1...25d529a
+[0.4.2]: https://github.com/alliecatowo/glassy/compare/v0.4.1...94afcdd
+[0.4.1]: https://github.com/alliecatowo/glassy/releases/tag/v0.4.1
+[0.4.0]: https://github.com/alliecatowo/glassy/releases/tag/v0.4.0
+[0.2.1]: https://github.com/alliecatowo/glassy/releases/tag/v0.2.1
+[0.2.0]: https://github.com/alliecatowo/glassy/releases/tag/v0.2.0
 [0.1.0]: https://github.com/alliecatowo/glassy/releases/tag/v0.1.0

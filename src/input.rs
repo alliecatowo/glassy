@@ -190,6 +190,57 @@ pub fn encode_key_parts(
             return None; // no kitty form → nothing on release
         }
 
+        // Natural text-editing sequences for modified editing keys, in the
+        // non-kitty path only. Under any kitty bit a modified key is emitted as
+        // CSI-u by the block above and returns before here, so full-screen apps
+        // (vim/helix) still receive the raw modified-key event; these prompt-
+        // oriented bytes only apply when no app has negotiated kitty.
+        //
+        // These match ghostty's shipped default keybinds (verified via
+        // `ghostty +list-keybinds --default`) so word/line motion + deletion work
+        // at a bare shell prompt with no shell config — readline/zle bind these
+        // bytes by default:
+        //   Opt/Alt  + ←/→ → word back/forward    (ghostty `esc:b` / `esc:f`)
+        //   Cmd/Super+ ←/→ → line start/end        (ghostty `text:\x01` / `\x05`)
+        //   Cmd/Super+ ⌫   → delete to line start  (ghostty `text:\x15`, ^U)
+        //   Opt/Alt  + ⌫   → backward-kill-word    (readline meta-DEL, `\x1b\x7f`)
+        //   Ctrl     + ←/→ → word back/forward     (xterm modified-cursor form)
+        //
+        // Shift+Enter → `\x1b[27;2;13~` — the xterm modifyOtherKeys encoding for
+        // Enter (keycode 13) with Shift. This matches ghostty exactly: ghostty has
+        // no `shift+enter` keybind; its key ENCODER emits this unconditionally,
+        // even in a plain shell with nothing negotiated, so Shift+Enter is always
+        // distinct from Enter (Enter submits; Shift+Enter does not). Prompts that
+        // understand this form (e.g. Claude Code) treat it as a newline.
+        if !kitty.active() {
+            match named {
+                NamedKey::ArrowLeft | NamedKey::ArrowRight => {
+                    let left = named == NamedKey::ArrowLeft;
+                    if super_ && !ctrl && !alt {
+                        return Some(vec![if left { 0x01 } else { 0x05 }]);
+                    }
+                    if alt && !ctrl && !super_ {
+                        return Some((if left { b"\x1bb" } else { b"\x1bf" }).to_vec());
+                    }
+                    if ctrl && !alt && !super_ {
+                        return Some((if left { b"\x1b[1;5D" } else { b"\x1b[1;5C" }).to_vec());
+                    }
+                }
+                NamedKey::Backspace => {
+                    if super_ && !ctrl && !alt {
+                        return Some(vec![0x15]);
+                    }
+                    if alt && !ctrl && !super_ {
+                        return Some(b"\x1b\x7f".to_vec());
+                    }
+                }
+                NamedKey::Enter if shift && !ctrl && !alt && !super_ => {
+                    return Some(b"\x1b[27;2;13~".to_vec());
+                }
+                _ => {}
+            }
+        }
+
         let seq: &[u8] = match named {
             NamedKey::Enter => b"\r",
             NamedKey::Backspace => b"\x7f",
@@ -686,5 +737,137 @@ mod tests {
         // Shift F5 = mods 2.
         let seq = kitty_named(NamedKey::F5, 2, 1, false, false).unwrap();
         assert_eq!(seq, b"\x1b[15;2~");
+    }
+
+    // ---- modified-arrow shell motion (word / line) ----
+
+    #[test]
+    fn modified_arrows_emit_shell_motion_sequences() {
+        use super::{ModifyOtherKeys, encode_key_parts};
+        use winit::keyboard::{Key, ModifiersState, NamedKey};
+
+        let enc = |key: NamedKey, mods: ModifiersState| {
+            encode_key_parts(
+                &Key::Named(key),
+                None,
+                true,
+                false,
+                mods,
+                KittyFlags::default(),
+                false,
+                ModifyOtherKeys::Reset,
+            )
+        };
+        // Opt/Alt + ←/→ → word back/forward (readline/zle meta-b / meta-f).
+        assert_eq!(
+            enc(NamedKey::ArrowLeft, ModifiersState::ALT).as_deref(),
+            Some(b"\x1bb".as_slice())
+        );
+        assert_eq!(
+            enc(NamedKey::ArrowRight, ModifiersState::ALT).as_deref(),
+            Some(b"\x1bf".as_slice())
+        );
+        // Cmd/Super + ←/→ → line start/end (Ctrl-A / Ctrl-E).
+        assert_eq!(
+            enc(NamedKey::ArrowLeft, ModifiersState::SUPER).as_deref(),
+            Some([0x01].as_slice())
+        );
+        assert_eq!(
+            enc(NamedKey::ArrowRight, ModifiersState::SUPER).as_deref(),
+            Some([0x05].as_slice())
+        );
+        // Ctrl + ←/→ → word back/forward (xterm modified-cursor form).
+        assert_eq!(
+            enc(NamedKey::ArrowLeft, ModifiersState::CONTROL).as_deref(),
+            Some(b"\x1b[1;5D".as_slice())
+        );
+        assert_eq!(
+            enc(NamedKey::ArrowRight, ModifiersState::CONTROL).as_deref(),
+            Some(b"\x1b[1;5C".as_slice())
+        );
+    }
+
+    #[test]
+    fn modified_edit_keys_emit_shell_sequences() {
+        use super::{ModifyOtherKeys, encode_key_parts};
+        use winit::keyboard::{Key, ModifiersState, NamedKey};
+
+        let enc = |key: NamedKey, mods: ModifiersState| {
+            encode_key_parts(
+                &Key::Named(key),
+                None,
+                true,
+                false,
+                mods,
+                KittyFlags::default(),
+                false,
+                ModifyOtherKeys::Reset,
+            )
+        };
+        // Cmd/Super + Backspace → ^U (delete to line start) — ghostty `text:\x15`.
+        assert_eq!(
+            enc(NamedKey::Backspace, ModifiersState::SUPER).as_deref(),
+            Some([0x15].as_slice())
+        );
+        // Opt/Alt + Backspace → meta-DEL (backward-kill-word) — readline default.
+        assert_eq!(
+            enc(NamedKey::Backspace, ModifiersState::ALT).as_deref(),
+            Some(b"\x1b\x7f".as_slice())
+        );
+        // Shift+Enter → modifyOtherKeys form for Enter (keycode 13) + Shift,
+        // exactly what ghostty's encoder emits by default in a plain shell so it
+        // is distinct from a submitting Enter.
+        assert_eq!(
+            enc(NamedKey::Enter, ModifiersState::SHIFT).as_deref(),
+            Some(b"\x1b[27;2;13~".as_slice())
+        );
+        // Plain Backspace / Enter are unaffected (fall through to the C0 bytes).
+        assert_eq!(
+            enc(NamedKey::Backspace, ModifiersState::empty()).as_deref(),
+            Some(b"\x7f".as_slice())
+        );
+        assert_eq!(
+            enc(NamedKey::Enter, ModifiersState::empty()).as_deref(),
+            Some(b"\r".as_slice())
+        );
+    }
+
+    #[test]
+    fn kitty_active_arrows_bypass_shell_motion() {
+        // Under a kitty bit a modified arrow must go out as CSI-u (the raw
+        // modified-key event) so full-screen apps still see the real key —
+        // NOT the prompt-oriented motion sequences above.
+        use super::{ModifyOtherKeys, encode_key_parts};
+        use winit::keyboard::{Key, ModifiersState, NamedKey};
+        let kitty = KittyFlags {
+            disambiguate: true,
+            ..Default::default()
+        };
+        let out = encode_key_parts(
+            &Key::Named(NamedKey::ArrowLeft),
+            None,
+            true,
+            false,
+            ModifiersState::ALT,
+            kitty,
+            false,
+            ModifyOtherKeys::Reset,
+        );
+        // Alt = kitty mods 3 → CSI 1 ; 3 D, not ESC b.
+        assert_eq!(out.as_deref(), Some(b"\x1b[1;3D".as_slice()));
+
+        // Shift+Enter under kitty must be the CSI-u form (\x1b[13;2u), NOT the
+        // ESC+CR legacy newline — a negotiated app gets the precise key event.
+        let enter = encode_key_parts(
+            &Key::Named(NamedKey::Enter),
+            None,
+            true,
+            false,
+            ModifiersState::SHIFT,
+            kitty,
+            false,
+            ModifyOtherKeys::Reset,
+        );
+        assert_eq!(enter.as_deref(), Some(b"\x1b[13;2u".as_slice()));
     }
 }

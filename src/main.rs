@@ -62,7 +62,18 @@ fn main() -> anyhow::Result<()> {
     color::set_theme(settings.theme);
 
     // Typed event loop so the PTY thread can wake us via EventLoopProxy<UserEvent>.
-    let event_loop = EventLoop::<pty::UserEvent>::with_user_event().build()?;
+    let mut event_loop_builder = EventLoop::<pty::UserEvent>::with_user_event();
+    // Disable winit's bare default macOS menu. winit installs it from
+    // `applicationDidFinishLaunching:` — which fires when `run_app` starts, i.e.
+    // AFTER our `install_menu_bar` below (that runs before `run_app`) — so it
+    // silently overwrites glassy's full glassy/File/Edit/View/Window bar with an
+    // app-name-only stub. Turning it off lets our menu survive as the main menu.
+    #[cfg(target_os = "macos")]
+    {
+        use winit::platform::macos::EventLoopBuilderExtMacOS;
+        event_loop_builder.with_default_menu(false);
+    }
+    let event_loop = event_loop_builder.build()?;
     event_loop.set_control_flow(ControlFlow::Wait);
 
     let proxy = event_loop.create_proxy();

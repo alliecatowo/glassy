@@ -334,7 +334,7 @@ fn compose_window_title_variants() {
     );
     // count of 1 adds no suffix; empty primary falls back to glassy.
     assert_eq!(compose_window_title("zsh", None, Some(1)), "zsh");
-    assert_eq!(compose_window_title("", None, None), "glassy");
+    assert_eq!(compose_window_title("", None, None), "Glassy");
 }
 
 #[test]
@@ -352,8 +352,8 @@ fn os_title_is_printable_ascii_only() {
     assert_eq!(os_title("vim  src/main.rs"), "vim src/main.rs");
     assert_eq!(os_title("✻ thinking…"), "thinking");
     assert_eq!(os_title("日本語 build"), "build");
-    assert_eq!(os_title("   "), "glassy");
-    assert_eq!(os_title(""), "glassy");
+    assert_eq!(os_title("   "), "Glassy");
+    assert_eq!(os_title(""), "Glassy");
     // No char in the output is ever non-ASCII-graphic-or-space.
     let t = os_title("a\u{f00c}b 😀 c");
     assert!(t.chars().all(|c| c.is_ascii_graphic() || c == ' '));

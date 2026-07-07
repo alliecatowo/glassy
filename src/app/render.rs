@@ -646,19 +646,21 @@ impl App {
                     }
                 };
 
-                // Underline the hovered link's cells as a Ctrl+click affordance.
-                // OSC 8 links: match by URI stored in the cell's hyperlink field.
-                // Plain-text links: match by pre-computed col range on the hovered row.
+                // Underline links so they read as clickable.
+                //  • Explicit OSC 8 hyperlinks are ALWAYS underlined (an app declared
+                //    them a link, so signal it without requiring a hover — this is what
+                //    keeps app links, e.g. in Claude Code, from looking dead).
+                //  • Plain-text detected URLs/paths underline only on hover (matched by
+                //    the pre-computed col range on the hovered row), so scrollback isn't
+                //    littered with underlines or false-positive guesses.
                 if !hidden && matches!(decorations.underline, UnderlineStyle::None) {
-                    let is_hovered_osc8 = hovered_link
-                        .as_deref()
-                        .is_some_and(|hov| cell.hyperlink().is_some_and(|h| h.uri() == hov));
+                    let is_osc8_link = cell.hyperlink().is_some();
                     let is_hovered_plain = !plain_link_spans.is_empty()
                         && row_u == hovered_cell_row
                         && plain_link_spans
                             .iter()
                             .any(|s| (col as usize) >= s.col_start && (col as usize) < s.col_end);
-                    if is_hovered_osc8 || is_hovered_plain {
+                    if is_osc8_link || is_hovered_plain {
                         decorations.underline = UnderlineStyle::Single;
                     }
                 }

@@ -3,7 +3,7 @@
 #   brew tap alliecatowo/glassy https://github.com/alliecatowo/glassy
 #   brew install --cask glassy
 #
-# This is the recommended macOS install path: it puts glassy.app in
+# This is the recommended macOS install path: it puts Glassy.app in
 # /Applications AND symlinks the CLI binary embedded in the bundle
 # (Contents/MacOS/glassy — the same binary that runs the GUI) onto PATH via
 # the `binary` artifact below, so installing the cask alone gets you both
@@ -19,30 +19,30 @@
 cask "glassy" do
   arch arm: "aarch64", intel: "x86_64"
 
-  version "0.4.4"
-  sha256 arm:   "9280c4e9e6f17a1c1bcb8ccd0351be5ba6001ecded4b2bcbbd689648f40303fe",
-         intel: "6782b2de84b0c0e6a48d72ffcfc6c92122a788f3ea365294cf57c3f364beb0f8"
+  version "0.5.0"
+  sha256 arm:   "00389d83f52fc92a7e6c60bf2c8f63d4f2f31438e37c710f68ce95ff012ca77f",
+         intel: "900bd3b30f7d156863ff524b5c848edfd73155ca4fa5da45eee7b7ef15fa8102"
 
-  url "https://github.com/alliecatowo/glassy/releases/download/v0.4.4/glassy-#{version}-macos-#{arch}.dmg"
-  name "glassy"
+  url "https://github.com/alliecatowo/glassy/releases/download/v0.5.0/glassy-#{version}-macos-#{arch}.dmg"
+  name "Glassy"
   desc "Fast, minimal GPU-accelerated terminal emulator written in Rust"
   homepage "https://github.com/alliecatowo/glassy"
 
   depends_on macos: :big_sur
 
-  app "glassy.app"
-  binary "#{appdir}/glassy.app/Contents/MacOS/glassy"
+  app "Glassy.app"
+  binary "#{appdir}/Glassy.app/Contents/MacOS/glassy"
 
   # glassy is ad-hoc signed (needed just to execute at all on Apple Silicon)
   # but not notarized — no paid Apple Developer Program account behind this
   # project. Without this, Gatekeeper blocks first launch with "Apple could
   # not verify 'glassy' is free of malware", since brew --cask (unlike brew
   # install of a plain Formula) deliberately quarantines installed apps.
-  # Scoped to glassy.app only — this has no effect on Gatekeeper's handling
+  # Scoped to Glassy.app only — this has no effect on Gatekeeper's handling
   # of anything else on the system.
   postflight do
     system_command "/usr/bin/xattr",
-                   args: ["-dr", "com.apple.quarantine", "#{appdir}/glassy.app"]
+                   args: ["-dr", "com.apple.quarantine", "#{appdir}/Glassy.app"]
   end
 
   zap trash: [
@@ -55,7 +55,7 @@ cask "glassy" do
     <<~EOS
       glassy is ad-hoc signed but not notarized by Apple (no paid Developer
       Program account behind this project yet). This cask clears the
-      com.apple.quarantine flag on #{appdir}/glassy.app during install so
+      com.apple.quarantine flag on #{appdir}/Glassy.app during install so
       Gatekeeper doesn't block first launch with "Apple could not verify
       'glassy' is free of malware". If you'd rather see that warning and
       decide for yourself, download the .dmg from the Releases page instead:

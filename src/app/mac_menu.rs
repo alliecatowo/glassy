@@ -221,7 +221,7 @@ pub fn install_menu_bar(proxy: EventLoopProxy<UserEvent>) {
             sep(mtm),
             quit_item(mtm),
         ];
-        submenu(mtm, &bar, "glassy", &app_items);
+        submenu(mtm, &bar, "Glassy", &app_items);
 
         // File menu.
         let file_items = [
@@ -287,7 +287,7 @@ pub fn install_menu_bar(proxy: EventLoopProxy<UserEvent>) {
 /// The standard Quit item, wired to AppKit's own `terminate:` so ⌘Q quits the
 /// app the way every macOS user expects (clean NSApplication shutdown).
 fn quit_item(mtm: MainThreadMarker) -> Retained<NSMenuItem> {
-    let title = NSString::from_str("Quit glassy");
+    let title = NSString::from_str("Quit Glassy");
     let key = NSString::from_str("q");
     // SAFETY: terminate: is a standard NSApplication action; nil target lets
     // AppKit route it up the responder chain to the application object.
