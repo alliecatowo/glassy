@@ -562,6 +562,23 @@ pub struct Renderer {
     /// routes the grid through the shared CRT post pass with mode-specific params.
     /// See [`effect::WindowEffect`].
     window_effect: WindowEffect,
+
+    /// Set by the `wgpu::Device::set_device_lost_callback` registered in
+    /// [`Renderer::new_with_fonts`] (see `renderer/init.rs`) when the GPU
+    /// device is lost after startup (driver crash/reset, GPU hot-unplug) — an
+    /// event wgpu otherwise has no documented default behavior for on the next
+    /// `submit()`/`present()`. The render loop checks [`Renderer::device_lost`]
+    /// each frame and degrades gracefully (same clean-exit path as an init
+    /// failure) instead of relying on that undocumented default. `Arc` so the
+    /// callback closure (which may run on an arbitrary wgpu-internal thread)
+    /// can set it without borrowing the `Renderer`.
+    ///
+    /// `#[allow(dead_code)]`: wiring the render loop's per-frame check is a
+    /// separate app-level change outside this stream's scope (see
+    /// `Renderer::device_lost`'s doc comment) — this field and its accessor
+    /// are the additive, self-contained half.
+    #[allow(dead_code)]
+    device_lost: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// State for the multi-pane (split) render path. A flat instance list whose
