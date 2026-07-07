@@ -927,7 +927,14 @@ impl App {
                 self.settings_saved = true;
                 log::info!("settings saved to config");
             }
-            Err(e) => log::error!("settings save failed: {e:#}"),
+            Err(e) => {
+                // `self.settings_saved` stays false here, identical to the
+                // pre-save "not yet saved" state — without a toast, a real
+                // failure (read-only file, HOME/XDG unset) is indistinguishable
+                // in the UI from "hasn't saved yet". Surface it explicitly.
+                log::error!("settings save failed: {e:#}");
+                self.push_toast(format!("Settings not saved: {e:#}"));
+            }
         }
     }
 
