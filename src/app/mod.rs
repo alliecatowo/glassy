@@ -619,6 +619,13 @@ struct Session {
     /// is `last_cwd`). Keyed by pane id; used for session persistence so each pane
     /// of a split restores in its own directory.
     pane_cwds: std::collections::HashMap<usize, std::path::PathBuf>,
+    /// True for a command-palette "run command" scratch tab (see
+    /// `App::spawn_scratch_run`). Its `custom_title` carries the raw command text
+    /// (`▸ <cmd>`) purely for the live tab label and MUST NOT be persisted — see
+    /// `build_session`, which drops the custom title for scratch tabs so the
+    /// command (possibly containing secrets) never reaches the on-disk session
+    /// state. Not itself serialized: a restored session has no scratch tabs.
+    scratch: bool,
 }
 
 pub struct App {
@@ -657,6 +664,10 @@ pub struct App {
     /// User-assigned custom title for the ACTIVE tab (double-click rename), which
     /// overrides `active_title` in the chip. `None` uses the OSC title.
     active_custom_title: Option<String>,
+    /// True when the ACTIVE tab is a "run command" scratch tab (see
+    /// `App::spawn_scratch_run` and `Session::scratch`). Carried through tab
+    /// park/swap so `build_session` never persists the scratch command text.
+    active_scratch: bool,
     /// Per-pane last cwd for the ACTIVE tab's non-focused panes (the focused pane's
     /// is `active_cwd`). Keyed by pane id; persisted so each split pane restores in
     /// its own directory.

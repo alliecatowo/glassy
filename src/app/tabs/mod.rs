@@ -28,6 +28,7 @@ impl App {
             active_id: 0,
             active_title: String::new(),
             active_custom_title: None,
+            active_scratch: false,
             active_pane_cwds: std::collections::HashMap::new(),
             tab_rename: None,
             last_tab_click: None,
@@ -457,6 +458,7 @@ impl App {
                 last_cwd: self.active_cwd.take(),
                 custom_title: self.active_custom_title.take(),
                 pane_cwds: std::mem::take(&mut self.active_pane_cwds),
+                scratch: self.active_scratch,
             });
         }
         self.tab_order.push(id);
@@ -464,6 +466,7 @@ impl App {
         self.active_id = id;
         self.active_title.clear();
         self.active_custom_title = None;
+        self.active_scratch = false;
         self.active_busy_until = None;
         // The new tab starts at the inherited cwd; OSC 7 updates it as the user cd's.
         self.active_cwd = cwd;
@@ -566,14 +569,19 @@ impl App {
                 last_cwd: self.active_cwd.take(),
                 custom_title: self.active_custom_title.take(),
                 pane_cwds: std::mem::take(&mut self.active_pane_cwds),
+                scratch: self.active_scratch,
             });
         }
         self.tab_order.push(id);
         self.pty = Some(pty);
         self.active_id = id;
         self.active_title.clear();
-        // Label the tab with the command so it's identifiable while it runs.
+        // Label the tab with the command so it's identifiable while it runs. This
+        // custom title is LIVE-ONLY: `active_scratch` marks the tab so
+        // `build_session` never persists this text (it may contain secrets) to the
+        // on-disk session state — see `Session::scratch`.
         self.active_custom_title = Some(format!("▸ {cmdline}"));
+        self.active_scratch = true;
         self.active_busy_until = None;
         self.active_cwd = cwd;
         self.modify_other_keys = ModifyOtherKeys::default();
@@ -658,6 +666,7 @@ impl App {
                 last_cwd: self.active_cwd.take(),
                 custom_title: self.active_custom_title.take(),
                 pane_cwds: std::mem::take(&mut self.active_pane_cwds),
+                scratch: self.active_scratch,
             });
         }
         let bi = self
@@ -671,6 +680,7 @@ impl App {
         self.active_id = target.id;
         self.active_title = target.title;
         self.active_custom_title = target.custom_title;
+        self.active_scratch = target.scratch;
         self.active_pane_cwds = target.pane_cwds;
         // Inherit the activated session's busy deadline (it streams in the fg now).
         self.active_busy_until = target.busy_until;
@@ -763,6 +773,7 @@ impl App {
             self.pty = None;
             self.active_title.clear();
             self.active_custom_title = None;
+            self.active_scratch = false;
             self.active_pane_cwds.clear();
             self.active_cwd = None; // the closed tab's cwd is gone
             if self.tab_order.is_empty() {
@@ -779,6 +790,7 @@ impl App {
                 self.active_id = next.id;
                 self.active_title = next.title;
                 self.active_custom_title = next.custom_title;
+                self.active_scratch = next.scratch;
                 self.active_pane_cwds = next.pane_cwds;
                 self.active_cwd = next.last_cwd;
                 // Mirror activate_tab: carry the promoted tab's busy-spinner state
@@ -846,11 +858,27 @@ impl App {
 /// used deliberately: a login-shell flag is unnecessary here and not portable
 /// to every POSIX shell either. Pulled out as a pure fn (no `Pty`/`Shell`
 /// construction) so the exact wrapping is unit-testable.
+///
+/// `cmdline` is NOT interpolated into the wrapper script — it is passed as a
+/// SEPARATE argv element (`$1`) and run via `eval "$1"`. Interpolating it inline
+/// would let an unbalanced quote/paren in the user's command break the wrapper's
+/// own parse, so the `status=$?` / `printf` / `dd` tail (the exit-status readout
+/// and "press any key" hold) would never run. Keeping it in `$1` means the
+/// wrapper always parses regardless of what the user typed; only the `eval`'d
+/// command itself can fail (which is exactly what we report the exit status of).
 fn scratch_shell_parts(program: String, cmdline: &str) -> (String, Vec<String>) {
-    let script = format!(
-        "{cmdline}\nstatus=$?\nprintf '\\n[glassy] exit %d - press any key to close\\n' \"$status\"\ndd bs=1 count=1 2>/dev/null >/dev/null\n"
-    );
-    (program, vec!["-c".to_string(), script])
+    let script = "eval \"$1\"\nstatus=$?\nprintf '\\n[glassy] exit %d - press any key to close\\n' \"$status\"\ndd bs=1 count=1 2>/dev/null >/dev/null\n";
+    (
+        program,
+        vec![
+            "-c".to_string(),
+            script.to_string(),
+            // $0 for the -c script (a conventional placeholder), then $1 = the
+            // user command, referenced via `eval "$1"` above.
+            "glassy-run".to_string(),
+            cmdline.to_string(),
+        ],
+    )
 }
 
 /// Whether a `file://` URL's path (the part after the scheme, still possibly
@@ -993,9 +1021,15 @@ mod scratch_tests {
     fn wraps_command_with_c_flag() {
         let (program, args) = scratch_shell_parts("/bin/bash".to_string(), "ls -la");
         assert_eq!(program, "/bin/bash");
-        assert_eq!(args.len(), 2);
+        // -c <script> <$0-placeholder> <cmdline-as-$1>
+        assert_eq!(args.len(), 4);
         assert_eq!(args[0], "-c");
-        assert!(args[1].starts_with("ls -la\n"));
+        // The command is a SEPARATE argv element ($1), not inlined into the script.
+        assert_eq!(args[3], "ls -la");
+        // The wrapper script runs the command via `eval "$1"`, never by
+        // interpolating it into the script text.
+        assert!(args[1].contains("eval \"$1\""));
+        assert!(!args[1].contains("ls -la"));
     }
 
     #[test]
@@ -1007,6 +1041,27 @@ mod scratch_tests {
         // `dd`, not bash's `read -n1 -s`, so this also works under a POSIX-only
         // /bin/sh or dash where `read -n` isn't supported.
         assert!(script.contains("dd bs=1 count=1"));
+    }
+
+    #[test]
+    fn unbalanced_quote_in_cmdline_stays_isolated_from_the_wrapper() {
+        // REGRESSION: an unbalanced quote/paren in the user's command must not be
+        // able to break the wrapper's own parse. Because the command is a separate
+        // argv element ($1) rather than interpolated into the `-c` script, the
+        // wrapper's exit-status/keypress tail is always present and intact — only
+        // the eval'd `$1` can fail, which is exactly what we report the status of.
+        let evil = "echo \"unterminated";
+        let (_, args) = scratch_shell_parts("/bin/sh".to_string(), evil);
+        // The raw command lives verbatim in its own argv slot...
+        assert_eq!(args[3], evil);
+        // ...and does NOT appear anywhere inside the wrapper script.
+        assert!(!args[1].contains(evil));
+        assert!(!args[1].contains("unterminated"));
+        // The wrapper tail survives regardless of the command's contents.
+        assert!(args[1].contains("eval \"$1\""));
+        assert!(args[1].contains("status=$?"));
+        assert!(args[1].contains("press any key to close"));
+        assert!(args[1].contains("dd bs=1 count=1"));
     }
 
     #[test]
