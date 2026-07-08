@@ -374,7 +374,7 @@ pub struct Config {
 /// Config string accepted by `apply_kv`: a comma- or space-separated list of
 /// segment names, e.g. `"cwd git_branch mode time encoding"`. Rendering (the
 /// content/color/placement of each) is table-driven — see `SEGMENT_SPECS` in
-/// `chrome.rs` — so this enum only names which segments exist; it carries no
+/// `chrome/status_bar.rs` — so this enum only names which segments exist; it carries no
 /// data itself (hence `Copy`, which a per-instance custom segment can't be —
 /// see `Custom` below and `CustomSegment`).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]

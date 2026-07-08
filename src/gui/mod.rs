@@ -778,7 +778,7 @@ impl SettingsSection {
 /// the few toggles with extra live side effects (grid reflow, renderer sync,
 /// session-dirty). Adding a new plain boolean setting is then one
 /// `RowKind::Toggle` push + one table row, instead of a field here + a match
-/// arm in `settings_panel.rs` + an `if` block in `chrome.rs`.
+/// arm in `settings_panel.rs` + an `if` block in `chrome/settings_form.rs`.
 #[derive(Clone, Debug, Default)]
 pub struct SettingsEvents {
     /// Font-size stepper delta in clicks (-1 / 0 / +1).

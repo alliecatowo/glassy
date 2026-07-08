@@ -5,7 +5,7 @@
 //!
 //! This exists because `save_settings` used to hand-list a fixed set of
 //! (key, value) pairs that drifted out of sync with `apply_settings_events`
-//! (`chrome.rs`) as new settings-form controls were added — Save reported
+//! (`chrome/settings_form.rs`) as new settings-form controls were added — Save reported
 //! success but silently dropped anything not in the hand-list, so the value
 //! reverted on restart. Driving the save from one table, and asserting its
 //! coverage in a test, makes that class of bug fail CI instead of shipping.
@@ -28,7 +28,7 @@ pub(crate) struct SavedKey {
 /// the settings stepper both drive it there), not in `Config::font_size`, which
 /// only reflects the size at startup. Everything else here is read straight off
 /// `Config` because the settings UI writes straight through to `Config` live
-/// (see `App::apply_settings_events` in `chrome.rs`, `App::commit_settings_field`
+/// (see `App::apply_settings_events` in `chrome/settings_form.rs`, `App::commit_settings_field`
 /// in `settings_fields.rs`, and the system Light/Dark pickers in
 /// `settings_themes.rs`).
 ///
@@ -189,7 +189,7 @@ pub(crate) const SAVED_KEYS: &[SavedKey] = &[
         get: |c| format!("{:.0}", c.padding_right.unwrap_or(0.0)),
     },
     // Quake mode is restart-only (the window is armed once in `App::init_quake`
-    // at startup — see `chrome.rs`'s CONFIG_TOGGLES entry doc), but the toggle
+    // at startup — see `chrome/settings_form.rs`'s CONFIG_TOGGLES entry doc), but the toggle
     // still writes through `Config` live so Save persists it for the next launch.
     SavedKey {
         key: "quake",
@@ -321,7 +321,7 @@ mod tests {
     use super::*;
 
     /// Every `Config` field that the settings UI can live-mutate, hand-enumerated
-    /// by reading `App::apply_settings_events` (`chrome.rs`),
+    /// by reading `App::apply_settings_events` (`chrome/settings_form.rs`),
     /// `App::commit_settings_field` (`settings_fields.rs`), and the system
     /// Light/Dark theme pickers (`settings_themes.rs`) end to end. `font_size` is
     /// intentionally excluded — see [`SAVED_KEYS`]'s doc comment.

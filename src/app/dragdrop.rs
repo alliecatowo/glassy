@@ -87,7 +87,7 @@ impl App {
         renderer.push_overlay_rrect_px(x, y, w, h, radius, [a[0], a[1], a[2], 0.35]);
         // ...with a fainter inset fill on top, leaving a ring-like border effect
         // (mirrors the inset-rect technique `paint_tab_rename` uses for its focus
-        // ring, in `chrome.rs`).
+        // ring, in `chrome/confirm.rs`).
         let inset = 2.0;
         renderer.push_overlay_rrect_px(
             x + inset,
