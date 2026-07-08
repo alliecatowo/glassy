@@ -154,7 +154,11 @@ impl App {
                 .map(|(id, _)| id)
                 .filter(|&id| id != src)
         });
-        let divider = lighten(color::selection_bg(), 0.18);
+        // Theme-aware elevation instead of a bare `lighten`: on light themes an
+        // additive lighten of the (already pale) selection color clamps at white
+        // and the divider vanishes. glass_elevate darkens on light themes so the
+        // seam between tiles stays visible on every theme.
+        let divider = crate::gui::glass_elevate(color::selection_bg(), 0.18);
         // The gutter to draw transiently emphasised (drag wins over mere hover).
         let active_gutter = self
             .dragging_gutter

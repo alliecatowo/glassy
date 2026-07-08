@@ -82,13 +82,15 @@ impl App {
 
         // --- Query field --------------------------------------------------------
         let field = gui::Rect::new(inner_x, panel.y + pad, inner_w, field_h);
+        // Theme-aware recessed track (gui::track_off()) instead of a flat black
+        // fill, which on light themes painted an opaque black input box.
         renderer.push_overlay_rrect_px(
             field.x,
             field.y,
             field.w,
             field.h,
             radius,
-            [0.0, 0.0, 0.0, 0.35],
+            gui::track_off(),
         );
         let ty = (field.y + (field.h - cell_h) * 0.5).round();
         let mut cx = field.x + pad;

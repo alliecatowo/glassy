@@ -123,7 +123,7 @@ impl App {
         let fg = mul(gui::fg());
         let fg_dim = mul(gui::fg_dim());
         let raised = gui::glass_active_tab();
-        let chip_luma = 0.2126 * raised[0] + 0.7152 * raised[1] + 0.0722 * raised[2];
+        let chip_luma = color::luma(raised);
         let active_fg = if chip_luma > 0.5 {
             mul([0.04, 0.04, 0.05, 1.0])
         } else {

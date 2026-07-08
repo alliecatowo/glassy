@@ -25,7 +25,7 @@ use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Window, WindowId};
 
 use crate::bell::{self, AudioBell};
-use crate::color::{self, lighten};
+use crate::color;
 use crate::gui;
 use crate::input::{KittyFlags, ModifyOtherKeys, MouseReport, encode_key_parts, encode_mouse};
 use crate::pane;

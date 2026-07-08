@@ -52,6 +52,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Config saves preserve inline trailing comments**, surface write failures as a toast instead of only a log line, and re-read the file before writing so a settings Save can't clobber a concurrent external edit.
 - **GPU device loss** now registers a `device_lost` callback and degrades gracefully instead of relying on undocumented driver behavior.
 
+#### Light-theme chrome legibility
+- **Toast and inline-peek cards** are now legible on light themes. Both hand-rolled a near-black card background (`bg*0.12+0.04`) that stayed dark on light themes while their foreground text followed the theme — leaving dark-on-dark text. They now use the shared theme-aware floating-surface fill. The peek card's document glyph also swapped from a non-BMP codepoint (which tofued on most terminal fonts) to a BMP-safe one.
+- **Split-pane dividers** no longer vanish on light themes: the seam color is elevated via theme-aware math (darken on light backgrounds) instead of an additive lighten that clamped to white.
+- **Folded command-output scrim** fades toward the terminal background instead of hard black, so the "… N lines hidden" summary stays readable on light themes.
+- **Command-palette query field** uses the theme-aware recessed-track fill instead of a flat black box that was opaque and out of place on light themes.
+- **Keyboard focus ring** on the accent-filled Save button no longer overpaints the accent body grey — the ring subtracts the button's own fill.
+
 ---
 
 ## [0.4.4] - 2026-07-02

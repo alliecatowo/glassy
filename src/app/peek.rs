@@ -99,15 +99,11 @@ impl Peek {
         let card_x = area.x as f32 + MARGIN;
         let card_y = (area.y as f32 + area.h as f32 - MARGIN - card_h).max(area.y as f32 + MARGIN);
 
-        // Frosted glass background (same recipe as the toast card).
-        let bg_base = color::default_bg();
-        let card_bg = [
-            bg_base[0] * 0.12 + 0.04,
-            bg_base[1] * 0.12 + 0.04,
-            bg_base[2] * 0.14 + 0.06,
-            gui::GLASS_FLOAT_ALPHA,
-        ];
-        renderer.push_overlay_rrect_px(card_x, card_y, card_w, card_h, CARD_RADIUS, card_bg);
+        // Frosted glass background: the shared E3 floating-surface fill
+        // (gui::glass_float()), theme-aware so the card stays legible on light
+        // themes — the old `bg*0.12+0.04` recipe painted a near-black card that
+        // hid theme-dark foreground text on light backgrounds.
+        let card_bg = gui::glass_float();
         let accent = color::accent();
         let border_c = [accent[0], accent[1], accent[2], 0.35];
         renderer.push_overlay_rrect_px(
@@ -128,8 +124,10 @@ impl Peek {
         let tx = (card_x + PAD_X).round();
         let mut ty = (card_y + PAD_Y).round();
 
-        // Title row (accent, prefixed with a doc glyph).
-        let title = clip_to(&format!("\u{1F5CE} {}", self.title), max_chars);
+        // Title row (accent, prefixed with a doc glyph). U+25A4 (▤) is BMP-safe;
+        // it replaces U+1F5CE 🗎 which is outside the BMP and tofus on most
+        // terminal fonts (the codebase bans non-BMP UI glyphs — see widgets.rs).
+        let title = clip_to(&format!("\u{25A4} {}", self.title), max_chars);
         renderer.push_overlay_glyph_px_str(tx, ty, &title, accent);
         ty += cell_h;
 

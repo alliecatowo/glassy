@@ -95,7 +95,10 @@ impl<'r> Ui<'r> {
         let fill = state_fill(fill_on(), hover_t, it.pressed);
         self.rrect(rect, self.m.radius, fill);
         if matches!(st, WState::Focus) {
-            self.focus_ring(rect, self.m.radius);
+            // Subtract the button's own accent fill, not the default grey panel
+            // fill, so the focus ring reads as a 1 px halo without overpainting
+            // the accent body.
+            self.focus_ring_over(rect, self.m.radius, fill);
         }
         let nudge = if it.pressed { 1.0 } else { 0.0 };
         let mut content = rect;

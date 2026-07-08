@@ -1428,7 +1428,7 @@ impl App {
         let cltx = (close_r.x + (close_r.w - clw) * 0.5).round();
         let clty = (close_r.center_y() - cell_h * 0.5).round();
         // Danger button uses contrasting text.
-        let dluma = 0.2126 * danger[0] + 0.7152 * danger[1] + 0.0722 * danger[2];
+        let dluma = color::luma(danger);
         let close_fg = if dluma > 0.4 {
             [0.06, 0.06, 0.07, 1.0]
         } else {
