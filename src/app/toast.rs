@@ -198,6 +198,21 @@ pub(crate) fn paint_toasts(
         let mut card_bg = gui::glass_float();
         card_bg[3] *= alpha;
 
+        // Soft drop shadow under the card (E3 depth), faded with the toast.
+        let mut shadow = gui::shadow_e3();
+        shadow[3] *= alpha;
+        renderer.push_overlay_shadow_px(
+            card_x,
+            card_y,
+            card_w,
+            card_h,
+            CARD_RADIUS,
+            gui::SHADOW_E3_FEATHER,
+            0.0,
+            4.0,
+            shadow,
+        );
+
         // Thin accent border (very subtle).
         let accent = color::accent();
         let border_c = [accent[0], accent[1], accent[2], alpha * 0.35];

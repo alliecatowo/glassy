@@ -70,7 +70,19 @@ impl App {
         let py = ((surface.1 - ph) * 0.35).round().max(pad);
         let panel = gui::Rect::new(px, py, pw, ph);
 
-        // Panel body (E3 floating surface) + accent top rail.
+        // Soft drop shadow under the floating panel (E3 depth), then the panel
+        // body (E3 floating surface) + accent top rail.
+        renderer.push_overlay_shadow_px(
+            panel.x,
+            panel.y,
+            panel.w,
+            panel.h,
+            m.r_lg,
+            gui::SHADOW_E3_FEATHER,
+            0.0,
+            4.0,
+            gui::shadow_e3(),
+        );
         renderer.push_overlay_rrect_px(
             panel.x,
             panel.y,

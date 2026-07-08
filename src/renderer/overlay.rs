@@ -139,6 +139,49 @@ impl Renderer {
         });
     }
 
+    /// Queue a soft drop shadow beneath a rounded-rect surface. `(x, y, w, h)` is
+    /// the SURFACE rect (the thing casting the shadow) and `radius` its corner
+    /// radius, both in px; `feather` is the blur width in px (the audit's E3
+    /// shadows use ~12–16). `(dx, dy)` offsets the shadow (a small positive `dy`
+    /// gives an "under" drop shadow); `color` is straight RGBA (typically a low-
+    /// alpha near-black on dark themes, softer on light).
+    ///
+    /// Emits ONE `FgInstance` with `flags == 5` into the same text-on-glass
+    /// channel as the rrect primitives — no new pipeline, bind group or buffer
+    /// type. The instance quad is the surface grown by `feather` on all sides
+    /// (plus the offset); the shader (see `fs_fg` flags==5) reconstructs the
+    /// inset surface rrect and feathers the coverage around it. Push this BEFORE
+    /// the surface fill so the surface overpaints the shadow's opaque interior.
+    #[allow(clippy::too_many_arguments)]
+    pub fn push_overlay_shadow_px(
+        &mut self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        radius: f32,
+        feather: f32,
+        dx: f32,
+        dy: f32,
+        color: [f32; 4],
+    ) {
+        if w <= 0.0 || h <= 0.0 || feather <= 0.0 || color[3] <= 0.0 {
+            return;
+        }
+        // Grow the quad by `feather` on every side so the feathered falloff has
+        // room to fade to zero outside the surface, and apply the drop offset.
+        self.overlay_text.push(FgInstance {
+            pos: [x - feather + dx, y - feather + dy],
+            size: [w + 2.0 * feather, h + 2.0 * feather],
+            // radius smuggled in uv_min.x (like flags==3); feather in uv_min.y.
+            uv_min: [radius, feather],
+            uv_max: [0.0, 0.0],
+            color,
+            flags: 5,
+            _pad: [0; 3],
+        });
+    }
+
     /// Begin capturing the tab-bar's overlay instances. Records the current overlay
     /// list lengths so [`Renderer::commit_tab_overlay`] can snapshot exactly the
     /// instances the tab-bar painter pushed. The tab bar is always painted first

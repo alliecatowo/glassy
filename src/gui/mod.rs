@@ -284,6 +284,22 @@ pub fn glass_float_border() -> [f32; 4] {
     with_alpha(color::accent(), 0.22)
 }
 
+/// Soft drop-shadow tint for an E3 floating surface (menus / popups / palette /
+/// settings / toasts / modals). Near-black, with a theme-aware alpha — denser on
+/// dark themes, softer on light — per the design-system depth spec. Pair with
+/// [`Renderer::push_overlay_shadow_px`] and a ~[`SHADOW_E3_FEATHER`] blur.
+pub fn shadow_e3() -> [f32; 4] {
+    let a = if luma(color::default_bg()) > 0.7 {
+        0.18
+    } else {
+        0.35
+    };
+    [0.0, 0.0, 0.0, a]
+}
+
+/// Default E3 soft-shadow blur (feather) width in px.
+pub const SHADOW_E3_FEATHER: f32 = 14.0;
+
 /// Soft edge accent (was a bright 1px "edge-lit" rail). Kept extremely subtle so
 /// raised surfaces read as clean soft glass with NO thin bright line artifacts —
 /// on light-accent themes the old 0.60-alpha accent rail painted harsh white/light

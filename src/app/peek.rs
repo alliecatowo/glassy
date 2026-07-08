@@ -104,6 +104,18 @@ impl Peek {
         // themes — the old `bg*0.12+0.04` recipe painted a near-black card that
         // hid theme-dark foreground text on light backgrounds.
         let card_bg = gui::glass_float();
+        // Soft drop shadow under the card (E3 depth).
+        renderer.push_overlay_shadow_px(
+            card_x,
+            card_y,
+            card_w,
+            card_h,
+            CARD_RADIUS,
+            gui::SHADOW_E3_FEATHER,
+            0.0,
+            4.0,
+            gui::shadow_e3(),
+        );
         let accent = color::accent();
         let border_c = [accent[0], accent[1], accent[2], 0.35];
         renderer.push_overlay_rrect_px(

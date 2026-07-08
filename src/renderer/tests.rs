@@ -498,6 +498,24 @@ fn headless_wgpu_device_init_succeeds() {
 }
 
 #[test]
+fn real_shader_wgsl_compiles_and_validates() {
+    // Compile the actual src/shader.wgsl on the headless device inside a
+    // validation error scope. The other GPU tests use inline probe shaders, so
+    // a WGSL syntax/type error in the real shader (e.g. the overlay rrect /
+    // soft-shadow SDF branches) would otherwise only surface at app launch.
+    let Some((device, _queue)) = headless_device() else {
+        return;
+    };
+    let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let _shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("real-shader-wgsl"),
+        source: wgpu::ShaderSource::Wgsl(include_str!("../shader.wgsl").into()),
+    });
+    let err = pollster::block_on(scope.pop());
+    assert!(err.is_none(), "shader.wgsl failed validation: {err:?}");
+}
+
+#[test]
 fn headless_device_can_create_atlas_textures() {
     // Verify that the two atlas texture descriptors (R8Unorm mask and
     // Rgba8Unorm color) can be created on the headless device. A wgpu 31

@@ -64,7 +64,10 @@ struct FgOut {
     o.clip = vec4<f32>(ndc, 0.0, 1.0);
     // For flags==3/4 the atlas UVs are unused, so the caller smuggles radius data
     // through uv_min/uv_max; `unit` then gives the 0..1 local coord directly.
-    let rrect = in.flags == 3u || in.flags == 4u;
+    // flags 3 (rrect), 4 (per-corner rrect) and 5 (soft shadow) all use `unit`
+    // as a clean 0..1 local coord and smuggle their radius/feather data through
+    // uv_min/uv_max instead of sampling the atlas.
+    let rrect = in.flags == 3u || in.flags == 4u || in.flags == 5u;
     o.uv = select(mix(in.uv_min, in.uv_max, in.unit), in.unit, rrect);
     o.color = in.color;
     o.flags = in.flags;
@@ -152,6 +155,25 @@ fn coverage_blend(color: vec3<f32>, cov: f32) -> vec4<f32> {
 // correctly over a translucent backdrop, so every branch below returns a
 // premultiplied color (rgb already scaled by the output alpha).
 @fragment fn fs_fg(in: FgOut) -> @location(0) vec4<f32> {
+    if (in.flags == 5u) {
+        // Soft drop shadow. The quad is the surface rrect GROWN by `feather` px
+        // on every side (see push_overlay_shadow_px), so the surface itself is a
+        // centered rrect inset from the quad by `feather`. radius_px carries the
+        // surface corner radius; radii4.y carries the feather (blur) width — the
+        // same out-of-band packing the rrect4 path uses, so this adds NO new
+        // vertex attribute, pipeline or bind group. The coverage ramps from full
+        // alpha `feather` px inside the surface edge down to 0 `feather` px
+        // outside it, giving a soft feathered halo. The opaque interior is
+        // overpainted by the surface fill drawn on top.
+        let feather = max(in.radii4.y, 0.5);
+        let half = in.quad_px * 0.5;
+        let p = in.uv * in.quad_px - half;
+        let surf_half = max(half - vec2<f32>(feather, feather), vec2<f32>(0.0, 0.0));
+        let r = min(in.radius_px, min(surf_half.x, surf_half.y));
+        let d = sdf_rrect(p, surf_half, r);
+        let cov = (1.0 - smoothstep(-feather, feather, d)) * in.color.a;
+        return vec4<f32>(in.color.rgb * cov, cov);
+    }
     if (in.flags == 4u) {
         // Per-corner rounded-rect solid fill. Same AA treatment as flags==3 but
         // each corner gets its own radius (top-rounded tabs etc.). Radii are

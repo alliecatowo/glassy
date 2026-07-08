@@ -52,7 +52,10 @@ impl App {
             let is_held = held == Some(seg.item);
             let glyph = match seg.item {
                 StripItem::Help => '?',
-                StripItem::Settings => '\u{F013}',
+                // U+2699 GEAR is BMP and covered by Noto Sans Symbols2 / Apple
+                // Symbols (already in the fallback set), unlike the previous PUA
+                // U+F013 which tofus without a Nerd Font configured.
+                StripItem::Settings => '\u{2699}',
                 _ => '\u{2261}',
             };
             if is_held {
@@ -232,7 +235,7 @@ impl App {
                     let glyph = match seg.item {
                         StripItem::NewTab => '+',
                         StripItem::Help => '?',
-                        StripItem::Settings => '\u{F013}',
+                        StripItem::Settings => '\u{2699}',
                         _ => '\u{2261}',
                     };
                     let base = surface;
