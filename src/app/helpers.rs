@@ -164,8 +164,6 @@ pub(crate) enum StripItem {
     /// A tab's ✕ close affordance at stable position `pos`.
     TabClose(usize),
     NewTab,
-    Help,
-    Settings,
     Menu,
     /// Borderless-window controls painted in the top-right chrome on non-macOS
     /// (macOS keeps its native traffic lights). Only laid out when glassy owns the
@@ -290,19 +288,34 @@ pub(crate) enum MenuAction {
     SplitRight,
     SplitDown,
     NewTab,
+    CommandPalette,
     Settings,
     Help,
+    QuakeToggle,
+    About,
     CloseTab,
 }
 
 impl MenuAction {
-    /// The fixed set shown by the ≡ hamburger dropdown. Settings (⚙) and Help (?)
-    /// are NOT listed here — they have dedicated quick-access strip icons, so
-    /// duplicating them in the hamburger would give two independent UI paths to the
-    /// same overlay. `PaneHeaders` is likewise omitted: it is a Settings-form (and
-    /// command-palette) toggle, not a top-level menu action. The right-click context
-    /// menu uses a separately-built `Vec<MenuAction>` (see `context_menu_items`).
-    pub(crate) const ALL: &'static [MenuAction] = &[MenuAction::NewTab, MenuAction::CloseTab];
+    /// The grouped set shown by the ≡ hamburger dropdown. The standalone `?`/`⚙`
+    /// strip icons were folded IN here (leaving `+`/`≡` as the only standalone
+    /// top-right buttons), so the hamburger is now the single home for Settings /
+    /// Help alongside New tab, the splits, the command palette, quake toggle, and
+    /// About. Grouped (via [`MenuAction::group`]) as: New tab / Split right / Split
+    /// down | Command palette / Settings / Help | Quake toggle | About. The
+    /// right-click context menu uses a separately-built `Vec<MenuAction>` (see
+    /// `context_menu_items`).
+    pub(crate) const ALL: &'static [MenuAction] = &[
+        MenuAction::NewTab,
+        MenuAction::SplitRight,
+        MenuAction::SplitDown,
+        MenuAction::CommandPalette,
+        MenuAction::Settings,
+        MenuAction::Help,
+        MenuAction::QuakeToggle,
+        MenuAction::About,
+        MenuAction::CloseTab,
+    ];
 
     pub(crate) fn label(self) -> &'static str {
         match self {
@@ -314,8 +327,11 @@ impl MenuAction {
             MenuAction::SplitRight => "Split right",
             MenuAction::SplitDown => "Split down",
             MenuAction::NewTab => "New tab",
+            MenuAction::CommandPalette => "Command palette",
             MenuAction::Settings => "Settings",
             MenuAction::Help => "Help / keys",
+            MenuAction::QuakeToggle => "Toggle quake",
+            MenuAction::About => "About",
             MenuAction::CloseTab => "Close tab",
         }
     }
@@ -331,8 +347,11 @@ impl MenuAction {
             MenuAction::SplitRight => '|',
             MenuAction::SplitDown => '-',
             MenuAction::NewTab => '+',
+            MenuAction::CommandPalette => '»',
             MenuAction::Settings => '*',
             MenuAction::Help => '?',
+            MenuAction::QuakeToggle => '\u{25BC}', // ▼ slides down
+            MenuAction::About => 'i',
             MenuAction::CloseTab => '✕',
         }
     }
@@ -349,22 +368,28 @@ impl MenuAction {
             MenuAction::SplitRight => Some("Ctrl+Shift+E"),
             MenuAction::SplitDown => Some("Ctrl+Shift+O"),
             MenuAction::NewTab => Some("Ctrl+Shift+T"),
+            MenuAction::CommandPalette => Some("Ctrl+Shift+P"),
             MenuAction::Settings => Some("Ctrl+,"),
             MenuAction::Help => Some("F1"),
+            MenuAction::QuakeToggle => Some("F12"),
+            MenuAction::About => None,
             MenuAction::CloseTab => Some("Ctrl+Shift+W"),
         }
     }
 
     /// Visual group id used by [`actions_to_entries`] to place separators: a
     /// separator is drawn between any two consecutive items whose groups differ.
-    /// 0 = clipboard, 1 = buffer/find, 2 = layout, 3 = app, 4 = destructive.
+    /// 0 = clipboard, 1 = buffer/find, 2 = new/layout, 3 = app (palette/settings/
+    /// help), 4 = quake, 5 = about, 6 = destructive.
     fn group(self) -> u8 {
         match self {
             MenuAction::Copy | MenuAction::Paste | MenuAction::SelectAll => 0,
             MenuAction::ClearScrollback | MenuAction::Search => 1,
             MenuAction::SplitRight | MenuAction::SplitDown | MenuAction::NewTab => 2,
-            MenuAction::Settings | MenuAction::Help => 3,
-            MenuAction::CloseTab => 4,
+            MenuAction::CommandPalette | MenuAction::Settings | MenuAction::Help => 3,
+            MenuAction::QuakeToggle => 4,
+            MenuAction::About => 5,
+            MenuAction::CloseTab => 6,
         }
     }
 }

@@ -34,12 +34,30 @@ impl App {
             MenuAction::SplitRight => self.split_pane(pane::Dir::Vertical, event_loop),
             MenuAction::SplitDown => self.split_pane(pane::Dir::Horizontal, event_loop),
             MenuAction::NewTab => self.new_tab(event_loop),
+            MenuAction::CommandPalette => self.open_palette(event_loop),
             MenuAction::Settings => {
                 self.open_settings();
+                // The menu item is invoked on the RELEASE edge, whose click_pos
+                // lands on the ≡ button (outside the centered panel). Mark the
+                // overlay as opened-by-press so that stale edge can't immediately
+                // scrim-dismiss it (mirrors the palette's OpenSettings arm).
+                self.overlay_opened_by_press = true;
                 self.mark_dirty(event_loop);
             }
             MenuAction::Help => {
                 self.help_open = true;
+                self.overlay_opened_by_press = true;
+                self.mark_dirty(event_loop);
+            }
+            MenuAction::QuakeToggle => {
+                self.quake_apply(crate::ipc::IpcCommand::Toggle, event_loop);
+                self.mark_dirty(event_loop);
+            }
+            MenuAction::About => {
+                // No standalone About panel; the Help overlay leads with the
+                // version + repo (see `help_rows_from_keymap`), so About opens it.
+                self.help_open = true;
+                self.overlay_opened_by_press = true;
                 self.mark_dirty(event_loop);
             }
             MenuAction::CloseTab => self.try_close_active_tab(event_loop),
@@ -47,9 +65,12 @@ impl App {
     }
 
     /// Build the selection-aware item list for the right-click context menu.
-    /// Copy is included only when a non-empty selection exists; Paste and New
-    /// tab are always present. Settings/Help/CloseTab are omitted from the
-    /// context menu (available via the hamburger).
+    /// Copy is greyed unless a non-empty selection exists; the rest are always
+    /// present. This list intentionally differs from the hamburger
+    /// ([`MenuAction::ALL`]): it carries the clipboard / buffer / find actions a
+    /// right-click wants, plus Settings and Help, but not the window-level
+    /// hamburger-only actions (command palette / quake toggle / About) or
+    /// CloseTab (closing a tab is the ✕ on its chip / `Ctrl+Shift+W`).
     pub(crate) fn context_menu_items(&self) -> Vec<MenuAction> {
         // Copy is always listed (greyed out when nothing is selected) so the
         // menu layout is stable; `actions_to_entries` reads the live selection
@@ -356,34 +377,6 @@ impl App {
                 }
             }
             Some(StripItem::NewTab) => self.new_tab(event_loop),
-            Some(StripItem::Help) => {
-                let opening = !self.help_open;
-                self.help_open = opening;
-                self.settings_open = false;
-                self.menu_open = false;
-                // When this press OPENS an overlay, the release of the same
-                // button must not be treated as a click-outside-panel dismiss.
-                if opening {
-                    self.overlay_opened_by_press = true;
-                }
-                self.force_full_redraw = true;
-                self.mark_dirty(event_loop);
-            }
-            Some(StripItem::Settings) => {
-                let opening = !self.settings_open;
-                if self.settings_open {
-                    self.settings_open = false;
-                } else {
-                    self.open_settings();
-                }
-                self.help_open = false;
-                self.menu_open = false;
-                if opening {
-                    self.overlay_opened_by_press = true;
-                }
-                self.force_full_redraw = true;
-                self.mark_dirty(event_loop);
-            }
             Some(StripItem::Menu) => {
                 // Toggle the hamburger dropdown; close other overlays.
                 let opening = !self.menu_open;

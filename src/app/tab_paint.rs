@@ -52,15 +52,10 @@ impl App {
             let is_hover = hovered == Some(seg.item);
             let is_held = held == Some(seg.item);
             let glyph = match seg.item {
-                StripItem::Help => '?',
-                // U+2699 GEAR is BMP and covered by Noto Sans Symbols2 / Apple
-                // Symbols (already in the fallback set), unlike the previous PUA
-                // U+F013 which tofus without a Nerd Font configured.
-                StripItem::Settings => '\u{2699}',
                 StripItem::WinMinimize => '\u{2013}', // – en dash
                 StripItem::WinMaximize => '\u{25A1}', // □ white square
                 StripItem::WinClose => '\u{2715}',    // ✕ multiplication x
-                _ => '\u{2261}',
+                _ => '\u{2261}',                      // ≡ hamburger menu
             };
             if is_held {
                 renderer.push_overlay_rrect_px(r.x, r.y, r.w, r.h, radius, press_fill(surface));
@@ -238,20 +233,16 @@ impl App {
                     }
                 }
                 StripItem::NewTab
-                | StripItem::Help
-                | StripItem::Settings
                 | StripItem::Menu
                 | StripItem::WinMinimize
                 | StripItem::WinMaximize
                 | StripItem::WinClose => {
                     let glyph = match seg.item {
                         StripItem::NewTab => '+',
-                        StripItem::Help => '?',
-                        StripItem::Settings => '\u{2699}',
                         StripItem::WinMinimize => '\u{2013}', // – en dash
                         StripItem::WinMaximize => '\u{25A1}', // □ white square
                         StripItem::WinClose => '\u{2715}',    // ✕ multiplication x
-                        _ => '\u{2261}',
+                        _ => '\u{2261}',                      // ≡ hamburger menu
                     };
                     // The window-close button gets a danger-tinted hover/press so
                     // it reads like a close affordance (mirrors the tab close box).

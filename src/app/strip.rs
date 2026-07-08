@@ -85,13 +85,15 @@ pub(crate) fn split_indicator(pane_count: usize) -> &'static str {
 }
 
 /// The right-aligned control buttons in the top chrome, in left→right paint
-/// order. The `?`/`⚙`/`≡` icon cluster always leads; when `win_controls` is set
-/// (a borderless window on non-macOS, where glassy owns the edge), the window
+/// order. Just the `≡` hamburger menu now — the standalone `?`/`⚙` buttons were
+/// folded INTO the hamburger (which carries Settings / Help), leaving `+` and `≡`
+/// as the only standalone top-right buttons. When `win_controls` is set (a
+/// borderless window on non-macOS, where glassy owns the edge), the window
 /// minimize / maximize / close buttons follow at the far right. macOS never sets
 /// `win_controls` — it keeps its native traffic lights. Shared by the full-bar
 /// layout and the floating-icon layout so both agree with the hit-test.
 pub(crate) fn right_control_items(win_controls: bool) -> Vec<StripItem> {
-    let mut v = vec![StripItem::Help, StripItem::Settings, StripItem::Menu];
+    let mut v = vec![StripItem::Menu];
     if win_controls {
         v.push(StripItem::WinMinimize);
         v.push(StripItem::WinMaximize);
@@ -113,6 +115,7 @@ pub(crate) fn right_control_items(win_controls: bool) -> Vec<StripItem> {
 /// stops at `TAB_MIN_W` (no infinite squeeze) and the strip then SCROLLS
 /// horizontally so the active tab (`active_pos`) stays fully visible. Pure (pixel
 /// math only) so the painter and the click hit-test agree, and unit-testable.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn strip_layout_ex(
     tabs: &[TabDesc],
     bar_w: f32,
@@ -533,7 +536,7 @@ mod floating_icon_tests {
         for &sw in &[800.0_f32, 1024.0, 1920.0, 640.0] {
             let bar_h = 32.0;
             let segs = floating_icon_segs(sw, bar_h, false);
-            assert_eq!(segs.len(), 3, "Help/Settings/Menu");
+            assert_eq!(segs.len(), 1, "just the ≡ menu now");
 
             // The header's inset right edge (header starts at x=0, full width sw).
             let header_right = sw - floating_icons_reserved_w(false);
@@ -552,16 +555,13 @@ mod floating_icon_tests {
 
     #[test]
     fn reserved_width_matches_the_cluster_geometry() {
-        // The reserved width equals the three icon buttons + trailing gap + pill
-        // pad, so it stays in lock-step with `floating_icon_segs`' own layout.
-        assert_eq!(
-            floating_icons_reserved_w(false),
-            CTRL_BTN * 3.0 + TAB_GAP + 4.0
-        );
+        // The reserved width equals the ≡ menu button + trailing gap + pill pad,
+        // so it stays in lock-step with `floating_icon_segs`' own layout.
+        assert_eq!(floating_icons_reserved_w(false), CTRL_BTN + TAB_GAP + 4.0);
         // With glassy's own window controls the cluster gains three more buttons.
         assert_eq!(
             floating_icons_reserved_w(true),
-            CTRL_BTN * 6.0 + TAB_GAP + 4.0
+            CTRL_BTN * 4.0 + TAB_GAP + 4.0
         );
     }
 }
