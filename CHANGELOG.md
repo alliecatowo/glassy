@@ -61,6 +61,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### Chrome design tokens
 - **Unified floating-surface elevation.** The E3 floating fill (dropdowns, dialogs, drag-ghost, toasts, inline peek, command palette) now derives from the theme background like the rest of the chrome instead of the selection color, so all elevation tiers share one hue and differ only by amount. The command palette also reuses the shared metric scale instead of re-deriving pad/gap/radius by hand.
+- **Eased quake slide.** The quake / drop-down window now decelerates into its resting edge with a cubic ease-out in both directions instead of moving linearly, for a softer drop. The slide still advances event-driven and settles back to 0% idle CPU.
 
 ---
 

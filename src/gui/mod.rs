@@ -122,6 +122,30 @@ pub enum WState {
 // Animation
 // ---------------------------------------------------------------------------
 
+// --- Motion vocabulary (§ design-system MOTION) ----------------------------
+//
+// Named durations for the chrome's transitions. These are the target
+// vocabulary; surfaces adopt them as their per-anim easing/duration work lands.
+// The mechanism is unchanged — gui_anims stepped only while unsettled, Poll
+// dropped back to Wait on settle — so none of these threaten the 0%-idle
+// invariant.
+
+/// Hover-in / press-release (ms). Short enough to feel instant; linear is fine.
+pub const MOTION_FAST_MS: f32 = 100.0;
+/// Hover-out / toggle / selection change (ms).
+pub const MOTION_BASE_MS: f32 = 150.0;
+/// Menu / popup / palette / panel entrance (ms): fade + small rise. Exit is
+/// instant.
+pub const MOTION_ENTER_MS: f32 = 180.0;
+
+/// Cubic ease-out: fast start, gentle settle. `t` is a normalized 0..1 progress
+/// (clamped). Used for enter/hover transitions and the quake slide so motion
+/// decelerates into its resting position instead of stopping abruptly.
+pub fn ease_out_cubic(t: f32) -> f32 {
+    let inv = 1.0 - t.clamp(0.0, 1.0);
+    1.0 - inv * inv * inv
+}
+
 /// A single change-triggered scalar animation (e.g. a hover fade). `value`
 /// chases `target`; [`Anim::step`] advances it and reports whether it has
 /// settled. Only unsettled anims keep the event loop on `Poll`.
@@ -889,6 +913,19 @@ mod tests {
         assert!(ev.bell.is_none());
         assert!(!ev.save && !ev.close);
         assert!(ev.theme_pick.is_none() && ev.font_pick.is_none());
+    }
+
+    #[test]
+    fn ease_out_cubic_endpoints_and_shape() {
+        assert_eq!(ease_out_cubic(0.0), 0.0);
+        assert_eq!(ease_out_cubic(1.0), 1.0);
+        // Clamps out-of-range inputs.
+        assert_eq!(ease_out_cubic(-0.5), 0.0);
+        assert_eq!(ease_out_cubic(1.5), 1.0);
+        // Ease-OUT: past the halfway travel by the midpoint (decelerating).
+        assert!(ease_out_cubic(0.5) > 0.5);
+        // Monotonic.
+        assert!(ease_out_cubic(0.25) < ease_out_cubic(0.75));
     }
 
     #[test]
