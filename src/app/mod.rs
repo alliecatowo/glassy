@@ -352,6 +352,19 @@ pub struct Config {
     /// unchanged. Only `Cards` adds anything: a subtle glass band + accent rail
     /// behind each finished command's row range. Config key `command_blocks`.
     pub command_blocks: CommandBlocksMode,
+    /// Lines of scrollback kept for a backgrounded/idle pane once it has been
+    /// idle/backgrounded for [`scrollback_background_idle_secs`](Self::scrollback_background_idle_secs)
+    /// seconds; `0` disables the cap (default). Config key
+    /// `scrollback_background_cap`. Parsed + validated at config-load time
+    /// (see `crate::pty::ScrollbackBackgroundPolicy`); not yet wired to live
+    /// `Pty` sessions (settings-UI-editable and persisted here regardless, so
+    /// the wiring can land as a separate follow-up without another config-key
+    /// stream).
+    pub scrollback_background_cap: usize,
+    /// Seconds a pane must be idle/backgrounded before `scrollback_background_cap`
+    /// takes effect. Default 900 (15 min). Config key
+    /// `scrollback_background_idle_secs`.
+    pub scrollback_background_idle_secs: u64,
 }
 
 /// Configurable segments for the status bar (config key `status_bar_segments`).
@@ -562,6 +575,20 @@ pub enum CommandBlocksMode {
     /// Warp-style. Presentation-only: draws no new invalidation, only what the
     /// existing badge/fold overlay pass already repaints.
     Cards,
+}
+
+impl CommandBlocksMode {
+    /// Round-trips a config-file value (`off` | `badges` | `cards`) back out —
+    /// the mirror of `config::parse::parse_command_blocks_mode`. Used by
+    /// `settings_save::SAVED_KEYS` to persist the settings-UI Effects → Command
+    /// blocks segmented row.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Badges => "badges",
+            Self::Cards => "cards",
+        }
+    }
 }
 
 /// A tab's split layout: the tiling tree (whose leaf ids are pty/pane ids) plus

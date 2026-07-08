@@ -550,22 +550,29 @@ impl RawConfig {
                 .and_then(crate::app::panes::PaneHeaderStyle::parse)
                 .unwrap_or_default(),
             pane_headers_single: self.pane_headers_single.unwrap_or(false),
+            scrollback_background_cap: self
+                .scrollback_background_cap
+                .unwrap_or(DEFAULT_SCROLLBACK_BACKGROUND_CAP),
+            scrollback_background_idle_secs: self
+                .scrollback_background_idle_secs
+                .unwrap_or(DEFAULT_SCROLLBACK_BACKGROUND_IDLE_SECS),
         };
 
         // Resolve + validate the w15 scrollback-background policy at parse time,
         // so a bad value is caught here rather than silently ignored. NOTE: this
         // does not yet reach live `Pty` sessions — that requires threading the
-        // resolved policy through `crate::app::Config` and every `Pty::spawn`
-        // call site (`src/app/{panes,event_loop}.rs`, `src/app/tabs/{mod,session}.rs`),
+        // resolved policy through every `Pty::spawn` call site
+        // (`src/app/{panes,event_loop}.rs`, `src/app/tabs/{mod,session}.rs`),
         // which is out of scope for the change that introduced this policy (see
-        // `crate::pty::ScrollbackBackgroundPolicy`). Logged at debug level so it
-        // is easy to confirm a configured value round-tripped through parsing
-        // without implying the feature is already active.
+        // `crate::pty::ScrollbackBackgroundPolicy`). The raw values ARE mirrored
+        // onto `config.scrollback_background_{cap,idle_secs}` above so the
+        // settings-UI Advanced-section steppers can display/edit/persist them
+        // ahead of that wiring landing. Logged at debug level so it is easy to
+        // confirm a configured value round-tripped through parsing without
+        // implying the feature is already active.
         let scrollback_background_policy = crate::pty::ScrollbackBackgroundPolicy::new(
-            self.scrollback_background_cap
-                .unwrap_or(DEFAULT_SCROLLBACK_BACKGROUND_CAP),
-            self.scrollback_background_idle_secs
-                .unwrap_or(DEFAULT_SCROLLBACK_BACKGROUND_IDLE_SECS),
+            config.scrollback_background_cap,
+            config.scrollback_background_idle_secs,
         );
         log::debug!(
             "glassy: scrollback_background_policy resolved to {scrollback_background_policy:?}; \

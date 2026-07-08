@@ -885,6 +885,15 @@ fn build_section_rows<'a>(section: SettingsSection, v: &'a SettingsView<'a>) -> 
                 label: "Ligatures",
                 value: v.ligatures,
             });
+            // w15: whether window opacity also applies to glyphs, not just the
+            // backdrop. Widget id feeds `ev.opacity_scope` via
+            // `apply_segmented_event` below; applied in `chrome.rs`.
+            rows.push(RowKind::Segmented {
+                id: "settings/opacity_scope",
+                label: "Opacity affects",
+                options: &["Background", "Text"],
+                sel: v.opacity_scope.min(1),
+            });
             rows.push(RowKind::Heading("Overlays"));
             rows.push(RowKind::Toggle {
                 id: "settings/minimap",
@@ -952,6 +961,16 @@ fn build_section_rows<'a>(section: SettingsSection, v: &'a SettingsView<'a>) -> 
                 id: "settings/dim_unfocused",
                 label: "Dim unfocused panes",
                 value: v.dim_unfocused,
+            });
+            rows.push(RowKind::Heading("Command blocks"));
+            // w15: opt-in chrome level for OSC 133/633 command blocks. Widget id
+            // feeds `ev.command_blocks` via `apply_segmented_event` below;
+            // applied in `chrome.rs`.
+            rows.push(RowKind::Segmented {
+                id: "settings/command_blocks",
+                label: "Card chrome",
+                options: &["Off", "Badges", "Cards"],
+                sel: v.command_blocks.min(2),
             });
             rows.push(RowKind::Heading("Clipboard"));
             rows.push(RowKind::Toggle {
@@ -1096,6 +1115,32 @@ fn build_section_rows<'a>(section: SettingsSection, v: &'a SettingsView<'a>) -> 
                 label: "Pane headers",
                 value: v.pane_headers,
             });
+            // w15: header density + whether a single unsplit pane also gets a
+            // header — both sit right under the toggle that gates them. Widget
+            // ids feed `ev.pane_header_style`/`ev.toggled` below; applied in
+            // `chrome.rs`.
+            rows.push(RowKind::Segmented {
+                id: "settings/pane_header_style",
+                label: "Header style",
+                options: &["Full", "Compact"],
+                sel: v.pane_header_style.min(1),
+            });
+            rows.push(RowKind::Toggle {
+                id: "settings/pane_headers_single",
+                label: "Header on single pane",
+                value: v.pane_headers_single,
+            });
+            rows.push(RowKind::Heading("Focus"));
+            // w15: unfocused-pane dim strength. `dim_unfocused` (the on/off
+            // gate) lives in the Effects section; this stays with the other
+            // pane-affecting controls here per the settings-modularity spec.
+            rows.push(RowKind::Slider {
+                id: "settings/unfocused_dim",
+                label: "Dim strength",
+                value: v.unfocused_dim,
+                min: 0.0,
+                max: 0.9,
+            });
             rows.push(RowKind::Heading("Status"));
             rows.push(RowKind::Toggle {
                 id: "settings/status_bar",
@@ -1173,6 +1218,28 @@ fn build_section_rows<'a>(section: SettingsSection, v: &'a SettingsView<'a>) -> 
                 id: "settings/scrollback",
                 label: "Scrollback",
                 text: format!("{}", v.scrollback),
+            });
+            rows.push(RowKind::Heading("Background scrollback"));
+            // w15: scrollback memory bounding — parsed + validated today but
+            // not yet wired to live `Pty` sessions (see
+            // `crate::pty::ScrollbackBackgroundPolicy`'s doc comment); the
+            // values still round-trip through Save so the UI is ready ahead of
+            // that wiring. Widget ids feed `ev.scrollback_background_cap_delta`
+            // / `ev.scrollback_background_idle_secs_delta` via
+            // `apply_stepper_event` below; applied in `chrome.rs`.
+            rows.push(RowKind::Stepper {
+                id: "settings/scrollback_background_cap",
+                label: "Idle pane cap",
+                text: if v.scrollback_background_cap == 0 {
+                    "Off".to_string()
+                } else {
+                    format!("{} lines", v.scrollback_background_cap)
+                },
+            });
+            rows.push(RowKind::Stepper {
+                id: "settings/scrollback_background_idle_secs",
+                label: "Idle threshold",
+                text: format!("{} s", v.scrollback_background_idle_secs),
             });
             rows.push(RowKind::Heading("Selection"));
             rows.push(RowKind::Toggle {
@@ -1287,6 +1354,7 @@ fn apply_slider_event(wid: &str, nv: f32, ev: &mut SettingsEvents) {
     match wid {
         "settings/power_mode_intensity" => ev.power_mode_intensity = Some(nv),
         "settings/quake_height" => ev.quake_height = Some(nv),
+        "settings/unfocused_dim" => ev.unfocused_dim = Some(nv),
         _ => {}
     }
 }
@@ -1306,6 +1374,10 @@ fn apply_stepper_event(wid: &str, delta: i32, ev: &mut SettingsEvents) {
         "settings/padding_right" => ev.padding_right_delta = delta,
         "settings/quake_animation_ms" => ev.quake_animation_delta = delta,
         "settings/notify_command_threshold_ms" => ev.notify_threshold_delta = delta,
+        "settings/scrollback_background_cap" => ev.scrollback_background_cap_delta = delta,
+        "settings/scrollback_background_idle_secs" => {
+            ev.scrollback_background_idle_secs_delta = delta
+        }
         _ => {}
     }
 }
@@ -1317,6 +1389,9 @@ fn apply_segmented_event(wid: &str, nv: usize, ev: &mut SettingsEvents) {
         "settings/cursor_style" => ev.cursor_style = Some(nv),
         "settings/tab_bar" => ev.tab_bar_mode = Some(nv),
         "settings/window_effect" => ev.window_effect = Some(nv),
+        "settings/opacity_scope" => ev.opacity_scope = Some(nv),
+        "settings/command_blocks" => ev.command_blocks = Some(nv),
+        "settings/pane_header_style" => ev.pane_header_style = Some(nv),
         _ => {}
     }
 }
@@ -1443,6 +1518,13 @@ mod tests {
             padding_right: 0,
             wallpaper_theme: "",
             popup_scroll: 0.0,
+            unfocused_dim: 0.28,
+            opacity_scope: 0,
+            command_blocks: 1,
+            pane_header_style: 0,
+            pane_headers_single: false,
+            scrollback_background_cap: 0,
+            scrollback_background_idle_secs: 900,
         };
         for sec in SettingsSection::ALL {
             let rows = build_section_rows(*sec, &v);

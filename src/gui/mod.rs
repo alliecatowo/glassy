@@ -676,6 +676,30 @@ pub struct SettingsView<'a> {
     /// popup can easily be taller than the window; this lets it scroll instead
     /// of silently truncating the list past whatever fits.
     pub popup_scroll: f32,
+
+    // --- settings-modularity stream: expose the remaining w15 config keys ---
+    /// Strength of the unfocused-pane dim overlay in `[0, 0.9]` (Panes → Focus
+    /// slider). See `Config::unfocused_dim`.
+    pub unfocused_dim: f32,
+    /// Whether window opacity also applies to terminal text, as a segmented
+    /// index: 0 = Background, 1 = Text. See `Config::opacity_text`.
+    pub opacity_scope: usize,
+    /// Command-block chrome level, as a segmented index: 0 = Off, 1 = Badges,
+    /// 2 = Cards. See `Config::command_blocks`.
+    pub command_blocks: usize,
+    /// Pane header density, as a segmented index: 0 = Full, 1 = Compact. See
+    /// `Config::pane_header_style`.
+    pub pane_header_style: usize,
+    /// Also show a header for a single, unsplit pane. See
+    /// `Config::pane_headers_single`.
+    pub pane_headers_single: bool,
+    /// Lines of scrollback kept for a backgrounded/idle pane once idle past
+    /// `scrollback_background_idle_secs`; `0` disables the cap. See
+    /// `Config::scrollback_background_cap`.
+    pub scrollback_background_cap: usize,
+    /// Seconds a pane must be idle/backgrounded before the cap above applies.
+    /// See `Config::scrollback_background_idle_secs`.
+    pub scrollback_background_idle_secs: u64,
 }
 
 /// The left-sidebar sections of the revamped settings window, in display order.
@@ -867,6 +891,25 @@ pub struct SettingsEvents {
     pub padding_bottom_delta: i32,
     pub padding_left_delta: i32,
     pub padding_right_delta: i32,
+
+    // --- settings-modularity stream: expose the remaining w15 config keys ---
+    /// New unfocused-pane dim strength if the Panes slider moved this frame.
+    pub unfocused_dim: Option<f32>,
+    /// New opacity-scope index if the Appearance segmented control changed
+    /// (0 = Background, 1 = Text).
+    pub opacity_scope: Option<usize>,
+    /// New command-blocks index if the Effects segmented control changed
+    /// (0 = Off, 1 = Badges, 2 = Cards).
+    pub command_blocks: Option<usize>,
+    /// New pane-header-style index if the Panes segmented control changed
+    /// (0 = Full, 1 = Compact).
+    pub pane_header_style: Option<usize>,
+    /// Background-scrollback-cap stepper delta in clicks (-1 / 0 / +1; scaled
+    /// to a 1000-line step by the caller), Advanced section.
+    pub scrollback_background_cap_delta: i32,
+    /// Background-scrollback-idle-seconds stepper delta in clicks (-1 / 0 /
+    /// +1; scaled to a 60s step by the caller), Advanced section.
+    pub scrollback_background_idle_secs_delta: i32,
 }
 
 // ---------------------------------------------------------------------------

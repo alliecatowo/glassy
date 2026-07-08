@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Shift+Enter** emits the modifyOtherKeys form `CSI 27 ; 2 ; 13 ~`, keeping it distinct from a submitting Enter, so prompts that recognise it (e.g. Claude Code) insert a newline instead of running the line.
 
 #### Settings
+- **Every w15 config key now has a settings-panel row**, not just a config-file entry: unfocused-pane dim strength (Panes > Focus slider), `opacity_scope` (Appearance, Background/Text segmented), `command_blocks` chrome level (Effects, Off/Badges/Cards segmented), pane header style + single-pane header (Panes, next to the existing Pane headers toggle), and the background-scrollback cap/idle-threshold steppers (Advanced). All round-trip through Save exactly like the settings that already had rows.
 - **Rename and delete profiles** from Settings > Profiles: each profile row now carries inline **Rename** (edit in place, Enter to save) and **Delete** (two-click confirm) affordances. Deleting the active profile falls back to the base config cleanly.
 - **Quake mode discoverability**: pressing the `quake_toggle` key (default F12) while quake mode is off now shows a toast pointing you at Settings > Quake instead of doing nothing, and the Settings > Quake section notes that Wayland users should bind a compositor key to `glassy toggle` (see `docs/quake-mode.md`). The command palette also always lists a Quake entry now, regardless of mode.
 

@@ -728,6 +728,32 @@ impl App {
         self.settings_saved = false;
     }
 
+    /// Adjust the background-scrollback cap (Advanced section stepper) by `dir`
+    /// (-1/+1) in 1000-line steps, clamped to `[0, SCROLLBACK_MAX]` (matching
+    /// `apply_kv`'s clamp exactly — see `config::parse::apply_kv`'s
+    /// `scrollback_background_cap` arm). `0` disables the cap.
+    pub(crate) fn adjust_scrollback_background_cap(&mut self, dir: i32) {
+        let step = 1000i64;
+        let cur = self.config.scrollback_background_cap as i64;
+        let next = (cur + dir as i64 * step).clamp(0, crate::config::parse::SCROLLBACK_MAX as i64);
+        self.config.scrollback_background_cap = next as usize;
+        self.settings_saved = false;
+    }
+
+    /// Adjust the background-scrollback idle threshold (Advanced section
+    /// stepper) by `dir` (-1/+1) in 60-second steps. UI-clamped to a day
+    /// (`[0, 86_400]`) for sane stepper bounds — `apply_kv` itself accepts any
+    /// `u64` (see `config::parse::apply_kv`'s `scrollback_background_idle_secs`
+    /// arm), so this stays a strict subset of what the config file accepts,
+    /// same convention as `adjust_padding_side`.
+    pub(crate) fn adjust_scrollback_background_idle_secs(&mut self, dir: i32) {
+        let step = 60i64;
+        let cur = self.config.scrollback_background_idle_secs as i64;
+        let next = (cur + dir as i64 * step).clamp(0, 86_400);
+        self.config.scrollback_background_idle_secs = next as u64;
+        self.settings_saved = false;
+    }
+
     /// Copy the config-file path to the OS clipboard (settings ⧉ button).
     pub(crate) fn copy_config_path(&mut self) {
         let path = config_display_path();

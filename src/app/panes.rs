@@ -26,11 +26,9 @@ impl PaneHeaderStyle {
         }
     }
 
-    /// Round-trips `parse`'s output back to a config-file value. Not called yet
-    /// (there's no settings-UI row for this key — see the house rule against
-    /// adding one outside a dedicated UI-exposure stream — so nothing persists it
-    /// via `SAVED_KEYS`), kept for API symmetry and that future stream.
-    #[allow(dead_code)]
+    /// Round-trips `parse`'s output back to a config-file value. Used by
+    /// `settings_save::SAVED_KEYS` to persist the settings-UI Panes → Pane
+    /// header style segmented row.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Full => "full",

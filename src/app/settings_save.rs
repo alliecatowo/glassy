@@ -293,6 +293,27 @@ pub(crate) const SAVED_KEYS: &[SavedKey] = &[
                 .unwrap_or_default()
         },
     },
+    // --- settings-modularity stream: expose the remaining w15 config keys ---
+    SavedKey {
+        key: "command_blocks",
+        get: |c| c.command_blocks.as_str().to_string(),
+    },
+    SavedKey {
+        key: "pane_header_style",
+        get: |c| c.pane_header_style.as_str().to_string(),
+    },
+    SavedKey {
+        key: "pane_headers_single",
+        get: |c| c.pane_headers_single.to_string(),
+    },
+    SavedKey {
+        key: "scrollback_background_cap",
+        get: |c| c.scrollback_background_cap.to_string(),
+    },
+    SavedKey {
+        key: "scrollback_background_idle_secs",
+        get: |c| c.scrollback_background_idle_secs.to_string(),
+    },
 ];
 
 #[cfg(test)]
@@ -368,6 +389,11 @@ mod tests {
         "command_fold",
         "hints_chars",
         "wallpaper_theme",
+        "command_blocks",
+        "pane_header_style",
+        "pane_headers_single",
+        "scrollback_background_cap",
+        "scrollback_background_idle_secs",
     ];
 
     #[test]

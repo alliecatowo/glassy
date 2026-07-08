@@ -1696,6 +1696,11 @@ ctrl+a g g = scroll_top\n\
         config.word_separator = "/:@[]{}".to_string();
         config.font_features = vec!["ss01".to_string(), "calt=0".to_string(), "dlig".to_string()];
         config.custom_effect = [0.11, 0.22, 0.33, 0.44, 0.55, 0.66];
+        config.command_blocks = crate::app::CommandBlocksMode::Cards;
+        config.pane_header_style = crate::app::panes::PaneHeaderStyle::Compact;
+        config.pane_headers_single = true;
+        config.scrollback_background_cap = 12345;
+        config.scrollback_background_idle_secs = 42;
 
         for entry in SAVED_KEYS {
             let serialized = (entry.get)(&config);

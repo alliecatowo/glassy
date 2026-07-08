@@ -125,6 +125,9 @@ const CONFIG_TOGGLES: &[(&str, ConfigToggleField)] = &[
     ("settings/title_show_count", |c| &mut c.title_show_count),
     ("settings/dim_unfocused", |c| &mut c.dim_unfocused),
     ("settings/copy_html", |c| &mut c.copy_html),
+    ("settings/pane_headers_single", |c| {
+        &mut c.pane_headers_single
+    }),
     ("settings/notify_command_finish", |c| {
         &mut c.notify_command_finish
     }),
@@ -1014,6 +1017,20 @@ impl App {
             padding_right: padding_right_px,
             wallpaper_theme: &wallpaper_theme_str,
             popup_scroll,
+            unfocused_dim: config.unfocused_dim,
+            opacity_scope: if config.opacity_text { 1 } else { 0 },
+            command_blocks: match config.command_blocks {
+                crate::app::CommandBlocksMode::Off => 0,
+                crate::app::CommandBlocksMode::Badges => 1,
+                crate::app::CommandBlocksMode::Cards => 2,
+            },
+            pane_header_style: match config.pane_header_style {
+                crate::app::panes::PaneHeaderStyle::Full => 0,
+                crate::app::panes::PaneHeaderStyle::Compact => 1,
+            },
+            pane_headers_single: config.pane_headers_single,
+            scrollback_background_cap: config.scrollback_background_cap,
+            scrollback_background_idle_secs: config.scrollback_background_idle_secs,
         };
         ui.build_settings((sw as f32, sh as f32), &view, fields)
     }
@@ -1143,6 +1160,43 @@ impl App {
         }
         if let Some(cs_idx) = ev.cursor_style {
             self.set_cursor_style_index(cs_idx);
+            changed = true;
+        }
+        // --- settings-modularity stream: remaining w15 config keys ---
+        if let Some(d) = ev.unfocused_dim {
+            self.config.unfocused_dim = d.clamp(0.0, 0.9);
+            self.settings_saved = false;
+            changed = true;
+        }
+        if let Some(idx) = ev.opacity_scope {
+            self.config.opacity_text = idx != 0;
+            self.settings_saved = false;
+            changed = true;
+        }
+        if let Some(idx) = ev.command_blocks {
+            self.config.command_blocks = match idx {
+                0 => crate::app::CommandBlocksMode::Off,
+                2 => crate::app::CommandBlocksMode::Cards,
+                _ => crate::app::CommandBlocksMode::Badges,
+            };
+            self.settings_saved = false;
+            changed = true;
+        }
+        if let Some(idx) = ev.pane_header_style {
+            self.config.pane_header_style = if idx == 1 {
+                crate::app::panes::PaneHeaderStyle::Compact
+            } else {
+                crate::app::panes::PaneHeaderStyle::Full
+            };
+            self.settings_saved = false;
+            changed = true;
+        }
+        if ev.scrollback_background_cap_delta != 0 {
+            self.adjust_scrollback_background_cap(ev.scrollback_background_cap_delta);
+            changed = true;
+        }
+        if ev.scrollback_background_idle_secs_delta != 0 {
+            self.adjust_scrollback_background_idle_secs(ev.scrollback_background_idle_secs_delta);
             changed = true;
         }
         // --- settings-themes stream events ---
