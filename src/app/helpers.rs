@@ -34,6 +34,12 @@ pub(crate) const CLOSE_BOX: f32 = 16.0;
 /// Square icon-button size for +/#/?/* controls (px).
 pub(crate) const CTRL_BTN: f32 = 28.0;
 
+/// Width of the borderless-window resize border zone (px). A left press within
+/// this many pixels of a window edge/corner starts an OS-driven resize drag
+/// (glassy owns the edge once the native decorations are off — see
+/// [`resize_edge_at`]). Kept small so it doesn't steal ordinary content clicks.
+pub(crate) const RESIZE_BORDER: f32 = 6.0;
+
 /// Corner radius for tab-bar icon buttons, derived from the cell height like the
 /// GUI metric scale so it tracks the font/DPI.
 pub(crate) fn gui_radius(cell_h: f32) -> f32 {
@@ -161,6 +167,12 @@ pub(crate) enum StripItem {
     Help,
     Settings,
     Menu,
+    /// Borderless-window controls painted in the top-right chrome on non-macOS
+    /// (macOS keeps its native traffic lights). Only laid out when glassy owns the
+    /// window edge — see [`right_control_items`].
+    WinMinimize,
+    WinMaximize,
+    WinClose,
 }
 
 /// One placed tab-bar item with its pixel rect. The label is carried for the tab

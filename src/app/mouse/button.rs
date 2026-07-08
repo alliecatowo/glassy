@@ -166,6 +166,23 @@ impl App {
             return;
         }
 
+        // Borderless window-edge resize: with the native decorations off, glassy
+        // owns the window edge, so a left press within the resize border starts an
+        // OS-driven resize drag (winit's `drag_resize_window`). Non-macOS only —
+        // macOS keeps its native frame's resize handles. Checked before the tab
+        // strip / pane / content paths so the edge zone wins over them.
+        #[cfg(not(target_os = "macos"))]
+        if button == MouseButton::Left
+            && pressed
+            && let Some(dir) = self.window_resize_edge_at_pointer()
+        {
+            if let Some(w) = self.window.as_ref() {
+                let _ = w.drag_resize_window(dir);
+            }
+            self.held_button = None;
+            return;
+        }
+
         if !pressed {
             self.dragging_tab = None; // end any tab drag-reorder on release
             self.minimap_dragging = false; // end any minimap scrub on release

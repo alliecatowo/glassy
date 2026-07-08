@@ -69,12 +69,26 @@ impl ApplicationHandler<UserEvent> for App {
             WindowAttributesExtWayland::with_name(attrs, "glassy", "glassy")
         };
 
+        // Own the window edge everywhere: go borderless so glassy's own top chrome
+        // (tab bar + window controls) is the only chrome, killing the OS/WM-drawn
+        // title bar and the hairline window border that ignore the glassy theme.
+        // The `decorations = true` escape hatch restores the native frame for users
+        // / WMs that want server-side decorations. macOS is handled separately below
+        // (the fullsize-content-view path is its borderless look, and keeps the
+        // native traffic-light buttons), so only toggle plain decorations off here.
+        #[cfg(not(target_os = "macos"))]
+        let attrs = attrs.with_decorations(self.config.decorations);
+
         // macOS: drop the separate OS title bar and let glassy's own content fill
         // the whole window (ghostty-style). The traffic-light buttons float over
         // the top-left; glassy's top chrome band insets past them (see
-        // TRAFFIC_LIGHT_INSET). title_hidden removes the centered title text.
+        // TRAFFIC_LIGHT_INSET). title_hidden removes the centered title text. When
+        // `decorations = true` the user opted back into the native frame, so leave
+        // the standard decorated NSWindow untouched.
         #[cfg(target_os = "macos")]
-        let attrs = {
+        let attrs = if self.config.decorations {
+            attrs
+        } else {
             use winit::platform::macos::WindowAttributesExtMacOS;
             attrs
                 .with_titlebar_transparent(true)
@@ -94,9 +108,12 @@ impl ApplicationHandler<UserEvent> for App {
         // macOS: with the title bar hidden and content fullsize, AppKit's titlebar
         // would auto-drag the window when the user drags our tab chips. Disable
         // OS-driven window moving so tab drags reach glassy; empty chrome areas
-        // move the window manually via `drag_window()` (see strip_click).
+        // move the window manually via `drag_window()` (see strip_click). Skip it
+        // when `decorations = true` (native frame): the real titlebar handles drags.
         #[cfg(target_os = "macos")]
-        Self::disable_macos_window_drag(&window);
+        if !self.config.decorations {
+            Self::disable_macos_window_drag(&window);
+        }
 
         let ms = |t: Instant| t.elapsed().as_secs_f64() * 1000.0;
         log::info!("startup: window created at {:.1} ms", ms(self.started));

@@ -290,6 +290,7 @@ impl App {
         let tab_pane_counts = self.tab_pane_counts();
         let tab_active_pos = self.active_pos();
         let tab_left_inset = self.chrome_left_inset();
+        let tab_win_controls = self.show_window_controls();
         let tab_strip_visible = self.tab_bar_visible();
         let new_tab_key = Self::tab_bar_key(
             &tab_snapshot,
@@ -447,7 +448,13 @@ impl App {
             // icon cluster (Help/Settings/Menu) in the top-right corner — it's
             // window chrome, not per-pane, so a split must not make it vanish.
             renderer.begin_tab_overlay();
-            Self::paint_floating_icons(renderer, tab_hovered, tab_held, tab_focused);
+            Self::paint_floating_icons(
+                renderer,
+                tab_hovered,
+                tab_held,
+                tab_focused,
+                tab_win_controls,
+            );
             renderer.commit_tab_overlay();
         } else if tab_bar_rebuild {
             renderer.begin_tab_overlay();
@@ -466,6 +473,7 @@ impl App {
                 &tab_pane_counts,
                 tab_active_pos,
                 tab_left_inset,
+                tab_win_controls,
             );
             renderer.commit_tab_overlay();
         } else {

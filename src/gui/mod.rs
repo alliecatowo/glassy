@@ -626,6 +626,10 @@ pub struct SettingsView<'a> {
     pub quake_height: f32,
     /// Quake slide animation duration in ms (0..5000).
     pub quake_animation_ms: u64,
+    /// Keep the native OS window frame instead of glassy's borderless chrome.
+    /// Restart-only: the frame is chosen once at window creation, so flipping
+    /// this live only takes effect after relaunch (labeled as such in the UI).
+    pub decorations: bool,
     /// Fire a desktop notification when a long-running command finishes.
     pub notify_command_finish: bool,
     /// Minimum command duration (ms) that triggers the notification.

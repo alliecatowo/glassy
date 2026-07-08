@@ -261,6 +261,31 @@ impl App {
         None
     }
 
+    /// Resize direction for the current pointer position against the borderless
+    /// window edge, or `None` when the native frame is kept (`decorations = true`),
+    /// the window is a quake dropdown (fixed geometry), the window is maximized
+    /// (no edges to grab), or the pointer isn't in the resize border. Non-macOS
+    /// only (macOS keeps its native resize handles).
+    #[cfg(not(target_os = "macos"))]
+    pub(crate) fn window_resize_edge_at_pointer(&self) -> Option<winit::window::ResizeDirection> {
+        if self.config.decorations || self.quake.is_some() {
+            return None;
+        }
+        let renderer = self.renderer.as_ref()?;
+        let window = self.window.as_ref()?;
+        if window.is_maximized() {
+            return None;
+        }
+        let (sw, sh) = renderer.surface_size();
+        resize_edge_at(
+            self.mouse_px.0 as f32,
+            self.mouse_px.1 as f32,
+            sw as f32,
+            sh as f32,
+            RESIZE_BORDER,
+        )
+    }
+
     pub(crate) fn strip_click(&mut self, event_loop: &ActiveEventLoop) -> bool {
         if self.renderer.is_none() {
             return false;
@@ -272,12 +297,19 @@ impl App {
         // and fall through to the terminal — no separate y-range guard needed.
         let item = self.strip_item_at_px(x as f32, y as f32);
         if item.is_none() {
-            // Empty space in the top chrome band: drag the window (macOS, where the
-            // OS title bar is hidden and its auto-drag disabled, so we move the
-            // window manually — this is what the titlebar drag used to do). Below
-            // the band, fall through to the terminal.
+            // Empty space in the top chrome band moves the window: glassy owns the
+            // top chrome on every platform now (borderless), so dragging an empty
+            // band area does what the native title bar used to. `drag_window()`
+            // starts an OS-driven move; below the band we fall through to the
+            // terminal. Skipped only when the user kept the native frame
+            // (`decorations = true`) on non-macOS, where a real title bar exists
+            // above the client area to handle moves (macOS always hides its bar).
+            #[cfg(not(target_os = "macos"))]
+            let want_drag = !self.config.decorations;
             #[cfg(target_os = "macos")]
-            if (y as f32) < self.effective_tab_bar_h()
+            let want_drag = true;
+            if want_drag
+                && (y as f32) < self.effective_tab_bar_h()
                 && let Some(w) = self.window.as_ref()
             {
                 let _ = w.drag_window();
@@ -422,6 +454,26 @@ impl App {
                 // next overlay and swallow that overlay's first dismiss click.
                 self.force_full_redraw = true;
                 self.mark_dirty(event_loop);
+            }
+            Some(StripItem::WinMinimize) => {
+                if let Some(w) = self.window.as_ref() {
+                    w.set_minimized(true);
+                }
+            }
+            Some(StripItem::WinMaximize) => {
+                if let Some(w) = self.window.as_ref() {
+                    let maximized = w.is_maximized();
+                    w.set_maximized(!maximized);
+                }
+            }
+            Some(StripItem::WinClose) => {
+                // Same graceful shutdown as the OS close button (CloseRequested):
+                // stop the PTY, then exit the loop. glassy is single-window, so
+                // closing the window quits.
+                if let Some(pty) = &self.pty {
+                    pty.shutdown();
+                }
+                event_loop.exit();
             }
             None => {
                 // Double-click on empty tab bar area toggles maximize.

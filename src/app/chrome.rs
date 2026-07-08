@@ -136,6 +136,10 @@ const CONFIG_TOGGLES: &[(&str, ConfigToggleField)] = &[
     // `SettingsSection::Quake` in `settings_panel.rs`), and the value is
     // still persisted on Save for the next launch.
     ("settings/quake", |c| &mut c.quake),
+    // Like quake, `decorations` only takes effect at window creation
+    // (`resumed()`), so flipping it live has no immediate effect — the Settings
+    // UI labels it "(restart required)". The value is still persisted on Save.
+    ("settings/decorations", |c| &mut c.decorations),
 ];
 
 // --- Status bar: data-driven segment table --------------------------------
@@ -990,6 +994,7 @@ impl App {
             quake: config.quake,
             quake_height: config.quake_height,
             quake_animation_ms: config.quake_animation_ms,
+            decorations: config.decorations,
             notify_command_finish: config.notify_command_finish,
             notify_command_threshold_ms: config.notify_command_threshold_ms,
             command_fold: config.command_fold,

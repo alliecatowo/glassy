@@ -203,6 +203,13 @@ pub(crate) const SAVED_KEYS: &[SavedKey] = &[
         key: "quake_animation_ms",
         get: |c| c.quake_animation_ms.to_string(),
     },
+    // Decorations is restart-only (the frame is chosen once at window creation in
+    // `resumed()`), but like `quake` the toggle writes through `Config` live so
+    // Save persists it for the next launch.
+    SavedKey {
+        key: "decorations",
+        get: |c| c.decorations.to_string(),
+    },
     SavedKey {
         key: "power_mode",
         get: |c| c.power_mode.to_string(),
@@ -342,6 +349,7 @@ mod tests {
         "quake",
         "quake_height",
         "quake_animation_ms",
+        "decorations",
         "power_mode",
         "power_mode_intensity",
         "dim_unfocused",

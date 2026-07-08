@@ -891,6 +891,15 @@ fn build_section_rows<'a>(section: SettingsSection, v: &'a SettingsView<'a>) -> 
                 label: "Minimap",
                 value: v.minimap,
             });
+            rows.push(RowKind::Heading("Window frame"));
+            rows.push(RowKind::Toggle {
+                id: "settings/decorations",
+                label: "Native OS title bar",
+                value: v.decorations,
+            });
+            rows.push(RowKind::Info(
+                "Restart required — off means glassy draws its own borderless chrome.",
+            ));
         }
         SettingsSection::Effects => {
             rows.push(RowKind::Heading("Window effect"));
@@ -1414,6 +1423,7 @@ mod tests {
             quake: false,
             quake_height: 0.5,
             quake_animation_ms: 180,
+            decorations: false,
             notify_command_finish: true,
             notify_command_threshold_ms: 10_000,
             command_fold: true,

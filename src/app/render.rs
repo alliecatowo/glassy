@@ -121,6 +121,10 @@ impl App {
         let tab_pane_counts = self.tab_pane_counts();
         let tab_active_pos = self.active_pos();
         let tab_left_inset = self.chrome_left_inset();
+        // Whether glassy paints its own window min/max/close controls (borderless,
+        // non-macOS). Constant per session (decorations is restart-only), so it is
+        // not part of the tab-bar rebuild key.
+        let tab_win_controls = self.show_window_controls();
         // Modifier-HOLD numbered overlay: when the primary modifier has been held
         // alone past the dwell, collect the visible tab chip rects + positions so
         // the painter can stamp a number badge on each (drawn after the cached bar
@@ -339,7 +343,7 @@ impl App {
                 // doesn't wash over the icons. When the strip is visible the header
                 // sits below it, so no inset is needed.
                 if !tab_strip_visible {
-                    let reserve = floating_icons_reserved_w();
+                    let reserve = floating_icons_reserved_w(self.show_window_controls());
                     area.w = (area.w as f32 - reserve).max(0.0) as i32;
                 }
                 area
@@ -950,7 +954,13 @@ impl App {
             // Strip hidden (single tab in Auto, or Never): paint only the three
             // floating icon buttons so Help/Settings/Menu remain reachable.
             renderer.begin_tab_overlay();
-            Self::paint_floating_icons(renderer, tab_hovered, tab_held, tab_focused);
+            Self::paint_floating_icons(
+                renderer,
+                tab_hovered,
+                tab_held,
+                tab_focused,
+                tab_win_controls,
+            );
             renderer.commit_tab_overlay();
         } else if tab_bar_rebuild {
             renderer.begin_tab_overlay();
@@ -969,6 +979,7 @@ impl App {
                 &tab_pane_counts,
                 tab_active_pos,
                 tab_left_inset,
+                tab_win_controls,
             );
             renderer.commit_tab_overlay();
         } else {

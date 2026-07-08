@@ -287,6 +287,7 @@ pub(super) struct RawConfig {
     pub quake: Option<bool>,
     pub quake_height: Option<f32>,
     pub quake_animation_ms: Option<u64>,
+    pub decorations: Option<bool>,
     pub command_history: Option<usize>,
     pub dim_unfocused: Option<bool>,
     pub unfocused_dim: Option<f32>,
@@ -489,6 +490,7 @@ impl RawConfig {
             command_badges: self.command_badges.unwrap_or(true),
             minimap: self.minimap.unwrap_or(false),
             quake: self.quake.unwrap_or(false),
+            decorations: self.decorations.unwrap_or(false),
             quake_height: {
                 let h = self.quake_height.unwrap_or(0.5);
                 if h.is_finite() && (QUAKE_HEIGHT_MIN..=QUAKE_HEIGHT_MAX).contains(&h) {
@@ -1491,6 +1493,9 @@ pub(super) fn apply_kv(key: &str, value: &str, raw: &mut RawConfig) -> Result<()
         }
         "quake" => {
             raw.quake = Some(parse_bool(value, "quake")?);
+        }
+        "decorations" => {
+            raw.decorations = Some(parse_bool(value, "decorations")?);
         }
         "quake_height" => {
             let h: f32 = value

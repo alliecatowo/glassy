@@ -240,6 +240,16 @@ pub struct Config {
     /// Quake slide animation duration in milliseconds (each direction). 0 disables
     /// the animation (instant show/hide). Default 180 ms.
     pub quake_animation_ms: u64,
+    /// Keep the native OS window frame (title bar + border + resize handles)
+    /// instead of glassy's own borderless client-side decorations. Default false:
+    /// glassy runs borderless everywhere and paints its own top chrome (tab bar +
+    /// window controls), so the OS never draws a system-themed title bar or a
+    /// hairline window border that ignores the glassy theme. Set `decorations =
+    /// true` to restore the native frame (an escape hatch for users/WMs that want
+    /// server-side decorations). Applied once at window creation — restart
+    /// required. On macOS `false` uses the fullsize-content-view path that keeps
+    /// the native traffic-light buttons floating over glassy's chrome.
+    pub decorations: bool,
     /// Number of recently-run shell commands to retain for the command palette's
     /// history source (captured from OSC 133 `B`..`C` zones). 0 disables capture.
     /// Default 200.

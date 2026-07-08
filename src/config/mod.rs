@@ -53,6 +53,7 @@
 //! quake       = false                  # quake/dropdown mode: borderless slide-down window
 //! quake_height = 0.5                   # fraction of the monitor height (0.1..1.0)
 //! quake_animation_ms = 180             # slide duration in ms (0 = instant)
+//! decorations = false                  # keep the native OS window frame (true = OS title bar/border; false = glassy's own borderless chrome)
 //! copy_on_select = false               # copy a selection to the clipboard as soon as it is made
 //! copy_html   = false                  # also place a rich-text (HTML) flavor on the clipboard on copy
 //! power_mode  = false                  # fun typing effect: cursor particle bursts + streak shake
@@ -491,6 +492,19 @@ mod tests {
         assert!(s.config.quake);
         assert!((s.config.quake_height - 0.4).abs() < 1e-6);
         assert_eq!(s.config.quake_animation_ms, 250);
+    }
+
+    #[test]
+    fn decorations_defaults_off_and_parses() {
+        // Default is borderless (own chrome) — decorations off.
+        let settings = RawConfig::default().into_settings().unwrap();
+        assert!(!settings.config.decorations);
+
+        let mut raw = RawConfig::default();
+        parse_config_file("decorations = true\n", &mut raw).unwrap();
+        assert_eq!(raw.decorations, Some(true));
+        let s = raw.into_settings().unwrap();
+        assert!(s.config.decorations);
     }
 
     #[test]
