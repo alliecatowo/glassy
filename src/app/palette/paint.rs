@@ -40,13 +40,17 @@ impl App {
         sel: usize,
         mouse: (f32, f32),
     ) -> Vec<(usize, gui::Rect)> {
-        let m = renderer.cell_metrics();
-        let cell_w = m.width;
-        let cell_h = m.height;
-        let pad = (cell_h * 0.5).round();
-        let gap = (cell_h * 0.35).round();
-        let radius = (cell_h * 0.28).round().clamp(4.0, 8.0);
-        let row_h = (cell_h * 1.55).round();
+        let cm = renderer.cell_metrics();
+        let cell_w = cm.width;
+        let cell_h = cm.height;
+        // Reuse the shared design-system Metrics instead of re-deriving the same
+        // pad/gap/radius/row-height formulas by hand, so the palette scales and
+        // rounds exactly like the rest of the chrome.
+        let m = gui::Metrics::new(cell_w, cell_h);
+        let pad = m.pad;
+        let gap = m.gap;
+        let radius = m.radius;
+        let row_h = m.row_h;
 
         // Full-surface scrim.
         renderer.push_overlay_px(0.0, 0.0, surface.0, surface.1, [0.0, 0.0, 0.0, 0.5]);
@@ -72,10 +76,10 @@ impl App {
             panel.y,
             panel.w,
             panel.h,
-            radius + 2.0,
+            m.r_lg,
             gui::glass_float(),
         );
-        renderer.push_overlay_rrect_px(panel.x, panel.y, panel.w, 2.0, radius + 2.0, gui::rail());
+        renderer.push_overlay_rrect_px(panel.x, panel.y, panel.w, 2.0, m.r_lg, gui::rail());
 
         let inner_x = panel.x + pad;
         let inner_w = panel.w - 2.0 * pad;

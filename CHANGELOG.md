@@ -59,6 +59,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Command-palette query field** uses the theme-aware recessed-track fill instead of a flat black box that was opaque and out of place on light themes.
 - **Keyboard focus ring** on the accent-filled Save button no longer overpaints the accent body grey — the ring subtracts the button's own fill.
 
+#### Chrome design tokens
+- **Unified floating-surface elevation.** The E3 floating fill (dropdowns, dialogs, drag-ghost, toasts, inline peek, command palette) now derives from the theme background like the rest of the chrome instead of the selection color, so all elevation tiers share one hue and differ only by amount. The command palette also reuses the shared metric scale instead of re-deriving pad/gap/radius by hand.
+
 ---
 
 ## [0.4.4] - 2026-07-02
