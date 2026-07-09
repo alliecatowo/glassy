@@ -19,9 +19,9 @@ class Glassy < Formula
   # prebuilt binary for speed), this formula deliberately always builds from
   # source — that's the point of it: a homebrew-core submission requires a
   # build-from-source formula, since core disallows vendored binaries.
-  url "https://github.com/alliecatowo/glassy/releases/download/v0.5.0/glassy-0.5.0-src.tar.gz"
-  version "0.5.0"
-  sha256 "78015a1208f3ef39d7b9b231d31c66de39c09f8a3c5bfbf9835cdeb9ec748cf7"
+  url "https://github.com/alliecatowo/glassy/releases/download/v0.6.0/glassy-0.6.0-src.tar.gz"
+  version "0.6.0"
+  sha256 "91da073be239c6bed6f0dfc5443429fb7af30517c6c1f0b1bbd168e57f16ed32"
   license "MIT"
   head "https://github.com/alliecatowo/glassy.git", branch: "main"
 

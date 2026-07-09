@@ -23,9 +23,9 @@
 class Glassy < Formula
   desc "Fast, minimal GPU-accelerated terminal emulator written in Rust"
   homepage "https://github.com/alliecatowo/glassy"
-  url "https://github.com/alliecatowo/glassy/releases/download/v0.5.0/glassy-0.5.0-src.tar.gz"
-  version "0.5.0"
-  sha256 "78015a1208f3ef39d7b9b231d31c66de39c09f8a3c5bfbf9835cdeb9ec748cf7"
+  url "https://github.com/alliecatowo/glassy/releases/download/v0.6.0/glassy-0.6.0-src.tar.gz"
+  version "0.6.0"
+  sha256 "91da073be239c6bed6f0dfc5443429fb7af30517c6c1f0b1bbd168e57f16ed32"
   license "MIT"
 
   head do
@@ -39,12 +39,12 @@ class Glassy < Formula
   # arch, so `brew install glassy` on macOS never touches the url/sha256 above.
   on_macos do
     on_arm do
-      url "https://github.com/alliecatowo/glassy/releases/download/v0.5.0/glassy-aarch64-macos"
-      sha256 "0b014726660ced595bfb3e906dc7f72238e45cdb975366f0515a648ab2ed405f"
+      url "https://github.com/alliecatowo/glassy/releases/download/v0.6.0/glassy-aarch64-macos"
+      sha256 "d0bbc3db347faf075d88fd5bff203fb4eb0d32d27b646fbd58736656de66f653"
     end
     on_intel do
-      url "https://github.com/alliecatowo/glassy/releases/download/v0.5.0/glassy-x86_64-macos"
-      sha256 "d967aa1558b81f204f9498b1f5a5898bc76a528a142e14e761424477915e52e5"
+      url "https://github.com/alliecatowo/glassy/releases/download/v0.6.0/glassy-x86_64-macos"
+      sha256 "18960193abbb37fc82ceef3dceb3027ae96741655298a6ba9c373804f52cb751"
     end
   end
 
