@@ -17,6 +17,9 @@ shipped.
 
 ## [Unreleased]
 
+### Fixed
+- **Linux aarch64 release builds actually succeed now**, instead of silently failing best-effort on every release. The cross-compile container was missing `libdbus-1-dev` (needed by `notify-rust`'s `libdbus-sys`), and separately `pkg-config` refuses to run cross-compiled at all unless told to — both are now handled (`Cross.toml`, `PKG_CONFIG_ALLOW_CROSS`). Verified with a full local cross-build, not just inferred from the error message.
+
 ## [0.6.1] - 2026-07-08
 
 ### Fixed

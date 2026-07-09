@@ -1,0 +1,21 @@
+# Config for `cross` (used by the Linux aarch64 release build; see
+# .github/workflows/release.yml). The stock cross-rs image for this target
+# doesn't ship libdbus's dev headers, which notify-rust's libdbus-sys build
+# script needs via pkg-config — every other system lib the build needs
+# (fontconfig, wayland, vulkan, xkbcommon, asound) is already present in the
+# image; only this one was missing.
+[target.aarch64-unknown-linux-gnu]
+pre-build = [
+    "dpkg --add-architecture arm64",
+    "apt-get update",
+    "apt-get install --assume-yes libdbus-1-dev:arm64 pkg-config",
+]
+
+# pkg-config-rs (what libdbus-sys's build script uses) refuses to run
+# pkg-config at all when HOST != TARGET unless explicitly told cross-compiling
+# is fine — confirmed locally: even with the .pc file present, the build
+# script panics with "pkg-config has not been configured to support
+# cross-compilation" until this is set. Passed through from the host env (see
+# the `env:` on the "Cross-build aarch64" workflow step) rather than assumed.
+[build.env]
+passthrough = ["PKG_CONFIG_ALLOW_CROSS"]

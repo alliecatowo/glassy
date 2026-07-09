@@ -7,7 +7,7 @@ name: Release
 #     Cargo.toml and a release is cut ONLY if one for that version does not
 #     already exist (the resolve-version job below computes `is_new`), so
 #     re-merges / unrelated main pushes are no-ops.
-#   * manual dispatch — validate the macOS/Windows build jobs on demand
+#   * manual dispatch — validate the macOS build jobs on demand
 #     (e.g. `gh workflow run release.yml --ref develop`) without cutting a
 #     release; on a non-tag ref the version falls back to Cargo.toml and the
 #     publish step is gated on `is_new`.
@@ -33,9 +33,12 @@ permissions:
   contents: write
 
 # ---------------------------------------------------------------------------
-# Build matrix — Linux x86_64 is required; aarch64 cross-compiled via
-# cross. macOS and Windows jobs are scaffolded but set continue-on-error
-# because those build targets are not yet verified green.
+# Build matrix — Linux x86_64 and macOS (both arches) are required and gate
+# `publish`; aarch64 cross-compiled via cross (verified green, but still
+# outside publish's gate — see Cross.toml for its one extra system dep). No
+# Windows build: it isn't a supported target yet (no Vulkan/GPU backend or
+# packaging story worked out), so it isn't scaffolded here at all rather than
+# sitting as a permanently-red TODO job.
 # ---------------------------------------------------------------------------
 jobs:
   # -------------------------------------------------------------------------
@@ -172,13 +175,15 @@ jobs:
           path: dist/
 
   # -------------------------------------------------------------------------
-  # Linux aarch64 (cross-compiled; best-effort)
+  # Linux aarch64 (cross-compiled). Verified green locally (see Cross.toml) —
+  # still not in `publish`'s `needs`/`if` gate though, so a regression here
+  # surfaces as a red job in the Actions UI without blocking the release
+  # (unlike Linux x86_64 / macOS, which do gate publish).
   # -------------------------------------------------------------------------
   build-linux-aarch64:
     name: Build — Linux aarch64
     needs: [resolve-version]
     runs-on: ubuntu-latest
-    continue-on-error: true  # aarch64 cross not yet validated; flip to false once green
     steps:
       - uses: actions/checkout@v4
 
@@ -201,6 +206,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Cross-build aarch64
+        env:
+          # See Cross.toml: pkg-config-rs refuses to run at all when
+          # HOST != TARGET unless told cross-compiling is intentional here.
+          PKG_CONFIG_ALLOW_CROSS: "1"
         run: cross build --release --locked --target aarch64-unknown-linux-gnu
 
       - name: Stage artifact
@@ -435,54 +444,27 @@ jobs:
             dist/${{ env.BIN }}-${{ matrix.arch }}-macos
 
   # -------------------------------------------------------------------------
-  # Windows (scaffolded; TODO: not yet green)
-  # -------------------------------------------------------------------------
-  build-windows:
-    name: Build — Windows (TODO)
-    runs-on: windows-latest
-    continue-on-error: true  # TODO: Windows build not yet verified; enable once deps resolved
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-
-      # TODO: install Windows build deps (Vulkan SDK, fontconfig-windows, etc.).
-      - name: Build release
-        run: cargo build --release --locked
-
-      - name: Stage artifact
-        run: |
-          New-Item -ItemType Directory -Force dist
-          Copy-Item target\release\${{ env.BIN }}.exe dist\${{ env.BIN }}-x86_64-windows.exe
-        shell: pwsh
-
-      # TODO: create NSIS / WiX installer.
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: windows
-          path: dist/
-
-  # -------------------------------------------------------------------------
-  # Publish GitHub Release — runs after all builds; includes macOS now
-  # that build-macos is no longer best-effort. Linux x86_64 is required;
-  # macos, linux-aarch64, and windows are optional (if they passed).
+  # Publish GitHub Release — runs after all builds. Linux x86_64 AND macOS
+  # (both matrix legs) are required — macOS is a first-class target, not a
+  # best-effort extra, so a broken mac build blocks the release instead of
+  # silently shipping without mac assets. Only linux-aarch64 is optional
+  # (if it passed).
   # -------------------------------------------------------------------------
   publish:
     name: Publish GitHub Release
     needs: [resolve-version, build-linux-x86_64, build-macos]
-    # Publish only when (a) Linux x86_64 built, and (b) this version is NEW —
-    # i.e. no tag/release already exists for it. The is_new guard is what makes
-    # the main-push trigger safe: a re-merge or an unrelated push to main where
-    # Cargo.toml's version was already released becomes a no-op here. Optional
-    # build jobs (aarch64/windows) may fail without blocking the release.
+    # Publish only when (a) Linux x86_64 built, (b) macOS built (both arches —
+    # a matrix job's result is 'failure' if any leg failed), and (c) this
+    # version is NEW — i.e. no tag/release already exists for it. The is_new
+    # guard is what makes the main-push trigger safe: a re-merge or an
+    # unrelated push to main where Cargo.toml's version was already released
+    # becomes a no-op here. Only the optional aarch64 build job may fail
+    # without blocking the release.
     # A plain workflow_dispatch is a BUILD-ONLY TEST (publish=false default) and
     # skips this job — which gates the whole publish chain (homebrew/aur/dnf/apt
     # all `needs: publish`). Tag/main pushes always publish; a dispatch publishes
     # only when explicitly requested with publish=true.
-    if: always() && needs.build-linux-x86_64.result == 'success' && needs.resolve-version.outputs.is_new == 'true' && (github.event_name != 'workflow_dispatch' || github.event.inputs.publish == 'true')
+    if: always() && needs.build-linux-x86_64.result == 'success' && needs.build-macos.result == 'success' && needs.resolve-version.outputs.is_new == 'true' && (github.event_name != 'workflow_dispatch' || github.event.inputs.publish == 'true')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -495,7 +477,7 @@ jobs:
           echo "tag=${{ needs.resolve-version.outputs.tag }}" >> "$GITHUB_OUTPUT"
 
       # Download all successfully-uploaded artifacts (pattern '*' catches
-      # linux-x86_64, and any of linux-aarch64 / macos / windows that passed).
+      # linux-x86_64, and linux-aarch64 / macos if they passed).
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
@@ -508,35 +490,59 @@ jobs:
           cd release
           sha256sum * > SHA256SUMS
 
+      # Pull this version's own section out of CHANGELOG.md (between its
+      # `## [x.y.z] - ...` header and the next `## [` header) so the release
+      # notes are the actual per-version changelog, not just the generic
+      # install blurb. Written OUTSIDE release/ — that dir's contents become
+      # release assets (`files: release/*` below) and shouldn't include the
+      # notes file itself.
+      - name: Extract changelog section
+        id: notes
+        run: |
+          VERSION="${{ steps.meta.outputs.version }}"
+          awk -v ver="$VERSION" '
+            $0 ~ "^## \\[" ver "\\]" { found=1; next }
+            found && /^## \[/ { exit }
+            found { print }
+          ' CHANGELOG.md > /tmp/changelog-section.md
+          if [[ ! -s /tmp/changelog-section.md ]]; then
+            echo "::warning::no CHANGELOG.md section found for version ${VERSION}"
+            echo "_(no changelog entry found for this version)_" > /tmp/changelog-section.md
+          fi
+
+          {
+            echo "## glassy ${{ steps.meta.outputs.tag }}"
+            echo
+            cat /tmp/changelog-section.md
+            echo
+            echo "### Install"
+            echo
+            echo '```sh'
+            echo "curl -fsSL https://raw.githubusercontent.com/alliecatowo/glassy/main/scripts/install.sh | bash"
+            echo '```'
+            echo
+            echo "Or pick a package below:"
+            echo
+            echo "| Platform | Package |"
+            echo "|----------|---------|"
+            echo "| Debian/Ubuntu | \`glassy_${VERSION}_amd64.deb\` |"
+            echo "| Fedora/RHEL/openSUSE | \`glassy-${VERSION}-*.rpm\` |"
+            echo "| Linux x86_64 (binary) | \`glassy-x86_64-linux\` |"
+            echo "| Linux aarch64 (binary) | \`glassy-aarch64-linux\` _(if green)_ |"
+            echo "| macOS Apple Silicon (.dmg) | \`glassy-${VERSION}-macos-aarch64.dmg\` |"
+            echo "| macOS Apple Silicon (bare binary) | \`glassy-aarch64-macos\` |"
+            echo "| macOS Intel (.dmg) | \`glassy-${VERSION}-macos-x86_64.dmg\` |"
+            echo "| macOS Intel (bare binary) | \`glassy-x86_64-macos\` |"
+            echo
+            echo "Verify any download against \`SHA256SUMS\`."
+          } > /tmp/release-notes.md
+
       - name: Create / update GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.meta.outputs.tag }}
           name: glassy ${{ steps.meta.outputs.tag }}
-          body: |
-            ## glassy ${{ steps.meta.outputs.tag }}
-
-            ### Install
-
-            ```sh
-            curl -fsSL https://raw.githubusercontent.com/alliecatowo/glassy/main/scripts/install.sh | bash
-            ```
-
-            Or pick a package below:
-
-            | Platform | Package |
-            |----------|---------|
-            | Debian/Ubuntu | `glassy_${{ steps.meta.outputs.version }}_amd64.deb` |
-            | Fedora/RHEL/openSUSE | `glassy-${{ steps.meta.outputs.version }}-*.rpm` |
-            | Linux x86_64 (binary) | `glassy-x86_64-linux` |
-            | Linux aarch64 (binary) | `glassy-aarch64-linux` _(if green)_ |
-            | macOS Apple Silicon (.dmg) | `glassy-${{ steps.meta.outputs.version }}-macos-aarch64.dmg` |
-            | macOS Apple Silicon (bare binary) | `glassy-aarch64-macos` |
-            | macOS Intel (.dmg) | `glassy-${{ steps.meta.outputs.version }}-macos-x86_64.dmg` |
-            | macOS Intel (bare binary) | `glassy-x86_64-macos` |
-            | Windows | `glassy-x86_64-windows.exe` _(if green)_ |
-
-            Verify any download against `SHA256SUMS`.
+          body_path: /tmp/release-notes.md
           files: release/*
           fail_on_unmatched_files: false
           draft: false
