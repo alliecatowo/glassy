@@ -103,6 +103,13 @@ impl App {
             .unwrap_or(0);
         let font_refs: Vec<&str> = font_choices.iter().map(|s| s.as_str()).collect();
         let font_display = config.font_family.as_deref().unwrap_or("default");
+        // Owned (not borrowed): `resolved_font_family` reads from `renderer`
+        // now, before `gui::Ui::new` below takes it mutably for the rest of
+        // this function, and the value must outlive that mutable borrow.
+        let resolved_font_family_str = match renderer.resolved_font_family() {
+            Some(name) => format!("Loaded font: {name}"),
+            None => "Loaded font: unresolved (generic monospace)".to_string(),
+        };
         let font_features_str = config.font_features.join(" ");
         // Effective uniform padding shown in the form: the explicit `padding`
         // override if set, else 0 (meaning "cell-derived default").
@@ -174,6 +181,7 @@ impl App {
             theme_names: &theme_names,
             theme_swatches: &swatches,
             font_family: font_display,
+            resolved_font_family: &resolved_font_family_str,
             font_names: &font_refs,
             font_idx,
             scrollback: config.scrollback,

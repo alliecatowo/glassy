@@ -716,10 +716,12 @@ impl Renderer {
             packer: Packer::new(ATLAS_SIZE),
             color_packer: Packer::new(COLOR_ATLAS_SIZE),
             atlas_reset: false,
+            atlas_overflow_pending: false,
             glyph_cache: HashMap::new(),
             cluster_cache: HashMap::new(),
             ligature_run_cache: HashMap::new(),
             wide_char_set: std::collections::HashSet::new(),
+            primary_coverage_cache: HashMap::new(),
             font_has_ligatures: false, // probed below after renderer is built
             ligatures_enabled: false,  // updated via set_ligatures()
             text,

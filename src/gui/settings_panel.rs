@@ -195,7 +195,11 @@ impl<'r> Ui<'r> {
         let body_top = sep_y + 1.0 + m.gap;
         let body_bot = inner.y + inner.h - m.row_h - m.gap; // leave room for footer
         let body_h = (body_bot - body_top).max(m.row_h);
-        let sidebar_w = (m.cell_w * 13.0).round();
+        // 13 cells fits the longest label ("Notifications") exactly, with no
+        // room left for the leading `m.pad` the label draws at — hence `+ pad
+        // + gap` so it actually fits instead of relying solely on the
+        // `label_clip` below to paper over it with an ellipsis.
+        let sidebar_w = (m.cell_w * 13.0 + m.pad + m.gap).round();
         let active_section = v.section.min(SettingsSection::ALL.len() - 1);
         for (i, sec) in SettingsSection::ALL.iter().enumerate() {
             let ry = body_top + i as f32 * (m.row_h + 2.0);
@@ -212,7 +216,19 @@ impl<'r> Ui<'r> {
             }
             let ty = (rr.center_y() - m.cell_h * 0.5).round();
             let col = if i == active_section { fg() } else { fg_dim() };
-            self.label((rr.x + m.pad).round(), ty, sec.label(), col);
+            // `label_clip`, not `label`: the content pane starts immediately at
+            // `sidebar_w` with no gap, so an unclipped label overflowing its
+            // highlight box (as "Notifications" — 13 chars — did against a
+            // `sidebar_w` sized for exactly 13 cells with no room for the
+            // leading `m.pad`) ran straight into the content pane. Clipping
+            // makes that structurally impossible regardless of label length.
+            self.label_clip(
+                (rr.x + m.pad).round(),
+                ty,
+                sec.label(),
+                sidebar_w - m.gap - m.pad,
+                col,
+            );
             if it.clicked {
                 ev.section_pick = Some(i);
             }
@@ -232,9 +248,15 @@ impl<'r> Ui<'r> {
         let ctrl_h = (m.row_h - m.gap).max(m.cell_h);
         let heading_h = (m.cell_h + m.gap).round();
         let step = m.row_h + m.gap;
+        // Every row kind bakes its OWN trailing gap into this height (so `ry +=
+        // rh` alone gives correct spacing to whatever follows). `Info` used to
+        // return bare `heading_h` with no added gap, so a row immediately after
+        // an info line (e.g. "Bold font" after "Applies on restart…") sat flush
+        // against it with no breathing room — the settings-panel "overlapping"
+        // jank. Match `Heading`'s `+ m.gap` so every row transition gets one.
         let row_height = |r: &RowKind| match r {
             RowKind::Heading(_) => heading_h + m.gap,
-            RowKind::Info(_) => heading_h,
+            RowKind::Info(_) => heading_h + m.gap,
             _ => step,
         };
         let content_h: f32 = rows.iter().map(row_height).sum();
@@ -858,6 +880,7 @@ fn rows_general<'a>(rows: &mut Vec<RowKind<'a>>, v: &'a SettingsView<'a>) {
         swatch: None,
         which: SettingsDrop::Font,
     });
+    rows.push(RowKind::Info(v.resolved_font_family));
     rows.push(RowKind::Heading("Window"));
     rows.push(RowKind::Slider {
         id: "settings/opacity",
@@ -1480,6 +1503,7 @@ mod tests {
             theme_names: &names,
             theme_swatches: &sw,
             font_family: "default",
+            resolved_font_family: "Loaded font: Test Mono",
             font_names: &names,
             font_idx: 0,
             scrollback: 10000,

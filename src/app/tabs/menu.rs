@@ -231,10 +231,12 @@ impl App {
         // Panel width estimation (mirrors gui::menu — just needs to be wide enough
         // that hits inside it are valid; exact width used for x-clamping).
         let label_chars = items.iter().map(|a| a.label().len()).max().unwrap_or(4);
+        // `.chars().count()`, not `.len()`: mac shortcut hints (`⌘T`) carry
+        // multi-byte UTF-8 symbols, which would overcount against byte length.
         let hint_chars = items
             .iter()
             .filter_map(|a| a.shortcut())
-            .map(|h| h.len())
+            .map(|h| h.chars().count())
             .max()
             .unwrap_or(0);
         let pad_x = (cell_w * 1.2).round();
@@ -407,9 +409,11 @@ impl App {
                             .map(|a| a.label().len())
                             .max()
                             .unwrap_or(4);
+                        // `.chars().count()`, not `.len()` — see the matching
+                        // comment in `menu_hit_test` above.
                         let hint_chars = MenuAction::ALL
                             .iter()
-                            .filter_map(|a| a.shortcut().map(|h| h.len()))
+                            .filter_map(|a| a.shortcut().map(|h| h.chars().count()))
                             .max()
                             .unwrap_or(0);
                         let pad_x = (cell_w * 1.2).round();

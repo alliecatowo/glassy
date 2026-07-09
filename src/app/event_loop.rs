@@ -115,6 +115,16 @@ impl ApplicationHandler<UserEvent> for App {
             Self::disable_macos_window_drag(&window);
         }
 
+        // macOS: set the Dock / Cmd-Tab icon now that the first window exists.
+        // This must happen here rather than before `event_loop.run_app()`: an
+        // unbundled `cargo run` binary only becomes a `.regular`
+        // activation-policy app — the state in which the Dock shows a per-app
+        // icon at all — once winit creates this first window, so an earlier
+        // `setApplicationIconImage:` is silently dropped. Setting it here makes
+        // the custom icon appear under `cargo run`, not just in the bundled .app.
+        #[cfg(target_os = "macos")]
+        Self::set_dock_icon();
+
         let ms = |t: Instant| t.elapsed().as_secs_f64() * 1000.0;
         log::info!("startup: window created at {:.1} ms", ms(self.started));
 
@@ -1197,6 +1207,50 @@ impl App {
     /// reorder instead. glassy re-implements window dragging for *empty* chrome
     /// areas via `Window::drag_window()` (see `strip_click`), so the only behavior
     /// removed here is the auto-drag that was stealing tab-reorder gestures.
+    /// macOS: set the Dock + Cmd-Tab application icon from the bundled `.icns`,
+    /// but only for an **unbundled** run (`cargo run`). Called from `resumed`
+    /// once the first window exists: before then the process isn't a `.regular`
+    /// activation-policy app and the Dock ignores the icon, which is why it
+    /// never showed under `cargo run` before.
+    ///
+    /// A packaged `.app` is skipped on purpose — it already gets the identical
+    /// icon through the normal macOS path (its `Info.plist` `CFBundleIconFile`
+    /// is the same `assets/icons/glassy-pink.icns`, staged by `release.yml`), so
+    /// a runtime `setApplicationIconImage:` there would only redundantly re-set
+    /// the same image (and risk a brief launch swap). `NSImage::initWithData`
+    /// reads the multi-representation icns; on failure we leave the default.
+    #[cfg(target_os = "macos")]
+    fn set_dock_icon() {
+        use objc2::ClassType;
+        use objc2_app_kit::{NSApplication, NSImage};
+        use objc2_foundation::{MainThreadMarker, NSData};
+
+        // Bundled `.app`: rely on the Info.plist icon; don't override at runtime.
+        let bundled = std::env::current_exe()
+            .map(|p| p.to_string_lossy().contains(".app/Contents/MacOS/"))
+            .unwrap_or(false);
+        if bundled {
+            return;
+        }
+
+        let icon_bytes = include_bytes!("../../assets/icons/glassy-pink.icns");
+        // SAFETY: standard AppKit calls; `resumed` runs on the main thread, so a
+        // `MainThreadMarker` is obtainable and the shared app is valid there.
+        unsafe {
+            objc2::rc::autoreleasepool(|_| {
+                let Some(mtm) = MainThreadMarker::new() else {
+                    return;
+                };
+                let data = NSData::with_bytes(icon_bytes);
+                if let Some(image) = NSImage::initWithData(NSImage::alloc(), &data) {
+                    let app = NSApplication::sharedApplication(mtm);
+                    app.setApplicationIconImage(Some(&image));
+                }
+            });
+        }
+    }
+
+    #[cfg(target_os = "macos")]
     fn disable_macos_window_drag(window: &Window) {
         use objc2_app_kit::NSView;
         use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};

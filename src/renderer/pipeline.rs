@@ -412,6 +412,39 @@ impl Renderer {
         total as u32
     }
 
+    /// Whether `ch` is routed to a dedicated family by `font_symbol_map`.
+    ///
+    /// Only the single-character path (`rasterize` → `pick_family_for`) honors
+    /// this routing. Ligature-run shaping (`rasterize_run`) always shapes with
+    /// the primary family, so a symbol-mapped character swept into a run would
+    /// silently lose its routing and fall through to cosmic-text's own font
+    /// cascade instead — which on macOS always includes Apple Color Emoji,
+    /// producing a color glyph where the single-char path would have produced
+    /// a flat one. Callers use this alongside [`Renderer::primary_font_covers`]
+    /// to keep such characters out of runs — see `src/text/presentation.rs`
+    /// for the full design this and the coverage check are two halves of.
+    pub(crate) fn has_symbol_override(&self, ch: char) -> bool {
+        crate::text::shape::lookup_symbol_family(&self.font_symbol_map, ch).is_some()
+    }
+
+    /// Whether the PRIMARY font actually has a glyph for `(ch, bold, italic)`
+    /// — see `Text::primary_font_covers` for the full rationale (this is the
+    /// half of the `presentation` policy that keeps an uncovered character out
+    /// of ligature-run shaping in the first place, rather than reacting after
+    /// the fact to whatever font cosmic-text's fallback cascade lands on).
+    /// Cached per `(char, bold, italic)`, same convention as `glyph_cache`
+    /// — a real font-coverage query is not something to repeat every frame for
+    /// every cell in a hot render loop.
+    pub(crate) fn primary_font_covers(&mut self, ch: char, bold: bool, italic: bool) -> bool {
+        let key = (ch, bold, italic);
+        if let Some(&covers) = self.primary_coverage_cache.get(&key) {
+            return covers;
+        }
+        let covers = self.text.primary_font_covers(ch, bold, italic);
+        self.primary_coverage_cache.insert(key, covers);
+        covers
+    }
+
     /// Ensure the glyph(s) for `(ch, bold, italic)` are rasterized and packed
     /// into the atlas, recording their `AtlasGlyph` entries in the cache.
     ///
@@ -436,6 +469,14 @@ impl Renderer {
         }
         let rasters = collect_rasters(&raw);
         let packed = self.pack_rasters(&rasters);
+        // If an atlas overflowed while packing, `packed` is missing the
+        // overflowing glyph(s) — a truncated pack. Don't cache it: the
+        // deferred repack at the next begin_frame will clear this cache
+        // entry's slot anyway, so skip the insert and let the next lookup
+        // recompute against the freshly-repacked atlas.
+        if self.atlas_overflow_pending {
+            return;
+        }
         self.glyph_cache.insert(key, packed);
     }
 
@@ -448,6 +489,11 @@ impl Renderer {
         }
         let rasters = collect_rasters(&self.text.rasterize_cluster(cluster, bold, italic));
         let packed = self.pack_rasters(&rasters);
+        // See ensure_glyphs: a truncated pack from an atlas overflow must not
+        // be cached; the deferred repack next frame will make it correct.
+        if self.atlas_overflow_pending {
+            return;
+        }
         self.cluster_cache.insert(key, packed);
     }
 
@@ -477,86 +523,82 @@ impl Renderer {
                 per_cell.push(packed);
             }
         }
+        // See ensure_glyphs: if any slot's pack was truncated by an atlas
+        // overflow, the whole run is stale — don't cache it, so the next
+        // lookup recomputes it after the deferred repack.
+        if self.atlas_overflow_pending {
+            return;
+        }
         self.ligature_run_cache.insert(key, per_cell);
     }
 
     /// Pack owned glyph bitmaps into the atlases, returning their placed entries.
     /// Coverage-mask glyphs go into the R8 mask atlas; color glyphs (emoji) go
-    /// into the RGBA8 color atlas. If either atlas fills mid-pack, both glyph
-    /// caches and both packers are cleared and we repack once (entries are
-    /// re-created lazily on demand thereafter).
+    /// into the RGBA8 color atlas.
+    ///
+    /// If a packer fills, we do NOT clear caches or reset packers here — doing
+    /// so mid-frame used to invalidate the atlas positions of instances already
+    /// emitted earlier in *this* frame (their UVs would keep pointing at texels
+    /// the reset packer then handed to someone else), which is what produced
+    /// the emoji-scroll atlas corruption. Instead we skip the overflowing
+    /// glyph for this call (it simply renders blank for one frame) and flag
+    /// `atlas_overflow_pending` + `atlas_reset`; the actual clear + reset
+    /// happens at the next [`Renderer::begin_frame`], before anything is
+    /// packed or drawn, and the forced full rebuild repacks the skipped glyph.
     pub(crate) fn pack_rasters(&mut self, rasters: &[Raster]) -> Vec<AtlasGlyph> {
         let mut packed: Vec<AtlasGlyph> = Vec::with_capacity(rasters.len());
-        let mut retried = false;
         let inv_mask = 1.0 / ATLAS_SIZE as f32;
         let inv_color = 1.0 / COLOR_ATLAS_SIZE as f32;
-        'attempt: loop {
-            packed.clear();
-            for r in rasters {
-                // Select the destination atlas, its packer, its uv scale, and the
-                // source bytes-per-pixel for the upload.
-                let (packer, texture, inv, bpp) = if r.is_color {
-                    (
-                        &mut self.color_packer,
-                        &self.color_atlas_texture,
-                        inv_color,
-                        4,
-                    )
-                } else {
-                    (&mut self.packer, &self.mask_atlas_texture, inv_mask, 1)
-                };
-                let (x, y) = match packer.alloc(r.width, r.height) {
-                    Some(o) => o,
-                    None => {
-                        if retried {
-                            log::warn!("glyph atlas full; a glyph was skipped");
-                            break 'attempt;
-                        }
-                        log::warn!("glyph atlas full; clearing cache and repacking");
-                        self.glyph_cache.clear();
-                        self.cluster_cache.clear();
-                        self.ligature_run_cache.clear();
-                        self.wide_char_set.clear();
-                        self.packer.reset();
-                        self.color_packer.reset();
-                        // Every cached glyph's atlas position just changed, so any
-                        // row already built this frame (and persisted rows from
-                        // earlier frames) now hold stale UVs. Flag a full rebuild.
-                        self.atlas_reset = true;
-                        retried = true;
-                        continue 'attempt;
-                    }
-                };
-                self.queue.write_texture(
-                    wgpu::TexelCopyTextureInfo {
-                        texture,
-                        mip_level: 0,
-                        origin: wgpu::Origin3d { x, y, z: 0 },
-                        aspect: wgpu::TextureAspect::All,
-                    },
-                    &r.data,
-                    wgpu::TexelCopyBufferLayout {
-                        offset: 0,
-                        bytes_per_row: Some(r.width * bpp),
-                        rows_per_image: Some(r.height),
-                    },
-                    wgpu::Extent3d {
-                        width: r.width,
-                        height: r.height,
-                        depth_or_array_layers: 1,
-                    },
-                );
-                packed.push(AtlasGlyph {
-                    uv_min: [x as f32 * inv, y as f32 * inv],
-                    uv_max: [(x + r.width) as f32 * inv, (y + r.height) as f32 * inv],
-                    px_w: r.width as f32,
-                    px_h: r.height as f32,
-                    left: r.left,
-                    top: r.top,
-                    is_color: r.is_color,
-                });
-            }
-            break;
+        for r in rasters {
+            // Select the destination atlas, its packer, its uv scale, and the
+            // source bytes-per-pixel for the upload.
+            let (packer, texture, inv, bpp) = if r.is_color {
+                (
+                    &mut self.color_packer,
+                    &self.color_atlas_texture,
+                    inv_color,
+                    4,
+                )
+            } else {
+                (&mut self.packer, &self.mask_atlas_texture, inv_mask, 1)
+            };
+            let (x, y) = match packer.alloc(r.width, r.height) {
+                Some(o) => o,
+                None => {
+                    log::debug!("glyph atlas full; deferring repack to next frame");
+                    self.atlas_overflow_pending = true;
+                    self.atlas_reset = true;
+                    continue;
+                }
+            };
+            self.queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d { x, y, z: 0 },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &r.data,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(r.width * bpp),
+                    rows_per_image: Some(r.height),
+                },
+                wgpu::Extent3d {
+                    width: r.width,
+                    height: r.height,
+                    depth_or_array_layers: 1,
+                },
+            );
+            packed.push(AtlasGlyph {
+                uv_min: [x as f32 * inv, y as f32 * inv],
+                uv_max: [(x + r.width) as f32 * inv, (y + r.height) as f32 * inv],
+                px_w: r.width as f32,
+                px_h: r.height as f32,
+                left: r.left,
+                top: r.top,
+                is_color: r.is_color,
+            });
         }
         packed
     }

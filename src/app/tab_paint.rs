@@ -70,9 +70,16 @@ impl App {
                 );
             }
             let cfg = if is_hover || is_held { fg } else { fg_dim };
-            let gx = r.x + (r.w - m.width) * 0.5;
-            let gy = r.center_y() - m.height * 0.5;
-            renderer.push_overlay_glyph_px(gx.round(), gy.round(), glyph, cfg);
+            if seg.item == StripItem::Menu {
+                // The hamburger reads as the "app menu" affordance — draw it a
+                // notch larger than the other icon buttons so it doesn't get
+                // lost next to the tab chips.
+                renderer.push_overlay_glyph_px_scaled(r.x, r.y, r.w, r.h, glyph, cfg, 1.5);
+            } else {
+                let gx = r.x + (r.w - m.width) * 0.5;
+                let gy = r.center_y() - m.height * 0.5;
+                renderer.push_overlay_glyph_px(gx.round(), gy.round(), glyph, cfg);
+            }
         }
     }
 
@@ -284,9 +291,16 @@ impl App {
                     } else {
                         fg_dim
                     };
-                    let gx = r.x + (r.w - m.width) * 0.5;
-                    let gy = r.center_y() - m.height * 0.5 + nudge;
-                    renderer.push_overlay_glyph_px(gx.round(), gy.round(), glyph, cfg);
+                    if seg.item == StripItem::Menu {
+                        // See `paint_floating_icons`: the hamburger is drawn a
+                        // notch larger than the other icon buttons.
+                        let by = r.y + nudge;
+                        renderer.push_overlay_glyph_px_scaled(r.x, by, r.w, r.h, glyph, cfg, 1.5);
+                    } else {
+                        let gx = r.x + (r.w - m.width) * 0.5;
+                        let gy = r.center_y() - m.height * 0.5 + nudge;
+                        renderer.push_overlay_glyph_px(gx.round(), gy.round(), glyph, cfg);
+                    }
                 }
             }
         }

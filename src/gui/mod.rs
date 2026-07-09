@@ -525,6 +525,12 @@ pub struct SettingsView<'a> {
     /// Theme preview swatch colors, parallel to `theme_names`.
     pub theme_swatches: &'a [[f32; 4]],
     pub font_family: &'a str,
+    /// The font ACTUALLY resolved/loaded (`Renderer::resolved_font_family`),
+    /// distinct from `font_family` above (the raw config value, often empty —
+    /// "let discovery choose"). Shown read-only next to the Font dropdown so a
+    /// user with several similarly-purposed fonts installed (e.g. multiple
+    /// Nerd Font family variants) can see what's genuinely loaded.
+    pub resolved_font_family: &'a str,
     pub font_names: &'a [&'a str],
     pub font_idx: usize,
     pub scrollback: usize,

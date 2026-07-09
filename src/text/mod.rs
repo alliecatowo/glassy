@@ -7,10 +7,12 @@
 //! `(char, bold, italic)` so repeated cells are a cheap `HashMap` lookup.
 //!
 //! Sub-modules:
-//! - `discover` — font discovery: fc-match cache, candidate producers, fallback loading
-//! - `shape`    — `Text` struct, shaping pipeline, rasterization
+//! - `discover`     — font discovery: fc-match cache, candidate producers, fallback loading
+//! - `shape`        — `Text` struct, shaping pipeline, rasterization
+//! - `presentation` — the text-vs-emoji presentation policy (see its module docs)
 
 pub(crate) mod discover;
+pub(crate) mod presentation;
 pub mod shape;
 
 pub use shape::{CellMetrics, RasterizedGlyph, Text};
@@ -262,6 +264,112 @@ mod tests {
             Err(_) => {
                 eprintln!("load_with_config_missing_bold_family_falls_back: skipped (no font)");
             }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Text-vs-emoji presentation (flat/color-emoji flicker regression)
+    // -----------------------------------------------------------------------
+
+    /// End-to-end sanity check for the flicker bug: a default-text-presentation
+    /// symbol (⚙ U+2699 — `Emoji=Yes`, `Emoji_Presentation=No`) must resolve to
+    /// the SAME non-color outcome whether it's shaped alone (`rasterize`) or
+    /// swept into a ligature run next to other text (`rasterize_run`) — the two
+    /// paths that used to disagree and flicker. Uses whatever font this
+    /// environment actually discovers, so it exercises the real fallback
+    /// cascade, not a synthetic one.
+    #[test]
+    fn gear_symbol_never_resolves_to_color_on_any_path() {
+        let Ok((mut text, metrics)) = Text::load(None, 14.0, &[]) else {
+            eprintln!("gear_symbol_never_resolves_to_color_on_any_path: skipped (no font)");
+            return;
+        };
+
+        let single = text.rasterize('\u{2699}', false, false);
+        assert!(
+            single.iter().all(|g| !g.is_color),
+            "⚙ rasterized alone must never come back as color art"
+        );
+
+        // Same character, now with changing neighbors on either side — the
+        // exact shape of the original flicker report (an icon next to a
+        // ticking timer). If it's still primary-font-covered, this and the
+        // single-char result above must agree; if it's not covered, run
+        // eligibility should have kept it off this path entirely, which
+        // `rasterize_run` also must not turn into a color glyph on its own.
+        for run_text in ["a\u{2699}b", "1\u{2699}2s", "\u{2699}z"] {
+            let slots = text.rasterize_run(run_text, false, false, metrics.width);
+            for slot in &slots {
+                assert!(
+                    slot.glyphs.iter().all(|g| !g.is_color),
+                    "run {run_text:?} must not resolve ⚙ to color art"
+                );
+            }
+        }
+    }
+
+    /// Codepoints from the user's Unicode stress test (default TEXT
+    /// presentation, but on many font stacks only Apple Color Emoji actually
+    /// has a glyph for them) must never render as color art, AND — now that
+    /// `render_coretext_gated`/`synthesize_tofu_glyph` back a rejected color
+    /// result with a real flat glyph or a visible tofu placeholder — must not
+    /// silently vanish either. Verified against whatever font this
+    /// environment actually discovers, confirmed empirically (not covered by
+    /// the primary font here, per `primary_font_covers`, yet still resolves to
+    /// exactly one non-color glyph).
+    #[test]
+    fn rejected_color_codepoint_shows_something_not_blank() {
+        let Ok((mut text, _)) = Text::load(None, 14.0, &[]) else {
+            eprintln!("rejected_color_codepoint_shows_something_not_blank: skipped (no font)");
+            return;
+        };
+        for ch in ['\u{2600}', '\u{2602}', '\u{2660}', '\u{2708}', '\u{2699}'] {
+            let glyphs = text.rasterize(ch, false, false);
+            assert!(
+                glyphs.iter().all(|g| !g.is_color),
+                "{ch:?} must never render as color art"
+            );
+            if !text.primary_font_covers(ch, false, false) {
+                assert!(
+                    !glyphs.is_empty(),
+                    "{ch:?} isn't covered by the primary font, so it must fall \
+                     through to a flat fallback glyph or a synthesized tofu \
+                     box — not silently disappear"
+                );
+            }
+        }
+    }
+
+    /// A genuine pictograph (🦀, default emoji presentation) must still be
+    /// allowed to render as color — the presentation gate must not overcorrect
+    /// into flattening real emoji.
+    #[test]
+    fn real_emoji_still_renders_as_color() {
+        let Ok((mut text, _)) = Text::load(None, 14.0, &[]) else {
+            eprintln!("real_emoji_still_renders_as_color: skipped (no font)");
+            return;
+        };
+        let glyphs = text.rasterize('\u{1F980}', false, false); // 🦀
+        // Either the font stack has no crab glyph at all (empty, acceptable),
+        // or every bitmap it does produce is color — never a flattened crab.
+        assert!(
+            glyphs.is_empty() || glyphs.iter().all(|g| g.is_color),
+            "🦀 must render as color art when this font stack can render it at all"
+        );
+    }
+
+    /// `primary_font_covers` must not panic for an arbitrary codepoint and must
+    /// agree with itself across repeated calls (pure function of loaded fonts).
+    #[test]
+    fn primary_font_covers_is_stable() {
+        let Ok((mut text, _)) = Text::load(None, 14.0, &[]) else {
+            eprintln!("primary_font_covers_is_stable: skipped (no font)");
+            return;
+        };
+        for ch in ['A', '\u{2699}', '\u{1F980}', '\u{2500}'] {
+            let a = text.primary_font_covers(ch, false, false);
+            let b = text.primary_font_covers(ch, false, false);
+            assert_eq!(a, b, "coverage for {ch:?} must be deterministic");
         }
     }
 }

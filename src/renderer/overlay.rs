@@ -248,6 +248,46 @@ impl Renderer {
         }
     }
 
+    /// Like [`push_overlay_glyph_px`], but draws `ch` scaled up by `scale` (e.g.
+    /// `1.5`) and centered within a `box_w`×`box_h` box anchored at `(box_x,
+    /// box_y)`. For icon glyphs that should read larger than body text (e.g. the
+    /// hamburger button) without bumping the whole terminal font size. Reuses the
+    /// same rasterized glyph — a modest scale-up of a simple monochrome shape
+    /// stays crisp, the same box-fit trick `place_glyphs` uses for color emoji.
+    #[allow(clippy::too_many_arguments)]
+    pub fn push_overlay_glyph_px_scaled(
+        &mut self,
+        box_x: f32,
+        box_y: f32,
+        box_w: f32,
+        box_h: f32,
+        ch: char,
+        fg: [f32; 4],
+        scale: f32,
+    ) {
+        if ch == ' ' || ch == '\0' {
+            return;
+        }
+        self.ensure_glyphs(ch, false, false);
+        if let Some(glyphs) = self.glyph_cache.get(&(ch, false, false)) {
+            for g in glyphs {
+                let w = g.px_w * scale;
+                let h = g.px_h * scale;
+                let x = box_x + (box_w - w) * 0.5;
+                let y = box_y + (box_h - h) * 0.5;
+                self.overlay_text.push(FgInstance {
+                    pos: [x, y],
+                    size: [w, h],
+                    uv_min: g.uv_min,
+                    uv_max: g.uv_max,
+                    color: fg,
+                    flags: if g.is_color { 1 } else { 0 },
+                    _pad: [0; 3],
+                });
+            }
+        }
+    }
+
     /// Draw a whole string starting at PIXEL `(x, y)` (top-left of the first
     /// glyph's cell box), one monospace cell advance per char, in color `fg`.
     /// Convenience over [`push_overlay_glyph_px`] for GUI labels.

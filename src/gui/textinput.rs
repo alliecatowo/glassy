@@ -115,9 +115,13 @@ impl<'r> Ui<'r> {
             }
         }
 
-        // Text or placeholder.
+        // Text or placeholder. The placeholder used unclipped `label`, unlike the
+        // real-text branch below (which scrolls/windows to `visible_cols`) — a
+        // placeholder longer than the field (e.g. "U+E000-U+F8FF:Symbols Nerd
+        // Font Mono") ran straight past the field's own right edge with no
+        // truncation at all. `label_clip` gives it the same hard boundary.
         if chars.is_empty() && !placeholder.is_empty() {
-            self.label(text_x.round(), ty, placeholder, fg_dim());
+            self.label_clip(text_x.round(), ty, placeholder, text_w, fg_dim());
         } else {
             self.label(text_x.round(), ty, &visible, fg());
         }

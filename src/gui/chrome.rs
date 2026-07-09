@@ -301,7 +301,10 @@ pub fn menu(
         .iter()
         .filter_map(|e| {
             if let MenuEntry::Item { hint: Some(h), .. } = e {
-                Some(h.len())
+                // `.chars().count()`, not `.len()`: mac shortcut hints (`⌘T`)
+                // carry multi-byte UTF-8 symbols, so byte length overcounts
+                // versus the cell-based width actually drawn below.
+                Some(h.chars().count())
             } else {
                 None
             }
@@ -377,13 +380,24 @@ pub fn menu(
                 let text_col = if *enabled { fg() } else { fg_dim() };
                 let ty = (y + (row_h - cell_h) * 0.5).round();
 
-                // Left icon.
+                // Left icon — centered on its own ink box (not the shared
+                // text baseline) within the `icon_w` × `row_h` slot. The icon
+                // set spans several Unicode blocks (geometric shapes, misc
+                // technical/symbols, dingbats, ASCII) whose glyphs carry very
+                // different bearings/ink extents; baseline-anchoring them like
+                // body text left them inconsistently sized and off-center
+                // relative to each other (a hairline sliver next to a full
+                // block). Ink-box centering makes every icon occupy the same
+                // visual footprint regardless of source block.
                 let ix = ax + pad_x;
-                renderer.push_overlay_glyph_px(
-                    ix.round(),
-                    ty,
+                renderer.push_overlay_glyph_px_scaled(
+                    ix,
+                    y,
+                    icon_w,
+                    row_h,
                     *icon,
                     if *enabled { fg() } else { fg_dim() },
+                    1.0,
                 );
 
                 // Label — clipped to the space before the shortcut hint (or the
