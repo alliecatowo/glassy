@@ -108,9 +108,11 @@ fn load_pipeline_cache_data(adapter_info: &wgpu::AdapterInfo) -> Option<Vec<u8>>
 const ATLAS_SIZE: u32 = 1024;
 /// Color-atlas dimensions (square, RGBA8). Color emoji are rasterized at a font
 /// strike ≥ the cell height (≈64px on Retina) for crisp downscaling, so each one
-/// is larger than a text glyph; 512² (1 MB) holds ~50 emoji at 64px — ample for a
-/// session — while staying lean. On overflow the shared path clears + repacks.
-const COLOR_ATLAS_SIZE: u32 = 512;
+/// is larger than a text glyph; 1024² (4 MB) holds ~450 emoji at 64px — comfortably
+/// covers even emoji-dense sessions. On overflow, the overflowing glyph is
+/// skipped for one frame and the clear + repack is deferred to the next frame
+/// boundary (see `atlas_overflow_pending`) rather than happening mid-frame.
+const COLOR_ATLAS_SIZE: u32 = 1024;
 /// Image-atlas dimensions (square, RGBA8). Inline images (kitty graphics) are
 /// packed here, kept separate from the glyph atlases so a large image can't evict
 /// the font cache. On overflow the image cache is cleared and repacked.
@@ -398,11 +400,19 @@ pub struct Renderer {
     packer: Packer,
     /// Shelf packer for the RGBA8 color atlas.
     color_packer: Packer,
-    /// Set when a glyph atlas overflowed and was repacked mid-frame (which
-    /// invalidates every cached glyph's UVs). The app must then force a full
-    /// row rebuild so persisted rows don't keep stale UVs. Read via
+    /// Set when a glyph atlas overflowed and the deferred repack (see
+    /// `atlas_overflow_pending`) will invalidate every cached glyph's UVs at
+    /// the next frame boundary. The app must then force a full row rebuild so
+    /// persisted rows don't keep stale UVs. Read via
     /// [`Renderer::pull_atlas_reset`].
     atlas_reset: bool,
+    /// Set when a glyph atlas filled mid-frame. Unlike the old inline repack,
+    /// the actual cache-clear + packer reset is DEFERRED to the next
+    /// [`Renderer::begin_frame`] so no instance already emitted this frame keeps
+    /// a UV pointing into an atlas region we are about to rewind (that was the
+    /// scroll/emoji-density corruption). The overflowing glyph is skipped for one
+    /// frame; `atlas_reset` (set alongside) forces the full rebuild that repacks it.
+    atlas_overflow_pending: bool,
     glyph_cache: HashMap<(char, bool, bool), Vec<AtlasGlyph>>,
     /// Atlas entries for multi-codepoint grapheme clusters (combining/ZWJ).
     cluster_cache: HashMap<(String, bool, bool), Vec<AtlasGlyph>>,
@@ -416,6 +426,13 @@ pub struct Renderer {
     /// These glyphs are rendered in a 2-cell (WIDE) box even when alacritty did
     /// not flag them as wide — corrects Nerd-font icons that overflow their cell.
     wide_char_set: std::collections::HashSet<(char, bool, bool)>,
+    /// Cache for [`Renderer::primary_font_covers`] — whether the PRIMARY font
+    /// has its own glyph for `(char, bold, italic)`. Gates ligature-run
+    /// eligibility (see `src/text/presentation.rs`); invalidated on font
+    /// reload/resize alongside `glyph_cache` since coverage depends on which
+    /// face is loaded, not on atlas state (so it is NOT cleared on atlas
+    /// overflow repack).
+    primary_coverage_cache: HashMap<(char, bool, bool), bool>,
     /// Whether the active font was detected to have an OpenType GSUB `liga`
     /// feature.  When false, ligature-run shaping is skipped regardless of the
     /// user config flag (no point paying for run-level shaping on a non-liga font).

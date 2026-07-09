@@ -190,15 +190,28 @@ pub(crate) fn paint_toasts(
         let card_x = sw as f32 - MARGIN_RIGHT - card_w;
         let card_y = y;
 
-        // Glass card background: frosted at current alpha.
-        let bg_base = color::default_bg();
-        let card_bg = [
-            bg_base[0] * 0.12 + 0.04, // slightly lighter than the terminal bg
-            bg_base[1] * 0.12 + 0.04,
-            bg_base[2] * 0.14 + 0.06,
-            alpha * gui::GLASS_FLOAT_ALPHA,
-        ];
-        renderer.push_overlay_rrect_px(card_x, card_y, card_w, card_h, CARD_RADIUS, card_bg);
+        // Glass card background: the shared E3 floating-surface fill, scaled to
+        // the toast's current fade alpha. Using gui::glass_float() (theme-aware
+        // elevation) instead of a hand-rolled near-black recipe keeps the card
+        // legible on light themes, where the old `bg*0.12+0.04` recipe painted a
+        // near-black card under theme-dark foreground text.
+        let mut card_bg = gui::glass_float();
+        card_bg[3] *= alpha;
+
+        // Soft drop shadow under the card (E3 depth), faded with the toast.
+        let mut shadow = gui::shadow_e3();
+        shadow[3] *= alpha;
+        renderer.push_overlay_shadow_px(
+            card_x,
+            card_y,
+            card_w,
+            card_h,
+            CARD_RADIUS,
+            gui::SHADOW_E3_FEATHER,
+            0.0,
+            4.0,
+            shadow,
+        );
 
         // Thin accent border (very subtle).
         let accent = color::accent();

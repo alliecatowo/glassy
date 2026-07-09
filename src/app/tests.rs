@@ -17,7 +17,7 @@ fn strip_layout(
     bar_h: f32,
     cell_w: f32,
 ) -> Vec<super::StripSeg> {
-    strip_layout_ex(tabs, bar_w, bar_h, cell_w, 0.0, 0, 0.0)
+    strip_layout_ex(tabs, bar_w, bar_h, cell_w, 0.0, 0, 0.0, false)
 }
 
 #[test]
@@ -67,10 +67,14 @@ fn context_menu_entries_group_with_separators() {
 
 #[test]
 fn hamburger_menu_groups_layout_and_destructive() {
-    // The hamburger is now (NewTab, CloseTab): Settings/Help have dedicated
-    // strip icons and PaneHeaders lives in the Settings form, so neither is
-    // duplicated here. NewTab is in the layout group, CloseTab in the
-    // destructive group → exactly one separator at that single boundary.
+    // The hamburger is now the grouped set:
+    //   New tab / Split right / Split down    (group 2)
+    // | Command palette / Settings / Help     (group 3)
+    // | Toggle quake                          (group 4)
+    // | About                                 (group 5)
+    // | Close tab                             (group 6, destructive)
+    // The standalone ?/⚙ strip buttons were folded IN, so Settings + Help now
+    // live here. Four group boundaries → exactly four separators.
     let entries = actions_to_entries(MenuAction::ALL, false);
     let item_count = entries
         .iter()
@@ -81,13 +85,14 @@ fn hamburger_menu_groups_layout_and_destructive() {
         .filter(|e| matches!(e, MenuEntry::Separator))
         .count();
     assert_eq!(item_count, MenuAction::ALL.len());
-    assert_eq!(sep_count, 1);
-    // The last entry is always the destructive Close-tab item.
+    assert_eq!(sep_count, 4);
+    // The last entry is the destructive Close-tab item.
     match entries.last() {
         Some(MenuEntry::Item { label, .. }) => assert_eq!(*label, "Close tab"),
         _ => panic!("hamburger must end with Close tab"),
     }
-    // Settings and Help are NOT in the hamburger anymore (strip icons own them).
+    // Settings + Help + the command palette + quake toggle + About are all in
+    // the hamburger now (the standalone ?/⚙ buttons were folded in).
     let labels: Vec<&str> = entries
         .iter()
         .filter_map(|e| match e {
@@ -95,9 +100,11 @@ fn hamburger_menu_groups_layout_and_destructive() {
             _ => None,
         })
         .collect();
-    assert!(!labels.contains(&"Settings"));
-    assert!(!labels.contains(&"Help / keys"));
-    assert!(!labels.contains(&"Pane headers"));
+    assert!(labels.contains(&"Settings"));
+    assert!(labels.contains(&"Help / keys"));
+    assert!(labels.contains(&"Command palette"));
+    assert!(labels.contains(&"Toggle quake"));
+    assert!(labels.contains(&"About"));
 }
 
 #[test]
@@ -177,10 +184,8 @@ fn strip_hit_test_matches_layout() {
     assert_eq!(strip_item_at(&segs, tx1, ty1), Some(StripItem::Tab(1)));
     let (nx, ny) = center(StripItem::NewTab).unwrap();
     assert_eq!(strip_item_at(&segs, nx, ny), Some(StripItem::NewTab));
-    let (hx, hy) = center(StripItem::Help).unwrap();
-    assert_eq!(strip_item_at(&segs, hx, hy), Some(StripItem::Help));
-    let (sx, sy) = center(StripItem::Settings).unwrap();
-    assert_eq!(strip_item_at(&segs, sx, sy), Some(StripItem::Settings));
+    // The standalone Help/Settings buttons were folded into the hamburger; only
+    // the ≡ menu remains as a standalone right-hand control (besides +).
     let (mx, my) = center(StripItem::Menu).unwrap();
     assert_eq!(strip_item_at(&segs, mx, my), Some(StripItem::Menu));
     // Below the bar there are no items.
@@ -256,7 +261,7 @@ fn many_tabs_stop_shrinking_at_min_width_and_scroll() {
             }
         })
         .collect();
-    let segs = strip_layout_ex(&tabs, 900.0, BH, CW, 0.0, 0, 0.0);
+    let segs = strip_layout_ex(&tabs, 900.0, BH, CW, 0.0, 0, 0.0, false);
     let widths: Vec<f32> = segs
         .iter()
         .filter_map(|s| matches!(s.item, StripItem::Tab(_)).then_some(s.rect.w))
@@ -278,7 +283,7 @@ fn scroll_keeps_active_tab_visible() {
     // The active tab is far to the right; the layout must scroll so it appears.
     let mut tabs: Vec<(&str, bool, bool)> = (0..30).map(|_| ("x", false, false)).collect();
     tabs[27] = ("active", true, false);
-    let segs = strip_layout_ex(&tabs, 900.0, BH, CW, 0.0, 27, 0.0);
+    let segs = strip_layout_ex(&tabs, 900.0, BH, CW, 0.0, 27, 0.0, false);
     assert!(
         segs.iter().any(|s| s.item == StripItem::Tab(27)),
         "active tab (27) must be laid out (scrolled into view)"
@@ -293,17 +298,28 @@ fn tag_reserve_keeps_tabs_left_of_counter() {
     assert!(reserve > 0.0);
     let tabs: Vec<(&str, bool, bool)> = (0..9).map(|_| ("t", false, false)).collect();
     let bar_w = 1000.0;
-    let segs = strip_layout_ex(&tabs, bar_w, BH, CW, reserve, 0, 0.0);
-    // The right controls start at bar_w - 3*CTRL - gap; the counter sits to their
-    // left within `reserve`. Tabs + the `+` must end before that counter band.
-    let counter_left = bar_w - super::CTRL_BTN * 3.0 - super::TAB_GAP - reserve;
+    let segs = strip_layout_ex(&tabs, bar_w, BH, CW, reserve, 0, 0.0, false);
+    // The right controls start at bar_w - (n controls)*CTRL - gap; the counter sits
+    // to their left within `reserve`. `counter_left` is where the reserved band
+    // begins. Tab chips must START (left edge) inside the tab band, and the `+`
+    // must END before the reserved band. (A scrolled-off tab whose LEFT edge is in
+    // the band is culled; a partially-visible right-edge tab may still extend under
+    // the controls, which paint on top of it and win hit-tests — pre-existing
+    // scroll behavior, not what this guard is about.)
+    let n_ctrl = super::right_control_items(false).len() as f32;
+    let counter_left = bar_w - super::CTRL_BTN * n_ctrl - super::TAB_GAP - reserve;
     for s in &segs {
-        if matches!(s.item, StripItem::Tab(_) | StripItem::NewTab) {
-            assert!(
-                s.rect.x + s.rect.w <= counter_left + super::CTRL_BTN + 1.0,
-                "{:?} overruns the counter band",
+        match s.item {
+            StripItem::NewTab => assert!(
+                s.rect.x + s.rect.w <= counter_left + 1.0,
+                "+ overruns the counter band"
+            ),
+            StripItem::Tab(_) => assert!(
+                s.rect.x <= counter_left,
+                "{:?} starts inside the counter band",
                 s.item
-            );
+            ),
+            _ => {}
         }
     }
 }

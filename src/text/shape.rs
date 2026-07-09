@@ -10,6 +10,7 @@ use cosmic_text::{
 };
 
 use super::discover::{FamilyOwned, StyleOverrides, build_font_system, discover_font_producers};
+use super::presentation::glyph_acceptable;
 use crate::config::parse::SymbolMapEntry;
 
 /// Per-cell layout metrics, all in physical pixels.
@@ -65,6 +66,26 @@ pub struct RunGlyph {
     pub glyphs: Vec<RasterizedGlyph>,
     /// How many grid cells this output occupies (1 = normal, 2+ = ligature/wide).
     pub advance_cells: usize,
+}
+
+/// The outcome of resolving one shaped [`cosmic_text::LayoutGlyph`] to a
+/// drawable bitmap — the SINGLE per-glyph decision every rasterization path
+/// now funnels through (see [`Text::finalize_shaped_glyph`]). Collapses what
+/// used to be three copy-pasted "notdef check, presentation gate, color-emoji
+/// upscale" bodies (in `build_glyphs`, `collect_glyphs`, and `rasterize_run`)
+/// into one.
+enum GlyphResolution {
+    /// A real, presentation-legitimate bitmap ready to draw.
+    Draw(RasterizedGlyph),
+    /// The shaper found real coverage but there's nothing to draw (a swash
+    /// cache miss, or a zero-size bbox — e.g. a combining mark with no ink of
+    /// its own). Not a fallback case: there is no "something's missing" story
+    /// here, just an empty cell.
+    Blank,
+    /// Either the shaper found no glyph at all (`.notdef`) or it found one but
+    /// [`glyph_acceptable`] rejected it as unsanctioned color art. Both cases
+    /// need the SAME recovery chain — see [`Text::recover_glyph`].
+    NeedsFallback,
 }
 
 /// Owns the shaping/rasterization state. Rasterized glyphs are *not* cached here;
@@ -600,6 +621,24 @@ impl Text {
         }
     }
 
+    /// The ACTUAL resolved primary font family name — read from the loaded
+    /// face's own name table, not from the (possibly unset) `font_family`
+    /// config key. This is genuinely different information: `font_family`
+    /// empty just means "let discovery choose," and discovery's choice can be
+    /// ambiguous when many similarly-purposed fonts are installed (e.g.
+    /// several Nerd Font family variants) — see `find_macos_nerd_font`'s doc
+    /// comment. `None` only in the rare case discovery fell through to the
+    /// full-system-scan last resort without identifying a single face
+    /// (`Family::Monospace`, a generic request rather than a named font).
+    /// Surfaced in the Settings panel (General, next to the Font dropdown) so
+    /// a user can see what's actually loaded instead of reading debug logs.
+    pub fn resolved_family_name(&self) -> Option<&str> {
+        match &self.family {
+            FamilyOwned::Named(name) => Some(name),
+            FamilyOwned::Monospace => None,
+        }
+    }
+
     /// Return the best `Family` to use for a given codepoint and bold/italic flags.
     ///
     /// Priority:
@@ -626,6 +665,48 @@ impl Text {
             FamilyOwned::Named(n) => FamilyOwned::Named(n.clone()),
             FamilyOwned::Monospace => FamilyOwned::Monospace,
         }
+    }
+
+    /// Whether the PRIMARY font family has its own glyph for `ch` — a real
+    /// font-coverage check via the resolved face's charmap, not merely
+    /// "shaping didn't come back `.notdef`" (which can succeed via ANY font in
+    /// cosmic-text's fallback cascade, including Apple Color Emoji). See the
+    /// `presentation` module docs: this is the other half of that policy,
+    /// applied to ligature-run eligibility rather than to a color decision. A
+    /// legitimate ligature (`->` → `→`) is, by construction, characters the
+    /// SAME font's GSUB table substitutes together — so every character in a
+    /// real ligature run is already covered by the primary font. Requiring
+    /// that here means an uncovered character never enters the run path at
+    /// all, so cosmic-text's fallback cascade never gets a chance to reach for
+    /// Apple Color Emoji on its behalf.
+    ///
+    /// Queries the exact face `build_attrs`/`rasterize_run` would request (same
+    /// family + weight/style derived from `bold`/`italic`), so this reflects
+    /// what run-shaping will actually resolve to, not an approximation.
+    pub(crate) fn primary_font_covers(&mut self, ch: char, bold: bool, italic: bool) -> bool {
+        let vw = self.variation_weight;
+        let vs = self.variation_stretch;
+        let attrs = build_attrs(
+            self.family.as_family(),
+            bold,
+            italic,
+            &self.font_features,
+            vw,
+            vs,
+        );
+        let query = fontdb::Query {
+            families: &[attrs.family],
+            weight: attrs.weight,
+            stretch: attrs.stretch,
+            style: attrs.style,
+        };
+        let Some(id) = self.font_system.db_mut().query(&query) else {
+            return false;
+        };
+        let Some(font) = self.font_system.get_font(id, attrs.weight) else {
+            return false;
+        };
+        font.as_swash().charmap().map(ch) != 0
     }
 
     /// Shape a representative string to derive the monospace advance width and
@@ -822,10 +903,18 @@ impl Text {
         );
         self.buffer.set_text(text, &attrs, Shaping::Advanced, None);
         self.buffer.shape_until_scroll(&mut self.font_system, false);
-        self.collect_glyphs()
+        self.collect_glyphs(text)
     }
 
-    /// Shape and rasterize a single character into owned RGBA bitmaps.
+    /// Shape and rasterize a single character (or family-routed cluster) into
+    /// owned RGBA/mask bitmaps. `.notdef` misses and unsanctioned color art
+    /// are both handled inside `collect_glyphs`'s fallback chain
+    /// ([`Text::recover_glyph`]) — this is now a thin shell over shape +
+    /// collect, identical in shape to `build_glyphs_with_family`. (The
+    /// previous whole-buffer `.notdef` pre-scan that used to live here — and
+    /// its own private re-render of `render_coretext_gated` — is gone: per-glyph
+    /// resolution in `collect_glyphs` now catches the same cases without a
+    /// separate whole-buffer pass, and without the risk of re-rendering twice.)
     fn build_glyphs(&mut self, text: &str, bold: bool, italic: bool) -> Vec<RasterizedGlyph> {
         // `family` borrows `self`, so capture the borrowed `Family` before the
         // `&mut self.font_system` borrows below; they touch disjoint fields.
@@ -841,100 +930,198 @@ impl Text {
         );
         self.buffer.set_text(text, &attrs, Shaping::Advanced, None);
         self.buffer.shape_until_scroll(&mut self.font_system, false);
+        self.collect_glyphs(text)
+    }
 
-        // `.notdef` (glyph_id 0) means no loaded font covers this code point — the
-        // shaper would otherwise hand us a tofu box. On macOS, defer to CoreText's
-        // system cascade (the same path Terminal.app uses) so e.g. ⏵ U+23F5 resolves
-        // to its real glyph in STIX Two Math instead of rendering as an empty square.
-        #[cfg(target_os = "macos")]
-        {
-            let has_notdef = self
-                .buffer
-                .layout_runs()
-                .any(|run| run.glyphs.iter().any(|g| g.glyph_id == 0));
-            if has_notdef && let Some(g) = render_coretext(text, self.font_px) {
-                // A monochrome symbol (e.g. ⏵) is correct at em size — it's tinted
-                // as a mask and placed by bearings. A color emoji needs the larger
-                // emoji_px raster so the renderer downscales it; re-render at that size.
-                if g.is_color
-                    && self.emoji_px > self.font_px
-                    && let Some(hi) = render_coretext(text, self.emoji_px)
-                {
-                    return vec![hi];
-                }
-                return vec![g];
+    /// The single per-glyph resolution used by every shaping path
+    /// (`collect_glyphs`, for single chars/clusters/family-routed text, and
+    /// `rasterize_run`, for ligature runs). Given one shaped `LayoutGlyph` and
+    /// the exact source substring it was shaped from (`gate_text` — the
+    /// presentation gate must see only this glyph's own text, never a whole
+    /// multi-glyph buffer, or one glyph's accept/reject decision leaks onto
+    /// its neighbors), decides whether to draw it, leave it blank, or hand it
+    /// to [`Text::recover_glyph`].
+    ///
+    /// This is also where the color-emoji `emoji_px` upscale happens — exactly
+    /// once, rather than the three copy-pasted call sites this replaces.
+    fn finalize_shaped_glyph(
+        &mut self,
+        gate_text: &str,
+        glyph: &cosmic_text::LayoutGlyph,
+    ) -> GlyphResolution {
+        // `.notdef`: no loaded font covers this code point at all. Only the
+        // fallback chain (CoreText's system cascade on macOS, a tofu box
+        // everywhere) can show something for it.
+        if glyph.glyph_id == 0 {
+            return GlyphResolution::NeedsFallback;
+        }
+
+        let advance = glyph.w;
+        // Rasterize at the buffer em size first.
+        let pg = glyph.physical((0.0, 0.0), 1.0);
+        // Clone the Option so the FontSystem borrow ends before we read the
+        // image and build the glyph below.
+        let img_opt = self
+            .swash_cache
+            .get_image(&mut self.font_system, pg.cache_key)
+            .clone();
+        let Some(mut img) = img_opt else {
+            return GlyphResolution::Blank;
+        };
+
+        // A font somewhere in cosmic-text's fallback cascade resolved this
+        // codepoint to color art it wasn't sanctioned for (see the
+        // `presentation` module docs) — most commonly Apple Color Emoji, which
+        // on macOS sits in cosmic-text's built-in fallback list ahead of plain
+        // symbol fonts and covers far more than actual `Emoji_Presentation=Yes`
+        // codepoints. Reject it rather than accept a glyph that would flicker
+        // between flat and color depending on which font in the cascade
+        // happened to answer first — but we already know this codepoint
+        // resolves to SOMETHING (it's not a `.notdef` miss), so the caller
+        // must still try to show something rather than silently drawing
+        // nothing (see `recover_glyph`).
+        if !glyph_acceptable(gate_text, matches!(img.content, SwashContent::Color)) {
+            return GlyphResolution::NeedsFallback;
+        }
+
+        // Color emoji are bitmaps. The em-size raster (~28px) is smaller than
+        // the cell (~36px), so the renderer would upscale and blur it. Re-fetch
+        // at `emoji_px` (a font strike ≥ cell height) so the renderer instead
+        // downscales — crisp. Text/mask glyphs keep the em-size raster.
+        if matches!(img.content, SwashContent::Color) {
+            let scale = self.emoji_px / self.font_px;
+            let pg_hi = glyph.physical((0.0, 0.0), scale);
+            if let Some(hi) = self
+                .swash_cache
+                .get_image(&mut self.font_system, pg_hi.cache_key)
+                .clone()
+            {
+                img = hi;
             }
         }
 
-        self.collect_glyphs()
+        let (w, h) = (img.placement.width, img.placement.height);
+        if w == 0 || h == 0 {
+            return GlyphResolution::Blank;
+        }
+        let pixels = (w * h) as usize;
+
+        let (data, is_color) = match img.content {
+            SwashContent::Mask => (img.data.clone(), false),
+            SwashContent::SubpixelMask => {
+                let mut d = Vec::with_capacity(pixels);
+                for px in img.data.chunks_exact(3) {
+                    d.push(px[0].max(px[1]).max(px[2]));
+                }
+                (d, false)
+            }
+            SwashContent::Color => (img.data.clone(), true),
+        };
+
+        GlyphResolution::Draw(RasterizedGlyph {
+            width: w,
+            height: h,
+            left: img.placement.left,
+            top: img.placement.top,
+            is_color,
+            data,
+            advance,
+        })
     }
 
-    /// Collect rasterized glyphs from the shaped buffer. Shared by all shaping paths.
-    fn collect_glyphs(&mut self) -> Vec<RasterizedGlyph> {
+    /// The single home for glyph recovery: what to draw when
+    /// [`Text::finalize_shaped_glyph`] returns `NeedsFallback` — either a
+    /// genuine `.notdef` miss (no loaded font covers the code point) or a
+    /// shaped result that [`glyph_acceptable`] rejected as unsanctioned color
+    /// art. Both cases get the SAME chain because both mean "cosmic-text /
+    /// fontdb couldn't legitimately show this"; only CoreText's full system
+    /// cascade (macOS) or a synthesized placeholder can do better.
+    ///
+    /// Order, matching the CoreText system cascade Terminal.app itself uses:
+    /// 1. Render `text` through CoreText ([`render_coretext`]). A flat
+    ///    (non-color) result is always legitimate — return it directly.
+    /// 2. A color result is legitimate only when [`glyph_acceptable`]
+    ///    sanctions it (explicit VS16, or the code point defaults to emoji
+    ///    presentation) — if so, re-render at `emoji_px` for a crisp
+    ///    downscale, mirroring `finalize_shaped_glyph`'s color upscale.
+    /// 3. Otherwise retry forcing TEXT presentation (`U+FE0E`) on the leading
+    ///    scalar — the same signal Messages.app/Notes.app use to keep a
+    ///    double-covered symbol flat.
+    /// 4. If nothing above produced a usable result, synthesize a tofu-box
+    ///    placeholder ([`synthesize_tofu_glyph`]) so a code point that
+    ///    resolves to SOMETHING somewhere never just vanishes.
+    ///
+    /// Non-macOS has no system cascade to defer to, so it always synthesizes
+    /// the tofu box.
+    #[cfg(target_os = "macos")]
+    fn recover_glyph(&mut self, text: &str, render_px: f32) -> Option<RasterizedGlyph> {
+        if let Some(g) = render_coretext(text, render_px) {
+            if !g.is_color {
+                return Some(g);
+            }
+            if glyph_acceptable(text, true) {
+                if self.emoji_px > render_px
+                    && let Some(hi) = render_coretext(text, self.emoji_px)
+                {
+                    return Some(hi);
+                }
+                return Some(g);
+            }
+            // Rejected color: retry forcing text presentation (VS15) on the
+            // base codepoint before giving up on a real glyph.
+            if let Some(base) = text.chars().next() {
+                let mut forced = String::with_capacity(text.len() + 3);
+                forced.push(base);
+                forced.push('\u{FE0E}');
+                if let Some(flat) = render_coretext(&forced, render_px).filter(|g| !g.is_color) {
+                    return Some(flat);
+                }
+            }
+        }
+        // CoreText found nothing usable at all (true universal `.notdef`), or
+        // found only unsanctioned color art with no flat alternative — either
+        // way, show a placeholder rather than silently dropping the cell.
+        Some(synthesize_tofu_glyph(render_px))
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn recover_glyph(&mut self, _text: &str, render_px: f32) -> Option<RasterizedGlyph> {
+        Some(synthesize_tofu_glyph(render_px))
+    }
+
+    /// Collect rasterized glyphs from the already-shaped buffer. Shared by
+    /// every shaping path (`build_glyphs`, `build_glyphs_with_family`, and
+    /// transitively `rasterize_cluster`). `text` is the exact string that was
+    /// just shaped into `self.buffer`; each glyph is gated on its own
+    /// substring of `text` via [`Text::finalize_shaped_glyph`] (not the whole
+    /// buffer), matching `rasterize_run`'s per-glyph granularity.
+    fn collect_glyphs(&mut self, text: &str) -> Vec<RasterizedGlyph> {
+        // Clone the shaped glyphs out of `self.buffer` first: `finalize_shaped_glyph`
+        // and `recover_glyph` need `&mut self` (for the swash cache / CoreText),
+        // which would conflict with a live borrow from `self.buffer.layout_runs()`.
+        let glyphs: Vec<cosmic_text::LayoutGlyph> = self
+            .buffer
+            .layout_runs()
+            .flat_map(|run| run.glyphs.iter().cloned())
+            .collect();
+
         let mut out = Vec::new();
-        for run in self.buffer.layout_runs() {
-            for glyph in run.glyphs.iter() {
-                // `.notdef` (glyph_id 0): the shaper found no real glyph in any
-                // loaded font. Skip it so we draw nothing rather than a tofu box.
-                // (macOS reroutes these to CoreText in build_glyphs before reaching
-                // here; this guards the non-macOS path and any CoreText miss.)
-                if glyph.glyph_id == 0 {
-                    continue;
-                }
-                let advance = glyph.w;
-                // Rasterize at the buffer em size first.
-                let pg = glyph.physical((0.0, 0.0), 1.0);
-                // Clone the Option so the FontSystem borrow ends before we read
-                // the image and build the glyph below.
-                let img_opt = self
-                    .swash_cache
-                    .get_image(&mut self.font_system, pg.cache_key)
-                    .clone();
-                let Some(mut img) = img_opt else { continue };
-
-                // Color emoji are bitmaps. The em-size raster (~28px) is smaller than
-                // the cell (~36px), so the renderer would upscale and blur it. Re-fetch
-                // at `emoji_px` (a font strike ≥ cell height) so the renderer instead
-                // downscales — crisp. Text/mask glyphs keep the em-size raster.
-                if matches!(img.content, SwashContent::Color) {
-                    let scale = self.emoji_px / self.font_px;
-                    let pg_hi = glyph.physical((0.0, 0.0), scale);
-                    if let Some(hi) = self
-                        .swash_cache
-                        .get_image(&mut self.font_system, pg_hi.cache_key)
-                        .clone()
-                    {
-                        img = hi;
+        for glyph in &glyphs {
+            let gate_text = &text[glyph.start..glyph.end];
+            match self.finalize_shaped_glyph(gate_text, glyph) {
+                GlyphResolution::Draw(g) => out.push(g),
+                GlyphResolution::Blank => {}
+                GlyphResolution::NeedsFallback => {
+                    // CoreText (or the tofu box) resolves the WHOLE input text
+                    // in one pass, so once we've deferred to it we stop —
+                    // pushing cosmic-text's sibling glyphs alongside a
+                    // CoreText replacement would duplicate ink for the same
+                    // input text.
+                    if let Some(g) = self.recover_glyph(text, self.font_px) {
+                        out.push(g);
                     }
+                    break;
                 }
-
-                let (w, h) = (img.placement.width, img.placement.height);
-                if w == 0 || h == 0 {
-                    continue;
-                }
-                let pixels = (w * h) as usize;
-
-                let (data, is_color) = match img.content {
-                    SwashContent::Mask => (img.data.clone(), false),
-                    SwashContent::SubpixelMask => {
-                        let mut d = Vec::with_capacity(pixels);
-                        for px in img.data.chunks_exact(3) {
-                            d.push(px[0].max(px[1]).max(px[2]));
-                        }
-                        (d, false)
-                    }
-                    SwashContent::Color => (img.data.clone(), true),
-                };
-
-                out.push(RasterizedGlyph {
-                    width: w,
-                    height: h,
-                    left: img.placement.left,
-                    top: img.placement.top,
-                    is_color,
-                    data,
-                    advance,
-                });
             }
         }
         out
@@ -993,89 +1180,66 @@ impl Text {
             })
             .collect();
 
+        // Clone the shaped glyphs out of `self.buffer` first: `finalize_shaped_glyph`
+        // needs `&mut self` (for the swash cache), which would conflict with a
+        // live borrow from `self.buffer.layout_runs()` — same reason
+        // `collect_glyphs` does this.
+        let glyphs: Vec<cosmic_text::LayoutGlyph> = self
+            .buffer
+            .layout_runs()
+            .flat_map(|run| run.glyphs.iter().cloned())
+            .collect();
+
         // For each shaped glyph, deposit its rasterized bitmap in the output slot
         // that corresponds to the first input character of the glyph's byte range.
-        for run in self.buffer.layout_runs() {
-            for glyph in run.glyphs.iter() {
-                let advance = glyph.w;
-                let char_idx = byte_to_char(glyph.start);
-                // How many input cells does this advance span?
-                let span = if cell_w > 0.0 {
-                    ((advance / cell_w).round() as usize).max(1)
-                } else {
-                    1
-                };
+        for glyph in &glyphs {
+            let advance = glyph.w;
+            let char_idx = byte_to_char(glyph.start);
+            // How many input cells does this advance span?
+            let span = if cell_w > 0.0 {
+                ((advance / cell_w).round() as usize).max(1)
+            } else {
+                1
+            };
 
-                // `.notdef` (glyph_id 0): no font covers this code point. Reserve
-                // the cell's advance but draw nothing (no tofu box). The single-char
-                // path (build_glyphs) reroutes these to CoreText; this run path is
-                // ligature/ASCII shaping where a miss should just stay blank.
-                if glyph.glyph_id == 0 {
+            let gate_text = &text[glyph.start..glyph.end];
+            match self.finalize_shaped_glyph(gate_text, glyph) {
+                GlyphResolution::Draw(rg) => {
+                    if char_idx < slots.len() {
+                        slots[char_idx].glyphs.push(rg);
+                        slots[char_idx].advance_cells = slots[char_idx].advance_cells.max(span);
+                    }
+                }
+                GlyphResolution::Blank => {
+                    // Advance-only glyph (space, control char, or a combining
+                    // mark with no ink of its own): mark the slot so the
+                    // caller knows this cell was shaped but blank.
                     if char_idx < slots.len() {
                         slots[char_idx].advance_cells = slots[char_idx].advance_cells.max(span);
                     }
-                    continue;
                 }
-
-                let pg = glyph.physical((0.0, 0.0), 1.0);
-                let img_opt = self
-                    .swash_cache
-                    .get_image(&mut self.font_system, pg.cache_key)
-                    .clone();
-                let Some(mut img) = img_opt else {
-                    // Advance-only glyph (space, control char): mark the slot
-                    // so the caller knows this cell was shaped but blank.
+                GlyphResolution::NeedsFallback => {
+                    // `App::liga_eligible` (src/app/render.rs) is supposed to
+                    // keep any character the primary font doesn't cover out of
+                    // a run entirely (`Text::primary_font_covers`), so a real
+                    // ligature's constituent glyphs should never land here —
+                    // every character in a legitimate ligature is by
+                    // construction covered by the primary font's own GSUB
+                    // table (see the `presentation` module docs). If this
+                    // fires, that invariant has been violated upstream;
+                    // surface it loudly in debug/test builds rather than
+                    // silently dropping ink, while still failing safe in
+                    // release by treating it like a `.notdef` miss
+                    // (advance-only, no tofu box — this run path shapes
+                    // ligature/ASCII text where a miss should just stay blank).
+                    debug_assert!(
+                        false,
+                        "run glyph needs fallback despite liga_eligible coverage gate: {:?}",
+                        gate_text
+                    );
                     if char_idx < slots.len() {
                         slots[char_idx].advance_cells = slots[char_idx].advance_cells.max(span);
                     }
-                    continue;
-                };
-
-                // Re-rasterize color emoji at emoji_px (≥ cell height) so the
-                // renderer downscales rather than upscales — see collect_glyphs.
-                if matches!(img.content, SwashContent::Color) {
-                    let scale = self.emoji_px / self.font_px;
-                    let pg_hi = glyph.physical((0.0, 0.0), scale);
-                    if let Some(hi) = self
-                        .swash_cache
-                        .get_image(&mut self.font_system, pg_hi.cache_key)
-                        .clone()
-                    {
-                        img = hi;
-                    }
-                }
-
-                let (w, h) = (img.placement.width, img.placement.height);
-                if w == 0 || h == 0 {
-                    if char_idx < slots.len() {
-                        slots[char_idx].advance_cells = slots[char_idx].advance_cells.max(span);
-                    }
-                    continue;
-                }
-                let pixels = (w * h) as usize;
-                let (data, is_color) = match img.content {
-                    SwashContent::Mask => (img.data.clone(), false),
-                    SwashContent::SubpixelMask => {
-                        let mut d = Vec::with_capacity(pixels);
-                        for px in img.data.chunks_exact(3) {
-                            d.push(px[0].max(px[1]).max(px[2]));
-                        }
-                        (d, false)
-                    }
-                    SwashContent::Color => (img.data.clone(), true),
-                };
-
-                if char_idx < slots.len() {
-                    slots[char_idx].glyphs.push(RasterizedGlyph {
-                        width: w,
-                        height: h,
-                        left: img.placement.left,
-                        top: img.placement.top,
-                        is_color,
-                        data,
-                        advance,
-                    });
-                    slots[char_idx].advance_cells = slots[char_idx].advance_cells.max(span);
                 }
             }
         }
@@ -1122,6 +1286,47 @@ impl Text {
         let glyph_count: usize = self.buffer.layout_runs().map(|r| r.glyphs.len()).sum();
         // "fi" has 2 input characters; a liga font collapses them into 1 glyph.
         glyph_count < 2
+    }
+}
+
+/// Synthesize a simple monochrome tofu-box placeholder — an outlined
+/// rectangle, proportioned like a typical font's own `.notdef` glyph — for a
+/// codepoint that resolved to *something* in the font chain but not to a
+/// legitimate flat glyph (`glyph_acceptable` rejected every color result on
+/// offer, per the `presentation` module's policy, and no font in the chain
+/// had a non-color alternative). Renders as a coverage mask (`is_color:
+/// false`) so the renderer tints it with the cell's foreground color like any
+/// other glyph — a visible "something is here but can't be shown correctly"
+/// marker, matching how kitty/alacritty/ghostty already handle unrenderable
+/// codepoints, rather than the silent blank glassy used to produce for this
+/// specific case. Also the terminal fallback for a TRUE `.notdef` miss
+/// (nothing anywhere covers the codepoint) on the single-character/cluster
+/// path — see [`Text::recover_glyph`]. The ligature-run path
+/// (`Text::rasterize_run`) is the one exception that still draws nothing for
+/// a miss: a `.notdef` or presentation-rejected glyph there just advances the
+/// cell, since that path shapes ligature/ASCII text where a tofu box mid-run
+/// would be visually noisier than a gap.
+fn synthesize_tofu_glyph(font_px: f32) -> RasterizedGlyph {
+    let width = (font_px * 0.55).round().max(2.0) as u32;
+    let height = (font_px * 0.72).round().max(2.0) as u32;
+    let stroke = ((font_px * 0.06).round() as u32).max(1);
+    let mut data = vec![0u8; (width * height) as usize];
+    for y in 0..height {
+        for x in 0..width {
+            let on_border = x < stroke || x + stroke >= width || y < stroke || y + stroke >= height;
+            if on_border {
+                data[(y * width + x) as usize] = 255;
+            }
+        }
+    }
+    RasterizedGlyph {
+        width,
+        height,
+        left: (font_px * 0.08).round() as i32,
+        top: (font_px * 0.72).round() as i32,
+        is_color: false,
+        data,
+        advance: 0.0,
     }
 }
 
@@ -1249,5 +1454,64 @@ fn render_coretext(cluster: &str, render_px: f32) -> Option<RasterizedGlyph> {
             data,
             advance: 0.0,
         })
+    }
+}
+
+#[cfg(test)]
+mod tofu_tests {
+    use super::*;
+
+    /// Pure geometry check, independent of any installed font: the synthesized
+    /// tofu box must be a non-color coverage mask with a visible border (not
+    /// an all-transparent no-op) and a sane, non-degenerate size at a typical
+    /// terminal font size.
+    #[test]
+    fn synthesize_tofu_glyph_has_a_visible_border() {
+        let g = synthesize_tofu_glyph(14.0);
+        assert!(!g.is_color, "tofu box must be a mask, not color art");
+        assert!(
+            g.width >= 2 && g.height >= 2,
+            "tofu box must have real area"
+        );
+        assert_eq!(
+            g.data.len(),
+            (g.width * g.height) as usize,
+            "mask data must be one byte per pixel"
+        );
+        // At least the four corner pixels (always on the border) must be painted.
+        let at = |x: u32, y: u32| g.data[(y * g.width + x) as usize];
+        assert_eq!(at(0, 0), 255, "top-left corner must be on the border");
+        assert_eq!(
+            at(g.width - 1, g.height - 1),
+            255,
+            "bottom-right corner must be on the border"
+        );
+        // The box must not be solid-filled — it's an outline, so the center
+        // (for a box large enough to have one) must be unpainted.
+        if g.width > 4 && g.height > 4 {
+            assert_eq!(
+                at(g.width / 2, g.height / 2),
+                0,
+                "tofu box must be a hollow outline, not a filled rectangle"
+            );
+        }
+    }
+
+    /// The box must scale up with font size rather than staying a fixed pixel
+    /// size (which would look wrong at large font sizes).
+    #[test]
+    fn synthesize_tofu_glyph_scales_with_font_size() {
+        let small = synthesize_tofu_glyph(10.0);
+        let large = synthesize_tofu_glyph(40.0);
+        assert!(large.width > small.width);
+        assert!(large.height > small.height);
+    }
+
+    /// Degenerate (near-zero) font sizes must not panic or divide by zero —
+    /// the `.max(2.0)` floor must hold.
+    #[test]
+    fn synthesize_tofu_glyph_handles_tiny_font_size_without_panic() {
+        let g = synthesize_tofu_glyph(0.0);
+        assert!(g.width >= 2 && g.height >= 2);
     }
 }

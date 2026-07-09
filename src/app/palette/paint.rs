@@ -40,13 +40,17 @@ impl App {
         sel: usize,
         mouse: (f32, f32),
     ) -> Vec<(usize, gui::Rect)> {
-        let m = renderer.cell_metrics();
-        let cell_w = m.width;
-        let cell_h = m.height;
-        let pad = (cell_h * 0.5).round();
-        let gap = (cell_h * 0.35).round();
-        let radius = (cell_h * 0.28).round().clamp(4.0, 8.0);
-        let row_h = (cell_h * 1.55).round();
+        let cm = renderer.cell_metrics();
+        let cell_w = cm.width;
+        let cell_h = cm.height;
+        // Reuse the shared design-system Metrics instead of re-deriving the same
+        // pad/gap/radius/row-height formulas by hand, so the palette scales and
+        // rounds exactly like the rest of the chrome.
+        let m = gui::Metrics::new(cell_w, cell_h);
+        let pad = m.pad;
+        let gap = m.gap;
+        let radius = m.radius;
+        let row_h = m.row_h;
 
         // Full-surface scrim.
         renderer.push_overlay_px(0.0, 0.0, surface.0, surface.1, [0.0, 0.0, 0.0, 0.5]);
@@ -66,29 +70,43 @@ impl App {
         let py = ((surface.1 - ph) * 0.35).round().max(pad);
         let panel = gui::Rect::new(px, py, pw, ph);
 
-        // Panel body (E3 floating surface) + accent top rail.
+        // Soft drop shadow under the floating panel (E3 depth), then the panel
+        // body (E3 floating surface) + accent top rail.
+        renderer.push_overlay_shadow_px(
+            panel.x,
+            panel.y,
+            panel.w,
+            panel.h,
+            m.r_lg,
+            gui::SHADOW_E3_FEATHER,
+            0.0,
+            4.0,
+            gui::shadow_e3(),
+        );
         renderer.push_overlay_rrect_px(
             panel.x,
             panel.y,
             panel.w,
             panel.h,
-            radius + 2.0,
+            m.r_lg,
             gui::glass_float(),
         );
-        renderer.push_overlay_rrect_px(panel.x, panel.y, panel.w, 2.0, radius + 2.0, gui::rail());
+        renderer.push_overlay_rrect_px(panel.x, panel.y, panel.w, 2.0, m.r_lg, gui::rail());
 
         let inner_x = panel.x + pad;
         let inner_w = panel.w - 2.0 * pad;
 
         // --- Query field --------------------------------------------------------
         let field = gui::Rect::new(inner_x, panel.y + pad, inner_w, field_h);
+        // Theme-aware recessed track (gui::track_off()) instead of a flat black
+        // fill, which on light themes painted an opaque black input box.
         renderer.push_overlay_rrect_px(
             field.x,
             field.y,
             field.w,
             field.h,
             radius,
-            [0.0, 0.0, 0.0, 0.35],
+            gui::track_off(),
         );
         let ty = (field.y + (field.h - cell_h) * 0.5).round();
         let mut cx = field.x + pad;

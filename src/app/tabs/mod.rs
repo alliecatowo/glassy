@@ -326,10 +326,12 @@ impl App {
         let m = r.cell_metrics();
         let (sw, _sh) = r.surface_size();
         let bar_h = tab_bar_h(m.height);
+        let win_controls = self.show_window_controls();
         if !self.tab_bar_visible() {
             // Bar hidden: still return the icon button segments so clicks on
-            // the floating Help/Settings/Menu buttons are correctly hit-tested.
-            return floating_icon_segs(sw as f32, bar_h);
+            // the floating Help/Settings/Menu (+ window control) buttons are
+            // correctly hit-tested.
+            return floating_icon_segs(sw as f32, bar_h, win_controls);
         }
         let descs = self.tab_descs();
         let refs: Vec<(&str, bool, bool)> =
@@ -343,6 +345,7 @@ impl App {
             tag_reserve,
             self.active_pos(),
             self.chrome_left_inset(),
+            win_controls,
         )
     }
 

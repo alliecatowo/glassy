@@ -5,7 +5,7 @@
 //!
 //! This exists because `save_settings` used to hand-list a fixed set of
 //! (key, value) pairs that drifted out of sync with `apply_settings_events`
-//! (`chrome.rs`) as new settings-form controls were added — Save reported
+//! (`chrome/settings_form.rs`) as new settings-form controls were added — Save reported
 //! success but silently dropped anything not in the hand-list, so the value
 //! reverted on restart. Driving the save from one table, and asserting its
 //! coverage in a test, makes that class of bug fail CI instead of shipping.
@@ -28,7 +28,7 @@ pub(crate) struct SavedKey {
 /// the settings stepper both drive it there), not in `Config::font_size`, which
 /// only reflects the size at startup. Everything else here is read straight off
 /// `Config` because the settings UI writes straight through to `Config` live
-/// (see `App::apply_settings_events` in `chrome.rs`, `App::commit_settings_field`
+/// (see `App::apply_settings_events` in `chrome/settings_form.rs`, `App::commit_settings_field`
 /// in `settings_fields.rs`, and the system Light/Dark pickers in
 /// `settings_themes.rs`).
 ///
@@ -189,7 +189,7 @@ pub(crate) const SAVED_KEYS: &[SavedKey] = &[
         get: |c| format!("{:.0}", c.padding_right.unwrap_or(0.0)),
     },
     // Quake mode is restart-only (the window is armed once in `App::init_quake`
-    // at startup — see `chrome.rs`'s CONFIG_TOGGLES entry doc), but the toggle
+    // at startup — see `chrome/settings_form.rs`'s CONFIG_TOGGLES entry doc), but the toggle
     // still writes through `Config` live so Save persists it for the next launch.
     SavedKey {
         key: "quake",
@@ -202,6 +202,13 @@ pub(crate) const SAVED_KEYS: &[SavedKey] = &[
     SavedKey {
         key: "quake_animation_ms",
         get: |c| c.quake_animation_ms.to_string(),
+    },
+    // Decorations is restart-only (the frame is chosen once at window creation in
+    // `resumed()`), but like `quake` the toggle writes through `Config` live so
+    // Save persists it for the next launch.
+    SavedKey {
+        key: "decorations",
+        get: |c| c.decorations.to_string(),
     },
     SavedKey {
         key: "power_mode",
@@ -286,6 +293,27 @@ pub(crate) const SAVED_KEYS: &[SavedKey] = &[
                 .unwrap_or_default()
         },
     },
+    // --- settings-modularity stream: expose the remaining w15 config keys ---
+    SavedKey {
+        key: "command_blocks",
+        get: |c| c.command_blocks.as_str().to_string(),
+    },
+    SavedKey {
+        key: "pane_header_style",
+        get: |c| c.pane_header_style.as_str().to_string(),
+    },
+    SavedKey {
+        key: "pane_headers_single",
+        get: |c| c.pane_headers_single.to_string(),
+    },
+    SavedKey {
+        key: "scrollback_background_cap",
+        get: |c| c.scrollback_background_cap.to_string(),
+    },
+    SavedKey {
+        key: "scrollback_background_idle_secs",
+        get: |c| c.scrollback_background_idle_secs.to_string(),
+    },
 ];
 
 #[cfg(test)]
@@ -293,7 +321,7 @@ mod tests {
     use super::*;
 
     /// Every `Config` field that the settings UI can live-mutate, hand-enumerated
-    /// by reading `App::apply_settings_events` (`chrome.rs`),
+    /// by reading `App::apply_settings_events` (`chrome/settings_form.rs`),
     /// `App::commit_settings_field` (`settings_fields.rs`), and the system
     /// Light/Dark theme pickers (`settings_themes.rs`) end to end. `font_size` is
     /// intentionally excluded — see [`SAVED_KEYS`]'s doc comment.
@@ -342,6 +370,7 @@ mod tests {
         "quake",
         "quake_height",
         "quake_animation_ms",
+        "decorations",
         "power_mode",
         "power_mode_intensity",
         "dim_unfocused",
@@ -360,6 +389,11 @@ mod tests {
         "command_fold",
         "hints_chars",
         "wallpaper_theme",
+        "command_blocks",
+        "pane_header_style",
+        "pane_headers_single",
+        "scrollback_background_cap",
+        "scrollback_background_idle_secs",
     ];
 
     #[test]

@@ -34,6 +34,16 @@ pub(crate) const CLOSE_BOX: f32 = 16.0;
 /// Square icon-button size for +/#/?/* controls (px).
 pub(crate) const CTRL_BTN: f32 = 28.0;
 
+/// Width of the borderless-window resize border zone (px). A left press within
+/// this many pixels of a window edge/corner starts an OS-driven resize drag
+/// (glassy owns the edge once the native decorations are off — see
+/// [`resize_edge_at`]). Kept small so it doesn't steal ordinary content clicks.
+// Only the non-macOS borderless resize path (`window_resize_edge_at_pointer`)
+// reads this; macOS keeps its native resize handles, so gate it to match its
+// sole consumer and avoid a dead-code warning on macOS builds.
+#[cfg(not(target_os = "macos"))]
+pub(crate) const RESIZE_BORDER: f32 = 6.0;
+
 /// Corner radius for tab-bar icon buttons, derived from the cell height like the
 /// GUI metric scale so it tracks the font/DPI.
 pub(crate) fn gui_radius(cell_h: f32) -> f32 {
@@ -158,9 +168,13 @@ pub(crate) enum StripItem {
     /// A tab's ✕ close affordance at stable position `pos`.
     TabClose(usize),
     NewTab,
-    Help,
-    Settings,
     Menu,
+    /// Borderless-window controls painted in the top-right chrome on non-macOS
+    /// (macOS keeps its native traffic lights). Only laid out when glassy owns the
+    /// window edge — see [`right_control_items`].
+    WinMinimize,
+    WinMaximize,
+    WinClose,
 }
 
 /// One placed tab-bar item with its pixel rect. The label is carried for the tab
@@ -278,19 +292,34 @@ pub(crate) enum MenuAction {
     SplitRight,
     SplitDown,
     NewTab,
+    CommandPalette,
     Settings,
     Help,
+    QuakeToggle,
+    About,
     CloseTab,
 }
 
 impl MenuAction {
-    /// The fixed set shown by the ≡ hamburger dropdown. Settings (⚙) and Help (?)
-    /// are NOT listed here — they have dedicated quick-access strip icons, so
-    /// duplicating them in the hamburger would give two independent UI paths to the
-    /// same overlay. `PaneHeaders` is likewise omitted: it is a Settings-form (and
-    /// command-palette) toggle, not a top-level menu action. The right-click context
-    /// menu uses a separately-built `Vec<MenuAction>` (see `context_menu_items`).
-    pub(crate) const ALL: &'static [MenuAction] = &[MenuAction::NewTab, MenuAction::CloseTab];
+    /// The grouped set shown by the ≡ hamburger dropdown. The standalone `?`/`⚙`
+    /// strip icons were folded IN here (leaving `+`/`≡` as the only standalone
+    /// top-right buttons), so the hamburger is now the single home for Settings /
+    /// Help alongside New tab, the splits, the command palette, quake toggle, and
+    /// About. Grouped (via [`MenuAction::group`]) as: New tab / Split right / Split
+    /// down | Command palette / Settings / Help | Quake toggle | About. The
+    /// right-click context menu uses a separately-built `Vec<MenuAction>` (see
+    /// `context_menu_items`).
+    pub(crate) const ALL: &'static [MenuAction] = &[
+        MenuAction::NewTab,
+        MenuAction::SplitRight,
+        MenuAction::SplitDown,
+        MenuAction::CommandPalette,
+        MenuAction::Settings,
+        MenuAction::Help,
+        MenuAction::QuakeToggle,
+        MenuAction::About,
+        MenuAction::CloseTab,
+    ];
 
     pub(crate) fn label(self) -> &'static str {
         match self {
@@ -302,57 +331,108 @@ impl MenuAction {
             MenuAction::SplitRight => "Split right",
             MenuAction::SplitDown => "Split down",
             MenuAction::NewTab => "New tab",
+            MenuAction::CommandPalette => "Command palette",
             MenuAction::Settings => "Settings",
             MenuAction::Help => "Help / keys",
+            MenuAction::QuakeToggle => "Toggle quake",
+            MenuAction::About => "About",
             MenuAction::CloseTab => "Close tab",
         }
     }
 
-    /// Left-column icon glyph for the real GUI menu (§3.6).
+    /// Left-column icon glyph for the real GUI menu (§3.6). Every glyph here is
+    /// a BMP symbol with `Emoji_Presentation = No` (default TEXT presentation),
+    /// so none of these can flicker into color — but staying off the
+    /// emoji-default list is necessary, not sufficient: a font can still lack
+    /// the glyph entirely (no substitute is drawn — see `src/text/presentation.rs`),
+    /// which is why this favors the specific glyphs already proven to render
+    /// (Geometric Shapes / Box Drawing / ASCII, the same family as `⧉`/`↗`/`✕`
+    /// used elsewhere in the chrome) over reaching for a more literal pictogram
+    /// from a less commonly embedded block on a hunch.
     pub(crate) fn icon(self) -> char {
         match self {
-            MenuAction::Copy => '◻',
+            MenuAction::Copy => '\u{29C9}', // ⧉ two joined squares (same as the copy-path icon)
             MenuAction::Paste => '□',
             MenuAction::SelectAll => '◼',
+            // Control-Pictures/Misc-Technical coverage is spottier in practice
+            // than assumed (see the flicker investigation) — these two aren't
+            // visible in the hamburger, so keep the originals rather than gamble
+            // on font coverage for a row nobody's confirmed is even affected.
             MenuAction::ClearScrollback => '~',
             MenuAction::Search => '/',
-            MenuAction::SplitRight => '|',
-            MenuAction::SplitDown => '-',
+            // Half-block fill glyphs (▐/▄) rasterized with inconsistent advance
+            // metrics here (one came out a hairline sliver, the other a full
+            // block) — solid bars oriented to the split axis read cleaner and
+            // share the fully-inked-shape family `◼`/`▼` already rasterize fine.
+            MenuAction::SplitRight => '\u{25AE}', // ▮ black vertical rectangle
+            MenuAction::SplitDown => '\u{25AC}',  // ▬ black rectangle (horizontal)
             MenuAction::NewTab => '+',
-            MenuAction::Settings => '*',
+            // With the unified glyph-resolution funnel (see `recover_glyph` in
+            // src/text/shape.rs), a default-TEXT symbol the primary font lacks no
+            // longer blanks: it falls back to a flat CoreText mono glyph. So ⌘
+            // (Misc Technical) and ⚙ (U+2699, resolved via Menlo) both render flat
+            // now — verified on-machine. ⓘ (U+24D8) is still avoided: it resolves
+            // to an oversized fullwidth enclosed-alphanumeric glyph (≈23px, wider
+            // than the cell), so About keeps a plain `i`. Search/clear have no
+            // correct flat (non-color) pictograph, so they stay ASCII.
+            MenuAction::CommandPalette => '\u{2318}', // ⌘ command key
+            MenuAction::Settings => '\u{2699}',       // ⚙ gear — flat via CoreText fallback
             MenuAction::Help => '?',
+            MenuAction::QuakeToggle => '\u{25BC}', // ▼ slides down
+            MenuAction::About => 'i',
             MenuAction::CloseTab => '✕',
         }
     }
 
     /// Right-aligned shortcut hint for the real GUI menu (§3.6). `None` for
     /// actions that have no keybinding shown in the menu.
+    ///
+    /// These were hardcoded to the PC chords unconditionally — always showing
+    /// "Ctrl+Shift+T" etc. even on macOS, where the real default bind is a
+    /// completely different chord (`cmd+t`, no shift at all; see
+    /// `mac_default_binds` in `config/keymap.rs`). Every other place that shows
+    /// a shortcut hint (the Help panel, the command palette) resolves it from
+    /// the LIVE keymap via `action_chord_display_map` specifically to avoid
+    /// this kind of drift; doing the same here would mean threading an owned,
+    /// per-frame-resolved string through `MenuEntry` (currently `&'static str`
+    /// throughout). Short of that larger change, this at least matches each
+    /// platform's actual DEFAULT bind (mac chords use the same ⌘/⇧ HIG symbol
+    /// convention `Chord::display_for` uses) — it just won't reflect a user's
+    /// OWN custom `[keybindings]` override, which is a smaller, pre-existing gap.
     pub(crate) fn shortcut(self) -> Option<&'static str> {
+        let mac = cfg!(target_os = "macos");
         match self {
-            MenuAction::Copy => Some("Ctrl+Shift+C"),
-            MenuAction::Paste => Some("Ctrl+Shift+V"),
-            MenuAction::SelectAll => Some("Ctrl+Shift+A"),
+            MenuAction::Copy => Some(if mac { "⌘C" } else { "Ctrl+Shift+C" }),
+            MenuAction::Paste => Some(if mac { "⌘V" } else { "Ctrl+Shift+V" }),
+            // No default PC bind exists for Select All at all (mac-only default).
+            MenuAction::SelectAll => mac.then_some("⌘A"),
             MenuAction::ClearScrollback => None,
-            MenuAction::Search => Some("Ctrl+Shift+F"),
-            MenuAction::SplitRight => Some("Ctrl+Shift+E"),
-            MenuAction::SplitDown => Some("Ctrl+Shift+O"),
-            MenuAction::NewTab => Some("Ctrl+Shift+T"),
-            MenuAction::Settings => Some("Ctrl+,"),
+            MenuAction::Search => Some(if mac { "⌘F" } else { "Ctrl+Shift+F" }),
+            MenuAction::SplitRight => Some(if mac { "⌘D" } else { "Ctrl+Shift+E" }),
+            MenuAction::SplitDown => Some(if mac { "⇧⌘D" } else { "Ctrl+Shift+O" }),
+            MenuAction::NewTab => Some(if mac { "⌘T" } else { "Ctrl+Shift+T" }),
+            MenuAction::CommandPalette => Some(if mac { "⇧⌘P" } else { "Ctrl+Shift+P" }),
+            MenuAction::Settings => Some(if mac { "⌘," } else { "Ctrl+," }),
             MenuAction::Help => Some("F1"),
-            MenuAction::CloseTab => Some("Ctrl+Shift+W"),
+            MenuAction::QuakeToggle => Some("F12"),
+            MenuAction::About => None,
+            MenuAction::CloseTab => Some(if mac { "⌘W" } else { "Ctrl+Shift+W" }),
         }
     }
 
     /// Visual group id used by [`actions_to_entries`] to place separators: a
     /// separator is drawn between any two consecutive items whose groups differ.
-    /// 0 = clipboard, 1 = buffer/find, 2 = layout, 3 = app, 4 = destructive.
+    /// 0 = clipboard, 1 = buffer/find, 2 = new/layout, 3 = app (palette/settings/
+    /// help), 4 = quake, 5 = about, 6 = destructive.
     fn group(self) -> u8 {
         match self {
             MenuAction::Copy | MenuAction::Paste | MenuAction::SelectAll => 0,
             MenuAction::ClearScrollback | MenuAction::Search => 1,
             MenuAction::SplitRight | MenuAction::SplitDown | MenuAction::NewTab => 2,
-            MenuAction::Settings | MenuAction::Help => 3,
-            MenuAction::CloseTab => 4,
+            MenuAction::CommandPalette | MenuAction::Settings | MenuAction::Help => 3,
+            MenuAction::QuakeToggle => 4,
+            MenuAction::About => 5,
+            MenuAction::CloseTab => 6,
         }
     }
 }

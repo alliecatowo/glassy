@@ -195,7 +195,11 @@ impl<'r> Ui<'r> {
         let body_top = sep_y + 1.0 + m.gap;
         let body_bot = inner.y + inner.h - m.row_h - m.gap; // leave room for footer
         let body_h = (body_bot - body_top).max(m.row_h);
-        let sidebar_w = (m.cell_w * 13.0).round();
+        // 13 cells fits the longest label ("Notifications") exactly, with no
+        // room left for the leading `m.pad` the label draws at — hence `+ pad
+        // + gap` so it actually fits instead of relying solely on the
+        // `label_clip` below to paper over it with an ellipsis.
+        let sidebar_w = (m.cell_w * 13.0 + m.pad + m.gap).round();
         let active_section = v.section.min(SettingsSection::ALL.len() - 1);
         for (i, sec) in SettingsSection::ALL.iter().enumerate() {
             let ry = body_top + i as f32 * (m.row_h + 2.0);
@@ -212,7 +216,19 @@ impl<'r> Ui<'r> {
             }
             let ty = (rr.center_y() - m.cell_h * 0.5).round();
             let col = if i == active_section { fg() } else { fg_dim() };
-            self.label((rr.x + m.pad).round(), ty, sec.label(), col);
+            // `label_clip`, not `label`: the content pane starts immediately at
+            // `sidebar_w` with no gap, so an unclipped label overflowing its
+            // highlight box (as "Notifications" — 13 chars — did against a
+            // `sidebar_w` sized for exactly 13 cells with no room for the
+            // leading `m.pad`) ran straight into the content pane. Clipping
+            // makes that structurally impossible regardless of label length.
+            self.label_clip(
+                (rr.x + m.pad).round(),
+                ty,
+                sec.label(),
+                sidebar_w - m.gap - m.pad,
+                col,
+            );
             if it.clicked {
                 ev.section_pick = Some(i);
             }
@@ -232,9 +248,15 @@ impl<'r> Ui<'r> {
         let ctrl_h = (m.row_h - m.gap).max(m.cell_h);
         let heading_h = (m.cell_h + m.gap).round();
         let step = m.row_h + m.gap;
+        // Every row kind bakes its OWN trailing gap into this height (so `ry +=
+        // rh` alone gives correct spacing to whatever follows). `Info` used to
+        // return bare `heading_h` with no added gap, so a row immediately after
+        // an info line (e.g. "Bold font" after "Applies on restart…") sat flush
+        // against it with no breathing room — the settings-panel "overlapping"
+        // jank. Match `Heading`'s `+ m.gap` so every row transition gets one.
         let row_height = |r: &RowKind| match r {
             RowKind::Heading(_) => heading_h + m.gap,
-            RowKind::Info(_) => heading_h,
+            RowKind::Info(_) => heading_h + m.gap,
             _ => step,
         };
         let content_h: f32 = rows.iter().map(row_height).sum();
@@ -822,448 +844,550 @@ fn theme_index(names: &[&str], name: &str) -> usize {
 }
 
 /// Build the row list for a section. Borrows the [`SettingsView`] so labels and
-/// values come straight from the live config snapshot.
+/// values come straight from the live config snapshot. Dispatches to one
+/// `rows_<section>` helper per section (below) — each owns exactly that
+/// section's rows, so a section's controls can be scanned/edited without
+/// wading through the other ten.
 fn build_section_rows<'a>(section: SettingsSection, v: &'a SettingsView<'a>) -> Vec<RowKind<'a>> {
     let mut rows: Vec<RowKind<'a>> = Vec::new();
     match section {
-        SettingsSection::General => {
-            rows.push(RowKind::Heading("Font"));
-            rows.push(RowKind::Stepper {
-                id: "settings/font_size",
-                label: "Font size",
-                text: format!("{:.0} px", v.font_px),
-            });
-            rows.push(RowKind::Dropdown {
-                id: "settings/font_family",
-                label: "Font",
-                text: v.font_family,
-                swatch: None,
-                which: SettingsDrop::Font,
-            });
-            rows.push(RowKind::Heading("Window"));
-            rows.push(RowKind::Slider {
-                id: "settings/opacity",
-                label: "Opacity",
-                value: v.opacity,
-                min: 0.0,
-                max: 1.0,
-            });
-            rows.push(RowKind::Stepper {
-                id: "settings/padding",
-                label: "Padding",
-                text: format!("{} px", v.padding),
-            });
-            rows.push(RowKind::Heading("Bell"));
-            rows.push(RowKind::Segmented {
-                id: "settings/bell",
-                label: "Bell",
-                options: &["Off", "Visual", "Audible"],
-                sel: v.bell.min(2),
-            });
-        }
-        SettingsSection::Appearance => {
-            rows.push(RowKind::Heading("Cursor"));
-            rows.push(RowKind::Segmented {
-                id: "settings/cursor_style",
-                label: "Cursor shape",
-                options: &["Block", "Beam", "Underline"],
-                sel: v.cursor_style_idx.min(2),
-            });
-            rows.push(RowKind::Toggle {
-                id: "settings/cursor_blink",
-                label: "Cursor blink",
-                value: v.cursor_blink,
-            });
-            rows.push(RowKind::Toggle {
-                id: "settings/cursor_trail",
-                label: "Cursor trail",
-                value: v.cursor_trail,
-            });
-            rows.push(RowKind::Heading("Text"));
-            rows.push(RowKind::Toggle {
-                id: "settings/ligatures",
-                label: "Ligatures",
-                value: v.ligatures,
-            });
-            rows.push(RowKind::Heading("Overlays"));
-            rows.push(RowKind::Toggle {
-                id: "settings/minimap",
-                label: "Minimap",
-                value: v.minimap,
-            });
-        }
-        SettingsSection::Effects => {
-            rows.push(RowKind::Heading("Window effect"));
-            // Unified window post-process effect (supersedes the legacy CRT
-            // toggle). Eight modes — a dropdown, since a segmented row crams 8
-            // labels. Index order mirrors `WindowEffect::index`. Widget id is
-            // UNCHANGED from the Appearance section this moved out of, so event
-            // routing (`apply_dropdown_toggle`/`apply_segmented_event` in this
-            // file, `ev.window_effect`/`window_effect_toggle` in `chrome.rs`) and
-            // persistence (`SAVED_KEYS["window_effect"]`) are untouched.
-            rows.push(RowKind::Dropdown {
-                id: "settings/window_effect",
-                label: "Effect",
-                text: EFFECT_NAMES
-                    .get(v.window_effect_idx)
-                    .copied()
-                    .unwrap_or("Off"),
-                swatch: None,
-                which: SettingsDrop::Effect,
-            });
-            // Custom effect: per-channel intensity sliders so any compatible
-            // combination stacks. Only shown when Custom (index 8) is selected.
-            // Widget ids UNCHANGED (see above).
-            if v.window_effect_idx == 8 {
-                for (id, label, ch) in CUSTOM_FX_SLIDERS {
-                    rows.push(RowKind::Slider {
-                        id,
-                        label,
-                        value: v.custom_effect.get(*ch).copied().unwrap_or(0.0),
-                        min: 0.0,
-                        max: 1.0,
-                    });
-                }
-            }
-            rows.push(RowKind::Heading("Power Mode"));
-            rows.push(RowKind::Toggle {
-                id: "settings/power_mode",
-                label: "Power mode",
-                value: v.power_mode,
-            });
-            rows.push(RowKind::Slider {
-                id: "settings/power_mode_intensity",
-                label: "Intensity",
-                value: v.power_mode_intensity,
-                min: 0.0,
-                max: 1.0,
-            });
-            rows.push(RowKind::Heading("Focus"));
-            rows.push(RowKind::Toggle {
-                id: "settings/dim_unfocused",
-                label: "Dim unfocused panes",
-                value: v.dim_unfocused,
-            });
-            rows.push(RowKind::Heading("Clipboard"));
-            rows.push(RowKind::Toggle {
-                id: "settings/copy_html",
-                label: "Copy as HTML",
-                value: v.copy_html,
-            });
-        }
-        SettingsSection::Terminal => {
-            rows.push(RowKind::Heading("Hints mode"));
-            rows.push(RowKind::TextEdit {
-                id: "settings/hints_chars",
-                label: "Hint chars",
-                which: EditField::HintsChars,
-                placeholder: "asdfghjkl… (default)",
-            });
-            rows.push(RowKind::Heading("Font overrides"));
-            rows.push(RowKind::Info(
-                "Applies on restart — the running font stack isn't reloaded live.",
-            ));
-            rows.push(RowKind::TextEdit {
-                id: "settings/font_bold",
-                label: "Bold font",
-                which: EditField::FontBold,
-                placeholder: "(synthesized)",
-            });
-            rows.push(RowKind::TextEdit {
-                id: "settings/font_italic",
-                label: "Italic font",
-                which: EditField::FontItalic,
-                placeholder: "(synthesized)",
-            });
-            rows.push(RowKind::TextEdit {
-                id: "settings/font_bold_italic",
-                label: "Bold-italic font",
-                which: EditField::FontBoldItalic,
-                placeholder: "(synthesized)",
-            });
-            rows.push(RowKind::TextEdit {
-                id: "settings/font_symbol_map",
-                label: "Symbol map",
-                which: EditField::FontSymbolMap,
-                placeholder: "U+E000-U+F8FF:Symbols Nerd Font Mono",
-            });
-            rows.push(RowKind::TextEdit {
-                id: "settings/font_variations",
-                label: "Font variations",
-                which: EditField::FontVariations,
-                placeholder: "wght=450 wdth=75",
-            });
-            rows.push(RowKind::Heading("Startup"));
-            rows.push(RowKind::Info(
-                "Set in the config file — changing the shell live is unsafe.",
-            ));
-            rows.push(RowKind::PathField {
-                id: "settings/shell",
-                label: "Shell",
-                text: v.shell_display,
-                copyable: false,
-            });
-            rows.push(RowKind::PathField {
-                id: "settings/cwd",
-                label: "Startup cwd",
-                text: v.cwd_display,
-                copyable: false,
-            });
-        }
-        SettingsSection::Themes => {
-            rows.push(RowKind::Heading("Wallpaper"));
-            rows.push(RowKind::TextEdit {
-                id: "settings/wallpaper_theme",
-                label: "Wallpaper image",
-                which: EditField::WallpaperTheme,
-                placeholder: "(disabled) /path/to/image.png",
-            });
-            rows.push(RowKind::Heading("Active theme"));
-            let swatch = v.theme_swatches.get(v.theme_idx).copied();
-            rows.push(RowKind::Dropdown {
-                id: "settings/theme",
-                label: "Theme",
-                text: v.theme_names.get(v.theme_idx).copied().unwrap_or(""),
-                swatch,
-                which: SettingsDrop::Theme,
-            });
-            rows.push(RowKind::Heading("Follow system"));
-            rows.push(RowKind::Toggle {
-                id: "settings/follow_system",
-                label: "Follow system",
-                value: v.follow_system,
-            });
-            rows.push(RowKind::Dropdown {
-                id: "settings/theme_light",
-                label: "Light theme",
-                text: v.theme_light,
-                swatch: v
-                    .theme_swatches
-                    .get(theme_index(v.theme_names, v.theme_light))
-                    .copied(),
-                which: SettingsDrop::ThemeLight,
-            });
-            rows.push(RowKind::Dropdown {
-                id: "settings/theme_dark",
-                label: "Dark theme",
-                text: v.theme_dark,
-                swatch: v
-                    .theme_swatches
-                    .get(theme_index(v.theme_names, v.theme_dark))
-                    .copied(),
-                which: SettingsDrop::ThemeDark,
-            });
-            rows.push(RowKind::Heading("Custom theme"));
-            rows.push(RowKind::Info(
-                "Click a swatch below to edit fg/bg/cursor/ansi.",
-            ));
-            // Reserve space so the floating editor card never overlaps real rows.
-            for _ in 0..5 {
-                rows.push(RowKind::Info(""));
-            }
-        }
-        SettingsSection::Keys => {
-            rows.push(RowKind::Heading("Keybindings"));
-            rows.push(RowKind::Info("Edit [keybindings] in the config file:"));
-            rows.push(RowKind::PathField {
-                id: "settings/config",
-                label: "Config",
-                text: v.config_path,
-                copyable: true,
-            });
-            rows.push(RowKind::Info("Press F1 for the full keybinding reference."));
-        }
-        SettingsSection::Panes => {
-            rows.push(RowKind::Heading("Tabs"));
-            rows.push(RowKind::Segmented {
-                id: "settings/tab_bar",
-                label: "Tab bar",
-                options: &["Auto", "Always", "Never"],
-                sel: v.tab_bar_mode.min(2),
-            });
-            rows.push(RowKind::Heading("Panes"));
-            rows.push(RowKind::Toggle {
-                id: "settings/pane_headers",
-                label: "Pane headers",
-                value: v.pane_headers,
-            });
-            rows.push(RowKind::Heading("Status"));
-            rows.push(RowKind::Toggle {
-                id: "settings/status_bar",
-                label: "Status bar",
-                value: v.status_bar,
-            });
-            rows.push(RowKind::Heading("Window title"));
-            rows.push(RowKind::Toggle {
-                id: "settings/title_show_cwd",
-                label: "Show cwd",
-                value: v.title_show_cwd,
-            });
-            rows.push(RowKind::Toggle {
-                id: "settings/title_show_count",
-                label: "Show tab count",
-                value: v.title_show_count,
-            });
-        }
-        SettingsSection::Quake => {
-            rows.push(RowKind::Heading("Quake / dropdown mode"));
-            rows.push(RowKind::Toggle {
-                id: "settings/quake",
-                label: "Enable quake mode",
-                value: v.quake,
-            });
-            rows.push(RowKind::Info(
-                "Restart required — quake mode is only armed at startup.",
-            ));
-            rows.push(RowKind::Info(
-                "On Wayland, bind a compositor key to `glassy toggle` — see docs/quake-mode.md.",
-            ));
-            rows.push(RowKind::Slider {
-                id: "settings/quake_height",
-                label: "Height",
-                value: v.quake_height,
-                min: crate::config::parse::QUAKE_HEIGHT_MIN,
-                max: crate::config::parse::QUAKE_HEIGHT_MAX,
-            });
-            rows.push(RowKind::Stepper {
-                id: "settings/quake_animation_ms",
-                label: "Slide duration",
-                text: format!("{} ms", v.quake_animation_ms),
-            });
-        }
-        SettingsSection::Notifications => {
-            rows.push(RowKind::Heading("Command finished"));
-            rows.push(RowKind::Toggle {
-                id: "settings/notify_command_finish",
-                label: "Notify when a command finishes",
-                value: v.notify_command_finish,
-            });
-            rows.push(RowKind::Stepper {
-                id: "settings/notify_command_threshold_ms",
-                label: "Minimum duration",
-                text: format!("{} ms", v.notify_command_threshold_ms),
-            });
-            rows.push(RowKind::Heading("Command output"));
-            rows.push(RowKind::Toggle {
-                id: "settings/command_fold",
-                label: "Allow folding output",
-                value: v.command_fold,
-            });
-            // Moved from the Panes section — widget id UNCHANGED so event
-            // routing (`CONFIG_TOGGLES` in `chrome.rs`) and persistence
-            // (`SAVED_KEYS["command_badges"]`) are untouched.
-            rows.push(RowKind::Toggle {
-                id: "settings/command_badges",
-                label: "Command badges",
-                value: v.command_badges,
-            });
-        }
-        SettingsSection::Advanced => {
-            rows.push(RowKind::Heading("Scrollback"));
-            rows.push(RowKind::Stepper {
-                id: "settings/scrollback",
-                label: "Scrollback",
-                text: format!("{}", v.scrollback),
-            });
-            rows.push(RowKind::Heading("Selection"));
-            rows.push(RowKind::Toggle {
-                id: "settings/copy_on_select",
-                label: "Copy on select",
-                value: v.copy_on_select,
-            });
-            rows.push(RowKind::TextEdit {
-                id: "settings/word_separator",
-                label: "Word seps",
-                which: EditField::WordSep,
-                placeholder: "(default)",
-            });
-            rows.push(RowKind::Heading("Shaping"));
-            rows.push(RowKind::TextEdit {
-                id: "settings/font_features",
-                label: "Font features",
-                which: EditField::FontFeatures,
-                placeholder: "ss01 calt=0 …",
-            });
-            rows.push(RowKind::Heading("Padding overrides"));
-            rows.push(RowKind::Info(
-                "Per-side overrides win over the uniform padding above.",
-            ));
-            rows.push(RowKind::Stepper {
-                id: "settings/padding_top",
-                label: "Top",
-                text: format!("{} px", v.padding_top),
-            });
-            rows.push(RowKind::Stepper {
-                id: "settings/padding_bottom",
-                label: "Bottom",
-                text: format!("{} px", v.padding_bottom),
-            });
-            rows.push(RowKind::Stepper {
-                id: "settings/padding_left",
-                label: "Left",
-                text: format!("{} px", v.padding_left),
-            });
-            rows.push(RowKind::Stepper {
-                id: "settings/padding_right",
-                label: "Right",
-                text: format!("{} px", v.padding_right),
-            });
-            rows.push(RowKind::Heading("Status bar"));
-            rows.push(RowKind::TextEdit {
-                id: "settings/status_bar_segments",
-                label: "Segments",
-                which: EditField::StatusBarSegments,
-                placeholder: "(default) cwd git_branch mode …",
-            });
-            rows.push(RowKind::TextEdit {
-                id: "settings/status_bar_time_format",
-                label: "Time format",
-                which: EditField::StatusBarTimeFormat,
-                placeholder: "%H:%M",
-            });
-            rows.push(RowKind::Heading("Session"));
-            rows.push(RowKind::Toggle {
-                id: "settings/restore_session",
-                label: "Restore session",
-                value: v.restore_session,
-            });
-            rows.push(RowKind::Heading("Config file"));
-            rows.push(RowKind::PathField {
-                id: "settings/config",
-                label: "Config",
-                text: v.config_path,
-                copyable: true,
-            });
-        }
-        // Runtime `[profile.*]` switching + "duplicate current as a new
-        // profile". Split out of Advanced (profiles-ui stream) into its own
-        // section — see `SettingsSection::Profiles`'s doc comment.
-        SettingsSection::Profiles => {
-            rows.push(RowKind::Heading("Profiles"));
-            rows.push(RowKind::ProfileDefault {
-                active: v.active_profile.is_none(),
-            });
-            for (i, name) in v.profile_names.iter().enumerate() {
-                rows.push(RowKind::Profile {
-                    index: i,
-                    name,
-                    active: v.active_profile == Some(*name),
-                    armed_delete: v.profile_delete_armed == Some(i),
-                    renaming: v.profile_rename_idx == Some(i),
-                });
-            }
-            rows.push(RowKind::Heading("New profile"));
-            rows.push(RowKind::ProfileCreate {
-                text_id: "settings/profile_new_name",
-                button_id: "settings/profile_new_save",
-                placeholder: "name",
-            });
-            rows.push(RowKind::Info(
-                "Duplicates the CURRENT live settings into a new [profile.NAME] section.",
-            ));
-        }
+        SettingsSection::General => rows_general(&mut rows, v),
+        SettingsSection::Appearance => rows_appearance(&mut rows, v),
+        SettingsSection::Effects => rows_effects(&mut rows, v),
+        SettingsSection::Terminal => rows_terminal(&mut rows, v),
+        SettingsSection::Themes => rows_themes(&mut rows, v),
+        SettingsSection::Keys => rows_keys(&mut rows, v),
+        SettingsSection::Panes => rows_panes(&mut rows, v),
+        SettingsSection::Quake => rows_quake(&mut rows, v),
+        SettingsSection::Notifications => rows_notifications(&mut rows, v),
+        SettingsSection::Advanced => rows_advanced(&mut rows, v),
+        SettingsSection::Profiles => rows_profiles(&mut rows, v),
     }
     rows
+}
+
+fn rows_general<'a>(rows: &mut Vec<RowKind<'a>>, v: &'a SettingsView<'a>) {
+    rows.push(RowKind::Heading("Font"));
+    rows.push(RowKind::Stepper {
+        id: "settings/font_size",
+        label: "Font size",
+        text: format!("{:.0} px", v.font_px),
+    });
+    rows.push(RowKind::Dropdown {
+        id: "settings/font_family",
+        label: "Font",
+        text: v.font_family,
+        swatch: None,
+        which: SettingsDrop::Font,
+    });
+    rows.push(RowKind::Info(v.resolved_font_family));
+    rows.push(RowKind::Heading("Window"));
+    rows.push(RowKind::Slider {
+        id: "settings/opacity",
+        label: "Opacity",
+        value: v.opacity,
+        min: 0.0,
+        max: 1.0,
+    });
+    rows.push(RowKind::Stepper {
+        id: "settings/padding",
+        label: "Padding",
+        text: format!("{} px", v.padding),
+    });
+    rows.push(RowKind::Heading("Bell"));
+    rows.push(RowKind::Segmented {
+        id: "settings/bell",
+        label: "Bell",
+        options: &["Off", "Visual", "Audible"],
+        sel: v.bell.min(2),
+    });
+}
+
+fn rows_appearance<'a>(rows: &mut Vec<RowKind<'a>>, v: &'a SettingsView<'a>) {
+    rows.push(RowKind::Heading("Cursor"));
+    rows.push(RowKind::Segmented {
+        id: "settings/cursor_style",
+        label: "Cursor shape",
+        options: &["Block", "Beam", "Underline"],
+        sel: v.cursor_style_idx.min(2),
+    });
+    rows.push(RowKind::Toggle {
+        id: "settings/cursor_blink",
+        label: "Cursor blink",
+        value: v.cursor_blink,
+    });
+    rows.push(RowKind::Toggle {
+        id: "settings/cursor_trail",
+        label: "Cursor trail",
+        value: v.cursor_trail,
+    });
+    rows.push(RowKind::Heading("Text"));
+    rows.push(RowKind::Toggle {
+        id: "settings/ligatures",
+        label: "Ligatures",
+        value: v.ligatures,
+    });
+    // w15: whether window opacity also applies to glyphs, not just the
+    // backdrop. Widget id feeds `ev.opacity_scope` via `apply_segmented_event`
+    // below; applied in `chrome/settings_form.rs`.
+    rows.push(RowKind::Segmented {
+        id: "settings/opacity_scope",
+        label: "Opacity affects",
+        options: &["Background", "Text"],
+        sel: v.opacity_scope.min(1),
+    });
+    rows.push(RowKind::Heading("Overlays"));
+    rows.push(RowKind::Toggle {
+        id: "settings/minimap",
+        label: "Minimap",
+        value: v.minimap,
+    });
+    rows.push(RowKind::Heading("Window frame"));
+    rows.push(RowKind::Toggle {
+        id: "settings/decorations",
+        label: "Native OS title bar",
+        value: v.decorations,
+    });
+    rows.push(RowKind::Info(
+        "Restart required — off means glassy draws its own borderless chrome.",
+    ));
+}
+
+fn rows_effects<'a>(rows: &mut Vec<RowKind<'a>>, v: &'a SettingsView<'a>) {
+    rows.push(RowKind::Heading("Window effect"));
+    // Unified window post-process effect (supersedes the legacy CRT toggle).
+    // Eight modes — a dropdown, since a segmented row crams 8 labels. Index
+    // order mirrors `WindowEffect::index`. Widget id is UNCHANGED from the
+    // Appearance section this moved out of, so event routing
+    // (`apply_dropdown_toggle`/`apply_segmented_event` in this file,
+    // `ev.window_effect`/`window_effect_toggle` in `chrome/settings_form.rs`)
+    // and persistence (`SAVED_KEYS["window_effect"]`) are untouched.
+    rows.push(RowKind::Dropdown {
+        id: "settings/window_effect",
+        label: "Effect",
+        text: EFFECT_NAMES
+            .get(v.window_effect_idx)
+            .copied()
+            .unwrap_or("Off"),
+        swatch: None,
+        which: SettingsDrop::Effect,
+    });
+    // Custom effect: per-channel intensity sliders so any compatible
+    // combination stacks. Only shown when Custom (index 8) is selected. Widget
+    // ids UNCHANGED (see above).
+    if v.window_effect_idx == 8 {
+        for (id, label, ch) in CUSTOM_FX_SLIDERS {
+            rows.push(RowKind::Slider {
+                id,
+                label,
+                value: v.custom_effect.get(*ch).copied().unwrap_or(0.0),
+                min: 0.0,
+                max: 1.0,
+            });
+        }
+    }
+    rows.push(RowKind::Heading("Power Mode"));
+    rows.push(RowKind::Toggle {
+        id: "settings/power_mode",
+        label: "Power mode",
+        value: v.power_mode,
+    });
+    rows.push(RowKind::Slider {
+        id: "settings/power_mode_intensity",
+        label: "Intensity",
+        value: v.power_mode_intensity,
+        min: 0.0,
+        max: 1.0,
+    });
+    rows.push(RowKind::Heading("Focus"));
+    rows.push(RowKind::Toggle {
+        id: "settings/dim_unfocused",
+        label: "Dim unfocused panes",
+        value: v.dim_unfocused,
+    });
+    rows.push(RowKind::Heading("Command blocks"));
+    // w15: opt-in chrome level for OSC 133/633 command blocks. Widget id feeds
+    // `ev.command_blocks` via `apply_segmented_event` below; applied in
+    // `chrome/settings_form.rs`.
+    rows.push(RowKind::Segmented {
+        id: "settings/command_blocks",
+        label: "Card chrome",
+        options: &["Off", "Badges", "Cards"],
+        sel: v.command_blocks.min(2),
+    });
+    rows.push(RowKind::Heading("Clipboard"));
+    rows.push(RowKind::Toggle {
+        id: "settings/copy_html",
+        label: "Copy as HTML",
+        value: v.copy_html,
+    });
+}
+
+fn rows_terminal<'a>(rows: &mut Vec<RowKind<'a>>, v: &'a SettingsView<'a>) {
+    rows.push(RowKind::Heading("Hints mode"));
+    rows.push(RowKind::TextEdit {
+        id: "settings/hints_chars",
+        label: "Hint chars",
+        which: EditField::HintsChars,
+        placeholder: "asdfghjkl… (default)",
+    });
+    rows.push(RowKind::Heading("Font overrides"));
+    rows.push(RowKind::Info(
+        "Applies on restart — the running font stack isn't reloaded live.",
+    ));
+    rows.push(RowKind::TextEdit {
+        id: "settings/font_bold",
+        label: "Bold font",
+        which: EditField::FontBold,
+        placeholder: "(synthesized)",
+    });
+    rows.push(RowKind::TextEdit {
+        id: "settings/font_italic",
+        label: "Italic font",
+        which: EditField::FontItalic,
+        placeholder: "(synthesized)",
+    });
+    rows.push(RowKind::TextEdit {
+        id: "settings/font_bold_italic",
+        label: "Bold-italic font",
+        which: EditField::FontBoldItalic,
+        placeholder: "(synthesized)",
+    });
+    rows.push(RowKind::TextEdit {
+        id: "settings/font_symbol_map",
+        label: "Symbol map",
+        which: EditField::FontSymbolMap,
+        placeholder: "U+E000-U+F8FF:Symbols Nerd Font Mono",
+    });
+    rows.push(RowKind::TextEdit {
+        id: "settings/font_variations",
+        label: "Font variations",
+        which: EditField::FontVariations,
+        placeholder: "wght=450 wdth=75",
+    });
+    rows.push(RowKind::Heading("Startup"));
+    rows.push(RowKind::Info(
+        "Set in the config file — changing the shell live is unsafe.",
+    ));
+    rows.push(RowKind::PathField {
+        id: "settings/shell",
+        label: "Shell",
+        text: v.shell_display,
+        copyable: false,
+    });
+    rows.push(RowKind::PathField {
+        id: "settings/cwd",
+        label: "Startup cwd",
+        text: v.cwd_display,
+        copyable: false,
+    });
+}
+
+fn rows_themes<'a>(rows: &mut Vec<RowKind<'a>>, v: &'a SettingsView<'a>) {
+    rows.push(RowKind::Heading("Wallpaper"));
+    rows.push(RowKind::TextEdit {
+        id: "settings/wallpaper_theme",
+        label: "Wallpaper image",
+        which: EditField::WallpaperTheme,
+        placeholder: "(disabled) /path/to/image.png",
+    });
+    rows.push(RowKind::Heading("Active theme"));
+    let swatch = v.theme_swatches.get(v.theme_idx).copied();
+    rows.push(RowKind::Dropdown {
+        id: "settings/theme",
+        label: "Theme",
+        text: v.theme_names.get(v.theme_idx).copied().unwrap_or(""),
+        swatch,
+        which: SettingsDrop::Theme,
+    });
+    rows.push(RowKind::Heading("Follow system"));
+    rows.push(RowKind::Toggle {
+        id: "settings/follow_system",
+        label: "Follow system",
+        value: v.follow_system,
+    });
+    rows.push(RowKind::Dropdown {
+        id: "settings/theme_light",
+        label: "Light theme",
+        text: v.theme_light,
+        swatch: v
+            .theme_swatches
+            .get(theme_index(v.theme_names, v.theme_light))
+            .copied(),
+        which: SettingsDrop::ThemeLight,
+    });
+    rows.push(RowKind::Dropdown {
+        id: "settings/theme_dark",
+        label: "Dark theme",
+        text: v.theme_dark,
+        swatch: v
+            .theme_swatches
+            .get(theme_index(v.theme_names, v.theme_dark))
+            .copied(),
+        which: SettingsDrop::ThemeDark,
+    });
+    rows.push(RowKind::Heading("Custom theme"));
+    rows.push(RowKind::Info(
+        "Click a swatch below to edit fg/bg/cursor/ansi.",
+    ));
+    // Reserve space so the floating editor card never overlaps real rows.
+    for _ in 0..5 {
+        rows.push(RowKind::Info(""));
+    }
+}
+
+fn rows_keys<'a>(rows: &mut Vec<RowKind<'a>>, v: &'a SettingsView<'a>) {
+    rows.push(RowKind::Heading("Keybindings"));
+    rows.push(RowKind::Info("Edit [keybindings] in the config file:"));
+    rows.push(RowKind::PathField {
+        id: "settings/config",
+        label: "Config",
+        text: v.config_path,
+        copyable: true,
+    });
+    rows.push(RowKind::Info("Press F1 for the full keybinding reference."));
+}
+
+fn rows_panes<'a>(rows: &mut Vec<RowKind<'a>>, v: &'a SettingsView<'a>) {
+    rows.push(RowKind::Heading("Tabs"));
+    rows.push(RowKind::Segmented {
+        id: "settings/tab_bar",
+        label: "Tab bar",
+        options: &["Auto", "Always", "Never"],
+        sel: v.tab_bar_mode.min(2),
+    });
+    rows.push(RowKind::Heading("Panes"));
+    rows.push(RowKind::Toggle {
+        id: "settings/pane_headers",
+        label: "Pane headers",
+        value: v.pane_headers,
+    });
+    // w15: header density + whether a single unsplit pane also gets a header —
+    // both sit right under the toggle that gates them. Widget ids feed
+    // `ev.pane_header_style`/`ev.toggled` below; applied in
+    // `chrome/settings_form.rs`.
+    rows.push(RowKind::Segmented {
+        id: "settings/pane_header_style",
+        label: "Header style",
+        options: &["Full", "Compact"],
+        sel: v.pane_header_style.min(1),
+    });
+    rows.push(RowKind::Toggle {
+        id: "settings/pane_headers_single",
+        label: "Header on single pane",
+        value: v.pane_headers_single,
+    });
+    rows.push(RowKind::Heading("Focus"));
+    // w15: unfocused-pane dim strength. `dim_unfocused` (the on/off gate)
+    // lives in the Effects section; this stays with the other pane-affecting
+    // controls here per the settings-modularity spec.
+    rows.push(RowKind::Slider {
+        id: "settings/unfocused_dim",
+        label: "Dim strength",
+        value: v.unfocused_dim,
+        min: 0.0,
+        max: 0.9,
+    });
+    rows.push(RowKind::Heading("Status"));
+    rows.push(RowKind::Toggle {
+        id: "settings/status_bar",
+        label: "Status bar",
+        value: v.status_bar,
+    });
+    rows.push(RowKind::Heading("Window title"));
+    rows.push(RowKind::Toggle {
+        id: "settings/title_show_cwd",
+        label: "Show cwd",
+        value: v.title_show_cwd,
+    });
+    rows.push(RowKind::Toggle {
+        id: "settings/title_show_count",
+        label: "Show tab count",
+        value: v.title_show_count,
+    });
+}
+
+fn rows_quake<'a>(rows: &mut Vec<RowKind<'a>>, v: &'a SettingsView<'a>) {
+    rows.push(RowKind::Heading("Quake / dropdown mode"));
+    rows.push(RowKind::Toggle {
+        id: "settings/quake",
+        label: "Enable quake mode",
+        value: v.quake,
+    });
+    rows.push(RowKind::Info(
+        "Restart required — quake mode is only armed at startup.",
+    ));
+    rows.push(RowKind::Info(
+        "On Wayland, bind a compositor key to `glassy toggle` — see docs/quake-mode.md.",
+    ));
+    rows.push(RowKind::Slider {
+        id: "settings/quake_height",
+        label: "Height",
+        value: v.quake_height,
+        min: crate::config::parse::QUAKE_HEIGHT_MIN,
+        max: crate::config::parse::QUAKE_HEIGHT_MAX,
+    });
+    rows.push(RowKind::Stepper {
+        id: "settings/quake_animation_ms",
+        label: "Slide duration",
+        text: format!("{} ms", v.quake_animation_ms),
+    });
+}
+
+fn rows_notifications<'a>(rows: &mut Vec<RowKind<'a>>, v: &'a SettingsView<'a>) {
+    rows.push(RowKind::Heading("Command finished"));
+    rows.push(RowKind::Toggle {
+        id: "settings/notify_command_finish",
+        label: "Notify when a command finishes",
+        value: v.notify_command_finish,
+    });
+    rows.push(RowKind::Stepper {
+        id: "settings/notify_command_threshold_ms",
+        label: "Minimum duration",
+        text: format!("{} ms", v.notify_command_threshold_ms),
+    });
+    rows.push(RowKind::Heading("Command output"));
+    rows.push(RowKind::Toggle {
+        id: "settings/command_fold",
+        label: "Allow folding output",
+        value: v.command_fold,
+    });
+    // Moved from the Panes section — widget id UNCHANGED so event routing
+    // (`CONFIG_TOGGLES` in `chrome/settings_form.rs`) and persistence
+    // (`SAVED_KEYS["command_badges"]`) are untouched.
+    rows.push(RowKind::Toggle {
+        id: "settings/command_badges",
+        label: "Command badges",
+        value: v.command_badges,
+    });
+}
+
+fn rows_advanced<'a>(rows: &mut Vec<RowKind<'a>>, v: &'a SettingsView<'a>) {
+    rows.push(RowKind::Heading("Scrollback"));
+    rows.push(RowKind::Stepper {
+        id: "settings/scrollback",
+        label: "Scrollback",
+        text: format!("{}", v.scrollback),
+    });
+    rows.push(RowKind::Heading("Background scrollback"));
+    // w15: scrollback memory bounding — parsed + validated today but not yet
+    // wired to live `Pty` sessions (see
+    // `crate::pty::ScrollbackBackgroundPolicy`'s doc comment); the values
+    // still round-trip through Save so the UI is ready ahead of that wiring.
+    // Widget ids feed `ev.scrollback_background_cap_delta` /
+    // `ev.scrollback_background_idle_secs_delta` via `apply_stepper_event`
+    // below; applied in `chrome/settings_form.rs`.
+    rows.push(RowKind::Stepper {
+        id: "settings/scrollback_background_cap",
+        label: "Idle pane cap",
+        text: if v.scrollback_background_cap == 0 {
+            "Off".to_string()
+        } else {
+            format!("{} lines", v.scrollback_background_cap)
+        },
+    });
+    rows.push(RowKind::Stepper {
+        id: "settings/scrollback_background_idle_secs",
+        label: "Idle threshold",
+        text: format!("{} s", v.scrollback_background_idle_secs),
+    });
+    rows.push(RowKind::Heading("Selection"));
+    rows.push(RowKind::Toggle {
+        id: "settings/copy_on_select",
+        label: "Copy on select",
+        value: v.copy_on_select,
+    });
+    rows.push(RowKind::TextEdit {
+        id: "settings/word_separator",
+        label: "Word seps",
+        which: EditField::WordSep,
+        placeholder: "(default)",
+    });
+    rows.push(RowKind::Heading("Shaping"));
+    rows.push(RowKind::TextEdit {
+        id: "settings/font_features",
+        label: "Font features",
+        which: EditField::FontFeatures,
+        placeholder: "ss01 calt=0 …",
+    });
+    rows.push(RowKind::Heading("Padding overrides"));
+    rows.push(RowKind::Info(
+        "Per-side overrides win over the uniform padding above.",
+    ));
+    rows.push(RowKind::Stepper {
+        id: "settings/padding_top",
+        label: "Top",
+        text: format!("{} px", v.padding_top),
+    });
+    rows.push(RowKind::Stepper {
+        id: "settings/padding_bottom",
+        label: "Bottom",
+        text: format!("{} px", v.padding_bottom),
+    });
+    rows.push(RowKind::Stepper {
+        id: "settings/padding_left",
+        label: "Left",
+        text: format!("{} px", v.padding_left),
+    });
+    rows.push(RowKind::Stepper {
+        id: "settings/padding_right",
+        label: "Right",
+        text: format!("{} px", v.padding_right),
+    });
+    rows.push(RowKind::Heading("Status bar"));
+    rows.push(RowKind::TextEdit {
+        id: "settings/status_bar_segments",
+        label: "Segments",
+        which: EditField::StatusBarSegments,
+        placeholder: "(default) cwd git_branch mode …",
+    });
+    rows.push(RowKind::TextEdit {
+        id: "settings/status_bar_time_format",
+        label: "Time format",
+        which: EditField::StatusBarTimeFormat,
+        placeholder: "%H:%M",
+    });
+    rows.push(RowKind::Heading("Session"));
+    rows.push(RowKind::Toggle {
+        id: "settings/restore_session",
+        label: "Restore session",
+        value: v.restore_session,
+    });
+    rows.push(RowKind::Heading("Config file"));
+    rows.push(RowKind::PathField {
+        id: "settings/config",
+        label: "Config",
+        text: v.config_path,
+        copyable: true,
+    });
+}
+
+// Runtime `[profile.*]` switching + "duplicate current as a new profile".
+// Split out of Advanced (profiles-ui stream) into its own section — see
+// `SettingsSection::Profiles`'s doc comment.
+fn rows_profiles<'a>(rows: &mut Vec<RowKind<'a>>, v: &'a SettingsView<'a>) {
+    rows.push(RowKind::Heading("Profiles"));
+    rows.push(RowKind::ProfileDefault {
+        active: v.active_profile.is_none(),
+    });
+    for (i, name) in v.profile_names.iter().enumerate() {
+        rows.push(RowKind::Profile {
+            index: i,
+            name,
+            active: v.active_profile == Some(*name),
+            armed_delete: v.profile_delete_armed == Some(i),
+            renaming: v.profile_rename_idx == Some(i),
+        });
+    }
+    rows.push(RowKind::Heading("New profile"));
+    rows.push(RowKind::ProfileCreate {
+        text_id: "settings/profile_new_name",
+        button_id: "settings/profile_new_save",
+        placeholder: "name",
+    });
+    rows.push(RowKind::Info(
+        "Duplicates the CURRENT live settings into a new [profile.NAME] section.",
+    ));
 }
 
 /// Map a Custom-effect channel slider's new value to its event (carrying the
@@ -1278,6 +1402,7 @@ fn apply_slider_event(wid: &str, nv: f32, ev: &mut SettingsEvents) {
     match wid {
         "settings/power_mode_intensity" => ev.power_mode_intensity = Some(nv),
         "settings/quake_height" => ev.quake_height = Some(nv),
+        "settings/unfocused_dim" => ev.unfocused_dim = Some(nv),
         _ => {}
     }
 }
@@ -1297,6 +1422,10 @@ fn apply_stepper_event(wid: &str, delta: i32, ev: &mut SettingsEvents) {
         "settings/padding_right" => ev.padding_right_delta = delta,
         "settings/quake_animation_ms" => ev.quake_animation_delta = delta,
         "settings/notify_command_threshold_ms" => ev.notify_threshold_delta = delta,
+        "settings/scrollback_background_cap" => ev.scrollback_background_cap_delta = delta,
+        "settings/scrollback_background_idle_secs" => {
+            ev.scrollback_background_idle_secs_delta = delta
+        }
         _ => {}
     }
 }
@@ -1308,6 +1437,9 @@ fn apply_segmented_event(wid: &str, nv: usize, ev: &mut SettingsEvents) {
         "settings/cursor_style" => ev.cursor_style = Some(nv),
         "settings/tab_bar" => ev.tab_bar_mode = Some(nv),
         "settings/window_effect" => ev.window_effect = Some(nv),
+        "settings/opacity_scope" => ev.opacity_scope = Some(nv),
+        "settings/command_blocks" => ev.command_blocks = Some(nv),
+        "settings/pane_header_style" => ev.pane_header_style = Some(nv),
         _ => {}
     }
 }
@@ -1371,6 +1503,7 @@ mod tests {
             theme_names: &names,
             theme_swatches: &sw,
             font_family: "default",
+            resolved_font_family: "Loaded font: Test Mono",
             font_names: &names,
             font_idx: 0,
             scrollback: 10000,
@@ -1414,6 +1547,7 @@ mod tests {
             quake: false,
             quake_height: 0.5,
             quake_animation_ms: 180,
+            decorations: false,
             notify_command_finish: true,
             notify_command_threshold_ms: 10_000,
             command_fold: true,
@@ -1433,6 +1567,13 @@ mod tests {
             padding_right: 0,
             wallpaper_theme: "",
             popup_scroll: 0.0,
+            unfocused_dim: 0.28,
+            opacity_scope: 0,
+            command_blocks: 1,
+            pane_header_style: 0,
+            pane_headers_single: false,
+            scrollback_background_cap: 0,
+            scrollback_background_idle_secs: 900,
         };
         for sec in SettingsSection::ALL {
             let rows = build_section_rows(*sec, &v);

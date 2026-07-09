@@ -122,6 +122,30 @@ pub enum WState {
 // Animation
 // ---------------------------------------------------------------------------
 
+// --- Motion vocabulary (§ design-system MOTION) ----------------------------
+//
+// Named durations for the chrome's transitions. These are the target
+// vocabulary; surfaces adopt them as their per-anim easing/duration work lands.
+// The mechanism is unchanged — gui_anims stepped only while unsettled, Poll
+// dropped back to Wait on settle — so none of these threaten the 0%-idle
+// invariant.
+
+/// Hover-in / press-release (ms). Short enough to feel instant; linear is fine.
+pub const MOTION_FAST_MS: f32 = 100.0;
+/// Hover-out / toggle / selection change (ms).
+pub const MOTION_BASE_MS: f32 = 150.0;
+/// Menu / popup / palette / panel entrance (ms): fade + small rise. Exit is
+/// instant.
+pub const MOTION_ENTER_MS: f32 = 180.0;
+
+/// Cubic ease-out: fast start, gentle settle. `t` is a normalized 0..1 progress
+/// (clamped). Used for enter/hover transitions and the quake slide so motion
+/// decelerates into its resting position instead of stopping abruptly.
+pub fn ease_out_cubic(t: f32) -> f32 {
+    let inv = 1.0 - t.clamp(0.0, 1.0);
+    1.0 - inv * inv * inv
+}
+
 /// A single change-triggered scalar animation (e.g. a hover fade). `value`
 /// chases `target`; [`Anim::step`] advances it and reports whether it has
 /// settled. Only unsettled anims keep the event loop on `Poll`.
@@ -242,13 +266,39 @@ pub fn glass_active_tab() -> [f32; 4] {
     with_alpha(glass_elevate(color::default_bg(), 0.22), 1.0)
 }
 
-/// E3 floating surface fill (dropdowns / dialogs / drag-ghost).
+/// E3 floating surface fill (dropdowns / dialogs / drag-ghost / toasts / peek).
+///
+/// Derived from the theme background (`default_bg`) — NOT `selection_bg` as it
+/// was originally — so the whole elevation family (E1 `glass_body`, E2
+/// `glass_raised`/`glass_active_tab`, E3 here) shares one hue and only differs
+/// by elevation amount (strict order `0 < 0.12 < 0.18 < 0.22`). Keying E3 off
+/// `selection_bg` let its hue diverge from the rest of the chrome on themes
+/// whose selection tint is a different color.
 pub fn glass_float() -> [f32; 4] {
-    with_alpha(
-        glass_elevate(color::selection_bg(), 0.12),
-        GLASS_FLOAT_ALPHA,
-    )
+    with_alpha(glass_elevate(color::default_bg(), 0.18), GLASS_FLOAT_ALPHA)
 }
+
+/// Accent hairline border for an E3 floating surface (menus / dialogs / palette).
+/// Very low alpha so it reads as a soft crown, not a hard drawn line.
+pub fn glass_float_border() -> [f32; 4] {
+    with_alpha(color::accent(), 0.22)
+}
+
+/// Soft drop-shadow tint for an E3 floating surface (menus / popups / palette /
+/// settings / toasts / modals). Near-black, with a theme-aware alpha — denser on
+/// dark themes, softer on light — per the design-system depth spec. Pair with
+/// [`Renderer::push_overlay_shadow_px`] and a ~[`SHADOW_E3_FEATHER`] blur.
+pub fn shadow_e3() -> [f32; 4] {
+    let a = if luma(color::default_bg()) > 0.7 {
+        0.18
+    } else {
+        0.35
+    };
+    [0.0, 0.0, 0.0, a]
+}
+
+/// Default E3 soft-shadow blur (feather) width in px.
+pub const SHADOW_E3_FEATHER: f32 = 14.0;
 
 /// Soft edge accent (was a bright 1px "edge-lit" rail). Kept extremely subtle so
 /// raised surfaces read as clean soft glass with NO thin bright line artifacts —
@@ -338,21 +388,53 @@ pub struct Metrics {
     pub card_radius: f32,
     pub ctrl_w: f32,
     pub knob: f32,
+
+    // --- design-system token scales (all derived from cell_h so they scale
+    // with the font / DPI for free) --------------------------------------------
+    /// Spacing scale (physical px). `sp_md` == [`Self::gap`] and `sp_lg` ==
+    /// [`Self::pad`] are kept as the pre-existing names; the extra stops fill in
+    /// the smaller and larger ends of a single spacing vocabulary.
+    pub sp_xs: f32,
+    pub sp_sm: f32,
+    pub sp_xl: f32,
+    /// Chrome-bar height (status bar, pane header). Replaces the old fixed
+    /// `STATUS_BAR_H`/`PANE_HEADER_H = 22` px constants with a font-derived value.
+    pub bar_h: f32,
+    /// Square control-button edge (tab-strip control buttons). `CLOSE_BOX` maps
+    /// to `btn * 0.6`.
+    pub btn: f32,
+    /// Radius scale (physical px). `r_md` == [`Self::radius`] and `r_lg` ==
+    /// [`Self::card_radius`]; `r_sm` is the tighter inner-element radius. A
+    /// "full" pill radius is always `rect.h * 0.5` at the call site.
+    pub r_sm: f32,
+    pub r_md: f32,
+    pub r_lg: f32,
 }
 
 impl Metrics {
     pub fn new(cell_w: f32, cell_h: f32) -> Self {
         let row_h = (cell_h * 1.6).round();
+        let radius = (cell_h * 0.28).round().clamp(4.0, 8.0);
+        let card_radius = radius + 2.0;
         Metrics {
             cell_w,
             cell_h,
             row_h,
             pad: (cell_h * 0.5).round(),
             gap: (cell_h * 0.4).round(),
-            radius: (cell_h * 0.28).round().clamp(4.0, 8.0),
-            card_radius: (cell_h * 0.28).round().clamp(4.0, 8.0) + 2.0,
+            radius,
+            card_radius,
             ctrl_w: (cell_w * 14.0).round(),
             knob: row_h - 8.0,
+
+            sp_xs: (cell_h * 0.125).round().max(2.0),
+            sp_sm: (cell_h * 0.25).round(),
+            sp_xl: (cell_h * 1.0).round(),
+            bar_h: (cell_h * 1.4).round(),
+            btn: (cell_h * 1.6).round(),
+            r_sm: (radius - 2.0).max(2.0),
+            r_md: radius,
+            r_lg: card_radius,
         }
     }
 }
@@ -443,6 +525,12 @@ pub struct SettingsView<'a> {
     /// Theme preview swatch colors, parallel to `theme_names`.
     pub theme_swatches: &'a [[f32; 4]],
     pub font_family: &'a str,
+    /// The font ACTUALLY resolved/loaded (`Renderer::resolved_font_family`),
+    /// distinct from `font_family` above (the raw config value, often empty —
+    /// "let discovery choose"). Shown read-only next to the Font dropdown so a
+    /// user with several similarly-purposed fonts installed (e.g. multiple
+    /// Nerd Font family variants) can see what's genuinely loaded.
+    pub resolved_font_family: &'a str,
     pub font_names: &'a [&'a str],
     pub font_idx: usize,
     pub scrollback: usize,
@@ -544,6 +632,10 @@ pub struct SettingsView<'a> {
     pub quake_height: f32,
     /// Quake slide animation duration in ms (0..5000).
     pub quake_animation_ms: u64,
+    /// Keep the native OS window frame instead of glassy's borderless chrome.
+    /// Restart-only: the frame is chosen once at window creation, so flipping
+    /// this live only takes effect after relaunch (labeled as such in the UI).
+    pub decorations: bool,
     /// Fire a desktop notification when a long-running command finishes.
     pub notify_command_finish: bool,
     /// Minimum command duration (ms) that triggers the notification.
@@ -590,6 +682,30 @@ pub struct SettingsView<'a> {
     /// popup can easily be taller than the window; this lets it scroll instead
     /// of silently truncating the list past whatever fits.
     pub popup_scroll: f32,
+
+    // --- settings-modularity stream: expose the remaining w15 config keys ---
+    /// Strength of the unfocused-pane dim overlay in `[0, 0.9]` (Panes → Focus
+    /// slider). See `Config::unfocused_dim`.
+    pub unfocused_dim: f32,
+    /// Whether window opacity also applies to terminal text, as a segmented
+    /// index: 0 = Background, 1 = Text. See `Config::opacity_text`.
+    pub opacity_scope: usize,
+    /// Command-block chrome level, as a segmented index: 0 = Off, 1 = Badges,
+    /// 2 = Cards. See `Config::command_blocks`.
+    pub command_blocks: usize,
+    /// Pane header density, as a segmented index: 0 = Full, 1 = Compact. See
+    /// `Config::pane_header_style`.
+    pub pane_header_style: usize,
+    /// Also show a header for a single, unsplit pane. See
+    /// `Config::pane_headers_single`.
+    pub pane_headers_single: bool,
+    /// Lines of scrollback kept for a backgrounded/idle pane once idle past
+    /// `scrollback_background_idle_secs`; `0` disables the cap. See
+    /// `Config::scrollback_background_cap`.
+    pub scrollback_background_cap: usize,
+    /// Seconds a pane must be idle/backgrounded before the cap above applies.
+    /// See `Config::scrollback_background_idle_secs`.
+    pub scrollback_background_idle_secs: u64,
 }
 
 /// The left-sidebar sections of the revamped settings window, in display order.
@@ -668,7 +784,7 @@ impl SettingsSection {
 /// the few toggles with extra live side effects (grid reflow, renderer sync,
 /// session-dirty). Adding a new plain boolean setting is then one
 /// `RowKind::Toggle` push + one table row, instead of a field here + a match
-/// arm in `settings_panel.rs` + an `if` block in `chrome.rs`.
+/// arm in `settings_panel.rs` + an `if` block in `chrome/settings_form.rs`.
 #[derive(Clone, Debug, Default)]
 pub struct SettingsEvents {
     /// Font-size stepper delta in clicks (-1 / 0 / +1).
@@ -781,6 +897,25 @@ pub struct SettingsEvents {
     pub padding_bottom_delta: i32,
     pub padding_left_delta: i32,
     pub padding_right_delta: i32,
+
+    // --- settings-modularity stream: expose the remaining w15 config keys ---
+    /// New unfocused-pane dim strength if the Panes slider moved this frame.
+    pub unfocused_dim: Option<f32>,
+    /// New opacity-scope index if the Appearance segmented control changed
+    /// (0 = Background, 1 = Text).
+    pub opacity_scope: Option<usize>,
+    /// New command-blocks index if the Effects segmented control changed
+    /// (0 = Off, 1 = Badges, 2 = Cards).
+    pub command_blocks: Option<usize>,
+    /// New pane-header-style index if the Panes segmented control changed
+    /// (0 = Full, 1 = Compact).
+    pub pane_header_style: Option<usize>,
+    /// Background-scrollback-cap stepper delta in clicks (-1 / 0 / +1; scaled
+    /// to a 1000-line step by the caller), Advanced section.
+    pub scrollback_background_cap_delta: i32,
+    /// Background-scrollback-idle-seconds stepper delta in clicks (-1 / 0 /
+    /// +1; scaled to a 60s step by the caller), Advanced section.
+    pub scrollback_background_idle_secs_delta: i32,
 }
 
 // ---------------------------------------------------------------------------
@@ -850,6 +985,19 @@ mod tests {
     }
 
     #[test]
+    fn ease_out_cubic_endpoints_and_shape() {
+        assert_eq!(ease_out_cubic(0.0), 0.0);
+        assert_eq!(ease_out_cubic(1.0), 1.0);
+        // Clamps out-of-range inputs.
+        assert_eq!(ease_out_cubic(-0.5), 0.0);
+        assert_eq!(ease_out_cubic(1.5), 1.0);
+        // Ease-OUT: past the halfway travel by the midpoint (decelerating).
+        assert!(ease_out_cubic(0.5) > 0.5);
+        // Monotonic.
+        assert!(ease_out_cubic(0.25) < ease_out_cubic(0.75));
+    }
+
+    #[test]
     fn anim_settles() {
         let mut a = Anim::new(0.0);
         a.target = 1.0;
@@ -860,6 +1008,41 @@ mod tests {
         assert!(a.is_settled());
         assert!((a.value - 1.0).abs() < 0.01);
         assert!(steps < 1000);
+    }
+
+    #[test]
+    fn metrics_token_scales_are_ordered_and_font_derived() {
+        let m = Metrics::new(9.0, 20.0);
+        // Spacing scale is strictly increasing.
+        assert!(m.sp_xs <= m.sp_sm);
+        assert!(m.sp_sm <= m.gap); // gap == sp_md
+        assert!(m.gap <= m.pad); // pad == sp_lg
+        assert!(m.pad <= m.sp_xl);
+        // sp_xs never collapses below a usable 2px.
+        assert!(m.sp_xs >= 2.0);
+        // Radius scale: r_sm < r_md == radius < r_lg == card_radius.
+        assert!(m.r_sm <= m.r_md);
+        assert_eq!(m.r_md, m.radius);
+        assert_eq!(m.r_lg, m.card_radius);
+        assert!(m.r_md < m.r_lg);
+        // Font-derived bar/button heights track the cell height.
+        let big = Metrics::new(9.0, 40.0);
+        assert!(big.bar_h > m.bar_h);
+        assert!(big.btn > m.btn);
+    }
+
+    #[test]
+    fn glass_elevation_amounts_are_strictly_ordered() {
+        // E1 (body, 0) < E2 raised (0.12) < E3 float (0.18) < E2+ active tab
+        // (0.22): a strict elevation order on a dark theme (additive lighten).
+        let bg = DARK_BG;
+        let body = luma(bg);
+        let raised = luma(glass_elevate(bg, 0.12));
+        let float = luma(glass_elevate(bg, 0.18));
+        let active = luma(glass_elevate(bg, 0.22));
+        assert!(body < raised, "raised must sit above body");
+        assert!(raised < float, "float must sit above raised");
+        assert!(float < active, "active-tab must sit above float");
     }
 
     #[test]
@@ -1059,18 +1242,20 @@ mod tests {
     }
 
     #[test]
-    fn glass_elevate_float_amount_darkens_clearly_on_near_white_selection_bg() {
-        // glass_float()'s amount (0.12), applied to a near-white selection-bg
-        // (one-light's selection tint `#E5E5E6` ≈ 0.898, also > the 0.7
-        // threshold) must stay clearly darker than that selection color.
-        let sel = [0.898, 0.898, 0.902, 1.0];
-        assert!(luma(sel) > 0.7, "fixture must exercise the light branch");
-        let floated = glass_elevate(sel, 0.12);
+    fn glass_elevate_float_amount_darkens_clearly_on_near_white_bg() {
+        // glass_float()'s amount (0.18), applied to a near-white background
+        // (one-light's `#FAFAFA`, > the 0.7 threshold) must stay clearly darker
+        // than the page so a floating surface reads as elevated on light themes.
+        assert!(
+            luma(NEAR_WHITE_BG) > 0.7,
+            "fixture must exercise the light branch"
+        );
+        let floated = glass_elevate(NEAR_WHITE_BG, 0.18);
         for i in 0..3 {
             assert!(
-                sel[i] - floated[i] > 0.05,
-                "channel {i}: sel={}, float={} — must be clearly darker",
-                sel[i],
+                NEAR_WHITE_BG[i] - floated[i] > 0.05,
+                "channel {i}: bg={}, float={} — must be clearly darker",
+                NEAR_WHITE_BG[i],
                 floated[i]
             );
         }
@@ -1124,7 +1309,7 @@ mod tests {
         );
         assert_eq!(
             glass_float(),
-            with_alpha(lighten(color::selection_bg(), 0.12), GLASS_FLOAT_ALPHA)
+            with_alpha(lighten(color::default_bg(), 0.18), GLASS_FLOAT_ALPHA)
         );
     }
 }

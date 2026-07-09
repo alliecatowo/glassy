@@ -25,7 +25,7 @@ use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Window, WindowId};
 
 use crate::bell::{self, AudioBell};
-use crate::color::{self, lighten};
+use crate::color;
 use crate::gui;
 use crate::input::{KittyFlags, ModifyOtherKeys, MouseReport, encode_key_parts, encode_mouse};
 use crate::pane;
@@ -240,6 +240,16 @@ pub struct Config {
     /// Quake slide animation duration in milliseconds (each direction). 0 disables
     /// the animation (instant show/hide). Default 180 ms.
     pub quake_animation_ms: u64,
+    /// Keep the native OS window frame (title bar + border + resize handles)
+    /// instead of glassy's own borderless client-side decorations. Default false:
+    /// glassy runs borderless everywhere and paints its own top chrome (tab bar +
+    /// window controls), so the OS never draws a system-themed title bar or a
+    /// hairline window border that ignores the glassy theme. Set `decorations =
+    /// true` to restore the native frame (an escape hatch for users/WMs that want
+    /// server-side decorations). Applied once at window creation — restart
+    /// required. On macOS `false` uses the fullsize-content-view path that keeps
+    /// the native traffic-light buttons floating over glassy's chrome.
+    pub decorations: bool,
     /// Number of recently-run shell commands to retain for the command palette's
     /// history source (captured from OSC 133 `B`..`C` zones). 0 disables capture.
     /// Default 200.
@@ -342,6 +352,19 @@ pub struct Config {
     /// unchanged. Only `Cards` adds anything: a subtle glass band + accent rail
     /// behind each finished command's row range. Config key `command_blocks`.
     pub command_blocks: CommandBlocksMode,
+    /// Lines of scrollback kept for a backgrounded/idle pane once it has been
+    /// idle/backgrounded for [`scrollback_background_idle_secs`](Self::scrollback_background_idle_secs)
+    /// seconds; `0` disables the cap (default). Config key
+    /// `scrollback_background_cap`. Parsed + validated at config-load time
+    /// (see `crate::pty::ScrollbackBackgroundPolicy`); not yet wired to live
+    /// `Pty` sessions (settings-UI-editable and persisted here regardless, so
+    /// the wiring can land as a separate follow-up without another config-key
+    /// stream).
+    pub scrollback_background_cap: usize,
+    /// Seconds a pane must be idle/backgrounded before `scrollback_background_cap`
+    /// takes effect. Default 900 (15 min). Config key
+    /// `scrollback_background_idle_secs`.
+    pub scrollback_background_idle_secs: u64,
 }
 
 /// Configurable segments for the status bar (config key `status_bar_segments`).
@@ -351,7 +374,7 @@ pub struct Config {
 /// Config string accepted by `apply_kv`: a comma- or space-separated list of
 /// segment names, e.g. `"cwd git_branch mode time encoding"`. Rendering (the
 /// content/color/placement of each) is table-driven — see `SEGMENT_SPECS` in
-/// `chrome.rs` — so this enum only names which segments exist; it carries no
+/// `chrome/status_bar.rs` — so this enum only names which segments exist; it carries no
 /// data itself (hence `Copy`, which a per-instance custom segment can't be —
 /// see `Custom` below and `CustomSegment`).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
@@ -552,6 +575,20 @@ pub enum CommandBlocksMode {
     /// Warp-style. Presentation-only: draws no new invalidation, only what the
     /// existing badge/fold overlay pass already repaints.
     Cards,
+}
+
+impl CommandBlocksMode {
+    /// Round-trips a config-file value (`off` | `badges` | `cards`) back out —
+    /// the mirror of `config::parse::parse_command_blocks_mode`. Used by
+    /// `settings_save::SAVED_KEYS` to persist the settings-UI Effects → Command
+    /// blocks segmented row.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Badges => "badges",
+            Self::Cards => "cards",
+        }
+    }
 }
 
 /// A tab's split layout: the tiling tree (whose leaf ids are pty/pane ids) plus

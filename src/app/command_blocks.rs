@@ -505,8 +505,12 @@ impl App {
             if h <= 0.0 {
                 continue;
             }
-            // Dim scrim over the hidden output.
-            renderer.push_overlay_px(pad, y0, grid_w, h, [0.0, 0.0, 0.0, 0.55]);
+            // Dim scrim over the hidden output. Theme-aware: fade toward the
+            // terminal background rather than hard black, so on light themes the
+            // scrim lightens (recedes) instead of blacking the row out under the
+            // dark fg_dim() summary text.
+            let bg = color::default_bg();
+            renderer.push_overlay_px(pad, y0, grid_w, h, [bg[0], bg[1], bg[2], 0.55]);
             // Summary text on the first hidden row.
             let summary = format!("\u{25B8} {} lines hidden", fr.hidden_lines); // ▸
             let tx = (pad + cw).round();

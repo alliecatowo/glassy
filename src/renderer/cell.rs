@@ -48,6 +48,14 @@ impl Renderer {
         self.metrics
     }
 
+    /// The actual resolved primary font family name — see
+    /// `Text::resolved_family_name` for why this can differ from the
+    /// `font_family` config value. Read by the Settings panel (General) to
+    /// show what font is genuinely loaded.
+    pub fn resolved_font_family(&self) -> Option<&str> {
+        self.text.resolved_family_name()
+    }
+
     /// Physical-pixel inset applied to the grid on all sides. The app must
     /// account for this when computing how many cells fit in the surface.
     pub fn pad(&self) -> f32 {
@@ -223,6 +231,7 @@ impl Renderer {
         self.cluster_cache.clear();
         self.ligature_run_cache.clear();
         self.wide_char_set.clear();
+        self.primary_coverage_cache.clear();
 
         // Re-probe ligature support: the new font file might be different from
         // the previous size's file (unlikely but possible after GLASSY_FONT change).
@@ -281,6 +290,7 @@ impl Renderer {
         self.cluster_cache.clear();
         self.ligature_run_cache.clear();
         self.wide_char_set.clear();
+        self.primary_coverage_cache.clear();
         self.atlas_reset = true;
 
         // Re-probe ligature support: the new font file may or may not carry an
@@ -321,6 +331,21 @@ impl Renderer {
     /// clear the per-row instance storage — only the rows the app re-pushes via
     /// [`Renderer::begin_row`] are rewritten; the rest are reused from last frame.
     pub fn begin_frame(&mut self, default_bg: [f32; 4]) {
+        // A prior frame overflowed a glyph atlas. Do the cache-clear + packer reset
+        // NOW, at the frame boundary, before any row is rebuilt or glyph packed — so
+        // (unlike the old mid-frame repack) no instance emitted last frame is still
+        // pointing into an atlas we are about to rewind. `atlas_reset` was already set
+        // when the overflow happened, so the app has already forced this frame's full
+        // rebuild, which will repack every glyph into the now-clean atlas.
+        if self.atlas_overflow_pending {
+            self.glyph_cache.clear();
+            self.cluster_cache.clear();
+            self.ligature_run_cache.clear();
+            self.wide_char_set.clear();
+            self.packer.reset();
+            self.color_packer.reset();
+            self.atlas_overflow_pending = false;
+        }
         // The clear color paints the (translucent) window backdrop, so it takes
         // the window opacity (and the visual-bell flash) just like the per-cell
         // default-background quads.
