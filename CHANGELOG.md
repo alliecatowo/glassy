@@ -5,7 +5,19 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.6.1] - Unreleased
+<!--
+Process: new entries land under `## [Unreleased]` (no version number) as they
+land, not under a pre-guessed version. Only at the moment a release is
+actually cut does that header get rewritten to `## [x.y.z] - YYYY-MM-DD` (the
+real version + the real date, together, in the same version-bump commit) —
+and a fresh empty `## [Unreleased]` goes in above it for whatever's next. This
+is what keeps a header from being stuck saying "Unreleased" long after it
+shipped.
+-->
+
+## [Unreleased]
+
+## [0.6.1] - 2026-07-08
 
 ### Fixed
 - **macOS traffic-light window buttons rendered abnormally small in released builds** (not `cargo build` locally). The release CI runner's default-selected Xcode links the binary against an older macOS SDK than what's installed locally, and macOS's linked-SDK compatibility checks make an app linked against that older SDK use legacy-sized title-bar chrome on newer macOS versions, even though nothing in glassy's own window setup changed. `release.yml` now pins `xcode-version: latest-stable` (`maxim-lobanov/setup-xcode`) so the macOS build job links against the newest SDK actually available on the runner instead of its stale default.

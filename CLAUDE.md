@@ -46,6 +46,13 @@ change must add a bullet under `## [Unreleased]`** in the correct subsection (`A
 in the same change as the code — don't defer it. Purely internal refactors with no
 user-visible effect may be skipped.
 
+**Cutting a release** (the version-bump commit, e.g. `596cf82`, `38ae8bc`) is the only time the
+`## [Unreleased]` header itself changes: rewrite it to `## [x.y.z] - YYYY-MM-DD` — the real
+version *and* the real date, together, in that one commit — then add a fresh empty
+`## [Unreleased]` above it for whatever lands next. Never pre-guess a version number onto the
+header before that moment, and never leave a shipped version's header saying `Unreleased` —
+either mistake is how a past `## [0.6.0] - Unreleased` sat wrong for an entire release cycle.
+
 ## Git
 
 - Branch off `main`. PRs default to **draft** unless asked otherwise.
