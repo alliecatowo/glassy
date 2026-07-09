@@ -34,6 +34,16 @@ pub(crate) const CLOSE_BOX: f32 = 16.0;
 /// Square icon-button size for +/#/?/* controls (px).
 pub(crate) const CTRL_BTN: f32 = 28.0;
 
+/// Width of the borderless-window resize border zone (px). A left press within
+/// this many pixels of a window edge/corner starts an OS-driven resize drag
+/// (glassy owns the edge once the native decorations are off — see
+/// [`resize_edge_at`]). Kept small so it doesn't steal ordinary content clicks.
+// Only the non-macOS borderless resize path (`window_resize_edge_at_pointer`)
+// reads this; macOS keeps its native resize handles, so gate it to match its
+// sole consumer and avoid a dead-code warning on macOS builds.
+#[cfg(not(target_os = "macos"))]
+pub(crate) const RESIZE_BORDER: f32 = 6.0;
+
 /// Corner radius for tab-bar icon buttons, derived from the cell height like the
 /// GUI metric scale so it tracks the font/DPI.
 pub(crate) fn gui_radius(cell_h: f32) -> f32 {
@@ -158,9 +168,13 @@ pub(crate) enum StripItem {
     /// A tab's ✕ close affordance at stable position `pos`.
     TabClose(usize),
     NewTab,
-    Help,
-    Settings,
     Menu,
+    /// Borderless-window controls painted in the top-right chrome on non-macOS
+    /// (macOS keeps its native traffic lights). Only laid out when glassy owns the
+    /// window edge — see [`right_control_items`].
+    WinMinimize,
+    WinMaximize,
+    WinClose,
 }
 
 /// One placed tab-bar item with its pixel rect. The label is carried for the tab
@@ -196,6 +210,44 @@ pub(crate) fn config_display_path() -> String {
     crate::config::path()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| "~/.config/glassy/glassy.conf".to_string())
+}
+
+/// Render `font_symbol_map` entries back to the `RANGE:Family[, RANGE:Family…]`
+/// text a user would type, for the Terminal section's editable field. Inverse
+/// of [`crate::config::parse::parse_symbol_map`] (round-trips through it).
+pub(crate) fn symbol_map_display(entries: &[crate::config::parse::SymbolMapEntry]) -> String {
+    entries
+        .iter()
+        .map(|e| {
+            if e.start == e.end {
+                format!("U+{:04X}:{}", e.start, e.family)
+            } else {
+                format!("U+{:04X}-U+{:04X}:{}", e.start, e.end, e.family)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Render `status_bar_segments` back to its space-joined display text for the
+/// Advanced section's editable field. `None` (built-in default set) displays
+/// as empty, matching `apply_kv`'s "empty clears the override" contract.
+/// Inverse of [`crate::config::parse::parse_status_bar_segments`].
+pub(crate) fn status_bar_segments_display(segs: Option<&[StatusBarSegment]>) -> String {
+    segs.map(|segs| segs.iter().map(|s| s.token()).collect::<Vec<_>>().join(" "))
+        .unwrap_or_default()
+}
+
+/// Render the resolved `shell` config value for the Terminal section's
+/// read-only info row. `alacritty_terminal::tty::Shell`'s `program`/`args`
+/// fields are `pub(crate)` to that crate (not visible here), so this falls
+/// back to its derived `Debug` output — still a faithful "resolved value"
+/// even though it isn't as clean as hand-formatted `program arg1 arg2`.
+pub(crate) fn shell_display(shell: &Option<alacritty_terminal::tty::Shell>) -> String {
+    match shell {
+        Some(s) => format!("{s:?}"),
+        None => "(default shell)".to_string(),
+    }
 }
 
 /// Lighten an RGB color toward white by `amount`, keeping alpha. Used for the
@@ -240,19 +292,34 @@ pub(crate) enum MenuAction {
     SplitRight,
     SplitDown,
     NewTab,
+    CommandPalette,
     Settings,
     Help,
+    QuakeToggle,
+    About,
     CloseTab,
 }
 
 impl MenuAction {
-    /// The fixed set shown by the ≡ hamburger dropdown. Settings (⚙) and Help (?)
-    /// are NOT listed here — they have dedicated quick-access strip icons, so
-    /// duplicating them in the hamburger would give two independent UI paths to the
-    /// same overlay. `PaneHeaders` is likewise omitted: it is a Settings-form (and
-    /// command-palette) toggle, not a top-level menu action. The right-click context
-    /// menu uses a separately-built `Vec<MenuAction>` (see `context_menu_items`).
-    pub(crate) const ALL: &'static [MenuAction] = &[MenuAction::NewTab, MenuAction::CloseTab];
+    /// The grouped set shown by the ≡ hamburger dropdown. The standalone `?`/`⚙`
+    /// strip icons were folded IN here (leaving `+`/`≡` as the only standalone
+    /// top-right buttons), so the hamburger is now the single home for Settings /
+    /// Help alongside New tab, the splits, the command palette, quake toggle, and
+    /// About. Grouped (via [`MenuAction::group`]) as: New tab / Split right / Split
+    /// down | Command palette / Settings / Help | Quake toggle | About. The
+    /// right-click context menu uses a separately-built `Vec<MenuAction>` (see
+    /// `context_menu_items`).
+    pub(crate) const ALL: &'static [MenuAction] = &[
+        MenuAction::NewTab,
+        MenuAction::SplitRight,
+        MenuAction::SplitDown,
+        MenuAction::CommandPalette,
+        MenuAction::Settings,
+        MenuAction::Help,
+        MenuAction::QuakeToggle,
+        MenuAction::About,
+        MenuAction::CloseTab,
+    ];
 
     pub(crate) fn label(self) -> &'static str {
         match self {
@@ -264,57 +331,108 @@ impl MenuAction {
             MenuAction::SplitRight => "Split right",
             MenuAction::SplitDown => "Split down",
             MenuAction::NewTab => "New tab",
+            MenuAction::CommandPalette => "Command palette",
             MenuAction::Settings => "Settings",
             MenuAction::Help => "Help / keys",
+            MenuAction::QuakeToggle => "Toggle quake",
+            MenuAction::About => "About",
             MenuAction::CloseTab => "Close tab",
         }
     }
 
-    /// Left-column icon glyph for the real GUI menu (§3.6).
+    /// Left-column icon glyph for the real GUI menu (§3.6). Every glyph here is
+    /// a BMP symbol with `Emoji_Presentation = No` (default TEXT presentation),
+    /// so none of these can flicker into color — but staying off the
+    /// emoji-default list is necessary, not sufficient: a font can still lack
+    /// the glyph entirely (no substitute is drawn — see `src/text/presentation.rs`),
+    /// which is why this favors the specific glyphs already proven to render
+    /// (Geometric Shapes / Box Drawing / ASCII, the same family as `⧉`/`↗`/`✕`
+    /// used elsewhere in the chrome) over reaching for a more literal pictogram
+    /// from a less commonly embedded block on a hunch.
     pub(crate) fn icon(self) -> char {
         match self {
-            MenuAction::Copy => '◻',
+            MenuAction::Copy => '\u{29C9}', // ⧉ two joined squares (same as the copy-path icon)
             MenuAction::Paste => '□',
             MenuAction::SelectAll => '◼',
+            // Control-Pictures/Misc-Technical coverage is spottier in practice
+            // than assumed (see the flicker investigation) — these two aren't
+            // visible in the hamburger, so keep the originals rather than gamble
+            // on font coverage for a row nobody's confirmed is even affected.
             MenuAction::ClearScrollback => '~',
             MenuAction::Search => '/',
-            MenuAction::SplitRight => '|',
-            MenuAction::SplitDown => '-',
+            // Half-block fill glyphs (▐/▄) rasterized with inconsistent advance
+            // metrics here (one came out a hairline sliver, the other a full
+            // block) — solid bars oriented to the split axis read cleaner and
+            // share the fully-inked-shape family `◼`/`▼` already rasterize fine.
+            MenuAction::SplitRight => '\u{25AE}', // ▮ black vertical rectangle
+            MenuAction::SplitDown => '\u{25AC}',  // ▬ black rectangle (horizontal)
             MenuAction::NewTab => '+',
-            MenuAction::Settings => '*',
+            // With the unified glyph-resolution funnel (see `recover_glyph` in
+            // src/text/shape.rs), a default-TEXT symbol the primary font lacks no
+            // longer blanks: it falls back to a flat CoreText mono glyph. So ⌘
+            // (Misc Technical) and ⚙ (U+2699, resolved via Menlo) both render flat
+            // now — verified on-machine. ⓘ (U+24D8) is still avoided: it resolves
+            // to an oversized fullwidth enclosed-alphanumeric glyph (≈23px, wider
+            // than the cell), so About keeps a plain `i`. Search/clear have no
+            // correct flat (non-color) pictograph, so they stay ASCII.
+            MenuAction::CommandPalette => '\u{2318}', // ⌘ command key
+            MenuAction::Settings => '\u{2699}',       // ⚙ gear — flat via CoreText fallback
             MenuAction::Help => '?',
+            MenuAction::QuakeToggle => '\u{25BC}', // ▼ slides down
+            MenuAction::About => 'i',
             MenuAction::CloseTab => '✕',
         }
     }
 
     /// Right-aligned shortcut hint for the real GUI menu (§3.6). `None` for
     /// actions that have no keybinding shown in the menu.
+    ///
+    /// These were hardcoded to the PC chords unconditionally — always showing
+    /// "Ctrl+Shift+T" etc. even on macOS, where the real default bind is a
+    /// completely different chord (`cmd+t`, no shift at all; see
+    /// `mac_default_binds` in `config/keymap.rs`). Every other place that shows
+    /// a shortcut hint (the Help panel, the command palette) resolves it from
+    /// the LIVE keymap via `action_chord_display_map` specifically to avoid
+    /// this kind of drift; doing the same here would mean threading an owned,
+    /// per-frame-resolved string through `MenuEntry` (currently `&'static str`
+    /// throughout). Short of that larger change, this at least matches each
+    /// platform's actual DEFAULT bind (mac chords use the same ⌘/⇧ HIG symbol
+    /// convention `Chord::display_for` uses) — it just won't reflect a user's
+    /// OWN custom `[keybindings]` override, which is a smaller, pre-existing gap.
     pub(crate) fn shortcut(self) -> Option<&'static str> {
+        let mac = cfg!(target_os = "macos");
         match self {
-            MenuAction::Copy => Some("Ctrl+Shift+C"),
-            MenuAction::Paste => Some("Ctrl+Shift+V"),
-            MenuAction::SelectAll => Some("Ctrl+Shift+A"),
+            MenuAction::Copy => Some(if mac { "⌘C" } else { "Ctrl+Shift+C" }),
+            MenuAction::Paste => Some(if mac { "⌘V" } else { "Ctrl+Shift+V" }),
+            // No default PC bind exists for Select All at all (mac-only default).
+            MenuAction::SelectAll => mac.then_some("⌘A"),
             MenuAction::ClearScrollback => None,
-            MenuAction::Search => Some("Ctrl+Shift+F"),
-            MenuAction::SplitRight => Some("Ctrl+Shift+E"),
-            MenuAction::SplitDown => Some("Ctrl+Shift+O"),
-            MenuAction::NewTab => Some("Ctrl+Shift+T"),
-            MenuAction::Settings => Some("Ctrl+,"),
+            MenuAction::Search => Some(if mac { "⌘F" } else { "Ctrl+Shift+F" }),
+            MenuAction::SplitRight => Some(if mac { "⌘D" } else { "Ctrl+Shift+E" }),
+            MenuAction::SplitDown => Some(if mac { "⇧⌘D" } else { "Ctrl+Shift+O" }),
+            MenuAction::NewTab => Some(if mac { "⌘T" } else { "Ctrl+Shift+T" }),
+            MenuAction::CommandPalette => Some(if mac { "⇧⌘P" } else { "Ctrl+Shift+P" }),
+            MenuAction::Settings => Some(if mac { "⌘," } else { "Ctrl+," }),
             MenuAction::Help => Some("F1"),
-            MenuAction::CloseTab => Some("Ctrl+Shift+W"),
+            MenuAction::QuakeToggle => Some("F12"),
+            MenuAction::About => None,
+            MenuAction::CloseTab => Some(if mac { "⌘W" } else { "Ctrl+Shift+W" }),
         }
     }
 
     /// Visual group id used by [`actions_to_entries`] to place separators: a
     /// separator is drawn between any two consecutive items whose groups differ.
-    /// 0 = clipboard, 1 = buffer/find, 2 = layout, 3 = app, 4 = destructive.
+    /// 0 = clipboard, 1 = buffer/find, 2 = new/layout, 3 = app (palette/settings/
+    /// help), 4 = quake, 5 = about, 6 = destructive.
     fn group(self) -> u8 {
         match self {
             MenuAction::Copy | MenuAction::Paste | MenuAction::SelectAll => 0,
             MenuAction::ClearScrollback | MenuAction::Search => 1,
             MenuAction::SplitRight | MenuAction::SplitDown | MenuAction::NewTab => 2,
-            MenuAction::Settings | MenuAction::Help => 3,
-            MenuAction::CloseTab => 4,
+            MenuAction::CommandPalette | MenuAction::Settings | MenuAction::Help => 3,
+            MenuAction::QuakeToggle => 4,
+            MenuAction::About => 5,
+            MenuAction::CloseTab => 6,
         }
     }
 }
@@ -455,6 +573,43 @@ pub(crate) fn build_grapheme(
     (combiners, consumed)
 }
 
+/// Fill `out` with display row `row_u`'s cells exactly as `Grid::display_iter`
+/// would yield them — same `Point` (line + column) and the same `&Cell`
+/// references, in the same left-to-right order — by indexing the grid row
+/// directly (O(cols)) instead of materializing the whole viewport.
+///
+/// `out` is `clear()`ed first, so one buffer can be reused across every row in a
+/// frame. Returns `false` (leaving `out` empty) when `row_u` lies outside the
+/// grid's visible lines, i.e. the row `display_iter` would never yield; the
+/// caller skips it, matching the old full-collect loop's bounds behaviour.
+///
+/// Mapping (verified against alacritty_terminal 0.26 `Grid::display_iter`, which
+/// walks `Line(-display_offset)..=Line(screen_lines - 1 - display_offset)` over
+/// columns `0..columns`): display row `row_u` ⇔ `Line(row_u - display_offset)`.
+pub fn collect_display_row<'a>(
+    grid: &'a alacritty_terminal::grid::Grid<Cell>,
+    row_u: usize,
+    display_offset: i32,
+    out: &mut Vec<Indexed<&'a Cell>>,
+) -> bool {
+    out.clear();
+    if row_u >= grid.screen_lines() {
+        return false;
+    }
+    let line = Line(row_u as i32 - display_offset);
+    let row = &grid[line];
+    // `display_iter` bounds columns by `grid.columns()` (== the row's width); use
+    // the same source so the buffer is a byte-for-byte match of the iterator.
+    for c in 0..grid.columns() {
+        let col = Column(c);
+        out.push(Indexed {
+            point: Point::new(line, col),
+            cell: &row[col],
+        });
+    }
+    true
+}
+
 /// Physical-pixel step per Ctrl +/- font-size adjustment.
 pub(crate) const FONT_STEP_PX: f32 = 2.0;
 
@@ -462,6 +617,27 @@ pub(crate) const FONT_STEP_PX: f32 = 2.0;
 /// received (config file was modified). Only opacity/bell_visual/status_bar/
 /// pane_headers/word_separator apply live; font changes require a full reload.
 impl App {
+    /// Re-read `glassy.conf` (+ CLI-less defaults) from disk and apply the
+    /// live-reloadable subset via [`Self::apply_config_reload`]. This is the
+    /// exact path `UserEvent::ConfigReload` runs when the file watcher notices
+    /// an edit (see `user_event.rs`) — factored out here so the `glassy @
+    /// reload-config` and `glassy @ set-config` remote-control verbs
+    /// (`remote.rs`) can trigger the identical reload without duplicating the
+    /// match. Returns `Err` with a message suitable for an IPC `ERR` reply on
+    /// a resolve failure; `Ok(None)` from `Settings::resolve` (the
+    /// `--help`/`--version` early-exit path) can't happen with an empty CLI
+    /// arg iterator, but is handled defensively rather than panicking.
+    pub(crate) fn reload_config_from_disk(&mut self) -> Result<(), String> {
+        match crate::config::Settings::resolve(std::iter::empty()) {
+            Ok(Some(settings)) => {
+                self.apply_config_reload(&settings.config);
+                Ok(())
+            }
+            Ok(None) => Err("config reload produced no settings".to_string()),
+            Err(e) => Err(format!("config reload failed: {e:#}")),
+        }
+    }
+
     pub(crate) fn apply_config_reload(&mut self, new_config: &Config) {
         // Opacity changes take effect immediately in the renderer.
         if new_config.opacity != self.config.opacity {
@@ -470,6 +646,27 @@ impl App {
                 r.set_opacity(self.config.opacity);
             }
             self.dirty = true;
+        }
+
+        // Unfocused-dim strength applies on the next split frame: the overlay is
+        // re-emitted per frame from the renderer's live value (cached panes too).
+        if new_config.unfocused_dim != self.config.unfocused_dim {
+            self.config.unfocused_dim = new_config.unfocused_dim;
+            if let Some(r) = &mut self.renderer {
+                r.set_pane_dim(self.config.unfocused_dim);
+            }
+            self.dirty = true;
+        }
+
+        // Opacity scope bakes into cached per-row glyph instances at push time,
+        // so flipping it needs a full repaint, not just a redraw.
+        if new_config.opacity_text != self.config.opacity_text {
+            self.config.opacity_text = new_config.opacity_text;
+            if let Some(r) = &mut self.renderer {
+                r.set_text_opacity(self.config.opacity_text);
+            }
+            self.dirty = true;
+            self.force_full_redraw = true;
         }
 
         // Window effect changes hot-swap the post-process mode. Switching to/from
@@ -849,4 +1046,144 @@ pub(super) fn spawn_config_watcher(
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alacritty_terminal::Term;
+    use alacritty_terminal::event::VoidListener;
+    use alacritty_terminal::term::Config as TermConfig;
+    use alacritty_terminal::vte::ansi::Handler;
+
+    /// Minimal [`Dimensions`] for building a PTY-less test [`Term`] (mirrors the
+    /// vi_mode tests). `total_lines` matches `screen_lines` (no fixed scrollback
+    /// cap; history grows as lines are pushed off the top).
+    struct Size {
+        cols: usize,
+        lines: usize,
+    }
+    impl Dimensions for Size {
+        fn total_lines(&self) -> usize {
+            self.lines
+        }
+        fn screen_lines(&self) -> usize {
+            self.lines
+        }
+        fn columns(&self) -> usize {
+            self.cols
+        }
+    }
+
+    fn make_term(cols: usize, lines: usize) -> Term<VoidListener> {
+        Term::new(TermConfig::default(), &Size { cols, lines }, VoidListener)
+    }
+
+    /// Type a literal string through the VTE handler, breaking on `\n`.
+    fn type_str(t: &mut Term<VoidListener>, s: &str) {
+        for ch in s.chars() {
+            if ch == '\n' {
+                t.linefeed();
+                t.carriage_return();
+            } else {
+                t.input(ch);
+            }
+        }
+    }
+
+    /// THE refactor invariant. For every display row, `collect_display_row` must
+    /// reproduce exactly the cells `Grid::display_iter` yields for that row: the
+    /// identical `Point` (line + column) and the identical `&Cell` reference
+    /// (compared by address), in the same left-to-right order. This is precisely
+    /// what the old flat `display_iter.collect()` fed the render loops, so matching
+    /// it row-by-row pins that the per-row buffers are a byte-for-byte substitute —
+    /// including under a non-zero `display_offset`, where the row↔line mapping bites.
+    fn assert_row_buffers_match_display_iter(t: &Term<VoidListener>) {
+        let grid = t.grid();
+        let display_offset = grid.display_offset() as i32;
+        let screen_lines = grid.screen_lines();
+
+        // Reference: bucket display_iter's output by display row.
+        let mut expected: Vec<Vec<(Point, *const Cell)>> = vec![Vec::new(); screen_lines];
+        for indexed in grid.display_iter() {
+            let row_u = (indexed.point.line.0 + display_offset) as usize;
+            expected[row_u].push((indexed.point, indexed.cell as *const Cell));
+        }
+
+        // Actual: the production per-row helper, buffer reused across rows.
+        let mut buf: Vec<Indexed<&Cell>> = Vec::new();
+        for (row_u, expected_row) in expected.iter().enumerate() {
+            let present = collect_display_row(grid, row_u, display_offset, &mut buf);
+            assert!(present, "row {row_u} within screen_lines must be present");
+            let actual: Vec<(Point, *const Cell)> = buf
+                .iter()
+                .map(|c| (c.point, c.cell as *const Cell))
+                .collect();
+            assert_eq!(
+                &actual, expected_row,
+                "row {row_u} buffer differs from display_iter (offset {display_offset})"
+            );
+        }
+    }
+
+    #[test]
+    fn row_buffers_equal_display_iter_unscrolled() {
+        let mut t = make_term(10, 5);
+        type_str(&mut t, "hello\nworld\nfoo\nbar\nbaz");
+        assert_eq!(t.grid().display_offset(), 0);
+        assert_row_buffers_match_display_iter(&t);
+    }
+
+    #[test]
+    fn row_buffers_equal_display_iter_scrolled() {
+        // Produce scrollback, then scroll up so display_offset > 0 — the case the
+        // `line + display_offset` mapping has to get exactly right.
+        let mut t = make_term(8, 4);
+        for i in 0..20 {
+            type_str(&mut t, &format!("row{i}\n"));
+        }
+        t.scroll_display(Scroll::Delta(3));
+        assert!(
+            t.grid().display_offset() > 0,
+            "test setup: expected a non-zero scrollback offset"
+        );
+        assert_row_buffers_match_display_iter(&t);
+    }
+
+    #[test]
+    fn row_buffers_equal_display_iter_with_wide_and_combining() {
+        // Wide CJK + a combining mark exercise the row-scoped lookahead
+        // (`unit_len` spacer handling and `build_grapheme`) over the buffer; the
+        // helper must still mirror the grid cell-for-cell.
+        let mut t = make_term(20, 3);
+        type_str(&mut t, "aｗb\n"); // full-width 'ｗ' → WIDE_CHAR + trailing spacer
+        type_str(&mut t, "e\u{0301}x"); // 'e' + combining acute accent
+        assert_row_buffers_match_display_iter(&t);
+    }
+
+    #[test]
+    fn row_out_of_range_is_absent() {
+        // A display row past the grid's visible lines is never yielded by
+        // display_iter; the helper reports it absent and leaves the buffer empty
+        // (so the render loops skip it, matching the old bounds check).
+        let t = make_term(6, 3);
+        let grid = t.grid();
+        let mut buf: Vec<Indexed<&Cell>> = Vec::new();
+        assert!(!collect_display_row(grid, 3, 0, &mut buf));
+        assert!(buf.is_empty());
+        assert!(!collect_display_row(grid, 99, 0, &mut buf));
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn display_row_to_line_mapping_is_exact() {
+        // Pin the display_offset arithmetic exhaustively: display row `row_u` maps
+        // to `Line(row_u - display_offset)` and inverts back to `row_u`.
+        for display_offset in 0..12i32 {
+            for row_u in 0..40usize {
+                let line = Line(row_u as i32 - display_offset);
+                assert_eq!(line.0 + display_offset, row_u as i32);
+            }
+        }
+    }
 }

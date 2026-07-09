@@ -202,19 +202,28 @@ pub(super) fn dispatch(
             return;
         }
         UserEvent::ConfigReload => {
-            // Config file changed; reload from disk and apply live-reloadable settings.
-            match crate::config::Settings::resolve(std::iter::empty()) {
-                Ok(Some(settings)) => {
-                    app.apply_config_reload(&settings.config);
-                }
-                Ok(None) => {
-                    log::debug!("config reload: --help/--version");
-                }
-                Err(e) => {
-                    log::warn!("config reload failed: {e}");
-                }
+            // Config file changed; reload from disk and apply live-reloadable
+            // settings. Shared with the `glassy @ reload-config` / `set-config`
+            // remote-control verbs (`App::reload_config_from_disk`, `remote.rs`)
+            // so every trigger of a config reload runs the identical path.
+            if let Err(e) = app.reload_config_from_disk() {
+                log::warn!("{e}");
             }
             return;
+        }
+        UserEvent::SystemThemeChanged(scheme) => {
+            // Linux equivalent of `WindowEvent::ThemeChanged` (event_loop.rs),
+            // which winit never emits on that platform: the system light/dark
+            // preference changed, or this is the initial read at startup
+            // (`crate::app::system_theme`). Same apply-or-reassert logic as the
+            // native handler, so a pinned (non-follow_system) `theme` still
+            // gets its CSD titlebar recoherenced.
+            if !app.apply_system_theme(Some(scheme))
+                && let Some(theme) = color::theme_by_name(&app.config.theme)
+            {
+                color::set_theme(theme);
+            }
+            app.force_full_redraw = true;
         }
         UserEvent::Ipc(cmd) => {
             // A `glassy toggle/show/hide` from a compositor hotkey (or a second

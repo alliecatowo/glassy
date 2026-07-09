@@ -100,7 +100,7 @@ impl App {
                     let (mx, my) = self.gui_click_pos;
                     if !gui::hit(self.settings_panel, mx, my) {
                         self.settings_open = false;
-                        self.settings_drop = gui::SettingsDrop::None;
+                        self.set_settings_drop(gui::SettingsDrop::None);
                         self.force_full_redraw = true;
                         self.mark_dirty(event_loop);
                     }
@@ -162,6 +162,23 @@ impl App {
         // is consumed (no terminal selection beneath the overlay). Clicking
         // the bar itself is a no-op (text editing is keyboard-driven).
         if self.search.is_some() {
+            self.held_button = None;
+            return;
+        }
+
+        // Borderless window-edge resize: with the native decorations off, glassy
+        // owns the window edge, so a left press within the resize border starts an
+        // OS-driven resize drag (winit's `drag_resize_window`). Non-macOS only —
+        // macOS keeps its native frame's resize handles. Checked before the tab
+        // strip / pane / content paths so the edge zone wins over them.
+        #[cfg(not(target_os = "macos"))]
+        if button == MouseButton::Left
+            && pressed
+            && let Some(dir) = self.window_resize_edge_at_pointer()
+        {
+            if let Some(w) = self.window.as_ref() {
+                let _ = w.drag_resize_window(dir);
+            }
             self.held_button = None;
             return;
         }
@@ -386,6 +403,21 @@ impl App {
             // The application owns the mouse; never start a glassy
             // selection or paste underneath it.
             self.report_mouse(base, pressed, false, mode);
+            return;
+        }
+
+        // Warp-style "click the block to select its output" affordance (OSC
+        // 133/633 command blocks): a left press in the left-margin gutter next
+        // to a finished command's row range selects that command's output as
+        // one unit instead of starting a normal drag-selection at column 0.
+        if button == MouseButton::Left
+            && pressed
+            && let Some(prompt_row) =
+                self.command_block_gutter_click_at(self.mouse_px.0, self.mouse_px.1)
+        {
+            self.select_command_output(prompt_row);
+            self.last_click = None; // don't feed the double/triple-click escalation
+            self.mark_dirty(event_loop);
             return;
         }
 

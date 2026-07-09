@@ -14,6 +14,17 @@ impl App {
         if f == gui::id("settings/word_separator")
             || f == gui::id("settings/font_features")
             || f == gui::id("settings/custom/hex")
+            || f == gui::id("settings/profile_new_name")
+            || f == gui::id("settings/profile_rename")
+            || f == gui::id("settings/hints_chars")
+            || f == gui::id("settings/font_bold")
+            || f == gui::id("settings/font_italic")
+            || f == gui::id("settings/font_bold_italic")
+            || f == gui::id("settings/font_symbol_map")
+            || f == gui::id("settings/font_variations")
+            || f == gui::id("settings/status_bar_segments")
+            || f == gui::id("settings/status_bar_time_format")
+            || f == gui::id("settings/wallpaper_theme")
         {
             Some(f)
         } else {
@@ -58,6 +69,28 @@ impl App {
             &mut self.settings_word_sep
         } else if field == gui::id("settings/custom/hex") {
             &mut self.settings_theme_hex
+        } else if field == gui::id("settings/profile_new_name") {
+            &mut self.settings_profile_new
+        } else if field == gui::id("settings/profile_rename") {
+            &mut self.settings_profile_rename
+        } else if field == gui::id("settings/hints_chars") {
+            &mut self.settings_hints_chars
+        } else if field == gui::id("settings/font_bold") {
+            &mut self.settings_font_bold
+        } else if field == gui::id("settings/font_italic") {
+            &mut self.settings_font_italic
+        } else if field == gui::id("settings/font_bold_italic") {
+            &mut self.settings_font_bold_italic
+        } else if field == gui::id("settings/font_symbol_map") {
+            &mut self.settings_font_symbol_map
+        } else if field == gui::id("settings/font_variations") {
+            &mut self.settings_font_variations
+        } else if field == gui::id("settings/status_bar_segments") {
+            &mut self.settings_status_bar_segments
+        } else if field == gui::id("settings/status_bar_time_format") {
+            &mut self.settings_status_bar_time_format
+        } else if field == gui::id("settings/wallpaper_theme") {
+            &mut self.settings_wallpaper_theme
         } else {
             &mut self.settings_font_feat
         };
@@ -124,6 +157,70 @@ impl App {
         } else if field == gui::id("settings/custom/hex") {
             // Live-parse the hex into the working custom-theme entry + preview it.
             self.apply_custom_hex();
+        } else if field == gui::id("settings/hints_chars") {
+            // Mirrors `apply_kv`'s finalization rule exactly (ASCII letters only,
+            // >= 2 chars or fall back to the built-in default) via the shared
+            // helper. Already-live: `App::open_hints` reads `config.hints_chars`
+            // fresh every time hints mode is invoked, so this needs no renderer
+            // sync — the very next Ctrl+Shift+H uses the new alphabet.
+            let text = self.settings_hints_chars.text();
+            self.config.hints_chars = crate::config::parse::normalize_hints_chars(&text);
+        } else if field == gui::id("settings/font_bold") {
+            // NOTE: font_bold/italic/bold_italic/symbol_map/font_variations are
+            // baked into the font stack once at startup (`Renderer::new_with_fonts`
+            // via `Text::load_with_config`); `Renderer::reload_fonts` (the live
+            // family/features reload path) does not thread them through. There is
+            // no live renderer-sync path for these today — see
+            // `apply_config_reload` (helpers.rs), which likewise does not cover
+            // them. Committing here still updates the live `Config` (so Save
+            // persists the typed value and the change takes effect on restart),
+            // matching the honest "restart required" labeling in the Terminal
+            // section.
+            let text = self.settings_font_bold.text();
+            self.config.font_bold = (!text.is_empty()).then_some(text);
+        } else if field == gui::id("settings/font_italic") {
+            let text = self.settings_font_italic.text();
+            self.config.font_italic = (!text.is_empty()).then_some(text);
+        } else if field == gui::id("settings/font_bold_italic") {
+            let text = self.settings_font_bold_italic.text();
+            self.config.font_bold_italic = (!text.is_empty()).then_some(text);
+        } else if field == gui::id("settings/font_symbol_map") {
+            let text = self.settings_font_symbol_map.text();
+            self.config.font_symbol_map = if text.trim().is_empty() {
+                Vec::new()
+            } else {
+                crate::config::parse::parse_symbol_map(&text)
+            };
+        } else if field == gui::id("settings/font_variations") {
+            let text = self.settings_font_variations.text();
+            self.config.font_variations = if text.trim().is_empty() {
+                Vec::new()
+            } else {
+                crate::config::parse::parse_font_variations(&text)
+            };
+        } else if field == gui::id("settings/status_bar_segments") {
+            // Already-live: the status-bar paint call clones `status_bar_segments`
+            // fresh every frame (see `render.rs`/`multipane.rs`), so no extra sync.
+            let text = self.settings_status_bar_segments.text();
+            self.config.status_bar_segments = if text.is_empty() {
+                None
+            } else {
+                Some(crate::config::parse::parse_status_bar_segments(&text))
+            };
+        } else if field == gui::id("settings/status_bar_time_format") {
+            let text = self.settings_status_bar_time_format.text();
+            self.config.status_bar_time_format = if text.is_empty() {
+                "%H:%M".to_string()
+            } else {
+                text
+            };
+        } else if field == gui::id("settings/wallpaper_theme") {
+            // Path-only: does NOT re-run theme generation on every keystroke (that
+            // would decode + resample an image on each character typed). Use the
+            // existing "Generate theme from wallpaper" palette action once the
+            // path is set, or restart, to apply it.
+            let text = self.settings_wallpaper_theme.text();
+            self.config.wallpaper_theme = (!text.is_empty()).then(|| text.into());
         }
     }
 }

@@ -132,17 +132,27 @@ impl<'r> Ui<'r> {
     /// produces clean rounded corners instead of the previous 4-quad approach
     /// that left mitre gaps.
     pub(crate) fn focus_ring(&mut self, r: Rect, radius: f32) {
+        self.focus_ring_over(r, radius, glass_raised());
+    }
+
+    /// [`Ui::focus_ring`] with an explicit inner fill. The ring is drawn as an
+    /// accent rrect with `inner_fill` subtracted 1 px inside it, so the inner
+    /// fill MUST match whatever the widget already painted underneath — passing
+    /// the default `glass_raised()` over an accent-filled surface (e.g. a focused
+    /// `accent_button`) would overpaint its accent body grey. Accent-filled
+    /// widgets pass their own fill here instead.
+    pub(crate) fn focus_ring_over(&mut self, r: Rect, radius: f32, inner_fill: [f32; 4]) {
         // Softened accent (was full-opacity accent, which read as a harsh bright
         // ring on light themes). A translucent ring still clearly signals focus
         // without a hard line.
         let c = with_alpha(color::accent(), 0.55);
         // Outer filled rrect.
         self.rrect(r, radius, c);
-        // Inner filled rrect in the panel background — subtracts to leave a 1 px ring.
+        // Inner filled rrect — subtracts to leave a 1 px ring over the widget's
+        // own fill.
         let inner = r.inset(1.0);
         if inner.w > 0.0 && inner.h > 0.0 {
-            // Use the same glass_raised fill so the ring appears as a 1 px halo.
-            self.rrect(inner, (radius - 1.0).max(0.0), glass_raised());
+            self.rrect(inner, (radius - 1.0).max(0.0), inner_fill);
         }
     }
 

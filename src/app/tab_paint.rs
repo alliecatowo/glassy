@@ -13,11 +13,12 @@ impl App {
         hovered: Option<StripItem>,
         held: Option<StripItem>,
         focused: bool,
+        win_controls: bool,
     ) {
         let m = renderer.cell_metrics();
         let (sw, _sh) = renderer.surface_size();
         let bar_h = tab_bar_h(m.height);
-        let segs = floating_icon_segs(sw as f32, bar_h);
+        let segs = floating_icon_segs(sw as f32, bar_h, win_controls);
 
         let fdim = if focused { 1.0 } else { 0.7 };
         let mul = |c: [f32; 4]| [c[0] * fdim, c[1] * fdim, c[2] * fdim, c[3]];
@@ -51,9 +52,10 @@ impl App {
             let is_hover = hovered == Some(seg.item);
             let is_held = held == Some(seg.item);
             let glyph = match seg.item {
-                StripItem::Help => '?',
-                StripItem::Settings => '\u{F013}',
-                _ => '\u{2261}',
+                StripItem::WinMinimize => '\u{2013}', // – en dash
+                StripItem::WinMaximize => '\u{25A1}', // □ white square
+                StripItem::WinClose => '\u{2715}',    // ✕ multiplication x
+                _ => '\u{2261}',                      // ≡ hamburger menu
             };
             if is_held {
                 renderer.push_overlay_rrect_px(r.x, r.y, r.w, r.h, radius, press_fill(surface));
@@ -68,9 +70,16 @@ impl App {
                 );
             }
             let cfg = if is_hover || is_held { fg } else { fg_dim };
-            let gx = r.x + (r.w - m.width) * 0.5;
-            let gy = r.center_y() - m.height * 0.5;
-            renderer.push_overlay_glyph_px(gx.round(), gy.round(), glyph, cfg);
+            if seg.item == StripItem::Menu {
+                // The hamburger reads as the "app menu" affordance — draw it a
+                // notch larger than the other icon buttons so it doesn't get
+                // lost next to the tab chips.
+                renderer.push_overlay_glyph_px_scaled(r.x, r.y, r.w, r.h, glyph, cfg, 1.5);
+            } else {
+                let gx = r.x + (r.w - m.width) * 0.5;
+                let gy = r.center_y() - m.height * 0.5;
+                renderer.push_overlay_glyph_px(gx.round(), gy.round(), glyph, cfg);
+            }
         }
     }
 
@@ -102,6 +111,7 @@ impl App {
         pane_counts: &[usize],
         active_pos: usize,
         left_inset: f32,
+        win_controls: bool,
     ) {
         let m = renderer.cell_metrics();
         let (sw, _sh) = renderer.surface_size();
@@ -123,7 +133,7 @@ impl App {
         let fg = mul(gui::fg());
         let fg_dim = mul(gui::fg_dim());
         let raised = gui::glass_active_tab();
-        let chip_luma = 0.2126 * raised[0] + 0.7152 * raised[1] + 0.0722 * raised[2];
+        let chip_luma = color::luma(raised);
         let active_fg = if chip_luma > 0.5 {
             mul([0.04, 0.04, 0.05, 1.0])
         } else {
@@ -151,6 +161,7 @@ impl App {
             tag_reserve,
             active_pos,
             left_inset,
+            win_controls,
         );
         let multi = descs.len() > 1;
         let spin = SPINNER_FRAMES[spinner_frame % SPINNER_FRAMES.len()];
@@ -228,22 +239,39 @@ impl App {
                         renderer.push_overlay_glyph_px(gx.round(), gy.round(), '✕', cfg);
                     }
                 }
-                StripItem::NewTab | StripItem::Help | StripItem::Settings | StripItem::Menu => {
+                StripItem::NewTab
+                | StripItem::Menu
+                | StripItem::WinMinimize
+                | StripItem::WinMaximize
+                | StripItem::WinClose => {
                     let glyph = match seg.item {
                         StripItem::NewTab => '+',
-                        StripItem::Help => '?',
-                        StripItem::Settings => '\u{F013}',
-                        _ => '\u{2261}',
+                        StripItem::WinMinimize => '\u{2013}', // – en dash
+                        StripItem::WinMaximize => '\u{25A1}', // □ white square
+                        StripItem::WinClose => '\u{2715}',    // ✕ multiplication x
+                        _ => '\u{2261}',                      // ≡ hamburger menu
                     };
-                    let base = surface;
-                    if is_held {
+                    // The window-close button gets a danger-tinted hover/press so
+                    // it reads like a close affordance (mirrors the tab close box).
+                    let is_close = seg.item == StripItem::WinClose;
+                    if is_close && (is_hover || is_held) {
+                        let a = if is_held { 0.30 } else { 0.18 };
                         renderer.push_overlay_rrect_px(
                             r.x,
                             r.y,
                             r.w,
                             r.h,
                             gui_radius(m.height),
-                            press_fill(base),
+                            [danger[0], danger[1], danger[2], a],
+                        );
+                    } else if is_held {
+                        renderer.push_overlay_rrect_px(
+                            r.x,
+                            r.y,
+                            r.w,
+                            r.h,
+                            gui_radius(m.height),
+                            press_fill(surface),
                         );
                     } else if is_hover {
                         renderer.push_overlay_rrect_px(
@@ -252,14 +280,27 @@ impl App {
                             r.w,
                             r.h,
                             gui_radius(m.height),
-                            hover_fill(base),
+                            hover_fill(surface),
                         );
                     }
                     let nudge = if is_held { 1.0 } else { 0.0 };
-                    let cfg = if is_hover || is_held { fg } else { fg_dim };
-                    let gx = r.x + (r.w - m.width) * 0.5;
-                    let gy = r.center_y() - m.height * 0.5 + nudge;
-                    renderer.push_overlay_glyph_px(gx.round(), gy.round(), glyph, cfg);
+                    let cfg = if is_close && (is_hover || is_held) {
+                        danger
+                    } else if is_hover || is_held {
+                        fg
+                    } else {
+                        fg_dim
+                    };
+                    if seg.item == StripItem::Menu {
+                        // See `paint_floating_icons`: the hamburger is drawn a
+                        // notch larger than the other icon buttons.
+                        let by = r.y + nudge;
+                        renderer.push_overlay_glyph_px_scaled(r.x, by, r.w, r.h, glyph, cfg, 1.5);
+                    } else {
+                        let gx = r.x + (r.w - m.width) * 0.5;
+                        let gy = r.center_y() - m.height * 0.5 + nudge;
+                        renderer.push_overlay_glyph_px(gx.round(), gy.round(), glyph, cfg);
+                    }
                 }
             }
         }

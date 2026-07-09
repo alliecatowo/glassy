@@ -92,6 +92,16 @@ impl Renderer {
         let surface_arc = Arc::new(surface);
         let surface_arc_thread = surface_arc.clone();
 
+        // Flag flipped by the `device_lost` callback registered below (a real GPU
+        // device loss — driver crash/reset, GPU hot-unplug — after startup, not an
+        // init-time failure). `Arc` so the callback, which wgpu may invoke from an
+        // arbitrary internal thread, can set it without borrowing `Renderer`; the
+        // render loop polls it via [`Renderer::device_lost`] each frame and
+        // degrades gracefully instead of relying on wgpu's undocumented default
+        // behavior on the next `submit()`/`present()`.
+        let device_lost = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let device_lost_thread = device_lost.clone();
+
         // Spawn the GPU init thread. It requests the adapter (GPU selection) and
         // then the logical device; both are async-over-pollster and CPU-bound
         // (driver IPC + validation layer init).
@@ -131,6 +141,17 @@ impl Renderer {
                         ..Default::default() // experimental_features + trace
                     }))
                     .context("requesting GPU device")?;
+                // Register the device-lost callback as soon as the device exists.
+                // Only the `Destroyed` reason is expected in normal operation (we
+                // never call `device.destroy()` ourselves outside of drop), so
+                // any callback firing here is either an unrequested driver-level
+                // loss or a bug — either way, log the reason and flip the flag
+                // rather than let the next submit()/present() hit undefined wgpu
+                // behavior.
+                device.set_device_lost_callback(move |reason, message| {
+                    log::error!("glassy: GPU device lost ({reason:?}): {message}");
+                    device_lost_thread.store(true, std::sync::atomic::Ordering::Relaxed);
+                });
                 Ok((adapter, device, queue))
             },
         );
@@ -695,10 +716,12 @@ impl Renderer {
             packer: Packer::new(ATLAS_SIZE),
             color_packer: Packer::new(COLOR_ATLAS_SIZE),
             atlas_reset: false,
+            atlas_overflow_pending: false,
             glyph_cache: HashMap::new(),
             cluster_cache: HashMap::new(),
             ligature_run_cache: HashMap::new(),
             wide_char_set: std::collections::HashSet::new(),
+            primary_coverage_cache: HashMap::new(),
             font_has_ligatures: false, // probed below after renderer is built
             ligatures_enabled: false,  // updated via set_ligatures()
             text,
@@ -740,6 +763,8 @@ impl Renderer {
             clear_color: [0.0, 0.0, 0.0, 1.0],
             flash: None,
             opacity: opacity.clamp(0.0, 1.0),
+            pane_dim: DEFAULT_PANE_DIM,
+            text_opacity: false,
             transparent,
             premultiplied_surface,
             mp: MultiPane::default(),
@@ -752,6 +777,7 @@ impl Renderer {
             crt: crt::CrtPass::default(),
             cursor_trail: cursor_trail::CursorTrail::default(),
             window_effect: WindowEffect::None,
+            device_lost,
         };
 
         // Probe the loaded font for OpenType GSUB liga support. This shapes the
@@ -768,6 +794,17 @@ impl Renderer {
         log::info!("  renderer: ready {:.1} ms (total Renderer::new)", ms(t));
 
         Ok(renderer)
+    }
+
+    /// Whether the GPU device has been lost since this `Renderer` was created
+    /// (driver crash/reset, GPU hot-unplug) — set by the `device_lost` callback
+    /// registered in [`Renderer::new_with_fonts`]. The render loop should check
+    /// this each frame and degrade gracefully (the same clean-shutdown path
+    /// used for an init-time GPU failure) rather than keep submitting to a
+    /// device wgpu no longer considers valid.
+    #[allow(dead_code)] // not yet polled by the render loop — see the field's doc comment
+    pub fn device_lost(&self) -> bool {
+        self.device_lost.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Pre-warm the glyph atlas with printable ASCII (regular + bold).

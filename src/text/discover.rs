@@ -993,17 +993,70 @@ fn macos_font_dirs() -> Vec<PathBuf> {
     dirs
 }
 
+/// Curated, well-known Nerd Font families to prefer when more than one is
+/// installed, in priority order — the macOS analogue of Linux's
+/// `CURATED_FAMILIES` (which fontconfig can query by name; macOS discovery
+/// here works from raw filenames instead, since there's no macOS equivalent
+/// of `fc-match` used for this pass). Matched as a substring against the
+/// normalized file stem (spaces stripped, lowercased — the same normalization
+/// `find_macos_nerd_font` already applies), so e.g.
+/// "JetBrainsMonoNerdFontMono-Regular.ttf" matches "jetbrainsmono". A font not
+/// on this list still gets picked (Nerd Font coverage matters more than which
+/// specific family) — it just sorts after every curated family, in a stable
+/// alphabetical order rather than directory-scan order.
+#[cfg(target_os = "macos")]
+const CURATED_NERD_FONT_FAMILIES: &[&str] = &[
+    "jetbrainsmono",
+    "firacode",
+    "cascadiacode",
+    "hack",
+    "meslo",
+    "sourcecodepro",
+    "iosevka",
+    "ubuntumono",
+    "dejavusansmono",
+];
+
+/// Where a candidate's normalized stem falls in `CURATED_NERD_FONT_FAMILIES`
+/// (lower = more preferred); anything not on the list ranks after all of them.
+#[cfg(target_os = "macos")]
+fn curated_nerd_font_rank(normalized_stem: &str) -> usize {
+    CURATED_NERD_FONT_FAMILIES
+        .iter()
+        .position(|family| normalized_stem.contains(family))
+        .unwrap_or(CURATED_NERD_FONT_FAMILIES.len())
+}
+
 /// Find any installed Nerd Font monospace by *property* — the normalized file
-/// stem contains "nerdfont" — rather than matching specific family names. The
-/// "Mono" variant (single-cell icons) and the Regular weight are preferred so a
-/// terminal gets even-width icons. Returns the first match, or `None` if no Nerd
-/// Font is installed (discovery then falls through to the system monospace).
+/// stem contains "nerdfont" — rather than matching one specific family name.
+/// The "Mono" variant (single-cell icons) and the Regular weight are
+/// preferred so a terminal gets even-width icons.
+///
+/// Among files that tie on the mono/regular preference, the pick used to be
+/// whichever `std::fs::read_dir` happened to enumerate first — filesystem
+/// directory-entry order, which is NOT alphabetical or otherwise meaningful
+/// (APFS returns entries in an internal order that can shift across font
+/// (re)installs). A user with several Nerd Font families installed (JetBrains
+/// Mono, other coding fonts, accessibility fonts, …) had no guarantee which
+/// one glassy would load, and no way to find out short of reading debug logs.
+///
+/// Now every candidate in a pass is collected across all scanned directories
+/// FIRST, then ranked by (curated-family preference, normalized stem) before
+/// picking the best one — deterministic across runs and reinstalls, and it
+/// prefers a well-known complete family when one is present. The resolved
+/// family name is surfaced to the user via `Text::resolved_family_name` / the
+/// Settings panel (General, next to the Font dropdown), so this no longer
+/// needs to be discovered by reading logs either.
 #[cfg(target_os = "macos")]
 fn find_macos_nerd_font() -> Option<PathBuf> {
     let dirs = macos_font_dirs();
     // Two passes: first require the "mono" + "regular" variant, then accept any
-    // Nerd Font face. Each pass scans user dirs before system dirs.
+    // Nerd Font face. Each pass scans user dirs before system dirs for
+    // collection purposes, but ALL matches across ALL dirs in the pass are
+    // ranked together, so a curated family in a later dir still wins over a
+    // less-preferred one in an earlier dir.
     for (want_mono, want_regular) in [(true, true), (true, false), (false, false)] {
+        let mut candidates: Vec<(PathBuf, String)> = Vec::new();
         for dir in &dirs {
             let Ok(entries) = std::fs::read_dir(dir) else {
                 continue;
@@ -1038,10 +1091,20 @@ fn find_macos_nerd_font() -> Option<PathBuf> {
                 {
                     continue;
                 }
-                log::debug!("glassy: macos nerd font: {}", entry.path().display());
-                return Some(entry.path());
+                candidates.push((entry.path(), n));
             }
         }
+        if candidates.is_empty() {
+            continue;
+        }
+        candidates.sort_by(|(_, a), (_, b)| {
+            curated_nerd_font_rank(a)
+                .cmp(&curated_nerd_font_rank(b))
+                .then_with(|| a.cmp(b))
+        });
+        let (path, _) = &candidates[0];
+        log::debug!("glassy: macos nerd font: {}", path.display());
+        return Some(path.clone());
     }
     None
 }
@@ -1168,6 +1231,55 @@ fn load_font_file_macos(db: &mut fontdb::Database, path: &Path) -> bool {
         Err(err) => {
             log::debug!("glassy: skipping font {}: {err}", path.display());
             false
+        }
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod macos_nerd_font_tests {
+    use super::*;
+
+    /// Curated families must rank strictly ahead of anything not on the list,
+    /// and earlier entries must rank ahead of later ones.
+    #[test]
+    fn curated_rank_orders_known_families_first() {
+        assert!(
+            curated_nerd_font_rank("jetbrainsmononerdfontmono-regular")
+                < curated_nerd_font_rank("firacodenerdfontmono-regular")
+        );
+        assert!(
+            curated_nerd_font_rank("firacodenerdfontmono-regular")
+                < curated_nerd_font_rank("somerandomfontnerdfontmono-regular")
+        );
+    }
+
+    /// A stem matching no curated family ranks exactly at the "unranked"
+    /// sentinel (list length), not some arbitrary lower/higher value.
+    #[test]
+    fn curated_rank_unranked_sentinel() {
+        assert_eq!(
+            curated_nerd_font_rank("intonemononerdfontmono-regular"),
+            CURATED_NERD_FONT_FAMILIES.len()
+        );
+    }
+
+    /// Real end-to-end check against whatever this machine actually has
+    /// installed: calling `find_macos_nerd_font` twice must return the exact
+    /// same path — the whole point of ranking every candidate instead of
+    /// taking the first directory-scan hit. Skips gracefully if no Nerd Font
+    /// is installed (e.g. a bare CI runner).
+    #[test]
+    fn find_macos_nerd_font_is_deterministic() {
+        let Some(first) = find_macos_nerd_font() else {
+            eprintln!("find_macos_nerd_font_is_deterministic: skipped (no Nerd Font installed)");
+            return;
+        };
+        for _ in 0..5 {
+            assert_eq!(
+                find_macos_nerd_font(),
+                Some(first.clone()),
+                "repeated calls must resolve to the identical font file"
+            );
         }
     }
 }

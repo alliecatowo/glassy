@@ -48,6 +48,14 @@ impl Renderer {
         self.metrics
     }
 
+    /// The actual resolved primary font family name — see
+    /// `Text::resolved_family_name` for why this can differ from the
+    /// `font_family` config value. Read by the Settings panel (General) to
+    /// show what font is genuinely loaded.
+    pub fn resolved_font_family(&self) -> Option<&str> {
+        self.text.resolved_family_name()
+    }
+
     /// Physical-pixel inset applied to the grid on all sides. The app must
     /// account for this when computing how many cells fit in the surface.
     pub fn pad(&self) -> f32 {
@@ -134,6 +142,55 @@ impl Renderer {
         self.opacity = opacity.clamp(0.0, 1.0);
     }
 
+    /// Set whether the window opacity also applies to terminal TEXT (the
+    /// `opacity_scope = text` config). Default false: glyphs composite opaque
+    /// over the translucent backdrop so text stays crisp. The caller must force
+    /// a full redraw afterward — glyph colors are baked into the cached per-row
+    /// instances at push time.
+    pub fn set_text_opacity(&mut self, text: bool) {
+        self.text_opacity = text;
+    }
+
+    /// Scale a straight-RGBA terminal-text color by the window opacity for the
+    /// `opacity_scope = text` mode. `premultiply` selects the consumer:
+    ///
+    /// * `false` — fg-pipeline glyphs/undercurl: the shader treats `color.a` as
+    ///   a coverage multiplier and premultiplies itself, so only alpha scales.
+    /// * `true` — bg-pass solids (box/block/powerline segments, underline and
+    ///   strikeout strokes): the bg pipeline has `blend: None` and writes raw
+    ///   values to a premultiplied surface, so the color must be premultiplied
+    ///   here (exactly like `glass_bg` does for cell backgrounds) — a straight
+    ///   translucent color on that path would render too bright AND punch the
+    ///   surface alpha down.
+    fn text_glass_color(color: [f32; 4], premultiply: bool, opacity: f32) -> [f32; 4] {
+        let a = color[3] * opacity;
+        if premultiply {
+            [color[0] * a, color[1] * a, color[2] * a, a]
+        } else {
+            [color[0], color[1], color[2], a]
+        }
+    }
+
+    /// Apply `opacity_scope = text` to a fg-pipeline glyph color (straight RGBA,
+    /// alpha = coverage multiplier). No-op when the scope is background-only or
+    /// the surface can't composite alpha.
+    pub(crate) fn text_fg(&self, color: [f32; 4]) -> [f32; 4] {
+        if !self.text_opacity || !self.transparent {
+            return color;
+        }
+        Self::text_glass_color(color, false, super::opacity::perceptual(self.opacity))
+    }
+
+    /// Apply `opacity_scope = text` to a bg-pass solid drawn in the foreground
+    /// color (procedural box/block/powerline cells, underline/strikeout rects).
+    /// Premultiplied variant of [`Renderer::text_fg`]; same no-op conditions.
+    pub(crate) fn text_fg_solid(&self, color: [f32; 4]) -> [f32; 4] {
+        if !self.text_opacity || !self.transparent {
+            return color;
+        }
+        Self::text_glass_color(color, true, super::opacity::perceptual(self.opacity))
+    }
+
     /// Reload the font at a new physical pixel size, recomputing the cell metrics
     /// and padding and rebuilding the glyph atlas. On failure the previous font
     /// is retained (the error is logged) so a bad size never breaks rendering.
@@ -174,6 +231,7 @@ impl Renderer {
         self.cluster_cache.clear();
         self.ligature_run_cache.clear();
         self.wide_char_set.clear();
+        self.primary_coverage_cache.clear();
 
         // Re-probe ligature support: the new font file might be different from
         // the previous size's file (unlikely but possible after GLASSY_FONT change).
@@ -232,6 +290,7 @@ impl Renderer {
         self.cluster_cache.clear();
         self.ligature_run_cache.clear();
         self.wide_char_set.clear();
+        self.primary_coverage_cache.clear();
         self.atlas_reset = true;
 
         // Re-probe ligature support: the new font file may or may not carry an
@@ -272,6 +331,21 @@ impl Renderer {
     /// clear the per-row instance storage — only the rows the app re-pushes via
     /// [`Renderer::begin_row`] are rewritten; the rest are reused from last frame.
     pub fn begin_frame(&mut self, default_bg: [f32; 4]) {
+        // A prior frame overflowed a glyph atlas. Do the cache-clear + packer reset
+        // NOW, at the frame boundary, before any row is rebuilt or glyph packed — so
+        // (unlike the old mid-frame repack) no instance emitted last frame is still
+        // pointing into an atlas we are about to rewind. `atlas_reset` was already set
+        // when the overflow happened, so the app has already forced this frame's full
+        // rebuild, which will repack every glyph into the now-clean atlas.
+        if self.atlas_overflow_pending {
+            self.glyph_cache.clear();
+            self.cluster_cache.clear();
+            self.ligature_run_cache.clear();
+            self.wide_char_set.clear();
+            self.packer.reset();
+            self.color_packer.reset();
+            self.atlas_overflow_pending = false;
+        }
         // The clear color paints the (translucent) window backdrop, so it takes
         // the window opacity (and the visual-bell flash) just like the per-cell
         // default-background quads.
@@ -284,22 +358,48 @@ impl Renderer {
         self.overlay_text.clear();
     }
 
+    /// Shared self-heal + dirty-marking for [`Renderer::begin_row`] and
+    /// [`Renderer::resume_row`], factored out as a free function of plain
+    /// row-storage state (no GPU handles involved) so it is unit-testable
+    /// without a full `Renderer`. `clear` selects `begin_row`'s destructive
+    /// rebuild semantics (`true`) vs `resume_row`'s append-only, non-destructive
+    /// semantics (`false`) — see each method's doc comment for when to use which.
+    pub(crate) fn retarget_row(
+        rows: &mut Vec<RowInstances>,
+        bg_row_offsets: &mut Vec<u32>,
+        fg_row_offsets: &mut Vec<u32>,
+        dirty_rows: &mut Vec<usize>,
+        row: usize,
+        clear: bool,
+    ) {
+        if row >= rows.len() {
+            // Should not happen if the app keeps the grid in sync, but stay safe:
+            // grow so the index is valid rather than panicking mid-frame.
+            rows.resize_with(row + 1, RowInstances::default);
+            bg_row_offsets.clear();
+            fg_row_offsets.clear();
+        }
+        if clear {
+            rows[row].bg.clear();
+            rows[row].fg.clear();
+        }
+        dirty_rows.push(row);
+    }
+
     /// Begin (re)building grid row `row`: subsequent `push_cell`/`push_cursor`
     /// calls land in this row's instance storage, replacing its previous contents.
     /// Out-of-range rows are ignored (clamped to a scratch slot) so a stale cursor
     /// row past a shrink never panics.
     pub fn begin_row(&mut self, row: usize) {
-        if row >= self.rows.len() {
-            // Should not happen if the app keeps the grid in sync, but stay safe:
-            // grow so the index is valid rather than panicking mid-frame.
-            self.rows.resize_with(row + 1, RowInstances::default);
-            self.bg_row_offsets.clear();
-            self.fg_row_offsets.clear();
-        }
+        Self::retarget_row(
+            &mut self.rows,
+            &mut self.bg_row_offsets,
+            &mut self.fg_row_offsets,
+            &mut self.dirty_rows,
+            row,
+            true,
+        );
         self.cur_row = row;
-        self.rows[row].bg.clear();
-        self.rows[row].fg.clear();
-        self.dirty_rows.push(row);
     }
 
     /// Re-target pushes at an already-built row WITHOUT clearing it, so callers can
@@ -310,6 +410,33 @@ impl Renderer {
         if row < self.rows.len() {
             self.cur_row = row;
         }
+    }
+
+    /// Re-target pushes at `row` for an overlay-only append (cursor bar/outline,
+    /// IME preedit) when the row was NOT rebuilt by the main per-cell content
+    /// loop this frame. Unlike [`Renderer::begin_row`], this never clears the
+    /// row's existing cached cell instances — `begin_row` may only destroy a
+    /// row's content when the caller is about to immediately repopulate it via
+    /// `push_cell`, which the overlay-only fallback paths never do. Left
+    /// unchecked, `begin_row` here would wipe the row down to just the overlay
+    /// quad: a full-row blank-plus-cursor artifact that persists until the row
+    /// is independently marked dirty again.
+    ///
+    /// Still grows `self.rows` (mirroring `begin_row`'s self-heal) so a row
+    /// past a recent resize is a valid index rather than being silently
+    /// dropped, and marks the row dirty so `end_frame` re-uploads it — the
+    /// overlay quad appended on top below must reach the GPU even though the
+    /// row's own cached cell content is unchanged.
+    pub fn resume_row(&mut self, row: usize) {
+        Self::retarget_row(
+            &mut self.rows,
+            &mut self.bg_row_offsets,
+            &mut self.fg_row_offsets,
+            &mut self.dirty_rows,
+            row,
+            false,
+        );
+        self.cur_row = row;
     }
 
     /// Apply the window opacity to a cell-background color.
@@ -427,6 +554,13 @@ impl Renderer {
         wide: bool,
         decorations: Decorations,
     ) {
+        // `opacity_scope = text`: fold the window opacity into the foreground
+        // color up front — the straight variant for atlas glyphs (fg pipeline),
+        // the premultiplied variant for procedural solids (bg pass). No-ops in
+        // the default background-only scope.
+        let fg_solid = self.text_fg_solid(fg);
+        let fg = self.text_fg(fg);
+
         let cell_w = self.metrics.width;
         let cell_h = self.metrics.height;
         let pad = self.pad;
@@ -515,18 +649,18 @@ impl Renderer {
         // overdrawn by our scanlines). This is correct: the bg quads are opaque.
         let is_powerline = matches!(cp, 0xE0B0..=0xE0B3);
         if is_block {
-            self.draw_block(ch, origin_x, origin_y, fg, bg);
+            self.draw_block(ch, origin_x, origin_y, fg_solid, bg);
             return;
         }
         if is_box {
             // `draw_box` returns false for code points it does not handle, in
             // which case we fall through to the normal glyph path so nothing
             // renders blank.
-            if self.draw_box(ch, origin_x, origin_y, fg) {
+            if self.draw_box(ch, origin_x, origin_y, fg_solid) {
                 return;
             }
         }
-        if is_powerline && self.draw_powerline(ch, origin_x, origin_y, fg, bg) {
+        if is_powerline && self.draw_powerline(ch, origin_x, origin_y, fg_solid, bg) {
             return;
         }
 
@@ -615,11 +749,12 @@ impl Renderer {
             let baseline = origin_y + self.metrics.ascent;
             let glyphs = &cached[i];
             if !glyphs.is_empty() {
+                let fg = self.text_fg(cell.fg);
                 let cur = self.cur_row;
                 Self::place_glyphs(
                     &mut self.rows[cur].fg,
                     glyphs,
-                    cell.fg,
+                    fg,
                     origin_x,
                     baseline,
                     cell_w,
@@ -711,5 +846,33 @@ impl Renderer {
                 _pad: [0; 3],
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod text_opacity_tests {
+    use super::*;
+
+    #[test]
+    fn straight_variant_scales_only_alpha() {
+        // fg-pipeline glyphs: the shader premultiplies, so RGB must stay straight.
+        let c = Renderer::text_glass_color([0.8, 0.6, 0.4, 1.0], false, 0.5);
+        assert_eq!(c, [0.8, 0.6, 0.4, 0.5]);
+    }
+
+    #[test]
+    fn premultiplied_variant_scales_rgb_and_alpha() {
+        // bg-pass solids: blend None writes raw values to a premultiplied
+        // surface, so RGB must carry the alpha or the solid renders too bright.
+        let c = Renderer::text_glass_color([0.8, 0.6, 0.4, 1.0], true, 0.5);
+        assert_eq!(c, [0.4, 0.3, 0.2, 0.5]);
+    }
+
+    #[test]
+    fn existing_translucency_compounds() {
+        // A color that already carries alpha (e.g. dim text) compounds with the
+        // window opacity rather than replacing it.
+        let c = Renderer::text_glass_color([1.0, 1.0, 1.0, 0.5], false, 0.5);
+        assert_eq!(c[3], 0.25);
     }
 }

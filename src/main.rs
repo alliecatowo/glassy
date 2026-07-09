@@ -1,17 +1,8 @@
-mod app;
-mod bell;
-mod color;
-mod config;
-mod gui;
-mod image;
-mod input;
-mod ipc;
-mod pane;
-mod pty;
-mod renderer;
-mod session;
-mod text;
-
+// `glassy` is a thin binary over the `glassy` library crate (`src/lib.rs`):
+// this file only holds the CLI entry point / control-client logic. The
+// module tree (app, color, config, ipc, pty, …) lives in the lib so
+// `benches/hot_paths.rs` and other out-of-crate targets can reach it.
+use glassy::{app, color, config, ipc, pty};
 use winit::event_loop::{ControlFlow, EventLoop};
 
 fn main() -> anyhow::Result<()> {
@@ -87,16 +78,26 @@ fn main() -> anyhow::Result<()> {
         Err(e) => log::warn!("ipc: failed to start control server: {e}"),
     }
 
+    // Linux: winit never emits WindowEvent::ThemeChanged there (and its
+    // Window::theme() never reflects the real GNOME/GTK preference), so
+    // `follow_system` needs its own live source. Reads/subscribes to the XDG
+    // desktop portal's color-scheme setting over D-Bus and posts updates back
+    // through `proxy`; a non-fatal no-op when no portal/bus is available
+    // (see `app::system_theme`).
+    #[cfg(target_os = "linux")]
+    app::system_theme::spawn(proxy.clone());
+
     // Clone a proxy for the macOS menu bar before `proxy` is moved into the app.
     #[cfg(target_os = "macos")]
     let menu_proxy = proxy.clone();
 
-    let mut app = app::App::new(proxy, settings.config);
+    let mut app = app::App::new(proxy, settings.config, settings.active_profile);
 
-    // Set dock + Cmd-Tab icon after EventLoop::build() so winit has already
-    // initialised NSApplication — our call then updates the existing singleton.
-    #[cfg(target_os = "macos")]
-    set_macos_app_icon();
+    // The Dock / Cmd-Tab icon is set from `App::resumed` for unbundled runs
+    // (`cargo run`) — once the first window exists and the process is a
+    // `.regular` activation-policy app, the point at which the Dock will honor
+    // it. The packaged `.app` is left to its `Info.plist` icon (the identical
+    // glassy-pink.icns) instead of a runtime override. See `App::set_dock_icon`.
 
     // Install the global macOS menu bar (glassy/File/Edit/View/Window) wired to
     // glassy's key actions via the event-loop proxy. Done after NSApplication
@@ -107,26 +108,6 @@ fn main() -> anyhow::Result<()> {
     event_loop.run_app(&mut app)?;
     ipc::cleanup();
     Ok(())
-}
-
-/// Set the macOS application icon (dock + Cmd-Tab switcher) from the bundled .icns.
-#[cfg(target_os = "macos")]
-fn set_macos_app_icon() {
-    use objc2::ClassType;
-    use objc2_app_kit::{NSApplication, NSImage};
-    use objc2_foundation::NSData;
-
-    let icon_bytes = include_bytes!("../assets/icons/glassy-pink.icns");
-    unsafe {
-        objc2::rc::autoreleasepool(|_| {
-            let mtm = objc2_foundation::MainThreadMarker::new().unwrap();
-            let data = NSData::with_bytes(icon_bytes);
-            if let Some(image) = NSImage::initWithData(NSImage::alloc(), &data) {
-                let app = NSApplication::sharedApplication(mtm);
-                app.setApplicationIconImage(Some(&image));
-            }
-        });
-    }
 }
 
 /// Run the `toggle`/`show`/`hide` control subcommand as a client: signal the

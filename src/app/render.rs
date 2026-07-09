@@ -2,6 +2,18 @@
 
 use super::*;
 
+/// Whether Power Mode's screen shake requires forcing a full grid rebuild this
+/// frame: every frame it's actively displacing the grid origin (`shaking`),
+/// plus exactly the one settle frame where it just stopped (`was_shaking &&
+/// !shaking`). Without that settle-frame case, the exact frame `shake_offset()`
+/// clamps to `(0, 0)` would compute `shaking == false` and skip the forced
+/// rebuild, leaving any row not independently re-dirtied that frame baked in
+/// at the previous (still-shaking) origin. A pure function of the two latched
+/// booleans so it's unit-testable without a full `App`/`Renderer`.
+pub(crate) fn shake_forces_full_redraw(shaking: bool, was_shaking: bool) -> bool {
+    shaking || was_shaking
+}
+
 impl App {
     pub(crate) fn render(&mut self) {
         // Split tabs take the dedicated multi-pane path; a single-pane tab (the
@@ -109,6 +121,10 @@ impl App {
         let tab_pane_counts = self.tab_pane_counts();
         let tab_active_pos = self.active_pos();
         let tab_left_inset = self.chrome_left_inset();
+        // Whether glassy paints its own window min/max/close controls (borderless,
+        // non-macOS). Constant per session (decorations is restart-only), so it is
+        // not part of the tab-bar rebuild key.
+        let tab_win_controls = self.show_window_controls();
         // Modifier-HOLD numbered overlay: when the primary modifier has been held
         // alone past the dwell, collect the visible tab chip rects + positions so
         // the painter can stamp a number badge on each (drawn after the cached bar
@@ -149,95 +165,64 @@ impl App {
                 .map(|r| r.has_tab_overlay())
                 .unwrap_or(false);
 
-        // Status-bar snapshot: term mode, scroll position, selection count.
-        // Taken here (under the `&self` borrow) before we take `&mut self.renderer`.
-        let (sb_mode, sb_disp_off, sb_hist, sb_sel_len) = match self.pty.as_ref() {
-            Some(pty) => {
-                let t = pty.term.lock();
-                let mode = *t.mode();
-                let disp = t.grid().display_offset() as i32;
-                let hist = t.grid().history_size();
-                let sel = t
-                    .selection_to_string()
-                    .map(|s| s.chars().count())
-                    .unwrap_or(0);
-                (mode, disp, hist, sel)
-            }
-            None => (TermMode::empty(), 0, 0, 0),
-        };
-        let sb_focused = self.focused;
-        let sb_surface_h = self
-            .renderer
-            .as_ref()
-            .map(|r| r.surface_size().1)
-            .unwrap_or(0);
-        // Status-bar cwd + git branch: read from the active PTY's cached PaneInfo.
-        // Evaluated here (before the renderer borrow) once per frame; PaneInfo is
-        // refreshed at most every 2 s (PROC_REFRESH_INTERVAL) by about_to_wait.
-        let sb_cwd: Option<std::path::PathBuf> = self
-            .pty
-            .as_ref()
-            .and_then(|p| p.pane_info.cwd.clone())
-            .or_else(|| self.active_cwd.clone()); // fallback to OSC 7 path
-        // Branch is precomputed in PaneInfo (refreshed on the 2 s proc poll), so
-        // the render path does no filesystem walk.
-        let sb_git_branch: Option<String> = self
-            .pty
-            .as_ref()
-            .and_then(|p| p.pane_info.git_branch.clone());
-        // Foreground process name (best-effort from PaneInfo).
-        let sb_fg_process: Option<String> = self
-            .pty
-            .as_ref()
-            .and_then(|p| p.pane_info.process_name(None).map(str::to_owned));
-        // Last command exit status from the OSC 133 block store (most recent block).
-        let sb_exit_status: Option<i32> = self.pty.as_ref().and_then(|p| {
-            p.prompts
-                .lock()
-                .ok()
-                .and_then(|g| g.blocks.iter().rev().find_map(|b| b.exit_code))
-        });
-        let sb_time_format = self.config.status_bar_time_format.clone();
-        let sb_segments = self.config.status_bar_segments.clone();
-        let sb_progress = self.active_progress;
-        let sb_broadcast = self.broadcast_input;
+        // Status-bar snapshot: every value `paint_status_bar` needs, built once
+        // here (under the `&self` borrow) before we take `&mut self.renderer` —
+        // see `App::status_bar_inputs` (chrome.rs) for the full field list.
+        let sb_inputs = self.status_bar_inputs();
 
-        // Command-block badges + fold ranges (OSC 133 shell integration). Built
+        // Command-block badges + fold ranges (OSC 133/633 shell integration),
+        // plus the opt-in card chrome bands (`command_blocks = cards`). Built
         // here under the `&self` borrow so the renderer gets plain owned data.
-        // Empty (and cheap) when no blocks exist or the feature is disabled.
-        let (cmd_badges, cmd_fold_ranges) = if self.config.command_badges {
-            self.pty
-                .as_ref()
-                .and_then(|p| {
-                    let disp = p.term.lock().grid().display_offset() as i32;
-                    p.prompts.lock().ok().map(|g| {
-                        (
-                            command_blocks::build_badges(
-                                &g.blocks,
-                                &self.fold_state,
-                                disp,
-                                self.rows,
-                            ),
-                            command_blocks::build_fold_ranges(
-                                &g.blocks,
-                                &self.fold_state,
-                                disp,
-                                self.rows,
-                            ),
-                        )
+        // Empty (and cheap) when no blocks exist or the relevant feature is
+        // disabled; the chrome bands are independent of `command_badges` (a
+        // user can want the card look without the exit-status chip).
+        let want_cards = self.config.command_blocks == CommandBlocksMode::Cards;
+        let (cmd_badges, cmd_fold_ranges, cmd_chrome_bands) =
+            if self.config.command_badges || want_cards {
+                self.pty
+                    .as_ref()
+                    .and_then(|p| {
+                        let disp = p.term.lock().grid().display_offset() as i32;
+                        p.prompts.lock().ok().map(|g| {
+                            let badges = if self.config.command_badges {
+                                command_blocks::build_badges(
+                                    &g.blocks,
+                                    &self.fold_state,
+                                    disp,
+                                    self.rows,
+                                )
+                            } else {
+                                Vec::new()
+                            };
+                            let folds = if self.config.command_badges {
+                                command_blocks::build_fold_ranges(
+                                    &g.blocks,
+                                    &self.fold_state,
+                                    disp,
+                                    self.rows,
+                                )
+                            } else {
+                                Vec::new()
+                            };
+                            let bands = if want_cards {
+                                command_blocks::build_chrome_bands(&g.blocks, disp, self.rows)
+                            } else {
+                                Vec::new()
+                            };
+                            (badges, folds, bands)
+                        })
                     })
-                })
-                .unwrap_or_default()
-        } else {
-            (Vec::new(), Vec::new())
-        };
+                    .unwrap_or_default()
+            } else {
+                (Vec::new(), Vec::new(), Vec::new())
+            };
 
         // Minimap snapshot: the strip rect (computed under `&self` before the
         // renderer borrow) plus the data to position the viewport indicator.
         // `None` when the minimap is disabled / unavailable this frame.
         let minimap_inputs = if self.minimap_active() {
             self.minimap_rect()
-                .map(|rect| (rect, sb_disp_off, self.rows))
+                .map(|rect| (rect, sb_inputs.display_offset, self.rows))
         } else {
             None
         };
@@ -260,6 +245,10 @@ impl App {
                 self.custom_theme_swatches(),
                 self.settings_custom_editing,
                 self.settings_profiles.clone(),
+                self.active_profile.clone(),
+                self.settings_profile_rename_idx,
+                self.settings_profile_delete_armed,
+                self.settings_popup_scroll,
             ))
         } else {
             None
@@ -338,6 +327,29 @@ impl App {
         // it is moved back at the end of the frame. Cheap (a Vec pointer swap).
         let minimap_cache = std::mem::take(&mut self.minimap_cache);
 
+        // Single-pane header overlay snapshot (feature: `pane_headers_single`):
+        // the content area + effective header height, resolved via `&self`
+        // methods before the disjoint renderer/pty borrows below. `None` unless
+        // both `pane_headers` and `pane_headers_single` are on (the split path,
+        // `render_split`, handles the header when the tab IS split).
+        let single_pane_header_area = (self.config.pane_headers && self.config.pane_headers_single)
+            .then(|| self.content_area())
+            .flatten()
+            .map(|mut area| {
+                // When the tab strip is hidden the header sits at y=0 — the same
+                // top band the floating Help/Settings/Menu icon cluster is painted
+                // over (top-right corner, drawn earlier this pass). Inset the
+                // header's right edge to clear the cluster's reserved width so it
+                // doesn't wash over the icons. When the strip is visible the header
+                // sits below it, so no inset is needed.
+                if !tab_strip_visible {
+                    let reserve = floating_icons_reserved_w(self.show_window_controls());
+                    area.w = (area.w as f32 - reserve).max(0.0) as i32;
+                }
+                area
+            });
+        let single_pane_header_h = self.pane_header_h() as f32;
+
         let (Some(renderer), Some(pty)) = (self.renderer.as_mut(), self.pty.as_ref()) else {
             self.minimap_cache = minimap_cache;
             return;
@@ -352,11 +364,29 @@ impl App {
         // would leave un-repainted rows at the previous offset (tearing). Force a
         // full rebuild while shaking so the whole grid re-lands at the new origin;
         // a no-op at rest (`shaking == false`), preserving the incremental path.
-        if shaking {
+        // Also forces one extra rebuild on the settle transition frame (see
+        // `shake_forces_full_redraw`) so a row that isn't otherwise re-dirtied
+        // doesn't keep its stale shaken-origin quads after the shake ends.
+        if shake_forces_full_redraw(shaking, self.was_shaking) {
             self.force_full_redraw = true;
         }
+        self.was_shaking = shaking;
 
         // Hold the terminal lock only long enough to copy out renderable state.
+        //
+        // Audited (w15 alacritty-surface, FairMutex item): stays fair `.lock()`
+        // intentionally. `lock_unfair()` only skips the fairness queue safely
+        // when paired with a held `lease()` (see upstream
+        // `alacritty_terminal::event_loop::EventLoop::spawn`, which leases once
+        // per read burst and uses `lock_unfair()` only *inside* that lease) — it
+        // is not a bare drop-in for a reader that never leases. Using it here
+        // without a lease would let this per-frame acquisition cut ahead of a
+        // PTY writer thread's `.lock()` wait, which is the opposite of what
+        // fairness exists to prevent (a busy PTY writer starving the render
+        // thread during high-throughput output like `cat bigfile`). No
+        // measurable contention was found to justify the tradeoff, so every
+        // render/UI-thread site keeps the fair path; see `pty::loop::run_loop`
+        // for the one PTY-thread site.
         let mut term = pty.term.lock();
 
         // Collect the terminal's per-line damage BEFORE reading renderable
@@ -466,9 +496,16 @@ impl App {
         // `begin_row` and the cursor overlay can re-target it later.
         let mut row_started = vec![false; rows];
 
-        // Collect the visible cells so we can look ahead across cells when
-        // reconstructing grapheme clusters (compound emoji span several cells).
-        let cells: Vec<_> = content.display_iter.collect();
+        // Read cells straight from the grid one dirty row at a time (in the loop
+        // below) instead of materializing the whole viewport every frame. `Grid`
+        // indexes a row in O(1), and each display row is self-contained: grapheme
+        // clusters, wide-char spacers and ligature runs are all row-scoped
+        // (`build_grapheme`/`unit_len` never look past the row, and a ligature run
+        // only continues while `run_row == srow`), so per-row buffers preserve every
+        // lookahead the old flat `display_iter.collect()` relied on. `grid` shares
+        // the same immutable term borrow as `content.colors`; `content.display_iter`
+        // is now unused.
+        let grid = term.grid();
 
         // Ligature run accumulator. When ligature shaping is active we buffer
         // consecutive simple (no-combiner, single-cell, same bold/italic/row)
@@ -523,221 +560,261 @@ impl App {
             };
         }
 
-        let mut ci = 0;
-        while ci < cells.len() {
-            let indexed = &cells[ci];
-            let cell = indexed.cell;
-
-            // The right half of a wide character is a spacer; a base cell consumes
-            // its own spacer below, so any spacer reached here is stray — skip it.
-            if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
-                ci += 1;
-                continue;
-            }
-
-            let row = indexed.point.line.0 + display_offset;
-            let col = indexed.point.column.0 as i32;
-            if row < 0 || row >= self.rows as i32 || col < 0 || col >= self.cols as i32 {
-                ci += 1;
-                continue;
-            }
-            let row_u = row as usize;
-            // Skip cells in rows that did not change: their instances are reused.
+        // Per-row cell buffer, reused across rows within this frame via `.clear()`.
+        // It borrows the term lock guard (`&Cell`), so it must be function-local
+        // rather than a persistent App field. Only dirty rows are visited; on a full
+        // rebuild every row is marked dirty above, so the visit order (top to bottom)
+        // and set are identical to the old whole-viewport traversal.
+        let mut row_buf: Vec<Indexed<&Cell>> = Vec::new();
+        for row_u in 0..rows {
             if !dirty[row_u] {
-                flush_run!();
-                ci += unit_len(&cells, ci);
                 continue;
             }
-            // First cell of a dirty row: clear it and begin pushing into it. The
-            // tab-bar inset is applied in pixels by the renderer (grid_origin_y),
-            // so the screen row equals the terminal row.
-            let srow = row_u;
-            if !row_started[srow] {
-                renderer.begin_row(srow);
-                row_started[srow] = true;
+            // Rows outside the grid's visible lines are never yielded by
+            // `display_iter`; skip them so behaviour matches the old bounds check.
+            if !collect_display_row(grid, row_u, display_offset, &mut row_buf) {
+                continue;
             }
+            let mut ci = 0;
+            while ci < row_buf.len() {
+                let indexed = &row_buf[ci];
+                let cell = indexed.cell;
 
-            let mut fg = color::resolve(cell.fg, colors);
-            let mut bg = color::resolve(cell.bg, colors);
-
-            if cell.flags.contains(Flags::INVERSE) {
-                std::mem::swap(&mut fg, &mut bg);
-            }
-            if cell.flags.contains(Flags::DIM) {
-                fg = [fg[0] * 0.66, fg[1] * 0.66, fg[2] * 0.66, fg[3]];
-            }
-            // Tint selected cells. Done before the cursor inversion so the cursor
-            // still reads clearly when it sits inside the selection.
-            if selection.is_some_and(|range| range.contains(indexed.point)) {
-                bg = color::selection_bg();
-            }
-            // Block cursor: invert the cell beneath it.
-            if invert_block && row == cursor_row && col == cursor_col {
-                std::mem::swap(&mut fg, &mut bg);
-            }
-            let hidden = cell.flags.contains(Flags::HIDDEN);
-
-            let bold = cell.flags.contains(Flags::BOLD) || cell.flags.contains(Flags::BOLD_ITALIC);
-            let italic =
-                cell.flags.contains(Flags::ITALIC) || cell.flags.contains(Flags::BOLD_ITALIC);
-            // A double-width (CJK / wide-emoji) cell spans two columns; the
-            // trailing spacer column is skipped above. The renderer lays the
-            // glyph out across the full two-cell box when this is set.
-            let wide = cell.flags.contains(Flags::WIDE_CHAR);
-
-            // Text decorations. Hidden cells draw nothing, so suppress strokes
-            // too. Underline styles are mutually exclusive (latest SGR wins);
-            // map the cell flags to a single style. The decoration color is the
-            // SGR 58 underline color when set, else the cell foreground, so e.g.
-            // a red LSP curl sits under default-fg text.
-            let mut decorations = if hidden {
-                Decorations::default()
-            } else {
-                let underline = if cell.flags.contains(Flags::UNDERCURL) {
-                    UnderlineStyle::Curl
-                } else if cell.flags.contains(Flags::DOTTED_UNDERLINE) {
-                    UnderlineStyle::Dotted
-                } else if cell.flags.contains(Flags::DASHED_UNDERLINE) {
-                    UnderlineStyle::Dashed
-                } else if cell.flags.contains(Flags::DOUBLE_UNDERLINE) {
-                    UnderlineStyle::Double
-                } else if cell.flags.contains(Flags::UNDERLINE) {
-                    UnderlineStyle::Single
-                } else {
-                    UnderlineStyle::None
-                };
-                let color = cell
-                    .underline_color()
-                    .map(|c| color::resolve(c, colors))
-                    .unwrap_or(fg);
-                Decorations {
-                    underline,
-                    strikeout: cell.flags.contains(Flags::STRIKEOUT),
-                    // SGR 53 overline (tracked in the side table, keyed by the
-                    // absolute grid row + column this cell occupies).
-                    overline: !overline_cells.is_empty()
-                        && overline_cells.contains(&(row, col as usize)),
-                    color,
+                // The right half of a wide character is a spacer; a base cell consumes
+                // its own spacer below, so any spacer reached here is stray — skip it.
+                if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                    ci += 1;
+                    continue;
                 }
-            };
 
-            // Underline links so they read as clickable.
-            //  • Explicit OSC 8 hyperlinks are ALWAYS underlined (an app declared
-            //    them a link, so signal it without requiring a hover — this is what
-            //    keeps app links, e.g. in Claude Code, from looking dead).
-            //  • Plain-text detected URLs/paths underline only on hover (matched by
-            //    the pre-computed col range on the hovered row), so scrollback isn't
-            //    littered with underlines or false-positive guesses.
-            if !hidden && matches!(decorations.underline, UnderlineStyle::None) {
-                let is_osc8_link = cell.hyperlink().is_some();
-                let is_hovered_plain = !plain_link_spans.is_empty()
-                    && row_u == hovered_cell_row
-                    && plain_link_spans
-                        .iter()
-                        .any(|s| (col as usize) >= s.col_start && (col as usize) < s.col_end);
-                if is_osc8_link || is_hovered_plain {
-                    decorations.underline = UnderlineStyle::Single;
+                let row = indexed.point.line.0 + display_offset;
+                let col = indexed.point.column.0 as i32;
+                if row < 0 || row >= self.rows as i32 || col < 0 || col >= self.cols as i32 {
+                    ci += 1;
+                    continue;
                 }
-            }
-
-            let ch = if hidden || cell.c == '\0' {
-                ' '
-            } else {
-                cell.c
-            };
-            // Reconstruct the grapheme cluster, merging this cell's combining /
-            // ZWJ code points with any following cells joined by ZWJ, a skin-tone
-            // modifier, a regional-indicator pair, or a variation selector — so
-            // compound emoji (flags, families, professions) shape into one glyph.
-            let (combiners, consumed) = if hidden {
-                (Vec::new(), unit_len(&cells, ci))
-            } else {
-                build_grapheme(&cells, ci, indexed.point.line.0)
-            };
-            // A cluster that spans 2+ grid cells (a wide CJK char, but also an
-            // emoji whose base code point is *narrow* yet joins following cells —
-            // e.g. the trans flag 🏳️‍⚧️ = narrow white-flag + ZWJ + symbol) must get
-            // a 2-cell box so its color glyph fills the space instead of being
-            // squished into one cell.
-            let wide = wide || consumed >= 2;
-
-            // Whether the (shown) cursor sits on this exact cell. A ligature run
-            // must not span the cursor cell: while editing, the character under the
-            // cursor has to render as its own glyph (not be swallowed into a wider
-            // ligature like `=>` → `⇒`), so the user sees and edits the real char.
-            // This holds for EVERY cursor shape (not just the inverting block):
-            // a beam/underline cursor over the middle of a ligature is just as
-            // misleading. Independent of fg/bg inversion, which only the block does.
-            let is_cursor_cell = cursor_shown && cur_cursor_cell == Some((col as usize, srow));
-
-            // Determine whether this cell is eligible for ligature run accumulation.
-            // A cell is ineligible if it has combiners, is wide, is hidden, is a
-            // space/null (blank), falls in the box-drawing / block-element ranges
-            // (those take the procedural path in push_cell and must not be shaped as
-            // part of a text run), or carries the cursor (so it splits out as an
-            // individual glyph — see `is_cursor_cell`).
-            let cp = ch as u32;
-            let is_box_or_block = (0x2500..=0x259F).contains(&cp);
-            let liga_eligible = use_liga
-                && !hidden
-                && combiners.is_empty()
-                && !wide
-                && ch != ' '
-                && ch != '\0'
-                && !is_box_or_block
-                && !is_cursor_cell;
-
-            if liga_eligible {
-                // Check if this cell is compatible with the current open run.
-                // A run break occurs on row change or style change. (The cursor cell
-                // itself is already excluded from `liga_eligible` above, so it never
-                // reaches here — it takes the individual `push_cell` path below.)
-                let run_continues = !run_cells.is_empty()
-                    && run_row == srow
-                    && run_bold == bold
-                    && run_italic == italic;
-
-                if !run_continues {
-                    // Flush any open run before starting a new one.
+                let row_u = row as usize;
+                // Skip cells in rows that did not change: their instances are reused.
+                if !dirty[row_u] {
                     flush_run!();
-                    run_row = srow;
-                    run_bold = bold;
-                    run_italic = italic;
+                    ci += unit_len(&row_buf, ci);
+                    continue;
+                }
+                // First cell of a dirty row: clear it and begin pushing into it. The
+                // tab-bar inset is applied in pixels by the renderer (grid_origin_y),
+                // so the screen row equals the terminal row.
+                let srow = row_u;
+                if !row_started[srow] {
+                    renderer.begin_row(srow);
+                    row_started[srow] = true;
                 }
 
-                // Append this cell to the run.
-                run_text.push(ch);
-                run_cells.push(LigatureCell {
-                    col: col as usize,
+                let mut fg = color::resolve(cell.fg, colors);
+                let mut bg = color::resolve(cell.bg, colors);
+
+                if cell.flags.contains(Flags::INVERSE) {
+                    std::mem::swap(&mut fg, &mut bg);
+                }
+                if cell.flags.contains(Flags::DIM) {
+                    fg = [fg[0] * 0.66, fg[1] * 0.66, fg[2] * 0.66, fg[3]];
+                }
+                // Tint selected cells. Done before the cursor inversion so the cursor
+                // still reads clearly when it sits inside the selection.
+                if selection.is_some_and(|range| range.contains(indexed.point)) {
+                    bg = color::selection_bg();
+                }
+                // Block cursor: invert the cell beneath it.
+                if invert_block && row == cursor_row && col == cursor_col {
+                    std::mem::swap(&mut fg, &mut bg);
+                }
+                let hidden = cell.flags.contains(Flags::HIDDEN);
+
+                let bold =
+                    cell.flags.contains(Flags::BOLD) || cell.flags.contains(Flags::BOLD_ITALIC);
+                let italic =
+                    cell.flags.contains(Flags::ITALIC) || cell.flags.contains(Flags::BOLD_ITALIC);
+                // A double-width (CJK / wide-emoji) cell spans two columns; the
+                // trailing spacer column is skipped above. The renderer lays the
+                // glyph out across the full two-cell box when this is set.
+                let wide = cell.flags.contains(Flags::WIDE_CHAR);
+
+                // Text decorations. Hidden cells draw nothing, so suppress strokes
+                // too. Underline styles are mutually exclusive (latest SGR wins);
+                // map the cell flags to a single style. The decoration color is the
+                // SGR 58 underline color when set, else the cell foreground, so e.g.
+                // a red LSP curl sits under default-fg text.
+                let mut decorations = if hidden {
+                    Decorations::default()
+                } else {
+                    let underline = if cell.flags.contains(Flags::UNDERCURL) {
+                        UnderlineStyle::Curl
+                    } else if cell.flags.contains(Flags::DOTTED_UNDERLINE) {
+                        UnderlineStyle::Dotted
+                    } else if cell.flags.contains(Flags::DASHED_UNDERLINE) {
+                        UnderlineStyle::Dashed
+                    } else if cell.flags.contains(Flags::DOUBLE_UNDERLINE) {
+                        UnderlineStyle::Double
+                    } else if cell.flags.contains(Flags::UNDERLINE) {
+                        UnderlineStyle::Single
+                    } else {
+                        UnderlineStyle::None
+                    };
+                    let color = cell
+                        .underline_color()
+                        .map(|c| color::resolve(c, colors))
+                        .unwrap_or(fg);
+                    Decorations {
+                        underline,
+                        strikeout: cell.flags.contains(Flags::STRIKEOUT),
+                        // SGR 53 overline (tracked in the side table, keyed by the
+                        // absolute grid row + column this cell occupies).
+                        overline: !overline_cells.is_empty()
+                            && overline_cells.contains(&(row, col as usize)),
+                        color,
+                    }
+                };
+
+                // Underline links so they read as clickable.
+                //  • Explicit OSC 8 hyperlinks are ALWAYS underlined (an app declared
+                //    them a link, so signal it without requiring a hover — this is what
+                //    keeps app links, e.g. in Claude Code, from looking dead).
+                //  • Plain-text detected URLs/paths underline only on hover (matched by
+                //    the pre-computed col range on the hovered row), so scrollback isn't
+                //    littered with underlines or false-positive guesses.
+                if !hidden && matches!(decorations.underline, UnderlineStyle::None) {
+                    let is_osc8_link = cell.hyperlink().is_some();
+                    let is_hovered_plain = !plain_link_spans.is_empty()
+                        && row_u == hovered_cell_row
+                        && plain_link_spans
+                            .iter()
+                            .any(|s| (col as usize) >= s.col_start && (col as usize) < s.col_end);
+                    if is_osc8_link || is_hovered_plain {
+                        decorations.underline = UnderlineStyle::Single;
+                    }
+                }
+
+                let ch = if hidden || cell.c == '\0' {
+                    ' '
+                } else {
+                    cell.c
+                };
+                // Reconstruct the grapheme cluster, merging this cell's combining /
+                // ZWJ code points with any following cells joined by ZWJ, a skin-tone
+                // modifier, a regional-indicator pair, or a variation selector — so
+                // compound emoji (flags, families, professions) shape into one glyph.
+                let (combiners, consumed) = if hidden {
+                    (Vec::new(), unit_len(&row_buf, ci))
+                } else {
+                    build_grapheme(&row_buf, ci, indexed.point.line.0)
+                };
+                // A cluster that spans 2+ grid cells (a wide CJK char, but also an
+                // emoji whose base code point is *narrow* yet joins following cells —
+                // e.g. the trans flag 🏳️‍⚧️ = narrow white-flag + ZWJ + symbol) must get
+                // a 2-cell box so its color glyph fills the space instead of being
+                // squished into one cell.
+                let wide = wide || consumed >= 2;
+
+                // Whether the (shown) cursor sits on this exact cell. A ligature run
+                // must not span the cursor cell: while editing, the character under the
+                // cursor has to render as its own glyph (not be swallowed into a wider
+                // ligature like `=>` → `⇒`), so the user sees and edits the real char.
+                // This holds for EVERY cursor shape (not just the inverting block):
+                // a beam/underline cursor over the middle of a ligature is just as
+                // misleading. Independent of fg/bg inversion, which only the block does.
+                let is_cursor_cell = cursor_shown && cur_cursor_cell == Some((col as usize, srow));
+
+                // Determine whether this cell is eligible for ligature run accumulation.
+                // A cell is ineligible if it has combiners, is wide, is hidden, is a
+                // space/null (blank), falls in the box-drawing / block-element ranges
+                // (those take the procedural path in push_cell and must not be shaped as
+                // part of a text run), or carries the cursor (so it splits out as an
+                // individual glyph — see `is_cursor_cell`).
+                //
+                // It is ALSO ineligible if it's routed by `font_symbol_map` to a
+                // dedicated family (`has_symbol_override`), or — the general case —
+                // the PRIMARY font doesn't actually have a glyph for it
+                // (`primary_font_covers`). Both checks exist for the same reason:
+                // `ensure_run_glyphs` always shapes a run with the primary family and
+                // no per-codepoint routing, so any character that needs routing (the
+                // symbol map) or fallback (the primary font lacks it) to render
+                // correctly would silently lose that on the run path and get
+                // whatever font cosmic-text's own internal fallback cascade lands on
+                // instead — which on macOS always includes Apple Color Emoji ahead of
+                // plain symbol fonts. A legitimate ligature (`->` → `→`) is by
+                // construction characters the SAME font's GSUB table substitutes, so
+                // requiring primary-font coverage costs real ligatures nothing while
+                // keeping every character that needs special handling on the
+                // single-character path — the one path with deliberate, controlled
+                // resolution. See `src/text/presentation.rs` for the full design.
+                let cp = ch as u32;
+                let is_box_or_block = (0x2500..=0x259F).contains(&cp);
+                let liga_eligible = use_liga
+                    && !hidden
+                    && combiners.is_empty()
+                    && !wide
+                    && ch != ' '
+                    && ch != '\0'
+                    && !is_box_or_block
+                    && !is_cursor_cell
+                    && !renderer.has_symbol_override(ch)
+                    && renderer.primary_font_covers(ch, bold, italic);
+
+                if liga_eligible {
+                    // Check if this cell is compatible with the current open run.
+                    // A run break occurs on row change or style change. (The cursor cell
+                    // itself is already excluded from `liga_eligible` above, so it never
+                    // reaches here — it takes the individual `push_cell` path below.)
+                    let run_continues = !run_cells.is_empty()
+                        && run_row == srow
+                        && run_bold == bold
+                        && run_italic == italic;
+
+                    if !run_continues {
+                        // Flush any open run before starting a new one.
+                        flush_run!();
+                        run_row = srow;
+                        run_bold = bold;
+                        run_italic = italic;
+                    }
+
+                    // Append this cell to the run.
+                    run_text.push(ch);
+                    run_cells.push(LigatureCell {
+                        col: col as usize,
+                        fg,
+                        bg,
+                        wide: false, // we checked !wide above
+                        decorations,
+                    });
+                    ci += consumed;
+                    continue;
+                }
+
+                // Non-ligature path: flush any open ligature run first.
+                flush_run!();
+
+                renderer.push_cell(
+                    col as usize,
+                    srow,
+                    ch,
+                    &combiners,
                     fg,
                     bg,
-                    wide: false, // we checked !wide above
+                    bold,
+                    italic,
+                    wide,
                     decorations,
-                });
+                );
                 ci += consumed;
-                continue;
             }
 
-            // Non-ligature path: flush any open ligature run first.
+            // Flush the ligature run at the end of every row. Runs never span rows
+            // (`run_continues` requires `run_row == srow`), so this is equivalent to
+            // the old single end-of-buffer flush while keeping each run's cells in
+            // their own row's instance storage (`push_*` targets the renderer's
+            // current row, which is this row).
             flush_run!();
-
-            renderer.push_cell(
-                col as usize,
-                srow,
-                ch,
-                &combiners,
-                fg,
-                bg,
-                bold,
-                italic,
-                wide,
-                decorations,
-            );
-            ci += consumed;
         }
-
-        // Flush any remaining ligature run at end of cell list.
-        flush_run!();
 
         // The real GUI tab bar is painted as a pixel overlay near the END of the
         // frame (after the cursor + images), so it composites above everything in
@@ -776,14 +853,16 @@ impl App {
             // re-target it WITHOUT clearing so the overlay appends on top of
             // that row's cell backgrounds. On a partial-dirty frame (e.g. a
             // resize) the cursor's row can have no in-bounds cells and so was
-            // never begun this frame — begin it now so the overlay still
-            // paints instead of being dropped for a frame.
+            // never begun this frame — resume it (without wiping any cached
+            // cell content: `begin_row` here would leave the row blank but
+            // for the cursor quad) so the overlay still paints instead of
+            // being dropped for a frame.
             let scr = cr;
             if cr < rows {
                 if row_started[scr] {
                     renderer.set_cur_row(scr);
                 } else {
-                    renderer.begin_row(scr);
+                    renderer.resume_row(scr);
                     row_started[scr] = true;
                 }
                 // gpu-fx cursor trail: the smear tail + a soft gliding head block
@@ -821,7 +900,10 @@ impl App {
                 if row_started[pr] {
                     renderer.set_cur_row(pr);
                 } else {
-                    renderer.begin_row(pr);
+                    // Same rationale as the cursor overlay fallback above: never
+                    // wipe a row's cached cell content via `begin_row` when we
+                    // are not about to rebuild it.
+                    renderer.resume_row(pr);
                     row_started[pr] = true;
                 }
                 ime::paint_preedit(renderer, preedit, pc, pr, self.cols);
@@ -867,10 +949,11 @@ impl App {
             }
         }
 
-        // Command-block affordances (OSC 133): the dim+summary overlay for folded
-        // output and the exit-status/duration badges, anchored to the grid by the
-        // same pixel origin as the cells. Suppressed under a modal so they don't
-        // punch through. Painted after images so badges read on top.
+        // Command-block affordances (OSC 133/633): the opt-in card chrome band,
+        // the dim+summary overlay for folded output, and the exit-status/duration
+        // badges, anchored to the grid by the same pixel origin as the cells.
+        // Suppressed under a modal so they don't punch through. Painted after
+        // images so badges read on top.
         if !self.help_open && !self.settings_open && !self.menu_open && self.palette.is_none() {
             Self::paint_command_blocks(
                 renderer,
@@ -878,6 +961,7 @@ impl App {
                 self.rows,
                 &cmd_badges,
                 &cmd_fold_ranges,
+                &cmd_chrome_bands,
             );
         }
 
@@ -889,7 +973,13 @@ impl App {
             // Strip hidden (single tab in Auto, or Never): paint only the three
             // floating icon buttons so Help/Settings/Menu remain reachable.
             renderer.begin_tab_overlay();
-            Self::paint_floating_icons(renderer, tab_hovered, tab_held, tab_focused);
+            Self::paint_floating_icons(
+                renderer,
+                tab_hovered,
+                tab_held,
+                tab_focused,
+                tab_win_controls,
+            );
             renderer.commit_tab_overlay();
         } else if tab_bar_rebuild {
             renderer.begin_tab_overlay();
@@ -908,6 +998,7 @@ impl App {
                 &tab_pane_counts,
                 tab_active_pos,
                 tab_left_inset,
+                tab_win_controls,
             );
             renderer.commit_tab_overlay();
         } else {
@@ -920,6 +1011,21 @@ impl App {
             Self::paint_tab_rename(renderer, *rect, buf, *caret, *sel);
         }
 
+        // Single-pane header overlay (feature: `pane_headers_single`): a
+        // lightweight title + focus dot + index("1") strip so `pane_headers` has
+        // an immediate visible effect even before the tab is ever split. Always
+        // redrawn (cheap: one fill + a couple of glyph runs), unlike the tab bar's
+        // cached overlay.
+        if let Some(area) = single_pane_header_area {
+            Self::paint_single_pane_header(
+                renderer,
+                area,
+                single_pane_header_h,
+                &self.active_title,
+                self.focused,
+            );
+        }
+
         // Modifier-HOLD numbered tab overlay: stamped over the (cached) tab bar
         // each frame the overlay is active, so it never invalidates the bar cache.
         if tab_strip_visible && !tab_hold_numbers.is_empty() {
@@ -930,23 +1036,7 @@ impl App {
         // content because it is an overlay (drawn last, not a reserved cell row).
         // Only painted when enabled in the config.
         if self.config.status_bar {
-            Self::paint_status_bar(
-                renderer,
-                sb_surface_h,
-                sb_mode,
-                sb_disp_off,
-                sb_hist,
-                sb_sel_len,
-                sb_focused,
-                sb_cwd.as_deref(),
-                sb_git_branch.as_deref(),
-                sb_progress,
-                sb_broadcast,
-                sb_fg_process.as_deref(),
-                &sb_time_format,
-                sb_exit_status,
-                sb_segments.as_deref(),
-            );
+            Self::paint_status_bar(renderer, &sb_inputs);
         }
 
         // Scrollback minimap strip: a thin right-edge overview composited over the
@@ -1029,6 +1119,10 @@ impl App {
             ref custom_swatches,
             custom_editing,
             ref profile_names,
+            ref active_profile,
+            profile_rename_idx,
+            profile_delete_armed,
+            popup_scroll,
         )) = settings_inputs
         {
             let font_px = renderer.font_px();
@@ -1041,6 +1135,28 @@ impl App {
                 double_click: self.gui_double_click,
                 theme_hex: &mut self.settings_theme_hex,
                 theme_hex_ms: &mut self.settings_theme_hex_ms,
+                profile_name: &mut self.settings_profile_new,
+                profile_name_ms: &mut self.settings_profile_new_ms,
+                profile_rename: &mut self.settings_profile_rename,
+                profile_rename_ms: &mut self.settings_profile_rename_ms,
+                hints_chars: &mut self.settings_hints_chars,
+                hints_chars_ms: &mut self.settings_hints_chars_ms,
+                font_bold: &mut self.settings_font_bold,
+                font_bold_ms: &mut self.settings_font_bold_ms,
+                font_italic: &mut self.settings_font_italic,
+                font_italic_ms: &mut self.settings_font_italic_ms,
+                font_bold_italic: &mut self.settings_font_bold_italic,
+                font_bold_italic_ms: &mut self.settings_font_bold_italic_ms,
+                font_symbol_map: &mut self.settings_font_symbol_map,
+                font_symbol_map_ms: &mut self.settings_font_symbol_map_ms,
+                font_variations: &mut self.settings_font_variations,
+                font_variations_ms: &mut self.settings_font_variations_ms,
+                status_bar_segments: &mut self.settings_status_bar_segments,
+                status_bar_segments_ms: &mut self.settings_status_bar_segments_ms,
+                status_bar_time_format: &mut self.settings_status_bar_time_format,
+                status_bar_time_format_ms: &mut self.settings_status_bar_time_format_ms,
+                wallpaper_theme: &mut self.settings_wallpaper_theme,
+                wallpaper_theme_ms: &mut self.settings_wallpaper_theme_ms,
             };
             settings_events = Some(Self::paint_settings(
                 renderer,
@@ -1064,6 +1180,10 @@ impl App {
                 custom_swatches,
                 custom_editing,
                 profile_names,
+                active_profile.as_deref(),
+                profile_rename_idx,
+                profile_delete_armed,
+                popup_scroll,
             ));
         } else if self.help_open {
             // Real GUI help panel (§3.7): scrollable two-column keybindings over
@@ -1151,6 +1271,27 @@ impl App {
                 h: (sh as i32 - top - status_h).max(0),
             };
             Self::paint_peek(renderer, peek, area);
+        }
+
+        // File drag-and-drop hover affordance: a subtle accent-tinted overlay
+        // over the pane's content area while a file is being dragged over the
+        // window (see `dragdrop.rs`). Single-pane tab: the "focused pane" is the
+        // whole content area.
+        if self.drop_hover {
+            let (sw, sh) = renderer.surface_size();
+            let status_h = if self.config.status_bar {
+                STATUS_BAR_H.round() as i32
+            } else {
+                0
+            };
+            let top = tab_strip_h.round() as i32;
+            let area = pane::Rect {
+                x: 0,
+                y: top,
+                w: sw as i32,
+                h: (sh as i32 - top - status_h).max(0),
+            };
+            Self::paint_drop_hover(renderer, area);
         }
 
         // Power Mode particle burst: soft glow dots flying out of the cursor,

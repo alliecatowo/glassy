@@ -76,9 +76,11 @@ impl Renderer {
 
     /// Like [`Renderer::begin_pane`] but with an explicit `dimmed` flag: when set,
     /// `end_pane` lays a subtle dark overlay quad over the pane's scissor rect after
-    /// its cell content, so an unfocused pane reads as recessed. The dim is recorded
-    /// as its own scissored draw after the pane's fg, so it darkens both the cell
-    /// backgrounds and the glyphs. Cached with the pane so reused frames stay dimmed.
+    /// its cell content, so an unfocused pane reads as recessed. The dim is emitted
+    /// into the overlay layer (premultiplied blend — see `pane_dim_instance` for why
+    /// the blend-less bg pass must not be used), darkening cell backgrounds and
+    /// glyphs alike. The flag is cached with the pane so reused frames stay dimmed;
+    /// the strength is read live from `pane_dim` at emission time.
     pub fn begin_pane_dimmed(
         &mut self,
         id: usize,
@@ -177,8 +179,8 @@ impl Renderer {
             fg_start,
             fg_end: self.mp.fg.len() as u32,
         });
-        // Dim overlay: a subtle dark quad over the whole pane, recorded as its OWN
-        // scissored bg draw AFTER the pane's fg so it darkens cells + glyphs alike.
+        // Dim overlay: a subtle dark quad over the whole pane, composited in the
+        // overlay layer so it darkens cells + glyphs alike without erasing them.
         if build.dimmed {
             self.push_pane_dim(build.scissor);
         }
@@ -189,31 +191,52 @@ impl Renderer {
         self.dirty_rows.clear();
     }
 
-    /// The dim-overlay alpha laid over an unfocused pane's content (a near-black
-    /// quad). Enough that the unfocused tile clearly recedes as background while
-    /// staying legible — 0.10 was too subtle to read as "dimmed".
-    pub(crate) const PANE_DIM_ALPHA: f32 = 0.28;
+    /// Set the unfocused-pane dim strength (the `unfocused_dim` config key).
+    /// Clamped to [0, 0.9] so a bad value can never black a pane out entirely;
+    /// 0 disables the overlay. Takes effect on the next frame for rebuilt AND
+    /// cached panes alike, because the overlay is re-emitted every frame from
+    /// the live value rather than baked into the cached instances.
+    pub fn set_pane_dim(&mut self, alpha: f32) {
+        self.pane_dim = if alpha.is_finite() {
+            alpha.clamp(0.0, 0.9)
+        } else {
+            DEFAULT_PANE_DIM
+        };
+    }
 
-    /// Record a single dark overlay quad spanning `scissor` as its own bg draw,
-    /// drawn (in pane order) immediately after the pane it dims so it composites
-    /// over that pane's glyphs. Scissored to the pane rect so it never bleeds.
-    fn push_pane_dim(&mut self, scissor: ScissorRect) {
-        if scissor.w == 0 || scissor.h == 0 {
-            return;
+    /// The dim instance for an unfocused pane: a black quad over `scissor` at
+    /// `alpha`, premultiplied for the OVERLAY pipeline. Returns `None` for empty
+    /// rects or a disabled dim.
+    ///
+    /// The overlay pass is the load-bearing choice: the bg pipeline has
+    /// `blend: None` (init.rs), so a translucent quad drawn there would REPLACE
+    /// the pane's pixels with straight rgba(0,0,0,alpha) — erasing the glyphs
+    /// beneath AND punching the framebuffer alpha down to `alpha`, which a
+    /// compositor renders as a mostly-transparent hole in the window instead of
+    /// a dimmed tile (the "unfocused pane disappears on glass windows" bug).
+    /// The overlay pipeline blends premultiplied, so the quad darkens what is
+    /// already there and can only raise surface alpha.
+    fn pane_dim_instance(scissor: ScissorRect, alpha: f32) -> Option<BgInstance> {
+        if scissor.w == 0 || scissor.h == 0 || alpha <= 0.0 {
+            return None;
         }
-        let bg_start = self.mp.bg.len() as u32;
-        self.mp.bg.push(BgInstance {
+        // Premultiplied black: RGB stays 0 at any alpha.
+        Some(BgInstance {
             pos: [scissor.x as f32, scissor.y as f32],
             size: [scissor.w as f32, scissor.h as f32],
-            color: [0.0, 0.0, 0.0, Self::PANE_DIM_ALPHA],
-        });
-        self.mp.panes.push(PaneDraw {
-            scissor,
-            bg_start,
-            bg_end: self.mp.bg.len() as u32,
-            fg_start: 0,
-            fg_end: 0,
-        });
+            color: [0.0, 0.0, 0.0, alpha],
+        })
+    }
+
+    /// Queue the dark dim quad for an unfocused pane into the overlay layer
+    /// (premultiplied blend), where it composites over the pane's cells and
+    /// glyphs. Pushed during pane emission — before any chrome overlays for the
+    /// frame — so menus/status bar still draw above it. The quad's geometry IS
+    /// the pane rect, so no scissor is needed in the overlay pass.
+    fn push_pane_dim(&mut self, scissor: ScissorRect) {
+        if let Some(inst) = Self::pane_dim_instance(scissor, self.pane_dim) {
+            self.overlay_quads.push(inst);
+        }
     }
 
     /// Emit a thin 1px divider rectangle at surface-pixel rect `(x, y, w, h)` in
@@ -411,6 +434,46 @@ impl Renderer {
             pass.set_vertex_buffer(0, self.unit_quad.slice(..));
             pass.set_vertex_buffer(1, self.overlay_text_buffer.slice(..));
             pass.draw(0..4, 0..self.overlay_text_count);
+        }
+    }
+}
+
+#[cfg(test)]
+mod dim_tests {
+    use super::*;
+
+    fn sc(x: u32, y: u32, w: u32, h: u32) -> ScissorRect {
+        ScissorRect { x, y, w, h }
+    }
+
+    #[test]
+    fn dim_instance_covers_scissor_at_alpha() {
+        let inst = Renderer::pane_dim_instance(sc(10, 20, 300, 200), 0.28).unwrap();
+        assert_eq!(inst.pos, [10.0, 20.0]);
+        assert_eq!(inst.size, [300.0, 200.0]);
+        // Premultiplied black: RGB must be exactly 0 so the quad can only darken.
+        assert_eq!(inst.color, [0.0, 0.0, 0.0, 0.28]);
+    }
+
+    #[test]
+    fn dim_instance_skips_empty_rects_and_zero_alpha() {
+        assert!(Renderer::pane_dim_instance(sc(0, 0, 0, 100), 0.28).is_none());
+        assert!(Renderer::pane_dim_instance(sc(0, 0, 100, 0), 0.28).is_none());
+        assert!(Renderer::pane_dim_instance(sc(0, 0, 100, 100), 0.0).is_none());
+        assert!(Renderer::pane_dim_instance(sc(0, 0, 100, 100), -0.5).is_none());
+    }
+
+    #[test]
+    fn dim_alpha_never_exceeds_the_legibility_clamp() {
+        // set_pane_dim clamps to [0, 0.9]; mirror the clamp here so a config
+        // value of e.g. 5.0 can never fully black out a pane.
+        for (input, want) in [(0.5_f32, 0.5_f32), (5.0, 0.9), (-1.0, 0.0)] {
+            let clamped = input.clamp(0.0, 0.9);
+            assert_eq!(clamped, want);
+            if clamped > 0.0 {
+                let inst = Renderer::pane_dim_instance(sc(0, 0, 10, 10), clamped).unwrap();
+                assert!(inst.color[3] <= 0.9);
+            }
         }
     }
 }

@@ -122,6 +122,30 @@ pub enum WState {
 // Animation
 // ---------------------------------------------------------------------------
 
+// --- Motion vocabulary (§ design-system MOTION) ----------------------------
+//
+// Named durations for the chrome's transitions. These are the target
+// vocabulary; surfaces adopt them as their per-anim easing/duration work lands.
+// The mechanism is unchanged — gui_anims stepped only while unsettled, Poll
+// dropped back to Wait on settle — so none of these threaten the 0%-idle
+// invariant.
+
+/// Hover-in / press-release (ms). Short enough to feel instant; linear is fine.
+pub const MOTION_FAST_MS: f32 = 100.0;
+/// Hover-out / toggle / selection change (ms).
+pub const MOTION_BASE_MS: f32 = 150.0;
+/// Menu / popup / palette / panel entrance (ms): fade + small rise. Exit is
+/// instant.
+pub const MOTION_ENTER_MS: f32 = 180.0;
+
+/// Cubic ease-out: fast start, gentle settle. `t` is a normalized 0..1 progress
+/// (clamped). Used for enter/hover transitions and the quake slide so motion
+/// decelerates into its resting position instead of stopping abruptly.
+pub fn ease_out_cubic(t: f32) -> f32 {
+    let inv = 1.0 - t.clamp(0.0, 1.0);
+    1.0 - inv * inv * inv
+}
+
 /// A single change-triggered scalar animation (e.g. a hover fade). `value`
 /// chases `target`; [`Anim::step`] advances it and reports whether it has
 /// settled. Only unsettled anims keep the event loop on `Poll`.
@@ -192,6 +216,35 @@ fn with_alpha(mut c: [f32; 4], a: f32) -> [f32; 4] {
     c
 }
 
+/// Elevate a base surface color to build the panel/card/active-tab/floating
+/// hierarchy (§2.1) without changing hue. `amount` is the same "how much
+/// hierarchy" knob in both directions:
+///
+/// - On dark and mid-tone backgrounds (`luma(base) <= 0.7`) this lightens
+///   additively by `amount`, same as the original scheme.
+/// - On light backgrounds (`luma(base) > 0.7`, the same threshold
+///   [`state_fill`] uses) additive lightening clips at white almost
+///   immediately — on a near-white bg like one-light's `#FAFAFA` every
+///   channel is already within `amount` of 1.0, so the result clamps back to
+///   (near) the original color and raised surfaces become invisible against
+///   the background. Darkening instead — by the multiplicative factor
+///   `1.0 - amount` — keeps the surface clearly legible, and because `base`
+///   is close to 1.0 on these themes the resulting per-channel delta
+///   (`base * amount`) lands in the same ballpark as the additive delta a
+///   dark theme gets, so the perceived "how raised is this" contrast stays
+///   comparable across light and dark themes.
+///
+/// `pub(crate)` (rather than private) so `app::command_blocks`'s opt-in
+/// command-block "card" chrome can derive its band tint from the same
+/// theme-aware elevation math instead of a hardcoded color.
+pub(crate) fn glass_elevate(base: [f32; 4], amount: f32) -> [f32; 4] {
+    if luma(base) > 0.7 {
+        darken(base, 1.0 - amount)
+    } else {
+        lighten(base, amount)
+    }
+}
+
 /// E1 chrome bar fill.
 pub fn glass_body() -> [f32; 4] {
     with_alpha(color::default_bg(), GLASS_BAR_ALPHA)
@@ -199,21 +252,53 @@ pub fn glass_body() -> [f32; 4] {
 
 /// E2 raised surface fill (cards / buttons on glass).
 pub fn glass_raised() -> [f32; 4] {
-    with_alpha(lighten(color::default_bg(), 0.12), GLASS_SURFACE_ALPHA)
+    with_alpha(
+        glass_elevate(color::default_bg(), 0.12),
+        GLASS_SURFACE_ALPHA,
+    )
 }
 
 /// E2+ active-tab chip fill — one stop brighter and fully opaque so the active
 /// tab clearly stands apart from both the bar and the recessed inactive chips.
-/// Derived from the theme's background + extra lightening so it reads as
+/// Derived from the theme's background + extra elevation so it reads as
 /// "the open surface" on any theme without hard-coding a color.
 pub fn glass_active_tab() -> [f32; 4] {
-    with_alpha(lighten(color::default_bg(), 0.22), 1.0)
+    with_alpha(glass_elevate(color::default_bg(), 0.22), 1.0)
 }
 
-/// E3 floating surface fill (dropdowns / dialogs / drag-ghost).
+/// E3 floating surface fill (dropdowns / dialogs / drag-ghost / toasts / peek).
+///
+/// Derived from the theme background (`default_bg`) — NOT `selection_bg` as it
+/// was originally — so the whole elevation family (E1 `glass_body`, E2
+/// `glass_raised`/`glass_active_tab`, E3 here) shares one hue and only differs
+/// by elevation amount (strict order `0 < 0.12 < 0.18 < 0.22`). Keying E3 off
+/// `selection_bg` let its hue diverge from the rest of the chrome on themes
+/// whose selection tint is a different color.
 pub fn glass_float() -> [f32; 4] {
-    with_alpha(lighten(color::selection_bg(), 0.12), GLASS_FLOAT_ALPHA)
+    with_alpha(glass_elevate(color::default_bg(), 0.18), GLASS_FLOAT_ALPHA)
 }
+
+/// Accent hairline border for an E3 floating surface (menus / dialogs / palette).
+/// Very low alpha so it reads as a soft crown, not a hard drawn line.
+pub fn glass_float_border() -> [f32; 4] {
+    with_alpha(color::accent(), 0.22)
+}
+
+/// Soft drop-shadow tint for an E3 floating surface (menus / popups / palette /
+/// settings / toasts / modals). Near-black, with a theme-aware alpha — denser on
+/// dark themes, softer on light — per the design-system depth spec. Pair with
+/// [`Renderer::push_overlay_shadow_px`] and a ~[`SHADOW_E3_FEATHER`] blur.
+pub fn shadow_e3() -> [f32; 4] {
+    let a = if luma(color::default_bg()) > 0.7 {
+        0.18
+    } else {
+        0.35
+    };
+    [0.0, 0.0, 0.0, a]
+}
+
+/// Default E3 soft-shadow blur (feather) width in px.
+pub const SHADOW_E3_FEATHER: f32 = 14.0;
 
 /// Soft edge accent (was a bright 1px "edge-lit" rail). Kept extremely subtle so
 /// raised surfaces read as clean soft glass with NO thin bright line artifacts —
@@ -303,21 +388,53 @@ pub struct Metrics {
     pub card_radius: f32,
     pub ctrl_w: f32,
     pub knob: f32,
+
+    // --- design-system token scales (all derived from cell_h so they scale
+    // with the font / DPI for free) --------------------------------------------
+    /// Spacing scale (physical px). `sp_md` == [`Self::gap`] and `sp_lg` ==
+    /// [`Self::pad`] are kept as the pre-existing names; the extra stops fill in
+    /// the smaller and larger ends of a single spacing vocabulary.
+    pub sp_xs: f32,
+    pub sp_sm: f32,
+    pub sp_xl: f32,
+    /// Chrome-bar height (status bar, pane header). Replaces the old fixed
+    /// `STATUS_BAR_H`/`PANE_HEADER_H = 22` px constants with a font-derived value.
+    pub bar_h: f32,
+    /// Square control-button edge (tab-strip control buttons). `CLOSE_BOX` maps
+    /// to `btn * 0.6`.
+    pub btn: f32,
+    /// Radius scale (physical px). `r_md` == [`Self::radius`] and `r_lg` ==
+    /// [`Self::card_radius`]; `r_sm` is the tighter inner-element radius. A
+    /// "full" pill radius is always `rect.h * 0.5` at the call site.
+    pub r_sm: f32,
+    pub r_md: f32,
+    pub r_lg: f32,
 }
 
 impl Metrics {
     pub fn new(cell_w: f32, cell_h: f32) -> Self {
         let row_h = (cell_h * 1.6).round();
+        let radius = (cell_h * 0.28).round().clamp(4.0, 8.0);
+        let card_radius = radius + 2.0;
         Metrics {
             cell_w,
             cell_h,
             row_h,
             pad: (cell_h * 0.5).round(),
             gap: (cell_h * 0.4).round(),
-            radius: (cell_h * 0.28).round().clamp(4.0, 8.0),
-            card_radius: (cell_h * 0.28).round().clamp(4.0, 8.0) + 2.0,
+            radius,
+            card_radius,
             ctrl_w: (cell_w * 14.0).round(),
             knob: row_h - 8.0,
+
+            sp_xs: (cell_h * 0.125).round().max(2.0),
+            sp_sm: (cell_h * 0.25).round(),
+            sp_xl: (cell_h * 1.0).round(),
+            bar_h: (cell_h * 1.4).round(),
+            btn: (cell_h * 1.6).round(),
+            r_sm: (radius - 2.0).max(2.0),
+            r_md: radius,
+            r_lg: card_radius,
         }
     }
 }
@@ -408,6 +525,12 @@ pub struct SettingsView<'a> {
     /// Theme preview swatch colors, parallel to `theme_names`.
     pub theme_swatches: &'a [[f32; 4]],
     pub font_family: &'a str,
+    /// The font ACTUALLY resolved/loaded (`Renderer::resolved_font_family`),
+    /// distinct from `font_family` above (the raw config value, often empty —
+    /// "let discovery choose"). Shown read-only next to the Font dropdown so a
+    /// user with several similarly-purposed fonts installed (e.g. multiple
+    /// Nerd Font family variants) can see what's genuinely loaded.
+    pub resolved_font_family: &'a str,
     pub font_names: &'a [&'a str],
     pub font_idx: usize,
     pub scrollback: usize,
@@ -461,8 +584,6 @@ pub struct SettingsView<'a> {
     pub command_badges: bool,
     /// Animate the cursor between cells (cursor trail).
     pub cursor_trail: bool,
-    /// CRT / scanline post-process effect enabled.
-    pub crt_effect: bool,
     /// Include the cwd in the OS window title.
     pub title_show_cwd: bool,
     /// Append " · N tabs" to the OS window title.
@@ -480,6 +601,111 @@ pub struct SettingsView<'a> {
     pub custom_editing: usize,
     /// The available runtime profile names (from `[profile.*]` sections).
     pub profile_names: &'a [&'a str],
+    /// The currently-ACTIVE `[profile.NAME]` (lower-cased), or `None` when the
+    /// base (no-profile) config is active. Drives the active-row indicator in
+    /// the Profiles section (see `App::active_profile`).
+    pub active_profile: Option<&'a str>,
+    /// Which `profile_names` index is being renamed in place (its row shows an
+    /// inline edit field instead of the switch/rename/delete affordances), or
+    /// `None`. Mirrors `App::settings_profile_rename_idx`.
+    pub profile_rename_idx: Option<usize>,
+    /// Which `profile_names` index has its Delete affordance armed (first click
+    /// of the two-click confirm), or `None`. Mirrors
+    /// `App::settings_profile_delete_armed`.
+    pub profile_delete_armed: Option<usize>,
+
+    // --- settings-sections stream: Terminal / Effects / Quake / Notifications /
+    // Advanced additions --------------------------------------------------------
+    /// Power Mode (typing particle-burst effect) enabled.
+    pub power_mode: bool,
+    /// Power Mode effect strength (0..1).
+    pub power_mode_intensity: f32,
+    /// Dim unfocused pane content in a split.
+    pub dim_unfocused: bool,
+    /// Also place an HTML flavor on the clipboard on copy.
+    pub copy_html: bool,
+    /// Quake/dropdown mode enabled. Restart-only: the quake window is armed
+    /// once in `App::init_quake` at startup, so flipping this live only takes
+    /// effect after relaunch (labeled as such in the UI).
+    pub quake: bool,
+    /// Fraction of the monitor height the quake window occupies (0.1..1.0).
+    pub quake_height: f32,
+    /// Quake slide animation duration in ms (0..5000).
+    pub quake_animation_ms: u64,
+    /// Keep the native OS window frame instead of glassy's borderless chrome.
+    /// Restart-only: the frame is chosen once at window creation, so flipping
+    /// this live only takes effect after relaunch (labeled as such in the UI).
+    pub decorations: bool,
+    /// Fire a desktop notification when a long-running command finishes.
+    pub notify_command_finish: bool,
+    /// Minimum command duration (ms) that triggers the notification.
+    pub notify_command_threshold_ms: u64,
+    /// Allow command output to be folded under its prompt.
+    pub command_fold: bool,
+    /// The label alphabet for hints mode, display text (empty = built-in default).
+    pub hints_chars: &'a str,
+    /// Explicit bold-text font family override, display text.
+    pub font_bold: &'a str,
+    /// Explicit italic-text font family override, display text.
+    pub font_italic: &'a str,
+    /// Explicit bold-italic-text font family override, display text.
+    pub font_bold_italic: &'a str,
+    /// `font_symbol_map` rendered back to its `RANGE:Family[, RANGE:Family…]`
+    /// display text.
+    pub font_symbol_map: &'a str,
+    /// `font_variations` rendered back to its space-joined display text.
+    pub font_variations: &'a str,
+    /// The resolved shell program + args, display text (Debug-formatted — the
+    /// `alacritty_terminal::tty::Shell` fields are crate-private upstream, so
+    /// this is the most detail glassy can surface without reimplementing the
+    /// type). `"(default shell)"` when unset.
+    pub shell_display: &'a str,
+    /// The configured startup working directory, display text. Empty when
+    /// unset (the shell's own default/inherited cwd is used).
+    pub cwd_display: &'a str,
+    /// `status_bar_segments` rendered back to its space-joined display text.
+    /// Empty means "use the built-in default segment set".
+    pub status_bar_segments: &'a str,
+    /// `strftime`-style format string for the status bar's Time segment.
+    pub status_bar_time_format: &'a str,
+    /// Per-side padding overrides in logical px (0 = unset/inherit), display
+    /// values for the Advanced section's steppers.
+    pub padding_top: u32,
+    pub padding_bottom: u32,
+    pub padding_left: u32,
+    pub padding_right: u32,
+    /// Path to the wallpaper-theme source image, display text (empty =
+    /// disabled).
+    pub wallpaper_theme: &'a str,
+    /// Vertical scroll offset (px) of the currently-open dropdown popup (see
+    /// [`Ui::dropdown_popup`]), if any. With 60 built-in themes the theme
+    /// popup can easily be taller than the window; this lets it scroll instead
+    /// of silently truncating the list past whatever fits.
+    pub popup_scroll: f32,
+
+    // --- settings-modularity stream: expose the remaining w15 config keys ---
+    /// Strength of the unfocused-pane dim overlay in `[0, 0.9]` (Panes → Focus
+    /// slider). See `Config::unfocused_dim`.
+    pub unfocused_dim: f32,
+    /// Whether window opacity also applies to terminal text, as a segmented
+    /// index: 0 = Background, 1 = Text. See `Config::opacity_text`.
+    pub opacity_scope: usize,
+    /// Command-block chrome level, as a segmented index: 0 = Off, 1 = Badges,
+    /// 2 = Cards. See `Config::command_blocks`.
+    pub command_blocks: usize,
+    /// Pane header density, as a segmented index: 0 = Full, 1 = Compact. See
+    /// `Config::pane_header_style`.
+    pub pane_header_style: usize,
+    /// Also show a header for a single, unsplit pane. See
+    /// `Config::pane_headers_single`.
+    pub pane_headers_single: bool,
+    /// Lines of scrollback kept for a backgrounded/idle pane once idle past
+    /// `scrollback_background_idle_secs`; `0` disables the cap. See
+    /// `Config::scrollback_background_cap`.
+    pub scrollback_background_cap: usize,
+    /// Seconds a pane must be idle/backgrounded before the cap above applies.
+    /// See `Config::scrollback_background_idle_secs`.
+    pub scrollback_background_idle_secs: u64,
 }
 
 /// The left-sidebar sections of the revamped settings window, in display order.
@@ -488,9 +714,19 @@ pub enum SettingsSection {
     General,
     Appearance,
     Themes,
-    Keys,
+    Effects,
+    Terminal,
     Panes,
+    Quake,
+    Notifications,
+    Keys,
     Advanced,
+    /// Runtime `[profile.*]` switching + "duplicate current as a new profile".
+    /// Split out of `Advanced` (profiles-ui stream) into its own section so the
+    /// active-profile indicator and the new-profile TextEdit row have room to
+    /// breathe, and so this section's rows don't collide line-for-line with
+    /// other Advanced-section work landing around the same time.
+    Profiles,
 }
 
 impl SettingsSection {
@@ -499,9 +735,14 @@ impl SettingsSection {
         SettingsSection::General,
         SettingsSection::Appearance,
         SettingsSection::Themes,
-        SettingsSection::Keys,
+        SettingsSection::Effects,
+        SettingsSection::Terminal,
         SettingsSection::Panes,
+        SettingsSection::Quake,
+        SettingsSection::Notifications,
+        SettingsSection::Keys,
         SettingsSection::Advanced,
+        SettingsSection::Profiles,
     ];
     /// The sidebar label for this section.
     pub fn label(self) -> &'static str {
@@ -509,9 +750,14 @@ impl SettingsSection {
             SettingsSection::General => "General",
             SettingsSection::Appearance => "Appearance",
             SettingsSection::Themes => "Themes",
-            SettingsSection::Keys => "Keys",
+            SettingsSection::Effects => "Effects",
+            SettingsSection::Terminal => "Terminal",
             SettingsSection::Panes => "Panes",
+            SettingsSection::Quake => "Quake",
+            SettingsSection::Notifications => "Notifications",
+            SettingsSection::Keys => "Keys",
             SettingsSection::Advanced => "Advanced",
+            SettingsSection::Profiles => "Profiles",
         }
     }
     /// Resolve a section from its index, clamped to a valid section.
@@ -526,7 +772,20 @@ impl SettingsSection {
 /// Everything the settings form reported this frame. The App applies each
 /// non-default field to its live effects (`resize_font`, `set_opacity`,
 /// `cycle_theme`/`set_theme`, `save_settings`, …).
-#[derive(Clone, Copy, Debug, Default)]
+///
+/// Not `Copy` (the `toggled` list needs an allocation): every boolean toggle
+/// row used to carry its own dedicated `*_toggle: bool` field, set by a
+/// widget-id string match in `settings_panel::draw_control_row` and then read
+/// back through a near-identical `if ev.foo_toggle { … }` block in
+/// `App::apply_settings_events`. `toggled` collapses that into one table-driven
+/// path: a toggle row just pushes its widget id here, and
+/// `App::apply_settings_events` resolves each id via a small
+/// `(widget_id, accessor)` table for the plain flips, matching explicitly only
+/// the few toggles with extra live side effects (grid reflow, renderer sync,
+/// session-dirty). Adding a new plain boolean setting is then one
+/// `RowKind::Toggle` push + one table row, instead of a field here + a match
+/// arm in `settings_panel.rs` + an `if` block in `chrome/settings_form.rs`.
+#[derive(Clone, Debug, Default)]
 pub struct SettingsEvents {
     /// Font-size stepper delta in clicks (-1 / 0 / +1).
     pub font_delta: i32,
@@ -556,22 +815,14 @@ pub struct SettingsEvents {
     pub close: bool,
     /// The bounding rect of the whole panel (for click-outside dismissal).
     pub panel: Rect,
-    /// Status bar toggle was clicked.
-    pub status_bar_toggle: bool,
-    /// Pane-headers toggle was clicked.
-    pub pane_headers_toggle: bool,
-    /// Follow-system toggle was clicked.
-    pub follow_system_toggle: bool,
-    /// Ligatures toggle was clicked.
-    pub ligatures_toggle: bool,
-    /// Restore-session toggle was clicked.
-    pub restore_session_toggle: bool,
+    /// Widget ids of every boolean toggle row clicked this frame (see the
+    /// struct doc comment). Populated by `settings_panel::draw_control_row`;
+    /// consulted by `App::apply_settings_events`.
+    pub toggled: Vec<&'static str>,
     /// Padding stepper delta in clicks (-1 / 0 / +1).
     pub padding_delta: i32,
     /// New cursor-shape index if the segmented control changed.
     pub cursor_style: Option<usize>,
-    /// Cursor-blink toggle was clicked.
-    pub cursor_blink_toggle: bool,
     /// New tab-bar-mode index if the segmented control changed (0/1/2).
     pub tab_bar_mode: Option<usize>,
     /// New window-effect index if the segmented control changed (0..=8).
@@ -585,20 +836,8 @@ pub struct SettingsEvents {
     pub section_pick: Option<usize>,
     /// The active section's right-pane scroll moved (new offset in px).
     pub section_scroll: Option<f32>,
-    /// Copy-on-select toggle was clicked.
-    pub copy_on_select_toggle: bool,
-    /// Minimap toggle was clicked.
-    pub minimap_toggle: bool,
-    /// Command-badges toggle was clicked.
-    pub command_badges_toggle: bool,
-    /// Cursor-trail toggle was clicked.
-    pub cursor_trail_toggle: bool,
-    /// CRT-effect toggle was clicked.
-    pub crt_effect_toggle: bool,
-    /// Title-show-cwd toggle was clicked.
-    pub title_show_cwd_toggle: bool,
-    /// Title-show-count toggle was clicked.
-    pub title_show_count_toggle: bool,
+    /// The open dropdown popup's scroll moved (new offset in px).
+    pub popup_scroll: Option<f32>,
     /// The system Light-mode theme dropdown header was toggled.
     pub theme_light_toggle: bool,
     /// A system Light-mode theme row was picked (absolute index into THEME_NAMES).
@@ -613,9 +852,70 @@ pub struct SettingsEvents {
     pub custom_apply: bool,
     /// Save the custom theme to config (color.* keys).
     pub custom_save: bool,
-    /// A runtime profile was picked from the Advanced section (index into
+    /// A runtime profile was picked from the Profiles section (index into
     /// `profile_names`).
     pub profile_pick: Option<usize>,
+    /// The "(default)" row (Profiles section) was picked: switch back to the
+    /// base (no-profile) config.
+    pub profile_pick_default: bool,
+    /// The "duplicate current settings as a new profile" row's Save affordance
+    /// fired (Enter in the name field, or its button). The pending name lives in
+    /// `SettingsFields::profile_name` (App-owned, like the other editable text
+    /// fields).
+    pub profile_create: bool,
+    /// A profile row's "Rename" affordance was clicked: begin renaming that
+    /// `profile_names` index in place (index carried).
+    pub profile_rename_begin: Option<usize>,
+    /// The inline rename field's Save affordance fired (Enter or its button):
+    /// commit the pending rename (target index is `App::settings_profile_rename_idx`;
+    /// the new name lives in `SettingsFields::profile_rename`).
+    pub profile_rename_commit: bool,
+    /// The inline rename was cancelled (its ✕ button): drop back to the normal row.
+    pub profile_rename_cancel: bool,
+    /// A profile row's Delete affordance was clicked while NOT armed: arm the
+    /// two-click confirm for that `profile_names` index (index carried).
+    pub profile_delete_arm: Option<usize>,
+    /// The armed Delete affordance was clicked a second time: delete that
+    /// `profile_names` index (index carried).
+    pub profile_delete: Option<usize>,
+
+    // --- settings-sections stream: Terminal / Effects / Quake / Notifications /
+    // Advanced additions --------------------------------------------------------
+    /// New Power-Mode intensity if the Effects slider moved this frame.
+    pub power_mode_intensity: Option<f32>,
+    /// New quake-height fraction if the Quake slider moved this frame.
+    pub quake_height: Option<f32>,
+    /// Quake-animation-ms stepper delta in clicks (-1 / 0 / +1; scaled to a
+    /// 20ms step by the caller).
+    pub quake_animation_delta: i32,
+    /// Notify-command-threshold stepper delta in clicks (-1 / 0 / +1; scaled to
+    /// a 1000ms step by the caller).
+    pub notify_threshold_delta: i32,
+    /// Per-side padding stepper deltas in clicks (-1 / 0 / +1; scaled to a 2px
+    /// step by the caller), Advanced section.
+    pub padding_top_delta: i32,
+    pub padding_bottom_delta: i32,
+    pub padding_left_delta: i32,
+    pub padding_right_delta: i32,
+
+    // --- settings-modularity stream: expose the remaining w15 config keys ---
+    /// New unfocused-pane dim strength if the Panes slider moved this frame.
+    pub unfocused_dim: Option<f32>,
+    /// New opacity-scope index if the Appearance segmented control changed
+    /// (0 = Background, 1 = Text).
+    pub opacity_scope: Option<usize>,
+    /// New command-blocks index if the Effects segmented control changed
+    /// (0 = Off, 1 = Badges, 2 = Cards).
+    pub command_blocks: Option<usize>,
+    /// New pane-header-style index if the Panes segmented control changed
+    /// (0 = Full, 1 = Compact).
+    pub pane_header_style: Option<usize>,
+    /// Background-scrollback-cap stepper delta in clicks (-1 / 0 / +1; scaled
+    /// to a 1000-line step by the caller), Advanced section.
+    pub scrollback_background_cap_delta: i32,
+    /// Background-scrollback-idle-seconds stepper delta in clicks (-1 / 0 /
+    /// +1; scaled to a 60s step by the caller), Advanced section.
+    pub scrollback_background_idle_secs_delta: i32,
 }
 
 // ---------------------------------------------------------------------------
@@ -685,6 +985,19 @@ mod tests {
     }
 
     #[test]
+    fn ease_out_cubic_endpoints_and_shape() {
+        assert_eq!(ease_out_cubic(0.0), 0.0);
+        assert_eq!(ease_out_cubic(1.0), 1.0);
+        // Clamps out-of-range inputs.
+        assert_eq!(ease_out_cubic(-0.5), 0.0);
+        assert_eq!(ease_out_cubic(1.5), 1.0);
+        // Ease-OUT: past the halfway travel by the midpoint (decelerating).
+        assert!(ease_out_cubic(0.5) > 0.5);
+        // Monotonic.
+        assert!(ease_out_cubic(0.25) < ease_out_cubic(0.75));
+    }
+
+    #[test]
     fn anim_settles() {
         let mut a = Anim::new(0.0);
         a.target = 1.0;
@@ -695,6 +1008,41 @@ mod tests {
         assert!(a.is_settled());
         assert!((a.value - 1.0).abs() < 0.01);
         assert!(steps < 1000);
+    }
+
+    #[test]
+    fn metrics_token_scales_are_ordered_and_font_derived() {
+        let m = Metrics::new(9.0, 20.0);
+        // Spacing scale is strictly increasing.
+        assert!(m.sp_xs <= m.sp_sm);
+        assert!(m.sp_sm <= m.gap); // gap == sp_md
+        assert!(m.gap <= m.pad); // pad == sp_lg
+        assert!(m.pad <= m.sp_xl);
+        // sp_xs never collapses below a usable 2px.
+        assert!(m.sp_xs >= 2.0);
+        // Radius scale: r_sm < r_md == radius < r_lg == card_radius.
+        assert!(m.r_sm <= m.r_md);
+        assert_eq!(m.r_md, m.radius);
+        assert_eq!(m.r_lg, m.card_radius);
+        assert!(m.r_md < m.r_lg);
+        // Font-derived bar/button heights track the cell height.
+        let big = Metrics::new(9.0, 40.0);
+        assert!(big.bar_h > m.bar_h);
+        assert!(big.btn > m.btn);
+    }
+
+    #[test]
+    fn glass_elevation_amounts_are_strictly_ordered() {
+        // E1 (body, 0) < E2 raised (0.12) < E3 float (0.18) < E2+ active tab
+        // (0.22): a strict elevation order on a dark theme (additive lighten).
+        let bg = DARK_BG;
+        let body = luma(bg);
+        let raised = luma(glass_elevate(bg, 0.12));
+        let float = luma(glass_elevate(bg, 0.18));
+        let active = luma(glass_elevate(bg, 0.22));
+        assert!(body < raised, "raised must sit above body");
+        assert!(raised < float, "float must sit above raised");
+        assert!(float < active, "active-tab must sit above float");
     }
 
     #[test]
@@ -833,5 +1181,135 @@ mod tests {
     #[test]
     fn id_empty_string_is_distinct_from_nonempty() {
         assert_ne!(id(""), id("x"));
+    }
+
+    // ---- glass surface elevation (light/dark theme parity) ------------------
+    //
+    // `glass_raised` / `glass_active_tab` / `glass_float` build their fills as
+    // `with_alpha(glass_elevate(base, amount), alpha)`. Before the fix, the
+    // elevation step was a bare `lighten(base, amount)`: purely additive and
+    // clamped at 1.0. On a near-white light-theme background (one-light
+    // `#FAFAFA`, ayu-light `#FCFCFC`) every channel is already within
+    // `amount` of 1.0, so the result clamped straight back to (almost) the
+    // background color — raised panels, cards, the active-tab chip and
+    // dropdowns all became visually indistinguishable from the page. These
+    // tests exercise `glass_elevate` directly with the exact `amount` values
+    // each public helper uses, on synthetic near-white and dark backgrounds,
+    // rather than mutating the process-global active theme via
+    // `color::set_theme` (which would race with other tests reading
+    // `color::active()` concurrently, e.g. `color::query_index_tests`).
+
+    /// Matches one-light's `#FAFAFA` background (250/255 per channel).
+    const NEAR_WHITE_BG: [f32; 4] = [0.9804, 0.9804, 0.9804, 1.0];
+    /// Matches Tokyo Night's `#1A1B26` background (the default dark theme).
+    const DARK_BG: [f32; 4] = [0.1020, 0.1059, 0.1490, 1.0];
+
+    #[test]
+    fn glass_elevate_panel_amount_darkens_clearly_on_near_white_bg() {
+        // glass_raised()'s amount (0.12).
+        let raised = glass_elevate(NEAR_WHITE_BG, 0.12);
+        for i in 0..3 {
+            assert!(
+                NEAR_WHITE_BG[i] - raised[i] > 0.06,
+                "channel {i}: bg={}, raised={} — must be clearly darker, not clipped to bg",
+                NEAR_WHITE_BG[i],
+                raised[i]
+            );
+        }
+        assert!(
+            luma(NEAR_WHITE_BG) - luma(raised) > 0.06,
+            "raised-panel luma delta too subtle on a near-white bg"
+        );
+    }
+
+    #[test]
+    fn glass_elevate_active_tab_amount_darkens_more_than_panel_on_near_white_bg() {
+        // glass_active_tab()'s amount (0.22) must read as "more elevated" than
+        // glass_raised()'s (0.12) — the active tab should stand out further
+        // from the background than an ordinary raised panel.
+        let raised = glass_elevate(NEAR_WHITE_BG, 0.12);
+        let active_tab = glass_elevate(NEAR_WHITE_BG, 0.22);
+        let raised_delta = luma(NEAR_WHITE_BG) - luma(raised);
+        let active_delta = luma(NEAR_WHITE_BG) - luma(active_tab);
+        assert!(
+            active_delta > raised_delta,
+            "active-tab delta ({active_delta}) should exceed panel delta ({raised_delta})"
+        );
+        assert!(
+            active_delta > 0.12,
+            "active-tab luma delta too subtle on a near-white bg: {active_delta}"
+        );
+    }
+
+    #[test]
+    fn glass_elevate_float_amount_darkens_clearly_on_near_white_bg() {
+        // glass_float()'s amount (0.18), applied to a near-white background
+        // (one-light's `#FAFAFA`, > the 0.7 threshold) must stay clearly darker
+        // than the page so a floating surface reads as elevated on light themes.
+        assert!(
+            luma(NEAR_WHITE_BG) > 0.7,
+            "fixture must exercise the light branch"
+        );
+        let floated = glass_elevate(NEAR_WHITE_BG, 0.18);
+        for i in 0..3 {
+            assert!(
+                NEAR_WHITE_BG[i] - floated[i] > 0.05,
+                "channel {i}: bg={}, float={} — must be clearly darker",
+                NEAR_WHITE_BG[i],
+                floated[i]
+            );
+        }
+    }
+
+    #[test]
+    fn glass_elevate_lightens_on_dark_bg_unchanged() {
+        // Dark-theme behaviour is untouched: still a plain additive lighten,
+        // matching every existing dark-theme expectation.
+        for amount in [0.12_f32, 0.22] {
+            let elevated = glass_elevate(DARK_BG, amount);
+            assert_eq!(elevated, lighten(DARK_BG, amount));
+            for i in 0..3 {
+                assert!(elevated[i] > DARK_BG[i]);
+            }
+        }
+    }
+
+    #[test]
+    fn glass_elevate_threshold_matches_state_fill() {
+        // Keep the light/dark branch point in sync with `state_fill`'s 0.7
+        // luma threshold so panels and interactive fills agree on which
+        // themes count as "light".
+        let just_light = [0.75, 0.75, 0.75, 1.0];
+        let just_dark = [0.65, 0.65, 0.65, 1.0];
+        assert!(luma(just_light) > 0.7);
+        assert!(luma(just_dark) <= 0.7);
+        assert!(
+            glass_elevate(just_dark, 0.1)[0] > just_dark[0],
+            "at/below threshold should lighten"
+        );
+        assert!(
+            glass_elevate(just_light, 0.1)[0] < just_light[0],
+            "above threshold should darken"
+        );
+    }
+
+    #[test]
+    fn glass_raised_active_tab_float_match_dark_theme_baseline() {
+        // With no theme override, the active theme defaults to Tokyo Night (a
+        // dark theme, luma well under 0.7), so the public glass_* helpers must
+        // still compute exactly the original additive-lighten fill — this
+        // pins the "dark themes are unaffected" half of the fix.
+        assert_eq!(
+            glass_raised(),
+            with_alpha(lighten(color::default_bg(), 0.12), GLASS_SURFACE_ALPHA)
+        );
+        assert_eq!(
+            glass_active_tab(),
+            with_alpha(lighten(color::default_bg(), 0.22), 1.0)
+        );
+        assert_eq!(
+            glass_float(),
+            with_alpha(lighten(color::default_bg(), 0.18), GLASS_FLOAT_ALPHA)
+        );
     }
 }

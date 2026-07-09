@@ -2,7 +2,7 @@
 //! split, close, and gutter hit-testing. Everything here is pure tree/geometry
 //! logic with no external dependencies.
 
-use super::{Dir, Rect, SplitHandle};
+use super::{Dir, LayoutPreset, Rect, SplitHandle};
 
 /// One node of the layout tree. A `Leaf` holds an opaque caller-owned id; a
 /// `Split` divides its area between `first` (left/top) and `second`
@@ -336,6 +336,115 @@ impl Node {
             first.equalize();
             second.equalize();
         }
+    }
+
+    /// Structural equality ignoring `ratio`: same shape (Leaf-vs-Split, split
+    /// `dir`, recursive left/right shape) AND the same leaf ids in the same
+    /// positions. Used by [`super::Layout::classify_preset`] to recognize which
+    /// preset (if any) the live tree currently matches.
+    pub(super) fn same_shape(&self, other: &Node) -> bool {
+        match (self, other) {
+            (Node::Leaf(a), Node::Leaf(b)) => a == b,
+            (
+                Node::Split {
+                    dir: da,
+                    first: fa,
+                    second: sa,
+                    ..
+                },
+                Node::Split {
+                    dir: db,
+                    first: fb,
+                    second: sb,
+                    ..
+                },
+            ) => da == db && fa.same_shape(fb) && sa.same_shape(sb),
+            _ => false,
+        }
+    }
+
+    /// Build a `Node` from a list of leaf ids (in the desired left-to-right /
+    /// top-to-bottom order) laid out per `preset`. `ids` must be non-empty (a
+    /// [`super::Layout`] always has at least one leaf); a single id yields a
+    /// bare `Leaf`.
+    pub(super) fn build_preset(ids: &[usize], preset: LayoutPreset) -> Node {
+        debug_assert!(!ids.is_empty());
+        if ids.len() == 1 {
+            return Node::Leaf(ids[0]);
+        }
+        match preset {
+            LayoutPreset::Rows => Self::build_even(ids, Dir::Horizontal),
+            LayoutPreset::Columns => Self::build_even(ids, Dir::Vertical),
+            LayoutPreset::MainVertical => {
+                let (&main, rest) = ids.split_first().expect("len > 1 checked above");
+                Node::Split {
+                    dir: Dir::Vertical,
+                    ratio: 0.5,
+                    first: Box::new(Node::Leaf(main)),
+                    second: Box::new(Self::build_even(rest, Dir::Horizontal)),
+                }
+            }
+            LayoutPreset::Grid => Self::build_grid(ids),
+        }
+    }
+
+    /// Recursively halve `ids` into a chain of `dir`-splits, each `first` taking
+    /// exactly one id and the ratio set so every leaf ends up an EVEN share of
+    /// the total extent: splitting off `1/n`, then `1/(n-1)` of the remainder,
+    /// etc., converges to `n` equal bands.
+    fn build_even(ids: &[usize], dir: Dir) -> Node {
+        match ids {
+            [] => unreachable!("build_even called with no ids"),
+            [id] => Node::Leaf(*id),
+            [id, rest @ ..] => Node::Split {
+                dir,
+                ratio: 1.0 / (ids.len() as f32),
+                first: Box::new(Node::Leaf(*id)),
+                second: Box::new(Self::build_even(rest, dir)),
+            },
+        }
+    }
+
+    /// Same recursive-halving scheme as [`Self::build_even`], but over
+    /// pre-built subtrees rather than bare leaf ids (used to combine the grid
+    /// preset's per-column subtrees into even side-by-side columns).
+    fn build_even_nodes(nodes: Vec<Node>, dir: Dir) -> Node {
+        let n = nodes.len();
+        debug_assert!(n > 0);
+        let mut it = nodes.into_iter();
+        let first = it.next().expect("n > 0 checked above");
+        let rest: Vec<Node> = it.collect();
+        if rest.is_empty() {
+            return first;
+        }
+        Node::Split {
+            dir,
+            ratio: 1.0 / (n as f32),
+            first: Box::new(first),
+            second: Box::new(Self::build_even_nodes(rest, dir)),
+        }
+    }
+
+    /// A roughly square grid: `ids` is chopped into `ceil(sqrt(n))` contiguous
+    /// chunks (as even in size as possible), each chunk becomes one column
+    /// stacking its panes in even rows, and the columns sit side by side in
+    /// even shares. Not a perfect rectangle for non-square `n`, but reads as a
+    /// grid for the common split counts (2/3/4/6/9...).
+    fn build_grid(ids: &[usize]) -> Node {
+        let n = ids.len();
+        let cols = (n as f64).sqrt().ceil() as usize;
+        let cols = cols.clamp(1, n);
+        let base = n / cols;
+        let rem = n % cols;
+        let mut columns = Vec::with_capacity(cols);
+        let mut idx = 0;
+        for c in 0..cols {
+            let take = base + usize::from(c < rem);
+            let take = take.max(1).min(n - idx);
+            columns.push(Self::build_even(&ids[idx..idx + take], Dir::Horizontal));
+            idx += take;
+        }
+        Self::build_even_nodes(columns, Dir::Vertical)
     }
 
     pub(super) fn to_desc(&self, id_of: &impl Fn(usize) -> usize) -> NodeDesc {

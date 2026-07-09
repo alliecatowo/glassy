@@ -586,6 +586,15 @@ pub enum UserEvent {
         exit: Option<i32>,
         duration: Duration,
     },
+    /// Linux only: the system light/dark color-scheme preference changed (or
+    /// was read for the first time at startup), as reported by
+    /// `org.freedesktop.portal.Settings` over D-Bus (see
+    /// `crate::app::system_theme`). winit never emits
+    /// `WindowEvent::ThemeChanged` on Linux, so this is the Linux equivalent
+    /// of that event; the UI thread applies it via the same
+    /// `App::apply_system_theme` path. Carries no session id (window-level).
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    SystemThemeChanged(winit::window::Theme),
 }
 
 /// Wraps the `ClipboardLoad` reply-builder closure so `UserEvent` can keep its
@@ -1208,9 +1217,100 @@ pub fn merge_word_separators(defaults: &str, extras: &str) -> String {
     chars.iter().collect()
 }
 
+// ---- Scrollback memory bounding (w15 Phase 1) -----------------------------
+
+/// Policy governing whether/how a pane's LIVE scrollback is trimmed once it is
+/// considered idle/backgrounded, bounding worst-case per-pane memory without
+/// touching `Term`/`Grid` internals. alacritty_terminal's scrollback storage is
+/// an uncompressed `Vec<Row<Cell>>` (~24 bytes/cell, no disk overflow — see the
+/// w15 alacritty-surface audit), and every open tab/split keeps a fully-resident
+/// live `Term`; this policy lets a background pane's history be shrunk back down
+/// to `cap` lines instead of staying at its full configured `scrollback`.
+///
+/// `cap == 0` disables the policy outright: [`effective_cap`](Self::effective_cap)
+/// then always returns the pane's full configured `scrollback` unchanged, so an
+/// install that never sets `scrollback_background_cap` sees no behavior change
+/// and no reduction in default visible scrollback.
+///
+/// NOTE: constructing/applying this policy (this module) is fully implemented
+/// and tested, but nothing yet *calls* [`apply_scrollback_background_policy`] on
+/// a live session — doing so requires knowing when a pane actually goes
+/// idle/backgrounded (tab-focus + timer bookkeeping in `src/app/tabs/mod.rs` /
+/// `src/app/multipane.rs`) and threading the parsed config value from
+/// `crate::app::Config` into `Pty::spawn`'s callers, both outside this change's
+/// file surface. `RawConfig::into_settings` (`src/config/parse.rs`) parses and
+/// validates the two config keys already.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ScrollbackBackgroundPolicy {
+    /// Lines of scrollback retained once a pane is judged idle/backgrounded.
+    /// `0` disables the policy (the default).
+    pub cap: usize,
+    /// How long (seconds) a pane must be idle/backgrounded before `cap` takes
+    /// effect. Unused while `cap == 0`.
+    pub idle_after_secs: u64,
+}
+
+impl ScrollbackBackgroundPolicy {
+    pub fn new(cap: usize, idle_after_secs: u64) -> Self {
+        Self {
+            cap,
+            idle_after_secs,
+        }
+    }
+
+    /// The effective scrollback ceiling for a pane currently judged idle, given
+    /// its full configured `scrollback`. Can only shrink the ceiling relative to
+    /// `scrollback`, never grow past it, and is a no-op while disabled
+    /// (`cap == 0`) — so a misconfigured cap larger than `scrollback` is simply
+    /// harmless rather than an error.
+    pub fn effective_cap(&self, scrollback: usize) -> usize {
+        if self.cap == 0 {
+            scrollback
+        } else {
+            self.cap.min(scrollback)
+        }
+    }
+}
+
+/// Apply `policy`'s effective cap to `term`'s live scrollback limit, returning
+/// the resulting `history_size()` (lines actually still resident).
+///
+/// Uses `Grid::update_history` (via `Term::grid_mut()`) directly rather than
+/// `Term::set_options`, so it cannot disturb any other `Term::Config` field
+/// (cursor style, semantic escape chars, kitty-keyboard mode, …) — only the
+/// scrollback ceiling changes. Per upstream `Grid::update_history`: shrinking
+/// actually evicts rows (`Storage::shrink_lines`), so previously scrolled-off
+/// history is genuinely freed, not merely hidden; growing the ceiling back up
+/// (e.g. a pane returning to the foreground) only allows FUTURE output to
+/// accumulate further — it does not resurrect already-evicted lines. This
+/// mirrors the audit's accepted tradeoff: background tabs are rarely scrolled
+/// far back, so the rare surprise of a shorter history on refocus is preferred
+/// over keeping every pane's full scrollback resident at all times.
+///
+/// The caller is responsible for marking a GUI-level full redraw when this
+/// actually shrinks the ceiling (alacritty's own damage tracking has no notion
+/// of this trim, only the GUI's `force_full_redraw` does — see `src/app/render.rs`).
+///
+/// `#[allow(dead_code)]`: exercised by `pty::term_integration` tests, but not
+/// yet called from production code — see the "NOTE" on
+/// [`ScrollbackBackgroundPolicy`] for why the live-session wiring is deferred.
+#[allow(dead_code)]
+pub fn apply_scrollback_background_policy<T>(
+    term: &mut Term<T>,
+    scrollback: usize,
+    policy: ScrollbackBackgroundPolicy,
+) -> usize {
+    let cap = policy.effective_cap(scrollback);
+    term.grid_mut().update_history(cap);
+    term.grid().history_size()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{PaneInfo, PromptTracker, merge_word_separators};
+    use super::{
+        PaneInfo, PromptTracker, ScrollbackBackgroundPolicy, apply_scrollback_background_policy,
+        merge_word_separators,
+    };
     use std::time::{Duration, Instant};
 
     // ---- kitty keyboard protocol negotiation (wire-level) --------------------
@@ -1464,5 +1564,128 @@ mod tests {
         let extras = ",:";
         let out = merge_word_separators(defaults, extras);
         assert_eq!(out.chars().count(), defaults.chars().count());
+    }
+
+    // ---- ScrollbackBackgroundPolicy bounding math ----------------------------
+
+    #[test]
+    fn scrollback_policy_disabled_by_default() {
+        assert_eq!(ScrollbackBackgroundPolicy::default().cap, 0);
+        assert_eq!(ScrollbackBackgroundPolicy::default().idle_after_secs, 0);
+    }
+
+    #[test]
+    fn scrollback_policy_zero_cap_is_a_no_op() {
+        let p = ScrollbackBackgroundPolicy::new(0, 900);
+        assert_eq!(p.effective_cap(10_000), 10_000);
+        assert_eq!(p.effective_cap(0), 0);
+    }
+
+    #[test]
+    fn scrollback_policy_caps_below_configured_scrollback() {
+        let p = ScrollbackBackgroundPolicy::new(500, 900);
+        assert_eq!(p.effective_cap(10_000), 500);
+    }
+
+    #[test]
+    fn scrollback_policy_cap_never_exceeds_configured_scrollback() {
+        // A cap larger than the pane's own `scrollback` is harmless, not an
+        // error: the effective cap is the smaller of the two.
+        let p = ScrollbackBackgroundPolicy::new(50_000, 900);
+        assert_eq!(p.effective_cap(1_000), 1_000);
+    }
+
+    #[test]
+    fn scrollback_policy_exact_match_is_idempotent() {
+        let p = ScrollbackBackgroundPolicy::new(10_000, 900);
+        assert_eq!(p.effective_cap(10_000), 10_000);
+    }
+
+    // ---- apply_scrollback_background_policy (real Term/Grid) ----------------
+    //
+    // Uses alacritty_terminal's own public `term::test::TermSize` + `VoidListener`
+    // test helpers (no OS-level PTY spawn needed) to build a real `Term`, push
+    // scrollback via `Handler::newline`, then exercise the trim/relax path
+    // against the real `Grid::update_history`.
+
+    mod term_integration {
+        use super::{ScrollbackBackgroundPolicy, apply_scrollback_background_policy};
+        use alacritty_terminal::Term;
+        use alacritty_terminal::event::VoidListener;
+        use alacritty_terminal::grid::Dimensions;
+        use alacritty_terminal::term::Config as TermConfig;
+        use alacritty_terminal::term::test::TermSize;
+        use alacritty_terminal::vte::ansi::Handler;
+
+        /// Build a `Term` with `scrollback` lines of history capacity and push
+        /// `lines` newlines from the bottom row so that many scroll into history.
+        fn term_with_history(scrollback: usize, lines: usize) -> Term<VoidListener> {
+            let size = TermSize::new(10, 5);
+            let config = TermConfig {
+                scrolling_history: scrollback,
+                ..TermConfig::default()
+            };
+            let mut term = Term::new(config, &size, VoidListener);
+            for _ in 0..lines {
+                term.newline();
+            }
+            term
+        }
+
+        #[test]
+        fn disabled_policy_leaves_history_untouched() {
+            let mut term = term_with_history(1_000, 200);
+            let before = term.grid().history_size();
+            assert!(before > 0, "test setup should have produced scrollback");
+            let after = apply_scrollback_background_policy(
+                &mut term,
+                1_000,
+                ScrollbackBackgroundPolicy::default(),
+            );
+            assert_eq!(after, before, "cap == 0 must not shrink history");
+        }
+
+        #[test]
+        fn enabled_policy_shrinks_history_to_cap() {
+            let mut term = term_with_history(1_000, 200);
+            assert!(term.grid().history_size() > 50);
+            let policy = ScrollbackBackgroundPolicy::new(50, 900);
+            let after = apply_scrollback_background_policy(&mut term, 1_000, policy);
+            assert_eq!(after, 50, "history should be trimmed down to the cap");
+            assert_eq!(term.grid().history_size(), 50);
+        }
+
+        #[test]
+        fn relaxing_the_cap_does_not_resurrect_evicted_lines() {
+            let mut term = term_with_history(1_000, 200);
+            let full = term.grid().history_size();
+            let policy = ScrollbackBackgroundPolicy::new(10, 900);
+            apply_scrollback_background_policy(&mut term, 1_000, policy);
+            assert_eq!(term.grid().history_size(), 10);
+
+            // "Refocus": disable the policy again (cap back to the full
+            // configured scrollback). This only raises the ceiling for FUTURE
+            // output — it must not restore the lines evicted above.
+            let restored = apply_scrollback_background_policy(
+                &mut term,
+                1_000,
+                ScrollbackBackgroundPolicy::default(),
+            );
+            assert_eq!(
+                restored, 10,
+                "widening the cap back up must not resurrect evicted history"
+            );
+            assert!(restored < full, "evicted lines stay gone");
+        }
+
+        #[test]
+        fn trimming_below_zero_history_is_a_no_op() {
+            // A pane with no scrollback yet (freshly spawned) has nothing to trim.
+            let mut term = term_with_history(1_000, 0);
+            assert_eq!(term.grid().history_size(), 0);
+            let policy = ScrollbackBackgroundPolicy::new(50, 900);
+            let after = apply_scrollback_background_policy(&mut term, 1_000, policy);
+            assert_eq!(after, 0);
+        }
     }
 }

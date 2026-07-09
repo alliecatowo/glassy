@@ -438,7 +438,20 @@ fn help_rows_from_keymap(keymap: &KeyMap, platform: Platform) -> Vec<HelpRow<'st
     let action_chord = crate::config::keymap::action_chord_display_map(keymap, platform);
 
     let mut rows: Vec<HelpRow<'static>> = Vec::new();
-    let mut last_section: &'static str = "";
+
+    // About block at the very top (also what the hamburger's "About" entry opens):
+    // the version and repo, sourced from Cargo metadata at compile time.
+    rows.push(HelpRow::Section("About"));
+    rows.push(HelpRow::Binding {
+        keys: concat!("v", env!("CARGO_PKG_VERSION")),
+        desc: "Glassy — GPU-accelerated terminal",
+    });
+    rows.push(HelpRow::Binding {
+        keys: "Repo",
+        desc: env!("CARGO_PKG_REPOSITORY"),
+    });
+
+    let mut last_section: &'static str = "About";
 
     for &action in HELP_ACTION_ORDER {
         let Some(chord_str) = action_chord.get(&action) else {

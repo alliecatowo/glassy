@@ -14,6 +14,28 @@
 //! glassy @ focus-tab 2              # activate tab at 1-based position
 //! ```
 //!
+//! Plugin-system Phase 1 (see [`docs/plugins.md`](../../docs/plugins.md)) adds
+//! five more verbs aimed at configuration and scripted reactions, in the same
+//! line-oriented style:
+//!
+//! ```text
+//! glassy @ list-themes              # OK tokyo-night, catppuccin-mocha, ...
+//! glassy @ reload-config            # OK  — re-reads glassy.conf from disk
+//! glassy @ run-action font_increase # OK  |  ERR unknown action '<name>'
+//! glassy @ get-config opacity       # OK 0.92  |  ERR unknown key '<key>'
+//! glassy @ set-config opacity 0.8   # OK  — writes glassy.conf + applies live
+//! ```
+//!
+//! w15 adds a sixth: `set-segment`/`clear-segment`, the first Phase-1 verb
+//! whose purpose is pushing UI content into glassy rather than mutating its
+//! own state — see the "Custom status-bar segments" section of
+//! [`docs/plugins.md`](../../docs/plugins.md).
+//!
+//! ```text
+//! glassy @ set-segment build "building..."  # OK  — shows in the status bar
+//! glassy @ clear-segment build              # OK  — removes it
+//! ```
+//!
 //! `glassy msg <cmd> …` is accepted as a synonym for `glassy @ <cmd> …`.
 //!
 //! ## Wire protocol
@@ -26,9 +48,12 @@
 //! S→C:  OK [text]\n   |   ERR <message>\n
 //! ```
 //!
-//! Args are space-separated; `send-text` takes the *rest of the line* verbatim
-//! (after C-style unescaping of `\n`, `\t`, `\\`). The protocol is intentionally
-//! line-oriented + ASCII so it stays shell-pipe friendly and forward-compatible.
+//! Args are space-separated; `send-text` and `set-config`'s value take the
+//! *rest of the line* verbatim (after the fixed leading tokens — `send-text`
+//! has none, `set-config` has the key), so both preserve embedded spaces.
+//! `send-text` additionally C-style-unescapes `\n`, `\t`, `\\`. The protocol
+//! is intentionally line-oriented + ASCII so it stays shell-pipe friendly and
+//! forward-compatible.
 //!
 //! The running instance turns a parsed request into a [`UserEvent::Control`]
 //! ([`crate::pty::UserEvent`]) carrying a one-shot reply channel; the UI thread
@@ -36,6 +61,8 @@
 //! listener writes to the client socket.
 
 use std::sync::mpsc::{Receiver, SyncSender};
+
+use crate::app::settings_save::SAVED_KEYS;
 
 /// A parsed remote-control command. Drives `App::apply_control` on the UI thread.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,6 +82,29 @@ pub enum ControlCommand {
     SetColor { target: String, hex: String },
     /// Activate the tab at a 1-based display position.
     FocusTab(usize),
+    /// List every theme name the registry resolves (built-ins + the user
+    /// themes dir), comma-separated.
+    ListThemes,
+    /// Re-read `glassy.conf` from disk and apply the live-reloadable subset —
+    /// the exact path the file-watcher's `UserEvent::ConfigReload` runs.
+    ReloadConfig,
+    /// Run a named command-palette action ([`crate::config::keymap::parse_action`])
+    /// as if invoked from a keybinding or menu item.
+    RunAction(String),
+    /// Read a single `glassy.conf` key's current live value.
+    GetConfig(String),
+    /// Write a single `glassy.conf` key: validated, persisted to disk, and
+    /// applied live via the same path as [`ControlCommand::ReloadConfig`].
+    SetConfig { key: String, value: String },
+    /// Push/update text for a custom status-bar segment (Phase 1 plugin
+    /// surface, `docs/plugins.md`). `id` identifies the segment for a later
+    /// `ClearSegment`; re-setting an existing `id` updates it in place.
+    /// Bounded to `MAX_CUSTOM_SEGMENTS` distinct ids and `text` is truncated to
+    /// `CUSTOM_SEGMENT_TEXT_CAP` chars — see `App::control_set_segment`.
+    SetSegment { id: String, text: String },
+    /// Remove a custom status-bar segment previously set by `SetSegment`. A
+    /// no-op (still replies `OK`) if `id` isn't currently set.
+    ClearSegment(String),
 }
 
 /// Split direction for the `split` remote command.
@@ -184,9 +234,78 @@ pub fn parse_request(line: &str) -> Result<ControlCommand, String> {
             .filter(|&n| n >= 1)
             .map(ControlCommand::FocusTab)
             .ok_or_else(|| format!("focus-tab: expected a 1-based position, got '{rest}'")),
+        "list-themes" => Ok(ControlCommand::ListThemes),
+        "reload-config" => Ok(ControlCommand::ReloadConfig),
+        "run-action" => {
+            let name = rest.trim();
+            if name.is_empty() {
+                Err("run-action: missing action name".to_string())
+            } else {
+                Ok(ControlCommand::RunAction(name.to_string()))
+            }
+        }
+        "get-config" => {
+            let key = rest.trim();
+            if key.is_empty() {
+                Err("get-config: missing key".to_string())
+            } else {
+                Ok(ControlCommand::GetConfig(key.to_ascii_lowercase()))
+            }
+        }
+        "set-config" => match rest.split_once(char::is_whitespace) {
+            Some((key, value)) if !key.trim().is_empty() => Ok(ControlCommand::SetConfig {
+                key: key.trim().to_ascii_lowercase(),
+                // Preserve the rest of the line verbatim (spaces included),
+                // mirroring `send-text`'s "rest of the line is the payload"
+                // handling — only the leading whitespace that separated the
+                // key is trimmed.
+                value: value.trim_start().to_string(),
+            }),
+            Some(_) => Err("set-config: missing key".to_string()),
+            None if rest.is_empty() => {
+                Err("set-config: usage 'set-config <key> <value>'".to_string())
+            }
+            None => Err(format!("set-config: missing value for key '{rest}'")),
+        },
+        // w15: `set-segment <id> <text...>` mirrors `set-config`'s "rest of the
+        // line after the first token is the payload verbatim" handling, so a
+        // segment's text can contain spaces without quoting.
+        "set-segment" => match rest.split_once(char::is_whitespace) {
+            Some((id, text)) if !id.trim().is_empty() => Ok(ControlCommand::SetSegment {
+                id: id.trim().to_ascii_lowercase(),
+                text: text.trim_start().to_string(),
+            }),
+            Some(_) => Err("set-segment: missing id".to_string()),
+            None if rest.is_empty() => {
+                Err("set-segment: usage 'set-segment <id> <text...>'".to_string())
+            }
+            None => Err(format!("set-segment: missing text for id '{rest}'")),
+        },
+        "clear-segment" => {
+            let id = rest.trim();
+            if id.is_empty() {
+                Err("clear-segment: missing id".to_string())
+            } else {
+                Ok(ControlCommand::ClearSegment(id.to_ascii_lowercase()))
+            }
+        }
         "" => Err("missing command".to_string()),
-        other => Err(format!("unknown command '{other}'")),
+        other => Err(format!(
+            "unknown command '{other}' (try: ls, open-tab, split, send-text, set-theme, \
+             set-color, focus-tab, list-themes, reload-config, run-action, get-config, \
+             set-config, set-segment, clear-segment)"
+        )),
     }
+}
+
+/// Whether `key` is a `glassy.conf` key the `get-config`/`set-config`
+/// remote-control verbs can read or write: any key in the declarative
+/// [`SAVED_KEYS`](crate::app::settings_save::SAVED_KEYS) table (the same one
+/// `App::save_settings`/the settings overlay's Save button writes), or the
+/// special-cased `font_size` (its live value lives in the renderer's
+/// effective px, not `Config::font_size` — see that table's doc comment).
+pub(crate) fn is_known_config_key(key: &str) -> bool {
+    key == "font_size" || SAVED_KEYS.iter().any(|k| k.key == key)
 }
 
 /// C-style unescape for `send-text`: turns `\n`, `\t`, `\r`, `\\`, and `\e`
@@ -284,6 +403,177 @@ mod tests {
         assert!(parse_request("frobnicate").is_err());
         assert!(parse_request("").is_err());
         assert!(parse_request("@").is_err());
+    }
+
+    #[test]
+    fn unknown_verb_error_mentions_new_verbs() {
+        // The unknown-command ERR text doubles as a usage hint (there is no
+        // dedicated `help` verb), so it must mention the Phase 1 additions
+        // alongside the pre-existing verbs.
+        let err = parse_request("frobnicate").unwrap_err();
+        for verb in [
+            "list-themes",
+            "reload-config",
+            "run-action",
+            "get-config",
+            "set-config",
+            "set-segment",
+            "clear-segment",
+        ] {
+            assert!(err.contains(verb), "error '{err}' should mention '{verb}'");
+        }
+    }
+
+    #[test]
+    fn parses_set_segment_and_clear_segment() {
+        assert_eq!(
+            parse_request("set-segment build building..."),
+            Ok(ControlCommand::SetSegment {
+                id: "build".to_string(),
+                text: "building...".to_string()
+            })
+        );
+        // Rest-of-line semantics: inner spaces in the text are preserved
+        // verbatim (only whitespace separating id from text is trimmed).
+        assert_eq!(
+            parse_request("@ set-segment ci  2 running,  1 queued"),
+            Ok(ControlCommand::SetSegment {
+                id: "ci".to_string(),
+                text: "2 running,  1 queued".to_string()
+            })
+        );
+        // The id is lowercased (matching get-config/set-config's key handling).
+        assert_eq!(
+            parse_request("set-segment BUILD ok"),
+            Ok(ControlCommand::SetSegment {
+                id: "build".to_string(),
+                text: "ok".to_string()
+            })
+        );
+        assert!(parse_request("set-segment").is_err());
+        assert!(parse_request("set-segment build").is_err());
+
+        assert_eq!(
+            parse_request("clear-segment build"),
+            Ok(ControlCommand::ClearSegment("build".to_string()))
+        );
+        assert_eq!(
+            parse_request("@ clear-segment BUILD"),
+            Ok(ControlCommand::ClearSegment("build".to_string()))
+        );
+        assert!(parse_request("clear-segment").is_err());
+    }
+
+    #[test]
+    fn parses_list_themes_and_reload_config() {
+        assert_eq!(
+            parse_request("@ list-themes"),
+            Ok(ControlCommand::ListThemes)
+        );
+        assert_eq!(parse_request("list-themes"), Ok(ControlCommand::ListThemes));
+        assert_eq!(
+            parse_request("@ reload-config"),
+            Ok(ControlCommand::ReloadConfig)
+        );
+        assert_eq!(
+            parse_request("reload-config"),
+            Ok(ControlCommand::ReloadConfig)
+        );
+    }
+
+    #[test]
+    fn parses_run_action() {
+        assert_eq!(
+            parse_request("run-action font_increase"),
+            Ok(ControlCommand::RunAction("font_increase".to_string()))
+        );
+        assert_eq!(
+            parse_request("@ run-action new_tab"),
+            Ok(ControlCommand::RunAction("new_tab".to_string()))
+        );
+        // Missing name is a parse-time error (unlike the actual unknown-action
+        // check, which happens later on the UI thread against the live
+        // keymap action table).
+        assert!(parse_request("run-action").is_err());
+        assert!(parse_request("run-action   ").is_err());
+    }
+
+    #[test]
+    fn parses_get_config() {
+        assert_eq!(
+            parse_request("get-config opacity"),
+            Ok(ControlCommand::GetConfig("opacity".to_string()))
+        );
+        assert_eq!(
+            parse_request("@ get-config FONT_SIZE"),
+            Ok(ControlCommand::GetConfig("font_size".to_string()))
+        );
+        assert!(parse_request("get-config").is_err());
+        assert!(parse_request("get-config   ").is_err());
+    }
+
+    #[test]
+    fn parses_set_config_single_word_value() {
+        assert_eq!(
+            parse_request("set-config opacity 0.9"),
+            Ok(ControlCommand::SetConfig {
+                key: "opacity".to_string(),
+                value: "0.9".to_string(),
+            })
+        );
+        assert_eq!(
+            parse_request("@ set-config THEME tokyo-night"),
+            Ok(ControlCommand::SetConfig {
+                key: "theme".to_string(),
+                value: "tokyo-night".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn parses_set_config_multi_word_value_preserves_spaces() {
+        // The shell already stripped any quoting by the time this reaches the
+        // wire (see `main.rs`'s `rest.join(" ")`); the value is simply
+        // "everything after the key", spaces included — mirrors send-text.
+        assert_eq!(
+            parse_request("set-config font_features calt=0 liga"),
+            Ok(ControlCommand::SetConfig {
+                key: "font_features".to_string(),
+                value: "calt=0 liga".to_string(),
+            })
+        );
+        assert_eq!(
+            parse_request("set-config word_separator a  b"),
+            Ok(ControlCommand::SetConfig {
+                key: "word_separator".to_string(),
+                value: "a  b".to_string(), // internal double space preserved
+            })
+        );
+    }
+
+    #[test]
+    fn set_config_missing_key_or_value_rejected() {
+        assert!(parse_request("set-config").is_err());
+        assert!(parse_request("set-config   ").is_err());
+        // A key with no value token at all is a usage error, not an implicit
+        // empty value (the wire can't represent a trailing empty value: both
+        // client and server trim the line, see `main.rs`/`ipc::mod`).
+        assert!(parse_request("set-config theme").is_err());
+    }
+
+    #[test]
+    fn is_known_config_key_covers_saved_keys_and_font_size() {
+        assert!(is_known_config_key("font_size"));
+        assert!(is_known_config_key("opacity"));
+        assert!(is_known_config_key("theme"));
+        assert!(is_known_config_key("font_features"));
+        assert!(!is_known_config_key("not_a_real_key"));
+        assert!(!is_known_config_key(""));
+        // Every SAVED_KEYS entry must be recognized (guards the helper from
+        // drifting out of sync with the table it reads).
+        for sk in SAVED_KEYS {
+            assert!(is_known_config_key(sk.key), "missing key '{}'", sk.key);
+        }
     }
 
     #[test]

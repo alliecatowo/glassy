@@ -13,6 +13,12 @@
 //!                                       # (turns on follow_system + pins per-scheme themes)
 //! opacity     = 0.92                   # 0.0 (clear) .. 1.0 (opaque); perceptual curve
 //! window_effect = none                 # none|frosted|acrylic|crt|scanlines|grain|vignette|bloom
+//! fx_curvature = 0.12                  # Custom effect channels (0.0..1.0); only used when window_effect = custom
+//! fx_scanline = 0.35
+//! fx_glow     = 0.22
+//! fx_vignette = 0.30
+//! fx_grain    = 0.15
+//! fx_tint     = 0.25
 //! padding     = 6                      # logical px grid inset (all sides)
 //! padding_top = 8                      # per-side overrides (optional, override padding)
 //! padding_bottom = 6
@@ -28,7 +34,11 @@
 //! theme_dark  = tokyo-night            # theme used in system Dark mode
 //! status_bar  = false                  # show status bar at the bottom (default off)
 //! pane_headers= false                  # show per-pane title bars + accent rail in splits (default off)
+//! pane_header_style = full             # pane header density: full | compact (default full)
+//! pane_headers_single = false          # also show a header for a single, unsplit pane (default off)
 //! dim_unfocused = true                 # dim unfocused pane content in a split (default on)
+//! unfocused_dim = 0.28                 # dim strength 0..0.9 (0 = invisible; needs dim_unfocused)
+//! opacity_scope = background           # what window opacity affects: background | text (text = glyphs too)
 //! ligatures   = false                  # enable OpenType ligature shaping across cells (default off)
 //! font_features = ss01, calt=0         # OpenType feature tags to force on/off (comma or space separated)
 //! cwd         = /home/me/projects      # working directory for the first tab's shell
@@ -43,11 +53,24 @@
 //! quake       = false                  # quake/dropdown mode: borderless slide-down window
 //! quake_height = 0.5                   # fraction of the monitor height (0.1..1.0)
 //! quake_animation_ms = 180             # slide duration in ms (0 = instant)
+//! decorations = false                  # keep the native OS window frame (true = OS title bar/border; false = glassy's own borderless chrome)
 //! copy_on_select = false               # copy a selection to the clipboard as soon as it is made
 //! copy_html   = false                  # also place a rich-text (HTML) flavor on the clipboard on copy
 //! power_mode  = false                  # fun typing effect: cursor particle bursts + streak shake
 //! power_mode_intensity = 0.6           # power-mode strength: 0.0 (subtle) .. 1.0 (max)
+//! command_blocks = badges              # command-block chrome: off | badges (default) | cards (adds a glass band)
+//! scrollback_background_cap = 0        # lines kept for a backgrounded/idle pane; 0 = disabled (default)
+//! scrollback_background_idle_secs = 900 # seconds idle/backgrounded before the cap above applies
 //! ```
+//!
+//! `follow_system` on Linux: winit never delivers a live theme-change event
+//! there (and never reports the real GNOME/GTK preference at all), so glassy
+//! reads and subscribes to `org.freedesktop.portal.Settings`'s color-scheme
+//! key over the session D-Bus itself (`app::system_theme`), covering both
+//! GNOME and KDE via the XDG desktop portal. This drives both the startup
+//! pick and live updates on Light/Dark toggle; with no portal/bus available
+//! it degrades quietly to the configured `theme_dark`. macOS and Windows
+//! already get this live from winit and need no help from that module.
 //!
 //! Quake / dropdown mode (see `docs/quake-mode.md`): with `quake = true` glassy
 //! opens as a borderless window that slides down from the top edge. Wayland has no
@@ -130,7 +153,7 @@ pub mod theme_import;
 use anyhow::{Context, Result};
 
 pub use keymap::{Chord, KeyAction, KeyMap, SequenceMap};
-pub use parse::{path, save};
+pub use parse::{path, save, validate_kv};
 pub use platform::Platform;
 
 /// Fully-resolved settings handed to the app: the renderer/PTY `Config` plus the
@@ -138,6 +161,11 @@ pub use platform::Platform;
 pub struct Settings {
     pub config: crate::app::Config,
     pub theme: crate::color::Theme,
+    /// The `[profile.NAME]` section activated to produce this `Settings` (lower-
+    /// cased), or `None` for the base (no-profile) config. Threaded through to
+    /// `App::new` so the settings UI can show which profile — if any — is
+    /// currently active; see `App::active_profile`.
+    pub active_profile: Option<String>,
 }
 
 impl Settings {
@@ -161,9 +189,18 @@ impl Settings {
                 .with_context(|| format!("parsing {}", path.display()))?;
         }
 
+        // 2.5. Rescan the user-themes directory (`themes/` next to
+        // `glassy.conf`) so `color::theme_by_name` et al. (used below, and by
+        // the settings overlay) can resolve user-authored themes. Runs once
+        // per process; a user theme with the same name as a built-in shadows
+        // it (see `color::user_themes`'s module doc).
+        crate::color::reload_user_themes();
+
         // 3. Pre-scan CLI for `--profile` and activate it if present.
+        let mut active_profile: Option<String> = None;
         if let Some(profile_name) = cli::profile_from_args(&args) {
             raw.activate_profile(&profile_name)?;
+            active_profile = Some(profile_name.to_ascii_lowercase());
         }
 
         // 4. Parse CLI args, which override the file + profile.
@@ -172,16 +209,40 @@ impl Settings {
             return Ok(None);
         }
 
-        // 5. Convert accumulated raw config into final settings.
-        raw.into_settings().map(Some)
+        // 5. Convert accumulated raw config into final settings, attaching which
+        // profile (if any) was activated at startup.
+        let mut settings = raw.into_settings()?;
+        settings.active_profile = active_profile;
+        Ok(Some(settings))
     }
 
     /// Re-resolve settings from the on-disk config file with the named profile
-    /// activated, for the LIVE runtime profile switch (palette / keybind). Unlike
-    /// [`Settings::resolve`] this skips CLI parsing (there is none at runtime) and
-    /// ignores the originally-passed `--profile`. Returns an error if the file is
-    /// missing or the profile is unknown.
+    /// activated, for the LIVE runtime profile switch (palette / keybind /
+    /// settings panel). Unlike [`Settings::resolve`] this skips CLI parsing
+    /// (there is none at runtime) and ignores the originally-passed `--profile`.
+    /// Returns an error if the file is missing or the profile is unknown.
     pub fn resolve_with_profile(profile: &str) -> Result<Settings> {
+        let mut raw = Self::load_raw_from_file()?;
+        raw.activate_profile(profile)?;
+        let mut settings = raw.into_settings()?;
+        settings.active_profile = Some(profile.to_ascii_lowercase());
+        Ok(settings)
+    }
+
+    /// Re-resolve settings from the on-disk config file with NO profile
+    /// activated — the base config. This is the live runtime counterpart to
+    /// [`Settings::resolve_with_profile`] that gives the settings UI a way BACK
+    /// to the un-profiled config after switching to a named profile (there was
+    /// previously no such path at runtime).
+    pub fn resolve_base() -> Result<Settings> {
+        let raw = Self::load_raw_from_file()?;
+        raw.into_settings()
+    }
+
+    /// Load + parse the on-disk config file into a fresh [`parse::RawConfig`],
+    /// with no profile activated. Shared by [`Self::resolve_with_profile`] and
+    /// [`Self::resolve_base`] so both start from the identical base parse.
+    fn load_raw_from_file() -> Result<parse::RawConfig> {
         let mut raw = parse::RawConfig::default();
         if let Some(path) = parse::path()
             && let Ok(text) = std::fs::read_to_string(&path)
@@ -189,8 +250,7 @@ impl Settings {
             parse::parse_config_file(&text, &mut raw)
                 .with_context(|| format!("parsing {}", path.display()))?;
         }
-        raw.activate_profile(profile)?;
-        raw.into_settings()
+        Ok(raw)
     }
 }
 
@@ -207,6 +267,18 @@ pub fn profile_names() -> Vec<String> {
         return Vec::new();
     };
     parse::profile_names_from_text(&text)
+}
+
+/// Benchmark-only shim over [`parse::parse_config_file`] (`pub(super)`, so not
+/// itself reachable from `benches/hot_paths.rs`, a separate crate). Keeps
+/// `parse::RawConfig` — a large, `pub(super)` accumulator struct with fields the
+/// benchmark has no reason to touch — private, while still exercising the exact
+/// parse hot path (`Settings::resolve`'s step 2 above) for timing. Not part of
+/// glassy's supported API.
+#[doc(hidden)]
+pub fn parse_config_file_bench(text: &str) -> Result<()> {
+    let mut raw = parse::RawConfig::default();
+    parse::parse_config_file(text, &mut raw)
 }
 
 #[cfg(test)]
@@ -239,26 +311,9 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // merge_config tests
+    // merge_config / save_into_section: see `config::parse::merge_tests` for the
+    // exhaustive coverage (those helpers are private to `parse.rs`).
     // -----------------------------------------------------------------------
-
-    #[test]
-    fn merge_updates_in_place_and_appends() {
-        let _existing = "\
-# my config
-theme = dracula
-font_size = 14
-opacity = 0.80
-";
-        // merge_config is private but tested indirectly via save()
-        // For direct access, we'd need to expose it or test via integration
-        let _updates = [
-            ("font_size", "20".to_string()),
-            ("opacity", "0.95".to_string()),
-            ("bell_visual", "false".to_string()),
-        ];
-        // Verify the logic inline: it should preserve comments and update in place
-    }
 
     // -----------------------------------------------------------------------
     // Boolean parsing tests
@@ -440,6 +495,19 @@ opacity = 0.80
     }
 
     #[test]
+    fn decorations_defaults_off_and_parses() {
+        // Default is borderless (own chrome) — decorations off.
+        let settings = RawConfig::default().into_settings().unwrap();
+        assert!(!settings.config.decorations);
+
+        let mut raw = RawConfig::default();
+        parse_config_file("decorations = true\n", &mut raw).unwrap();
+        assert_eq!(raw.decorations, Some(true));
+        let s = raw.into_settings().unwrap();
+        assert!(s.config.decorations);
+    }
+
+    #[test]
     fn quake_height_out_of_range_errors() {
         let mut raw = RawConfig::default();
         assert!(parse_config_file("quake_height = 2.0\n", &mut raw).is_err());
@@ -497,6 +565,38 @@ opacity = 0.80
     }
 
     #[test]
+    fn pane_header_style_parses_and_defaults_full() {
+        use crate::app::panes::PaneHeaderStyle;
+        // Default (unset) is Full.
+        let settings = RawConfig::default().into_settings().unwrap();
+        assert_eq!(settings.config.pane_header_style, PaneHeaderStyle::Full);
+        // Explicit compact/full both round-trip.
+        let mut raw_compact = RawConfig::default();
+        parse_config_file("pane_header_style = compact\n", &mut raw_compact).unwrap();
+        let s = raw_compact.into_settings().unwrap();
+        assert_eq!(s.config.pane_header_style, PaneHeaderStyle::Compact);
+        let mut raw_full = RawConfig::default();
+        parse_config_file("pane_header_style = FULL\n", &mut raw_full).unwrap();
+        let s = raw_full.into_settings().unwrap();
+        assert_eq!(s.config.pane_header_style, PaneHeaderStyle::Full);
+        // An unrecognized value falls back to Full instead of failing to load.
+        let mut raw_bad = RawConfig::default();
+        parse_config_file("pane_header_style = weird\n", &mut raw_bad).unwrap();
+        let s = raw_bad.into_settings().unwrap();
+        assert_eq!(s.config.pane_header_style, PaneHeaderStyle::Full);
+    }
+
+    #[test]
+    fn pane_headers_single_parses_and_defaults_off() {
+        let settings = RawConfig::default().into_settings().unwrap();
+        assert!(!settings.config.pane_headers_single);
+        let mut raw = RawConfig::default();
+        parse_config_file("pane_headers_single = on\n", &mut raw).unwrap();
+        let s = raw.into_settings().unwrap();
+        assert!(s.config.pane_headers_single);
+    }
+
+    #[test]
     fn dim_unfocused_parses_and_defaults_on() {
         // Default (unset) is ON — the focused pane should stand out by default.
         let settings = RawConfig::default().into_settings().unwrap();
@@ -507,6 +607,57 @@ opacity = 0.80
         assert_eq!(raw_off.dim_unfocused, Some(false));
         let settings_off = raw_off.into_settings().unwrap();
         assert!(!settings_off.config.dim_unfocused);
+    }
+
+    #[test]
+    fn unfocused_dim_parses_clamps_and_defaults() {
+        // Default (unset) is the renderer's DEFAULT_PANE_DIM.
+        let settings = RawConfig::default().into_settings().unwrap();
+        assert_eq!(
+            settings.config.unfocused_dim,
+            crate::renderer::DEFAULT_PANE_DIM
+        );
+        // Explicit value parses.
+        let mut raw = RawConfig::default();
+        parse_config_file("unfocused_dim = 0.5\n", &mut raw).unwrap();
+        assert_eq!(raw.unfocused_dim, Some(0.5));
+        assert_eq!(raw.into_settings().unwrap().config.unfocused_dim, 0.5);
+        // Out-of-range values clamp to [0, 0.9] so a pane can never black out.
+        let mut raw_hi = RawConfig::default();
+        parse_config_file("unfocused_dim = 5.0\n", &mut raw_hi).unwrap();
+        assert_eq!(raw_hi.into_settings().unwrap().config.unfocused_dim, 0.9);
+        let mut raw_lo = RawConfig::default();
+        parse_config_file("unfocused_dim = -1\n", &mut raw_lo).unwrap();
+        assert_eq!(raw_lo.into_settings().unwrap().config.unfocused_dim, 0.0);
+        // Non-numeric input is a parse error, matching opacity's behavior.
+        let mut raw_bad = RawConfig::default();
+        assert!(parse_config_file("unfocused_dim = dim\n", &mut raw_bad).is_err());
+        // Non-finite input falls back to the default rather than poisoning math.
+        let mut raw_nan = RawConfig::default();
+        parse_config_file("unfocused_dim = NaN\n", &mut raw_nan).unwrap();
+        assert_eq!(
+            raw_nan.into_settings().unwrap().config.unfocused_dim,
+            crate::renderer::DEFAULT_PANE_DIM
+        );
+    }
+
+    #[test]
+    fn opacity_scope_parses_and_defaults_to_background() {
+        // Default (unset) keeps text opaque.
+        let settings = RawConfig::default().into_settings().unwrap();
+        assert!(!settings.config.opacity_text);
+        // 'text' opts the glyphs into the window opacity.
+        let mut raw = RawConfig::default();
+        parse_config_file("opacity_scope = text\n", &mut raw).unwrap();
+        assert_eq!(raw.opacity_text, Some(true));
+        assert!(raw.into_settings().unwrap().config.opacity_text);
+        // 'background' is the explicit default spelling.
+        let mut raw_bg = RawConfig::default();
+        parse_config_file("opacity_scope = background\n", &mut raw_bg).unwrap();
+        assert_eq!(raw_bg.opacity_text, Some(false));
+        // Anything else is a config error, not a silent fallback.
+        let mut raw_bad = RawConfig::default();
+        assert!(parse_config_file("opacity_scope = both\n", &mut raw_bad).is_err());
     }
 
     #[test]
@@ -527,6 +678,36 @@ opacity = 0.80
         let mut raw_off = RawConfig::default();
         parse_config_file("command_history = 0\n", &mut raw_off).unwrap();
         assert_eq!(raw_off.command_history, Some(0));
+    }
+
+    #[test]
+    fn command_blocks_parses_and_defaults_to_badges() {
+        use crate::app::CommandBlocksMode;
+        // Default (unset) is Badges — today's appearance, unchanged.
+        let settings = RawConfig::default().into_settings().unwrap();
+        assert_eq!(settings.config.command_blocks, CommandBlocksMode::Badges);
+        // Explicit "off".
+        let mut raw_off = RawConfig::default();
+        parse_config_file("command_blocks = off\n", &mut raw_off).unwrap();
+        assert_eq!(raw_off.command_blocks, Some("off".to_string()));
+        assert_eq!(
+            raw_off.into_settings().unwrap().config.command_blocks,
+            CommandBlocksMode::Off
+        );
+        // Explicit "cards" opts into the new chrome.
+        let mut raw_cards = RawConfig::default();
+        parse_config_file("command_blocks = cards\n", &mut raw_cards).unwrap();
+        assert_eq!(
+            raw_cards.into_settings().unwrap().config.command_blocks,
+            CommandBlocksMode::Cards
+        );
+        // Case-insensitive.
+        let mut raw_upper = RawConfig::default();
+        parse_config_file("command_blocks = CARDS\n", &mut raw_upper).unwrap();
+        assert_eq!(raw_upper.command_blocks, Some("cards".to_string()));
+        // Anything else is a config error, not a silent fallback.
+        let mut raw_bad = RawConfig::default();
+        assert!(parse_config_file("command_blocks = full\n", &mut raw_bad).is_err());
     }
 
     #[test]
@@ -919,6 +1100,7 @@ ctrl+a g g = scroll_top\n\
             "command_palette",
             "copy",
             "paste",
+            "select_all",
             "toggle_status_bar",
             "font_increase",
             "font_decrease",
@@ -977,6 +1159,7 @@ ctrl+a g g = scroll_top\n\
             ("cmd+t", KeyAction::NewTab),
             ("cmd+c", KeyAction::Copy),
             ("cmd+v", KeyAction::Paste),
+            ("cmd+a", KeyAction::SelectAll),
             ("cmd+,", KeyAction::Settings),
             ("cmd+f", KeyAction::Search),
             ("cmd+1", KeyAction::GoToTab(1)),
@@ -1463,5 +1646,76 @@ ctrl+a g g = scroll_top\n\
     fn symbol_map_lookup_empty_map() {
         use crate::text::shape::lookup_symbol_family;
         assert_eq!(lookup_symbol_family(&[], 'A'), None);
+    }
+
+    // -----------------------------------------------------------------------
+    // Settings-save round-trip: every `settings_save::SAVED_KEYS` entry must
+    // survive a save/load cycle through `apply_kv`.
+    // -----------------------------------------------------------------------
+
+    /// For every key `App::save_settings` can write (the `settings_save::SAVED_KEYS`
+    /// table), verify that serializing a live [`crate::app::Config`] value and
+    /// re-parsing it through [`super::parse::apply_kv`] reconstructs the exact
+    /// same string. This is the save/load contract the settings-form Save button
+    /// depends on: a key `save_settings` writes must be a key `apply_kv`
+    /// understands, and it must round-trip to the value the user set — covering
+    /// the trickier formats (bool spellings, 2-decimal f32, space-joined
+    /// `Vec<String>`, theme names) in one sweep instead of one test per key.
+    #[test]
+    fn saved_keys_round_trip_through_apply_kv() {
+        use super::parse::apply_kv;
+        use crate::app::settings_save::SAVED_KEYS;
+
+        // A live Config with every SAVED_KEYS-covered field pushed away from its
+        // default, so the round-trip actually exercises a non-default value.
+        let mut config = RawConfig::default().into_settings().unwrap().config;
+        config.opacity = 0.6543;
+        config.bell_visual = false;
+        config.bell_audible = true;
+        config.theme = "dracula".to_string();
+        config.font_family = Some("FiraCode Nerd Font Mono".to_string());
+        config.scrollback = 54321;
+        config.status_bar = true;
+        config.pane_headers = true;
+        config.show_tab_bar = crate::app::TabBarMode::Always;
+        config.follow_system = true;
+        config.ligatures = true;
+        config.restore_session = true;
+        config.padding = Some(12.0);
+        config.cursor_style = crate::app::CursorStyleConfig::Beam;
+        config.cursor_blink = true;
+        config.window_effect = crate::renderer::WindowEffect::Vignette;
+        config.copy_on_select = true;
+        config.minimap = true;
+        config.command_badges = false;
+        config.cursor_trail = true;
+        config.title_show_cwd = false;
+        config.title_show_count = true;
+        config.theme_light = "one-light".to_string();
+        config.theme_dark = "nord".to_string();
+        config.word_separator = "/:@[]{}".to_string();
+        config.font_features = vec!["ss01".to_string(), "calt=0".to_string(), "dlig".to_string()];
+        config.custom_effect = [0.11, 0.22, 0.33, 0.44, 0.55, 0.66];
+        config.command_blocks = crate::app::CommandBlocksMode::Cards;
+        config.pane_header_style = crate::app::panes::PaneHeaderStyle::Compact;
+        config.pane_headers_single = true;
+        config.scrollback_background_cap = 12345;
+        config.scrollback_background_idle_secs = 42;
+
+        for entry in SAVED_KEYS {
+            let serialized = (entry.get)(&config);
+            let mut raw = RawConfig::default();
+            apply_kv(entry.key, &serialized, &mut raw).unwrap_or_else(|e| {
+                panic!("apply_kv rejected '{}={serialized}': {e:#}", entry.key)
+            });
+            let parsed_config = raw.into_settings().unwrap().config;
+            let reserialized = (entry.get)(&parsed_config);
+            assert_eq!(
+                serialized, reserialized,
+                "key '{}' did not round-trip through apply_kv (wrote '{serialized}', \
+                 read back as '{reserialized}')",
+                entry.key
+            );
+        }
     }
 }

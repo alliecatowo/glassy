@@ -1,9 +1,11 @@
 //! Unit tests for the App module. Extracted from mod.rs to keep it under 700 lines.
 
+use super::render::shake_forces_full_redraw;
 use super::{
-    MenuAction, StripItem, WheelAction, actions_to_entries, compact_cwd, compose_window_title,
-    image_dst_size, motion_button, move_in_order, split_indicator, strip_item_at, strip_layout_ex,
-    tab_tag_reserve, wheel_action,
+    CUSTOM_SEGMENT_TEXT_CAP, CustomSegment, MAX_CUSTOM_SEGMENTS, MenuAction, StripItem,
+    WheelAction, actions_to_entries, compact_cwd, compose_window_title, image_dst_size,
+    motion_button, move_in_order, remove_custom_segment, split_indicator, strip_item_at,
+    strip_layout_ex, tab_tag_reserve, upsert_custom_segment, wheel_action,
 };
 use crate::gui::MenuEntry;
 
@@ -15,7 +17,7 @@ fn strip_layout(
     bar_h: f32,
     cell_w: f32,
 ) -> Vec<super::StripSeg> {
-    strip_layout_ex(tabs, bar_w, bar_h, cell_w, 0.0, 0, 0.0)
+    strip_layout_ex(tabs, bar_w, bar_h, cell_w, 0.0, 0, 0.0, false)
 }
 
 #[test]
@@ -65,10 +67,14 @@ fn context_menu_entries_group_with_separators() {
 
 #[test]
 fn hamburger_menu_groups_layout_and_destructive() {
-    // The hamburger is now (NewTab, CloseTab): Settings/Help have dedicated
-    // strip icons and PaneHeaders lives in the Settings form, so neither is
-    // duplicated here. NewTab is in the layout group, CloseTab in the
-    // destructive group → exactly one separator at that single boundary.
+    // The hamburger is now the grouped set:
+    //   New tab / Split right / Split down    (group 2)
+    // | Command palette / Settings / Help     (group 3)
+    // | Toggle quake                          (group 4)
+    // | About                                 (group 5)
+    // | Close tab                             (group 6, destructive)
+    // The standalone ?/⚙ strip buttons were folded IN, so Settings + Help now
+    // live here. Four group boundaries → exactly four separators.
     let entries = actions_to_entries(MenuAction::ALL, false);
     let item_count = entries
         .iter()
@@ -79,13 +85,14 @@ fn hamburger_menu_groups_layout_and_destructive() {
         .filter(|e| matches!(e, MenuEntry::Separator))
         .count();
     assert_eq!(item_count, MenuAction::ALL.len());
-    assert_eq!(sep_count, 1);
-    // The last entry is always the destructive Close-tab item.
+    assert_eq!(sep_count, 4);
+    // The last entry is the destructive Close-tab item.
     match entries.last() {
         Some(MenuEntry::Item { label, .. }) => assert_eq!(*label, "Close tab"),
         _ => panic!("hamburger must end with Close tab"),
     }
-    // Settings and Help are NOT in the hamburger anymore (strip icons own them).
+    // Settings + Help + the command palette + quake toggle + About are all in
+    // the hamburger now (the standalone ?/⚙ buttons were folded in).
     let labels: Vec<&str> = entries
         .iter()
         .filter_map(|e| match e {
@@ -93,9 +100,11 @@ fn hamburger_menu_groups_layout_and_destructive() {
             _ => None,
         })
         .collect();
-    assert!(!labels.contains(&"Settings"));
-    assert!(!labels.contains(&"Help / keys"));
-    assert!(!labels.contains(&"Pane headers"));
+    assert!(labels.contains(&"Settings"));
+    assert!(labels.contains(&"Help / keys"));
+    assert!(labels.contains(&"Command palette"));
+    assert!(labels.contains(&"Toggle quake"));
+    assert!(labels.contains(&"About"));
 }
 
 #[test]
@@ -175,10 +184,8 @@ fn strip_hit_test_matches_layout() {
     assert_eq!(strip_item_at(&segs, tx1, ty1), Some(StripItem::Tab(1)));
     let (nx, ny) = center(StripItem::NewTab).unwrap();
     assert_eq!(strip_item_at(&segs, nx, ny), Some(StripItem::NewTab));
-    let (hx, hy) = center(StripItem::Help).unwrap();
-    assert_eq!(strip_item_at(&segs, hx, hy), Some(StripItem::Help));
-    let (sx, sy) = center(StripItem::Settings).unwrap();
-    assert_eq!(strip_item_at(&segs, sx, sy), Some(StripItem::Settings));
+    // The standalone Help/Settings buttons were folded into the hamburger; only
+    // the ≡ menu remains as a standalone right-hand control (besides +).
     let (mx, my) = center(StripItem::Menu).unwrap();
     assert_eq!(strip_item_at(&segs, mx, my), Some(StripItem::Menu));
     // Below the bar there are no items.
@@ -254,7 +261,7 @@ fn many_tabs_stop_shrinking_at_min_width_and_scroll() {
             }
         })
         .collect();
-    let segs = strip_layout_ex(&tabs, 900.0, BH, CW, 0.0, 0, 0.0);
+    let segs = strip_layout_ex(&tabs, 900.0, BH, CW, 0.0, 0, 0.0, false);
     let widths: Vec<f32> = segs
         .iter()
         .filter_map(|s| matches!(s.item, StripItem::Tab(_)).then_some(s.rect.w))
@@ -276,7 +283,7 @@ fn scroll_keeps_active_tab_visible() {
     // The active tab is far to the right; the layout must scroll so it appears.
     let mut tabs: Vec<(&str, bool, bool)> = (0..30).map(|_| ("x", false, false)).collect();
     tabs[27] = ("active", true, false);
-    let segs = strip_layout_ex(&tabs, 900.0, BH, CW, 0.0, 27, 0.0);
+    let segs = strip_layout_ex(&tabs, 900.0, BH, CW, 0.0, 27, 0.0, false);
     assert!(
         segs.iter().any(|s| s.item == StripItem::Tab(27)),
         "active tab (27) must be laid out (scrolled into view)"
@@ -291,17 +298,28 @@ fn tag_reserve_keeps_tabs_left_of_counter() {
     assert!(reserve > 0.0);
     let tabs: Vec<(&str, bool, bool)> = (0..9).map(|_| ("t", false, false)).collect();
     let bar_w = 1000.0;
-    let segs = strip_layout_ex(&tabs, bar_w, BH, CW, reserve, 0, 0.0);
-    // The right controls start at bar_w - 3*CTRL - gap; the counter sits to their
-    // left within `reserve`. Tabs + the `+` must end before that counter band.
-    let counter_left = bar_w - super::CTRL_BTN * 3.0 - super::TAB_GAP - reserve;
+    let segs = strip_layout_ex(&tabs, bar_w, BH, CW, reserve, 0, 0.0, false);
+    // The right controls start at bar_w - (n controls)*CTRL - gap; the counter sits
+    // to their left within `reserve`. `counter_left` is where the reserved band
+    // begins. Tab chips must START (left edge) inside the tab band, and the `+`
+    // must END before the reserved band. (A scrolled-off tab whose LEFT edge is in
+    // the band is culled; a partially-visible right-edge tab may still extend under
+    // the controls, which paint on top of it and win hit-tests — pre-existing
+    // scroll behavior, not what this guard is about.)
+    let n_ctrl = super::right_control_items(false).len() as f32;
+    let counter_left = bar_w - super::CTRL_BTN * n_ctrl - super::TAB_GAP - reserve;
     for s in &segs {
-        if matches!(s.item, StripItem::Tab(_) | StripItem::NewTab) {
-            assert!(
-                s.rect.x + s.rect.w <= counter_left + super::CTRL_BTN + 1.0,
-                "{:?} overruns the counter band",
+        match s.item {
+            StripItem::NewTab => assert!(
+                s.rect.x + s.rect.w <= counter_left + 1.0,
+                "+ overruns the counter band"
+            ),
+            StripItem::Tab(_) => assert!(
+                s.rect.x <= counter_left,
+                "{:?} starts inside the counter band",
                 s.item
-            );
+            ),
+            _ => {}
         }
     }
 }
@@ -419,4 +437,139 @@ fn drag_reports_held_button_under_motion_modes() {
     assert_eq!(motion_button(TermMode::MOUSE_MOTION, Some(2)), Some(2));
     // Click-only mode does not report drags.
     assert_eq!(motion_button(TermMode::MOUSE_REPORT_CLICK, Some(0)), None);
+}
+
+// ---- Power Mode screen-shake settle transition --------------------------
+//
+// `shake_forces_full_redraw` drives whether `render()` forces a full grid
+// rebuild this frame. A live shake always forces one; the settle frame (the
+// exact frame `shake_offset()` clamps to zero) must force exactly one more,
+// or rows not otherwise re-dirtied that frame keep their stale shaken-origin
+// quads (see `was_shaking`'s doc comment in `app/mod.rs`).
+
+#[test]
+fn shake_forces_redraw_while_actively_shaking() {
+    assert!(shake_forces_full_redraw(true, true));
+    assert!(shake_forces_full_redraw(true, false));
+}
+
+#[test]
+fn shake_forces_one_last_redraw_on_settle_frame() {
+    // shaking just became false, but the previous frame was still shaking.
+    assert!(shake_forces_full_redraw(false, true));
+}
+
+#[test]
+fn shake_does_not_force_redraw_at_rest() {
+    // Neither this frame nor the last was shaking: no extra redraw forced,
+    // preserving the incremental (0%-idle) path.
+    assert!(!shake_forces_full_redraw(false, false));
+}
+
+// ---- WindowEffect settings-cycle off-by-one -----------------------------
+//
+// `settings_advance_focused`/`settings_activate_focused` step the segmented
+// Window Effect control via `(cur + dir).rem_euclid(9)` (app/settings.rs).
+// `WindowEffect` has 9 variants (index 0..=8, Custom = 8); the old
+// `rem_euclid(8)` made Custom unreachable by cycling. These tests exercise
+// the same modulus arithmetic directly (no `App` instance needed).
+
+#[test]
+fn window_effect_cycle_visits_all_nine_variants() {
+    use crate::renderer::WindowEffect;
+
+    let mut seen = std::collections::HashSet::new();
+    let mut cur = 0i32;
+    for _ in 0..9 {
+        seen.insert(cur);
+        cur = (cur + 1).rem_euclid(9);
+    }
+    assert_eq!(
+        seen.len(),
+        9,
+        "cycling forward 9 steps must visit every index"
+    );
+    assert_eq!(cur, 0, "9 steps of +1 must wrap back to the start");
+    // Every visited index must resolve to a valid variant — in particular
+    // index 8 (Custom), which `rem_euclid(8)` could never reach.
+    assert!(
+        seen.iter()
+            .any(|&i| WindowEffect::from_index(i as usize) == WindowEffect::Custom),
+        "Custom (index 8) must be reachable by forward cycling"
+    );
+}
+
+#[test]
+fn window_effect_cycle_backward_from_zero_reaches_custom() {
+    // Left-arrow at None (index 0) must wrap to Custom (index 8), matching
+    // the settings.rs comment ("wrap with rem_euclid so Left at 0 lands on
+    // Custom").
+    let cur = 0i32;
+    let prev = (cur - 1).rem_euclid(9);
+    assert_eq!(prev, 8);
+    assert_eq!(
+        crate::renderer::WindowEffect::from_index(prev as usize),
+        crate::renderer::WindowEffect::Custom
+    );
+}
+
+// --- w15: custom status-bar segments (glassy @ set-segment/clear-segment) --
+
+#[test]
+fn upsert_custom_segment_inserts_and_updates_in_place() {
+    let mut segs: Vec<CustomSegment> = Vec::new();
+    upsert_custom_segment(&mut segs, "build", "building...").unwrap();
+    assert_eq!(segs.len(), 1);
+    assert_eq!(segs[0].id, "build");
+    assert_eq!(segs[0].text, "building...");
+
+    // Re-setting the same id updates in place — no duplicate, same position.
+    upsert_custom_segment(&mut segs, "build", "done").unwrap();
+    assert_eq!(segs.len(), 1);
+    assert_eq!(segs[0].text, "done");
+
+    // A second distinct id appends, preserving insertion order (render order).
+    upsert_custom_segment(&mut segs, "ci", "2 running").unwrap();
+    assert_eq!(segs.len(), 2);
+    assert_eq!(segs[0].id, "build");
+    assert_eq!(segs[1].id, "ci");
+}
+
+#[test]
+fn upsert_custom_segment_enforces_max_cap() {
+    let mut segs: Vec<CustomSegment> = Vec::new();
+    for i in 0..MAX_CUSTOM_SEGMENTS {
+        upsert_custom_segment(&mut segs, &format!("seg{i}"), "x").unwrap();
+    }
+    assert_eq!(segs.len(), MAX_CUSTOM_SEGMENTS);
+
+    // A new (not-yet-present) id past the cap is rejected, store unchanged.
+    let err = upsert_custom_segment(&mut segs, "one-too-many", "x").unwrap_err();
+    assert!(err.contains("too many"));
+    assert_eq!(segs.len(), MAX_CUSTOM_SEGMENTS);
+
+    // Updating an EXISTING id at full capacity still succeeds (no cap check
+    // on updates, only on growing the set).
+    upsert_custom_segment(&mut segs, "seg0", "updated").unwrap();
+    assert_eq!(segs.len(), MAX_CUSTOM_SEGMENTS);
+    assert_eq!(segs[0].text, "updated");
+}
+
+#[test]
+fn upsert_custom_segment_truncates_long_text() {
+    let mut segs: Vec<CustomSegment> = Vec::new();
+    let long = "x".repeat(CUSTOM_SEGMENT_TEXT_CAP * 2);
+    upsert_custom_segment(&mut segs, "id", &long).unwrap();
+    assert_eq!(segs[0].text.chars().count(), CUSTOM_SEGMENT_TEXT_CAP);
+}
+
+#[test]
+fn remove_custom_segment_is_idempotent() {
+    let mut segs: Vec<CustomSegment> = Vec::new();
+    upsert_custom_segment(&mut segs, "build", "x").unwrap();
+    remove_custom_segment(&mut segs, "build");
+    assert!(segs.is_empty());
+    // Removing an id that isn't (or is no longer) present is a no-op, not a panic.
+    remove_custom_segment(&mut segs, "build");
+    assert!(segs.is_empty());
 }

@@ -33,6 +33,41 @@ pub enum Move {
     Right,
 }
 
+/// A named split-tree shape the "cycle layout preset" action rebuilds the
+/// active tab's tree into, preserving the current DFS pane order (leaf ids are
+/// reassigned to the SAME set of leaves() in the SAME left-to-right order; no
+/// pane is spawned, closed, or reordered — only the tree shape/ratios change).
+/// [`Layout::cycle_preset`] steps through these in this declared order.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum LayoutPreset {
+    /// All panes stacked in even horizontal bands (top to bottom).
+    Rows,
+    /// All panes side by side in even vertical columns (left to right).
+    Columns,
+    /// One "main" pane (the first leaf) takes the left half; the rest stack in
+    /// even rows on the right (tmux's `main-vertical` layout).
+    MainVertical,
+    /// A roughly square grid: panes are grouped into `ceil(sqrt(n))` columns,
+    /// each column stacking its share of panes in even rows.
+    Grid,
+}
+
+impl LayoutPreset {
+    /// The fixed cycle order `cycle_preset` steps through.
+    const ORDER: [LayoutPreset; 4] = [
+        LayoutPreset::Rows,
+        LayoutPreset::Columns,
+        LayoutPreset::MainVertical,
+        LayoutPreset::Grid,
+    ];
+
+    /// The preset that follows this one in the cycle (wraps around).
+    fn next(self) -> LayoutPreset {
+        let i = Self::ORDER.iter().position(|&p| p == self).unwrap_or(0);
+        Self::ORDER[(i + 1) % Self::ORDER.len()]
+    }
+}
+
 /// Integer pixel rectangle in surface space.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Rect {
@@ -708,5 +743,153 @@ mod tests {
         // Inner even: each of 2 and 3 is half the right column's height.
         assert_eq!(map[&2].h, 300);
         assert_eq!(map[&3].h, 300);
+    }
+
+    // ---- layout preset cycle -----------------------------------------------
+
+    #[test]
+    fn preset_rows_stacks_evenly_preserving_order() {
+        let mut l = Layout::new(1);
+        l.split(Dir::Vertical, 2); // (1 | 2)
+        l.split(Dir::Horizontal, 3); // (1 | (2 / 3)) — arbitrary starting shape
+        assert!(l.apply_preset(LayoutPreset::Rows));
+        // DFS pane order is preserved: leaves() still reads 1, 2, 3.
+        assert_eq!(l.leaves(), vec![1, 2, 3]);
+        let map: std::collections::HashMap<usize, Rect> = l.rects(AREA, 0).into_iter().collect();
+        // Three even horizontal bands, top to bottom, full width each.
+        assert_eq!(
+            map[&1],
+            Rect {
+                x: 0,
+                y: 0,
+                w: 1000,
+                h: 200
+            }
+        );
+        assert_eq!(
+            map[&2],
+            Rect {
+                x: 0,
+                y: 200,
+                w: 1000,
+                h: 200
+            }
+        );
+        assert_eq!(
+            map[&3],
+            Rect {
+                x: 0,
+                y: 400,
+                w: 1000,
+                h: 200
+            }
+        );
+        assert_eq!(l.classify_preset(), Some(LayoutPreset::Rows));
+    }
+
+    #[test]
+    fn preset_columns_splits_evenly_side_by_side() {
+        let mut l = Layout::new(1);
+        l.split(Dir::Horizontal, 2);
+        l.split(Dir::Horizontal, 3);
+        assert!(l.apply_preset(LayoutPreset::Columns));
+        assert_eq!(l.leaves(), vec![1, 2, 3]);
+        let map: std::collections::HashMap<usize, Rect> = l.rects(AREA, 0).into_iter().collect();
+        assert_eq!(
+            map[&1],
+            Rect {
+                x: 0,
+                y: 0,
+                w: 333,
+                h: 600
+            }
+        );
+        assert_eq!(
+            map[&2],
+            Rect {
+                x: 333,
+                y: 0,
+                w: 334,
+                h: 600
+            }
+        );
+        assert_eq!(
+            map[&3],
+            Rect {
+                x: 667,
+                y: 0,
+                w: 333,
+                h: 600
+            }
+        );
+        assert_eq!(l.classify_preset(), Some(LayoutPreset::Columns));
+    }
+
+    #[test]
+    fn preset_main_vertical_gives_first_leaf_the_main_slot() {
+        let mut l = Layout::new(1);
+        l.split(Dir::Vertical, 2);
+        l.split(Dir::Vertical, 3);
+        assert!(l.apply_preset(LayoutPreset::MainVertical));
+        assert_eq!(l.leaves(), vec![1, 2, 3]);
+        let map: std::collections::HashMap<usize, Rect> = l.rects(AREA, 0).into_iter().collect();
+        // Leaf 1 is the main pane: full height, left half.
+        assert_eq!(
+            map[&1],
+            Rect {
+                x: 0,
+                y: 0,
+                w: 500,
+                h: 600
+            }
+        );
+        // 2 and 3 stack evenly in the right column.
+        assert_eq!(map[&2].x, 500);
+        assert_eq!(map[&3].x, 500);
+        assert_eq!(map[&2].h, 300);
+        assert_eq!(map[&3].h, 300);
+        assert_eq!(l.classify_preset(), Some(LayoutPreset::MainVertical));
+    }
+
+    #[test]
+    fn preset_grid_arranges_four_panes_two_by_two() {
+        let mut l = Layout::new(1);
+        l.split(Dir::Vertical, 2);
+        l.split(Dir::Horizontal, 3);
+        l.split(Dir::Horizontal, 4);
+        assert!(l.apply_preset(LayoutPreset::Grid));
+        assert_eq!(l.leaves(), vec![1, 2, 3, 4]);
+        let map: std::collections::HashMap<usize, Rect> = l.rects(AREA, 0).into_iter().collect();
+        // ceil(sqrt(4)) = 2 columns of 2 rows each: every tile is a quarter.
+        for id in [1, 2, 3, 4] {
+            assert_eq!(map[&id].w, 500);
+            assert_eq!(map[&id].h, 300);
+        }
+        assert_eq!(l.classify_preset(), Some(LayoutPreset::Grid));
+    }
+
+    #[test]
+    fn cycle_preset_steps_through_fixed_order_and_wraps() {
+        let mut l = Layout::new(1);
+        // Outer Horizontal / inner Vertical matches none of the four presets
+        // (each of Rows/Columns/MainVertical/Grid has a fixed outer `dir` for
+        // 3 leaves, and none of them is outer-Horizontal-inner-Vertical).
+        l.split(Dir::Horizontal, 2);
+        l.split(Dir::Vertical, 3);
+        assert_eq!(l.classify_preset(), None);
+        assert_eq!(l.cycle_preset(), Some(LayoutPreset::Rows));
+        assert_eq!(l.cycle_preset(), Some(LayoutPreset::Columns));
+        assert_eq!(l.cycle_preset(), Some(LayoutPreset::MainVertical));
+        assert_eq!(l.cycle_preset(), Some(LayoutPreset::Grid));
+        assert_eq!(l.cycle_preset(), Some(LayoutPreset::Rows)); // wraps around
+        // Pane order and focus are untouched by any of this.
+        assert_eq!(l.leaves(), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn cycle_preset_sole_leaf_is_noop() {
+        let mut l = Layout::new(1);
+        assert_eq!(l.cycle_preset(), None);
+        assert!(matches!(l.leaves().as_slice(), [1]));
     }
 }

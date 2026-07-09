@@ -4,6 +4,7 @@ use alacritty_terminal::tty::Shell;
 use anyhow::{Context, Result, bail};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
 
 use crate::app::Config;
 use crate::color;
@@ -14,6 +15,32 @@ use super::platform::Platform;
 
 const DEFAULT_FONT_SIZE: f32 = 14.0;
 const DEFAULT_SCROLLBACK: usize = 10_000;
+/// Upper clamp for the `scrollback` config value (lines). Lowered from an
+/// earlier 1,000,000 per the w15 alacritty-surface audit: alacritty's scrollback
+/// storage is an uncompressed `Vec<Row<Cell>>` at an estimated ~24 bytes/cell
+/// with no disk overflow, so 1,000,000 lines at a common 200-column width was a
+/// worst case of ~4.8 GB resident for a single pane. 200,000 lines (~960 MB
+/// worst case at 200 cols) is still generous — most terminals default in the
+/// low thousands — while capping the accidental-gigabytes-per-pane failure mode.
+/// Does not affect `DEFAULT_SCROLLBACK` (10,000); only configs that explicitly
+/// requested a very large value are affected.
+///
+/// `pub(crate)` so the live settings/palette scrollback adjuster
+/// (`App::adjust_scrollback`) clamps to the SAME upper bound the config-file
+/// parser enforces — otherwise a UI adjustment could push the live `Term` past
+/// this memory cap.
+pub(crate) const SCROLLBACK_MAX: usize = 200_000;
+/// Default for `scrollback_background_cap`: `0` disables the background-
+/// scrollback-bounding policy outright (see `crate::pty::ScrollbackBackgroundPolicy`),
+/// so out of the box every pane keeps its full configured `scrollback` resident
+/// regardless of focus — this Phase-1 rec must not reduce anyone's default
+/// visible scrollback.
+const DEFAULT_SCROLLBACK_BACKGROUND_CAP: usize = 0;
+/// Default for `scrollback_background_idle_secs`: how long (seconds) a pane must
+/// be idle/backgrounded before `scrollback_background_cap` takes effect, once
+/// that cap is non-zero. 15 minutes — long enough that a pane the user merely
+/// glanced away from briefly is never trimmed.
+const DEFAULT_SCROLLBACK_BACKGROUND_IDLE_SECS: u64 = 900;
 /// Default number of recently-run commands retained for the command palette's
 /// history source (OSC 133 `B`..`C` capture). 0 disables it.
 const DEFAULT_COMMAND_HISTORY: usize = 200;
@@ -21,6 +48,19 @@ const DEFAULT_COMMAND_HISTORY: usize = 200;
 /// notification when the window is unfocused. 10 s avoids spamming for quick
 /// commands while still catching long builds/tests.
 const DEFAULT_NOTIFY_COMMAND_THRESHOLD_MS: u64 = 10_000;
+/// Clamp bounds for `quake_height` (fraction of the monitor height the quake
+/// window occupies). Shared by `apply_kv`, `RawConfig::into_settings`'s default
+/// fallback, the CLI flag parser (`config::cli`), and the settings-form slider
+/// (`gui::settings_panel`) so all four enforce the identical range.
+pub(crate) const QUAKE_HEIGHT_MIN: f32 = 0.1;
+pub(crate) const QUAKE_HEIGHT_MAX: f32 = 1.0;
+/// Clamp bound for `quake_animation_ms` (the quake slide duration). Shared by
+/// `apply_kv`, `RawConfig::into_settings`'s default fallback, the CLI flag
+/// parser, and the settings-form stepper.
+pub(crate) const QUAKE_ANIMATION_MS_MAX: u64 = 5_000;
+/// Clamp bound for `notify_command_threshold_ms` (24 hours). Shared by
+/// `apply_kv` and the settings-form stepper so both enforce the identical cap.
+pub(crate) const NOTIFY_COMMAND_THRESHOLD_MS_MAX: u64 = 86_400_000;
 
 /// A single entry in the `font_symbol_map` config key: a Unicode range mapped
 /// to a specific font family. The shaper routes codepoints in `[start, end]`
@@ -135,6 +175,62 @@ pub fn parse_font_variations(value: &str) -> Vec<String> {
         .collect()
 }
 
+/// Parse a `status_bar_segments` value: a comma- or space-separated list of
+/// segment tokens. Unknown tokens are warned about and dropped (never a hard
+/// error — a stray typo shouldn't block startup). Shared by `apply_kv` (the
+/// config-file path) and the live settings-form "Status bar segments" text
+/// field (`App::commit_settings_field` in `settings_fields.rs`) so both apply
+/// the identical token set — this function IS the authoritative parser both
+/// callers of.
+pub(crate) fn parse_status_bar_segments(value: &str) -> Vec<crate::app::StatusBarSegment> {
+    use crate::app::StatusBarSegment;
+    value
+        .split([',', ' '])
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .filter_map(|s| match s.to_ascii_lowercase().as_str() {
+            "cwd" => Some(StatusBarSegment::Cwd),
+            "git_branch" | "git" => Some(StatusBarSegment::GitBranch),
+            "process" | "fg_process" => Some(StatusBarSegment::Process),
+            "time" | "clock" => Some(StatusBarSegment::Time),
+            "mode" => Some(StatusBarSegment::Mode),
+            "broadcast" | "bcast" => Some(StatusBarSegment::Broadcast),
+            "selection" | "sel" => Some(StatusBarSegment::Selection),
+            "scroll" => Some(StatusBarSegment::Scroll),
+            "encoding" | "enc" => Some(StatusBarSegment::Encoding),
+            "progress" => Some(StatusBarSegment::Progress),
+            "exit_status" | "exit" => Some(StatusBarSegment::ExitStatus),
+            "key_hints" | "hints" => Some(StatusBarSegment::KeyHints),
+            // w15 additions — see status-bar.md recs 1/3/4.
+            "tab_count" | "tabs" => Some(StatusBarSegment::TabCount),
+            "zoom" => Some(StatusBarSegment::Zoom),
+            "profile" => Some(StatusBarSegment::Profile),
+            "busy" => Some(StatusBarSegment::Busy),
+            "hostname" | "host" => Some(StatusBarSegment::Hostname),
+            "custom" => Some(StatusBarSegment::Custom),
+            other => {
+                log::warn!("glassy: ignoring unknown status_bar_segments entry '{other}'");
+                None
+            }
+        })
+        .collect()
+}
+
+/// Normalize a raw `hints_chars` string to the filtered alphabet `apply_kv`'s
+/// finalization step derives: only ASCII letters are kept, and an alphabet
+/// shorter than 2 chars is rejected (falls back to the built-in default by
+/// returning `None`). Shared by [`RawConfig::into_settings`] (the config-file
+/// path) and the live settings-form "Hint chars" text field so both apply the
+/// identical rule.
+pub(crate) fn normalize_hints_chars(s: &str) -> Option<String> {
+    let filtered: String = s.chars().filter(|c| c.is_ascii_alphabetic()).collect();
+    if filtered.chars().count() >= 2 {
+        Some(filtered)
+    } else {
+        None
+    }
+}
+
 /// Accumulated raw configuration before validation/finalization. Every field is
 /// optional so the file and CLI layers can each set a subset.
 #[derive(Default)]
@@ -191,8 +287,11 @@ pub(super) struct RawConfig {
     pub quake: Option<bool>,
     pub quake_height: Option<f32>,
     pub quake_animation_ms: Option<u64>,
+    pub decorations: Option<bool>,
     pub command_history: Option<usize>,
     pub dim_unfocused: Option<bool>,
+    pub unfocused_dim: Option<f32>,
+    pub opacity_text: Option<bool>,
     /// Also place a rich-text (HTML) flavor on the clipboard alongside the plain
     /// text on copy, so apps that prefer HTML get a monospace-preserving paste.
     pub copy_html: Option<bool>,
@@ -223,6 +322,33 @@ pub(super) struct RawConfig {
     pub command_fold: Option<bool>,
     pub power_mode: Option<bool>,
     pub power_mode_intensity: Option<f32>,
+    /// Custom window-effect channel intensities (0..1), one field per
+    /// `gui::settings_panel::CUSTOM_FX_SLIDERS` entry. Only meaningful when
+    /// `window_effect = custom`; unset channels fall back to the built-in
+    /// "pleasant retro-glass" defaults in [`RawConfig::into_settings`].
+    pub fx_curvature: Option<f32>,
+    pub fx_scanline: Option<f32>,
+    pub fx_glow: Option<f32>,
+    pub fx_vignette: Option<f32>,
+    pub fx_grain: Option<f32>,
+    pub fx_tint: Option<f32>,
+    /// Opt-in command-block visual chrome level: `off` | `badges` | `cards`.
+    /// Validated in `apply_kv`; resolved to [`crate::app::CommandBlocksMode`] by
+    /// [`parse_command_blocks_mode`] at finalization.
+    pub command_blocks: Option<String>,
+    // --- w15: scrollback memory bounding (Phase 1) ---
+    /// Lines of scrollback retained for a backgrounded/idle pane once trimmed;
+    /// `0` disables the policy. See `crate::pty::ScrollbackBackgroundPolicy`.
+    pub scrollback_background_cap: Option<usize>,
+    /// Seconds a pane must be idle/backgrounded before `scrollback_background_cap`
+    /// applies. Only meaningful when the cap is non-zero.
+    pub scrollback_background_idle_secs: Option<u64>,
+    /// Pane header information density: `full` | `compact`. See
+    /// [`crate::app::panes::PaneHeaderStyle`]. Default `full`.
+    pub pane_header_style: Option<String>,
+    /// Show a lightweight header for a single, unsplit pane too (not just
+    /// splits). Default false.
+    pub pane_headers_single: Option<bool>,
 }
 
 impl RawConfig {
@@ -279,8 +405,7 @@ impl RawConfig {
         let theme_dark =
             color::canonical_name(self.theme_dark.as_deref().unwrap_or(&theme_name)).to_string();
         let theme_light =
-            color::canonical_name(self.theme_light.as_deref().unwrap_or("rose-pine-dawn"))
-                .to_string();
+            color::canonical_name(self.theme_light.as_deref().unwrap_or("one-light")).to_string();
 
         let opacity = self.opacity.unwrap_or(DEFAULT_OPACITY);
         let opacity = if opacity.is_finite() {
@@ -335,8 +460,16 @@ impl RawConfig {
             crt_effect: self.crt_effect.unwrap_or(false),
             // Custom-effect channel intensities [curvature, scanline, glow,
             // vignette, grain, tint]. A pleasant retro-glass default; the
-            // Appearance → Custom sliders tune it live.
-            custom_effect: [0.12, 0.35, 0.22, 0.30, 0.15, 0.25],
+            // Appearance → Custom sliders tune it live and `save_settings`
+            // persists it via the `fx_*` keys below.
+            custom_effect: [
+                self.fx_curvature.unwrap_or(0.12),
+                self.fx_scanline.unwrap_or(0.35),
+                self.fx_glow.unwrap_or(0.22),
+                self.fx_vignette.unwrap_or(0.30),
+                self.fx_grain.unwrap_or(0.15),
+                self.fx_tint.unwrap_or(0.25),
+            ],
             // Resolve the window effect: an explicit `window_effect` wins; else the
             // legacy `crt_effect = true` maps to the CRT mode; else None. This keeps
             // old configs working while exposing the full mode set.
@@ -353,24 +486,38 @@ impl RawConfig {
             show_tab_bar: parse_tab_bar_mode(self.show_tab_bar.as_deref()),
             title_show_cwd: self.title_show_cwd.unwrap_or(true),
             title_show_count: self.title_show_count.unwrap_or(false),
-            hints_chars: self
-                .hints_chars
-                .filter(|s| s.chars().filter(|c| c.is_ascii_alphabetic()).count() >= 2)
-                .map(|s| s.chars().filter(|c| c.is_ascii_alphabetic()).collect()),
+            hints_chars: self.hints_chars.and_then(|s| normalize_hints_chars(&s)),
             command_badges: self.command_badges.unwrap_or(true),
             minimap: self.minimap.unwrap_or(false),
             quake: self.quake.unwrap_or(false),
+            decorations: self.decorations.unwrap_or(false),
             quake_height: {
                 let h = self.quake_height.unwrap_or(0.5);
-                if h.is_finite() && (0.1..=1.0).contains(&h) {
+                if h.is_finite() && (QUAKE_HEIGHT_MIN..=QUAKE_HEIGHT_MAX).contains(&h) {
                     h
                 } else {
                     0.5
                 }
             },
-            quake_animation_ms: self.quake_animation_ms.unwrap_or(180).min(5_000),
+            quake_animation_ms: self
+                .quake_animation_ms
+                .unwrap_or(180)
+                .min(QUAKE_ANIMATION_MS_MAX),
             command_history: self.command_history.unwrap_or(DEFAULT_COMMAND_HISTORY),
             dim_unfocused: self.dim_unfocused.unwrap_or(true),
+            unfocused_dim: {
+                // Mirror the opacity guard: non-finite falls back to the default,
+                // and the 0.9 ceiling keeps a pane from ever being blacked out.
+                let d = self
+                    .unfocused_dim
+                    .unwrap_or(crate::renderer::DEFAULT_PANE_DIM);
+                if d.is_finite() {
+                    d.clamp(0.0, 0.9)
+                } else {
+                    crate::renderer::DEFAULT_PANE_DIM
+                }
+            },
+            opacity_text: self.opacity_text.unwrap_or(false),
             copy_html: self.copy_html.unwrap_or(false),
             status_bar_segments: self.status_bar_segments,
             status_bar_time_format: self
@@ -396,9 +543,53 @@ impl RawConfig {
                     0.6
                 }
             },
+            command_blocks: parse_command_blocks_mode(self.command_blocks.as_deref()),
+            pane_header_style: self
+                .pane_header_style
+                .as_deref()
+                .and_then(crate::app::panes::PaneHeaderStyle::parse)
+                .unwrap_or_default(),
+            pane_headers_single: self.pane_headers_single.unwrap_or(false),
+            scrollback_background_cap: self
+                .scrollback_background_cap
+                .unwrap_or(DEFAULT_SCROLLBACK_BACKGROUND_CAP),
+            scrollback_background_idle_secs: self
+                .scrollback_background_idle_secs
+                .unwrap_or(DEFAULT_SCROLLBACK_BACKGROUND_IDLE_SECS),
         };
 
-        Ok(super::Settings { config, theme })
+        // Resolve + validate the w15 scrollback-background policy at parse time,
+        // so a bad value is caught here rather than silently ignored. NOTE: this
+        // does not yet reach live `Pty` sessions — that requires threading the
+        // resolved policy through every `Pty::spawn` call site
+        // (`src/app/{panes,event_loop}.rs`, `src/app/tabs/{mod,session}.rs`),
+        // which is out of scope for the change that introduced this policy (see
+        // `crate::pty::ScrollbackBackgroundPolicy`). The raw values ARE mirrored
+        // onto `config.scrollback_background_{cap,idle_secs}` above so the
+        // settings-UI Advanced-section steppers can display/edit/persist them
+        // ahead of that wiring landing. Logged at debug level so it is easy to
+        // confirm a configured value round-tripped through parsing without
+        // implying the feature is already active.
+        let scrollback_background_policy = crate::pty::ScrollbackBackgroundPolicy::new(
+            config.scrollback_background_cap,
+            config.scrollback_background_idle_secs,
+        );
+        log::debug!(
+            "glassy: scrollback_background_policy resolved to {scrollback_background_policy:?}; \
+             effective_cap against this session's scrollback ({}) would be {} \
+             (parsed only; not yet wired to live sessions)",
+            config.scrollback,
+            scrollback_background_policy.effective_cap(config.scrollback),
+        );
+
+        // The activated profile name (if any) is attached by the caller
+        // (`Settings::resolve` / `resolve_with_profile`) — `RawConfig` itself
+        // doesn't track which profile (if any) was applied to it.
+        Ok(super::Settings {
+            config,
+            theme,
+            active_profile: None,
+        })
     }
 
     /// Apply the named profile's key/value pairs over the base config, returning an
@@ -423,10 +614,51 @@ pub fn path() -> Option<PathBuf> {
     config_path()
 }
 
-/// Persist `updates` (`(key, value)` pairs) into the config file, preserving all
-/// other lines, comments, and ordering. A key already present is updated in place;
-/// a missing key is appended. Creates the parent directory and file if needed.
-/// Used by the live settings overlay so changes survive a restart.
+/// The resolved config DIRECTORY (the parent of `glassy.conf`), honoring the
+/// same platform + `$XDG_CONFIG_HOME` resolution as [`path`]. `pub(crate)` so
+/// the user-themes loader can find its `themes/` subdirectory without
+/// duplicating the platform resolution logic.
+pub(crate) fn config_dir() -> Option<PathBuf> {
+    config_path().and_then(|p| p.parent().map(PathBuf::from))
+}
+
+/// The full on-disk config text as of the last successful [`parse_config_file`]
+/// call (startup load, live-reload, or a runtime profile switch) — i.e. what
+/// the in-memory `Config` currently reflects. `save`/`save_into_section`
+/// compare a fresh read against this right before writing to detect an
+/// external edit (a manual `glassy.conf` tweak) that landed inside the
+/// config-watcher's ~500ms debounce window, so a Settings-panel Save — which
+/// always writes every `SAVED_KEYS` value, not just the ones the user actually
+/// changed — doesn't silently stomp that edit. See [`protect_against_external_edit`].
+static LAST_LOADED_TEXT: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+
+fn last_loaded_slot() -> &'static Mutex<Option<String>> {
+    LAST_LOADED_TEXT.get_or_init(|| Mutex::new(None))
+}
+
+/// Stash `text` as the most recent successfully-parsed config snapshot.
+/// Called once from [`parse_config_file`]; a poisoned lock (impossible short of
+/// a panic mid-assignment, which never happens here) just leaves the previous
+/// snapshot in place rather than propagating.
+fn record_loaded_snapshot(text: &str) {
+    if let Ok(mut slot) = last_loaded_slot().lock() {
+        *slot = Some(text.to_string());
+    }
+}
+
+/// A cheap clone of the last recorded load snapshot, or `None` if the process
+/// hasn't loaded a config file yet (in which case there is nothing to compare
+/// against, so the external-edit guard is a no-op).
+fn peek_loaded_snapshot() -> Option<String> {
+    last_loaded_slot().lock().ok().and_then(|g| g.clone())
+}
+
+/// Persist `updates` (`(key, value)` pairs) into the config file's TOP-LEVEL
+/// scope, preserving all other lines, comments, and ordering. A key already
+/// present is updated in place; a missing key is appended before the first
+/// `[section]` header (or at the end of the file when there are none). Creates
+/// the parent directory and file if needed. Used by the live settings overlay so
+/// changes survive a restart.
 pub fn save(updates: &[(&str, String)]) -> Result<()> {
     let path = config_path().context("no config path (HOME/XDG unset)")?;
     if let Some(dir) = path.parent() {
@@ -434,46 +666,440 @@ pub fn save(updates: &[(&str, String)]) -> Result<()> {
             .with_context(|| format!("creating config dir {}", dir.display()))?;
     }
     let existing = std::fs::read_to_string(&path).unwrap_or_default();
-    let out = merge_config(&existing, updates);
-    std::fs::write(&path, out).with_context(|| format!("writing config {}", path.display()))?;
+    let protected = protect_against_external_edit(&existing, None, updates);
+    let out = merge_config(&existing, &protected);
+    std::fs::write(&path, &out).with_context(|| format!("writing config {}", path.display()))?;
+    record_loaded_snapshot(&out);
     Ok(())
 }
 
-/// Merge `updates` into the text of a config file: a present key is updated in
-/// place (preserving its position), a missing one is appended; comments, blank
+/// Persist `updates` into a specific `[profile.NAME]` section of the config file
+/// (`section = Some(name)`), or the TOP-LEVEL scope (`section = None`, same
+/// behavior as [`save`]) — preserving everything else: comments, blank lines,
+/// other sections, and key ordering within the target range.
+///
+/// A key already present within the target section is updated in place; a
+/// missing one is appended at the END of that section's line range (just before
+/// the next `[section]` header, or end of file). When `section = Some(name)` and
+/// no matching `[profile.name]` header exists yet, a brand-new section is
+/// appended at the end of the file (with a blank-line separator when the file
+/// has non-blank trailing content).
+///
+/// Header matching mirrors [`parse_config_file`]'s rules exactly (so a write
+/// always targets the section a subsequent read would resolve): the literal
+/// `profile.` prefix is case-SENSITIVE, but the name after it is matched
+/// case-INsensitively. When multiple `[profile.name]` headers exist in the file
+/// (a malformed/hand-edited config), only the FIRST is touched — mirroring
+/// [`profile_names_from_text`]'s first-seen identity.
+///
+/// Creates the parent directory and file if needed.
+pub fn save_into_section(section: Option<&str>, updates: &[(&str, String)]) -> Result<()> {
+    let path = config_path().context("no config path (HOME/XDG unset)")?;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)
+            .with_context(|| format!("creating config dir {}", dir.display()))?;
+    }
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    let protected = protect_against_external_edit(&existing, section, updates);
+    let out = merge_into_section(&existing, section, &protected);
+    std::fs::write(&path, &out).with_context(|| format!("writing config {}", path.display()))?;
+    record_loaded_snapshot(&out);
+    Ok(())
+}
+
+/// Delete a whole `[profile.NAME]` section from the config file: its header line
+/// and body (up to but not including the next `[section]` header or EOF). A no-op
+/// (leaving the file byte-for-byte unchanged) when no matching section exists.
+/// The pure boundary logic lives in [`remove_section_text`] for unit testing.
+///
+/// Case rules mirror the rest of the section machinery: the `profile.` prefix is
+/// matched case-sensitively, the name after it case-insensitively.
+pub fn remove_section(name: &str) -> Result<()> {
+    let path = config_path().context("no config path (HOME/XDG unset)")?;
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    let out = remove_section_text(&existing, name);
+    std::fs::write(&path, &out).with_context(|| format!("writing config {}", path.display()))?;
+    record_loaded_snapshot(&out);
+    Ok(())
+}
+
+/// Rename a `[profile.OLD]` section's header to `[profile.NEW]` in place, leaving
+/// its body, every other section, and all comments verbatim. A no-op (file
+/// unchanged) when no `[profile.OLD]` header exists. The caller is responsible
+/// for rejecting a `new` name that collides with an existing profile (this
+/// function performs the surgery only). Pure logic in [`rename_section_text`].
+pub fn rename_section(old: &str, new: &str) -> Result<()> {
+    let path = config_path().context("no config path (HOME/XDG unset)")?;
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    let out = rename_section_text(&existing, old, new);
+    std::fs::write(&path, &out).with_context(|| format!("writing config {}", path.display()))?;
+    record_loaded_snapshot(&out);
+    Ok(())
+}
+
+/// Merge `updates` into the text of a config file's TOP-LEVEL scope: a present
+/// key is updated in place (preserving its position), a missing one is appended
+/// BEFORE the first `[section]` header (never inside one); comments, blank
 /// lines, unmanaged keys, and ordering are preserved. Pure for unit testing.
 fn merge_config(existing: &str, updates: &[(&str, String)]) -> String {
-    let mut lines: Vec<String> = existing.lines().map(str::to_string).collect();
-    let mut written = vec![false; updates.len()];
+    merge_into_section(existing, None, updates)
+}
 
-    for line in lines.iter_mut() {
-        let trimmed = line.trim_start();
-        if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with(';') {
-            continue;
-        }
-        let Some((key, _)) = trimmed.split_once('=') else {
-            continue;
-        };
-        let key = key.trim().to_ascii_lowercase();
-        for (i, (k, v)) in updates.iter().enumerate() {
-            if !written[i] && key == *k {
-                // Strip newlines and carriage returns from value to prevent injection.
-                let clean_v = v.replace(['\n', '\r'], "");
-                *line = format!("{k} = {clean_v}");
-                written[i] = true;
-            }
-        }
-    }
-    for (i, (k, v)) in updates.iter().enumerate() {
-        if !written[i] {
-            // Strip newlines and carriage returns from value to prevent injection.
-            let clean_v = v.replace(['\n', '\r'], "");
-            lines.push(format!("{k} = {clean_v}"));
-        }
+/// The pure text surgery behind [`remove_section`]: splice out the
+/// `[profile.NAME]` header line and its body span (bounded by the next
+/// `[section]` header, reusing [`find_range`]'s boundary logic so removal and
+/// merge agree on where a section ends). Returns `existing` unchanged when no
+/// matching section exists, so a no-op never rewrites the file (or its trailing
+/// newline). On a real removal the result is normalized to exactly one trailing
+/// newline, matching [`merge_into_section`].
+fn remove_section_text(existing: &str, name: &str) -> String {
+    let mut lines: Vec<String> = existing.lines().map(str::to_string).collect();
+    let key = name.to_ascii_lowercase();
+    let Some(header_idx) = lines
+        .iter()
+        .position(|l| profile_header_name(l).as_deref() == Some(key.as_str()))
+    else {
+        return existing.to_string();
+    };
+    // The body ends at the next `[section]` header after the profile header, or
+    // EOF — the exact end `find_range` uses, so the removed span is header + body.
+    let end = lines[header_idx + 1..]
+        .iter()
+        .position(|l| is_section_header(l))
+        .map(|off| header_idx + 1 + off)
+        .unwrap_or(lines.len());
+    lines.drain(header_idx..end);
+    if lines.is_empty() {
+        return String::new();
     }
     let mut out = lines.join("\n");
     out.push('\n');
     out
+}
+
+/// The pure text surgery behind [`rename_section`]: rewrite the matched
+/// `[profile.OLD]` header line to `[profile.NEW]` (lower-cased, matching the
+/// canonical stored form) and leave everything else — body, other sections,
+/// comments — verbatim. Returns `existing` unchanged when no match exists.
+fn rename_section_text(existing: &str, old: &str, new: &str) -> String {
+    let mut lines: Vec<String> = existing.lines().map(str::to_string).collect();
+    let key = old.to_ascii_lowercase();
+    let Some(idx) = lines
+        .iter()
+        .position(|l| profile_header_name(l).as_deref() == Some(key.as_str()))
+    else {
+        return existing.to_string();
+    };
+    lines[idx] = format!("[profile.{}]", new.to_ascii_lowercase());
+    let mut out = lines.join("\n");
+    out.push('\n');
+    out
+}
+
+/// Whether a trimmed line is a `[...]` section header of any kind.
+fn is_section_header(line: &str) -> bool {
+    let t = line.trim();
+    t.starts_with('[') && t.ends_with(']')
+}
+
+/// Parse a trimmed section-header line's profile name (`"work"` from
+/// `"[profile.work]"`), if it is a `[profile.NAME]` header — matching the exact
+/// case rules [`parse_config_file`] uses: the `profile.` prefix is
+/// case-sensitive, the name after it is lower-cased for comparison.
+fn profile_header_name(line: &str) -> Option<String> {
+    let line = line.trim();
+    if !(line.starts_with('[') && line.ends_with(']')) {
+        return None;
+    }
+    let inner = line[1..line.len() - 1].trim();
+    let name = inner.strip_prefix("profile.")?.trim();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_ascii_lowercase())
+    }
+}
+
+/// Resolve the (start, end) half-open line-index range for `section`'s body —
+/// the TOP-LEVEL scope (`section = None`, bounded by the first `[section]`
+/// header) or a specific `[profile.NAME]` section's body (bounded by the next
+/// `[section]` header after its own) — WITHOUT mutating `lines`. Returns `None`
+/// only when `section = Some(name)` and no matching header exists yet (a
+/// lookup-only caller has nothing to find; [`merge_into_section`] is the one
+/// place that creates a missing section on write).
+fn find_range(lines: &[String], section: Option<&str>) -> Option<(usize, usize)> {
+    match section {
+        None => {
+            let end = lines
+                .iter()
+                .position(|l| is_section_header(l))
+                .unwrap_or(lines.len());
+            Some((0, end))
+        }
+        Some(name) => {
+            let key = name.to_ascii_lowercase();
+            let header_idx = lines
+                .iter()
+                .position(|l| profile_header_name(l).as_deref() == Some(key.as_str()))?;
+            let end = lines[header_idx + 1..]
+                .iter()
+                .position(|l| is_section_header(l))
+                .map(|off| header_idx + 1 + off)
+                .unwrap_or(lines.len());
+            Some((header_idx + 1, end))
+        }
+    }
+}
+
+/// Merge `updates` into `existing`'s target range: the TOP-LEVEL scope
+/// (`section = None`, bounded by the first `[section]` header) or a specific
+/// `[profile.NAME]` section's body (`section = Some(name)`, bounded by the next
+/// `[section]` header after its own). See [`save_into_section`] for the full
+/// contract. Pure for unit testing.
+fn merge_into_section(existing: &str, section: Option<&str>, updates: &[(&str, String)]) -> String {
+    let mut lines: Vec<String> = existing.lines().map(str::to_string).collect();
+
+    let range: (usize, usize) = match find_range(&lines, section) {
+        Some(r) => r,
+        None => {
+            // `section = Some(name)` and no existing header: append a brand-new
+            // one at the end of the file (separated by a blank line unless the
+            // file already ends in blank/empty content).
+            let name = section.expect("find_range only returns None when section is Some");
+            if lines.last().is_some_and(|l| !l.is_empty()) {
+                lines.push(String::new());
+            }
+            lines.push(format!("[profile.{name}]"));
+            let start = lines.len();
+            (start, start)
+        }
+    };
+
+    apply_updates_in_range(&mut lines, range, updates);
+
+    let mut out = lines.join("\n");
+    out.push('\n');
+    out
+}
+
+/// Locate the first unquoted `#` or `;` that begins a trailing inline comment in
+/// a config value substring `s`. A marker inside a matched `'...'`/`"..."` span
+/// is part of the value, not a comment, and is skipped; an unterminated quote
+/// runs to the end of the string (so any `#`/`;` after an opening quote with no
+/// matching close is treated as still-quoted).
+///
+/// A marker only counts as a comment when it is preceded by whitespace that
+/// itself follows real (non-whitespace) value content — i.e. a marker that is
+/// the FIRST non-whitespace character of the value is NOT a comment. This is
+/// what lets a bare unquoted hex color value (`color.ansi0 = #15161e`) survive:
+/// its leading `#` is value content, while a genuine trailing comment
+/// (`#15161e  # black`) is still detected. A marker glued to preceding value
+/// content with no whitespace (`foo#bar`) is likewise treated as value.
+fn find_inline_comment_start(s: &str) -> Option<usize> {
+    let mut in_single = false;
+    let mut in_double = false;
+    // Whether we've seen any real (non-whitespace) value content yet, and whether
+    // the immediately-preceding character was whitespace. A comment marker needs
+    // both: content before it AND a whitespace gap separating it from that content.
+    let mut seen_content = false;
+    let mut prev_ws = true;
+    for (idx, ch) in s.char_indices() {
+        match ch {
+            '\'' if !in_double => {
+                in_single = !in_single;
+                seen_content = true;
+                prev_ws = false;
+            }
+            '"' if !in_single => {
+                in_double = !in_double;
+                seen_content = true;
+                prev_ws = false;
+            }
+            '#' | ';' if !in_single && !in_double => {
+                if seen_content && prev_ws {
+                    return Some(idx);
+                }
+                // Otherwise the marker is part of the value (a leading bare `#`
+                // hex color, or a marker glued to preceding content).
+                seen_content = true;
+                prev_ws = false;
+            }
+            c if c.is_whitespace() => {
+                prev_ws = true;
+            }
+            _ => {
+                seen_content = true;
+                prev_ws = false;
+            }
+        }
+    }
+    None
+}
+
+/// Split a raw, unquoted-scan value substring (the text after a config line's
+/// `=`) into `(value, trailing_comment)`. `trailing_comment` is `Some` (right-
+/// trimmed, marker included) when an unquoted `#`/`;` was found; `value` still
+/// carries its own surrounding whitespace — callers trim as needed.
+fn split_value_and_comment(raw_value: &str) -> (&str, Option<&str>) {
+    match find_inline_comment_start(raw_value) {
+        Some(idx) => (&raw_value[..idx], Some(raw_value[idx..].trim_end())),
+        None => (raw_value, None),
+    }
+}
+
+/// Look up `key`'s current value within `lines[range.0..range.1]`, the same
+/// way [`apply_updates_in_range`] finds a matching line — but read-only, and
+/// with any inline trailing comment stripped. Used by
+/// [`protect_against_external_edit`] to compare a baseline snapshot's value
+/// for a key against the value about to be written.
+fn find_key_value_in_range(lines: &[String], range: (usize, usize), key: &str) -> Option<String> {
+    let (start, end) = range;
+    let end = end.min(lines.len());
+    if start >= end {
+        return None;
+    }
+    for line in &lines[start..end] {
+        let trimmed = line.trim_start();
+        if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with(';') {
+            continue;
+        }
+        let Some((k, raw_value)) = trimmed.split_once('=') else {
+            continue;
+        };
+        if k.trim().eq_ignore_ascii_case(key) {
+            let (value, _) = split_value_and_comment(raw_value);
+            return Some(value.trim().to_string());
+        }
+    }
+    None
+}
+
+/// Filter `updates` down to the keys that genuinely changed since the last
+/// successful config load, guarding against clobbering a fresh external edit.
+///
+/// `save`/`save_into_section` always forward the settings UI's FULL live
+/// snapshot (every `SAVED_KEYS` value, via `App::save_settings`), not a diff —
+/// so if a manual `glassy.conf` edit lands inside the config-watcher's ~500ms
+/// debounce window (after the in-memory `Config` was last loaded but before a
+/// Settings-panel Save fires), a naive merge would silently overwrite that
+/// edit with the stale in-memory value for every key the UI didn't actually
+/// touch. Comparing `existing` (freshly re-read right before this call) against
+/// the snapshot recorded at the last load detects that window: when they
+/// differ, a key is only forwarded if its new value differs from what was
+/// loaded (a real settings-UI change — last-writer-wins for that narrow same-
+/// key race is acceptable); an update whose value merely matches the stale
+/// load is dropped so it doesn't stomp whatever the external edit just wrote.
+///
+/// When nothing has been loaded yet, the file is unchanged since the last
+/// load, or the target section doesn't exist in the loaded baseline (e.g. a
+/// brand-new profile), every update is forwarded unmodified — today's
+/// behavior.
+fn protect_against_external_edit<'a>(
+    existing: &str,
+    section: Option<&str>,
+    updates: &'a [(&'a str, String)],
+) -> Vec<(&'a str, String)> {
+    let Some(baseline) = peek_loaded_snapshot() else {
+        return updates.to_vec();
+    };
+    filter_updates_against_baseline(&baseline, existing, section, updates)
+}
+
+/// The pure filtering logic behind [`protect_against_external_edit`], taking
+/// the baseline snapshot as a plain argument instead of reading the process-
+/// global [`LAST_LOADED_TEXT`] — split out so tests can drive it directly
+/// without contending over shared global state with other tests running in
+/// parallel. See [`protect_against_external_edit`] for the full contract.
+fn filter_updates_against_baseline<'a>(
+    baseline: &str,
+    existing: &str,
+    section: Option<&str>,
+    updates: &'a [(&'a str, String)],
+) -> Vec<(&'a str, String)> {
+    if baseline == existing {
+        return updates.to_vec();
+    }
+    let baseline_lines: Vec<String> = baseline.lines().map(str::to_string).collect();
+    let Some(range) = find_range(&baseline_lines, section) else {
+        return updates.to_vec();
+    };
+    updates
+        .iter()
+        .filter(
+            |(k, v)| match find_key_value_in_range(&baseline_lines, range, k) {
+                Some(old) => old != *v,
+                None => true,
+            },
+        )
+        .cloned()
+        .collect()
+}
+
+/// Update-in-place (or append-at-range-end) the `(key, value)` pairs within
+/// `lines[range.0..range.1]`. A key found in the range (skipping comments/blank
+/// lines) is rewritten in place, preserving any inline trailing `#`/`;` comment
+/// on that line (a `#`/`;` inside a quoted value doesn't count — see
+/// [`find_inline_comment_start`]); a key not found is appended just before any
+/// TRAILING blank lines at the end of the range (so a blank-line separator
+/// before the next section, or the file's end, stays trailing instead of
+/// getting sandwiched between old and newly-appended content), preserving
+/// `updates`' relative order.
+fn apply_updates_in_range(
+    lines: &mut Vec<String>,
+    range: (usize, usize),
+    updates: &[(&str, String)],
+) {
+    let (start, end) = range;
+    let mut written = vec![false; updates.len()];
+
+    for line in &mut lines[start..end] {
+        let trimmed = line.trim_start();
+        if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with(';') {
+            continue;
+        }
+        let Some((key, raw_value)) = trimmed.split_once('=') else {
+            continue;
+        };
+        let key = key.trim().to_ascii_lowercase();
+        // Computed (and owned) BEFORE the `*line` reassignment below so the
+        // borrow of `line` via `trimmed`/`raw_value` ends here, not at the
+        // assignment (which would otherwise conflict under NLL).
+        let comment: Option<String> = split_value_and_comment(raw_value).1.map(str::to_string);
+        for (i, (k, v)) in updates.iter().enumerate() {
+            if !written[i] && key == *k {
+                // Strip newlines and carriage returns from value to prevent injection.
+                let clean_v = v.replace(['\n', '\r'], "");
+                *line = match &comment {
+                    Some(c) => format!("{k} = {clean_v}  {c}"),
+                    None => format!("{k} = {clean_v}"),
+                };
+                written[i] = true;
+            }
+        }
+    }
+
+    let insertions: Vec<String> = updates
+        .iter()
+        .zip(written.iter())
+        .filter(|&(_, &w)| !w)
+        .map(|((k, v), _)| {
+            // Strip newlines and carriage returns from value to prevent injection.
+            let clean_v = v.replace(['\n', '\r'], "");
+            format!("{k} = {clean_v}")
+        })
+        .collect();
+    if insertions.is_empty() {
+        return;
+    }
+    // Back up over trailing blank lines within the range so the insertion point
+    // sits right after the last real content line, not after a blank separator.
+    let mut insert_at = end;
+    while insert_at > start && lines[insert_at - 1].trim().is_empty() {
+        insert_at -= 1;
+    }
+    for (offset, line) in insertions.into_iter().enumerate() {
+        lines.insert(insert_at + offset, line);
+    }
 }
 
 /// The resolved config file path, honoring `$XDG_CONFIG_HOME` then `$HOME`.
@@ -558,6 +1184,13 @@ pub(super) fn parse_config_file(text: &str, raw: &mut RawConfig) -> Result<()> {
             }
         }
     }
+    // Only stash the snapshot on a successful parse: every real load path
+    // (`Settings::resolve`, `resolve_with_profile`, `resolve_base`) routes
+    // through here, so this is the one place that sees exactly what the
+    // in-memory `Config` now reflects. A failed parse leaves the app's config
+    // unchanged, so it must not overwrite the snapshot either — see
+    // `save`/`save_into_section`'s external-edit guard below.
+    record_loaded_snapshot(text);
     Ok(())
 }
 
@@ -593,8 +1226,11 @@ fn unquote(s: &str) -> &str {
     s
 }
 
-/// Parse a hex color string (with or without leading #) to an Rgb.
-pub(super) fn parse_hex_color(s: &str) -> Result<alacritty_terminal::vte::ansi::Rgb> {
+/// Parse a hex color string (with or without leading #) to an Rgb. `pub(crate)`
+/// so the theme-file importer (`config::theme_import`) and the user-themes
+/// loader (`color::user_themes`) share this one parser instead of each
+/// hand-rolling their own.
+pub(crate) fn parse_hex_color(s: &str) -> Result<alacritty_terminal::vte::ansi::Rgb> {
     let hex = s.trim_start_matches('#');
     if hex.len() != 6 {
         bail!("color must be a 6-digit hex value, got '{s}'");
@@ -606,6 +1242,25 @@ pub(super) fn parse_hex_color(s: &str) -> Result<alacritty_terminal::vte::ansi::
     let b =
         u8::from_str_radix(&hex[4..6], 16).with_context(|| format!("invalid hex color '{s}'"))?;
     Ok(alacritty_terminal::vte::ansi::Rgb { r, g, b })
+}
+
+/// Dry-run validate a single `key = value` pair through the exact parser the
+/// config file loader uses ([`apply_kv`]), without touching any live state.
+/// Used by `ipc::control`'s `set-config` remote-control verb to reject a hard
+/// parse failure (e.g. a non-numeric `opacity`, an out-of-range
+/// `cursor_style`) before ever writing the value to disk.
+///
+/// `Ok(())` means `apply_kv` accepted the value — it does NOT mean the value
+/// survives unclamped: several numeric keys (`opacity`, `power_mode_intensity`,
+/// the `fx_*` channels) are silently clamped later, in
+/// [`RawConfig::into_settings`], rather than rejected here. An unrecognized
+/// key is intentionally not an error from `apply_kv` itself (it just logs a
+/// warning and no-ops); callers that need to reject unknown keys (like
+/// `set-config`) check that separately (see
+/// `ipc::control::is_known_config_key`) before ever calling this.
+pub fn validate_kv(key: &str, value: &str) -> Result<()> {
+    let mut raw = RawConfig::default();
+    apply_kv(key, value, &mut raw)
 }
 
 /// Apply a single recognized `key`/`value` pair into `raw`.
@@ -700,7 +1355,7 @@ pub(super) fn apply_kv(key: &str, value: &str, raw: &mut RawConfig) -> Result<()
             let n: usize = value
                 .parse()
                 .with_context(|| format!("scrollback: invalid integer '{value}'"))?;
-            raw.scrollback = Some(n.clamp(0, 1_000_000));
+            raw.scrollback = Some(n.clamp(0, SCROLLBACK_MAX));
         }
         "command_history" => {
             let n: usize = value
@@ -715,7 +1370,7 @@ pub(super) fn apply_kv(key: &str, value: &str, raw: &mut RawConfig) -> Result<()
             let ms: u64 = value.parse().with_context(|| {
                 format!("notify_command_threshold_ms: invalid integer '{value}'")
             })?;
-            raw.notify_command_threshold_ms = Some(ms.min(86_400_000)); // cap at 24h
+            raw.notify_command_threshold_ms = Some(ms.min(NOTIFY_COMMAND_THRESHOLD_MS_MAX));
         }
         "command_fold" => {
             raw.command_fold = Some(parse_bool(value, "command_fold")?);
@@ -747,6 +1402,19 @@ pub(super) fn apply_kv(key: &str, value: &str, raw: &mut RawConfig) -> Result<()
         }
         "dim_unfocused" => {
             raw.dim_unfocused = Some(parse_bool(value, "dim_unfocused")?);
+        }
+        "unfocused_dim" => {
+            let d: f32 = value
+                .parse()
+                .with_context(|| format!("unfocused_dim: invalid number '{value}'"))?;
+            raw.unfocused_dim = Some(d);
+        }
+        "opacity_scope" => {
+            raw.opacity_text = Some(match value {
+                "background" => false,
+                "text" => true,
+                other => bail!("opacity_scope must be 'background' or 'text', got '{other}'"),
+            });
         }
         "word_separator" => {
             raw.word_separator = Some(value.to_string());
@@ -833,12 +1501,17 @@ pub(super) fn apply_kv(key: &str, value: &str, raw: &mut RawConfig) -> Result<()
         "quake" => {
             raw.quake = Some(parse_bool(value, "quake")?);
         }
+        "decorations" => {
+            raw.decorations = Some(parse_bool(value, "decorations")?);
+        }
         "quake_height" => {
             let h: f32 = value
                 .parse()
                 .with_context(|| format!("quake_height: invalid number '{value}'"))?;
-            if !(h.is_finite() && (0.1..=1.0).contains(&h)) {
-                bail!("quake_height must be between 0.1 and 1.0, got {h}");
+            if !(h.is_finite() && (QUAKE_HEIGHT_MIN..=QUAKE_HEIGHT_MAX).contains(&h)) {
+                bail!(
+                    "quake_height must be between {QUAKE_HEIGHT_MIN} and {QUAKE_HEIGHT_MAX}, got {h}"
+                );
             }
             raw.quake_height = Some(h);
         }
@@ -846,7 +1519,7 @@ pub(super) fn apply_kv(key: &str, value: &str, raw: &mut RawConfig) -> Result<()
             let ms: u64 = value
                 .parse()
                 .with_context(|| format!("quake_animation_ms: invalid integer '{value}'"))?;
-            raw.quake_animation_ms = Some(ms.min(5_000));
+            raw.quake_animation_ms = Some(ms.min(QUAKE_ANIMATION_MS_MAX));
         }
         "power_mode" => {
             raw.power_mode = Some(parse_bool(value, "power_mode")?);
@@ -859,6 +1532,24 @@ pub(super) fn apply_kv(key: &str, value: &str, raw: &mut RawConfig) -> Result<()
                 bail!("power_mode_intensity must be between 0.0 and 1.0, got {i}");
             }
             raw.power_mode_intensity = Some(i);
+        }
+        "fx_curvature" => {
+            raw.fx_curvature = Some(parse_unit_f32(value, "fx_curvature")?);
+        }
+        "fx_scanline" => {
+            raw.fx_scanline = Some(parse_unit_f32(value, "fx_scanline")?);
+        }
+        "fx_glow" => {
+            raw.fx_glow = Some(parse_unit_f32(value, "fx_glow")?);
+        }
+        "fx_vignette" => {
+            raw.fx_vignette = Some(parse_unit_f32(value, "fx_vignette")?);
+        }
+        "fx_grain" => {
+            raw.fx_grain = Some(parse_unit_f32(value, "fx_grain")?);
+        }
+        "fx_tint" => {
+            raw.fx_tint = Some(parse_unit_f32(value, "fx_tint")?);
         }
         "color.fg" => {
             parse_hex_color(value)?;
@@ -913,36 +1604,10 @@ pub(super) fn apply_kv(key: &str, value: &str, raw: &mut RawConfig) -> Result<()
             }
         }
         "status_bar_segments" => {
-            use crate::app::StatusBarSegment;
             if value.is_empty() {
                 raw.status_bar_segments = None;
             } else {
-                let segs: Vec<StatusBarSegment> = value
-                    .split([',', ' '])
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .filter_map(|s| match s.to_ascii_lowercase().as_str() {
-                        "cwd" => Some(StatusBarSegment::Cwd),
-                        "git_branch" | "git" => Some(StatusBarSegment::GitBranch),
-                        "process" | "fg_process" => Some(StatusBarSegment::Process),
-                        "time" | "clock" => Some(StatusBarSegment::Time),
-                        "mode" => Some(StatusBarSegment::Mode),
-                        "broadcast" | "bcast" => Some(StatusBarSegment::Broadcast),
-                        "selection" | "sel" => Some(StatusBarSegment::Selection),
-                        "scroll" => Some(StatusBarSegment::Scroll),
-                        "encoding" | "enc" => Some(StatusBarSegment::Encoding),
-                        "progress" => Some(StatusBarSegment::Progress),
-                        "exit_status" | "exit" => Some(StatusBarSegment::ExitStatus),
-                        "key_hints" | "hints" => Some(StatusBarSegment::KeyHints),
-                        other => {
-                            log::warn!(
-                                "glassy: ignoring unknown status_bar_segments entry '{other}'"
-                            );
-                            None
-                        }
-                    })
-                    .collect();
-                raw.status_bar_segments = Some(segs);
+                raw.status_bar_segments = Some(parse_status_bar_segments(value));
             }
         }
         "status_bar_time_format" => {
@@ -975,6 +1640,35 @@ pub(super) fn apply_kv(key: &str, value: &str, raw: &mut RawConfig) -> Result<()
             if !value.is_empty() {
                 raw.font_variations = Some(parse_font_variations(value));
             }
+        }
+        "command_blocks" => {
+            let v = value.to_ascii_lowercase();
+            match v.as_str() {
+                "off" | "badges" | "cards" => raw.command_blocks = Some(v),
+                _ => bail!("command_blocks must be off, badges, or cards; got '{value}'"),
+            }
+        }
+        // --- w15: scrollback memory bounding (Phase 1) ---
+        "scrollback_background_cap" => {
+            let n: usize = value
+                .parse()
+                .with_context(|| format!("scrollback_background_cap: invalid integer '{value}'"))?;
+            raw.scrollback_background_cap = Some(n.clamp(0, SCROLLBACK_MAX));
+        }
+        "scrollback_background_idle_secs" => {
+            let s: u64 = value.parse().with_context(|| {
+                format!("scrollback_background_idle_secs: invalid integer '{value}'")
+            })?;
+            raw.scrollback_background_idle_secs = Some(s);
+        }
+        "pane_header_style" => {
+            // Unrecognized values are accepted here (stored verbatim) and fall
+            // back to `Full` in `into_settings` — same forgiving pattern as
+            // `window_effect` — so a typo doesn't hard-fail config load.
+            raw.pane_header_style = Some(value.to_ascii_lowercase());
+        }
+        "pane_headers_single" => {
+            raw.pane_headers_single = Some(parse_bool(value, "pane_headers_single")?);
         }
         other => {
             log::warn!("glassy: ignoring unknown config key '{other}'");
@@ -1012,6 +1706,18 @@ pub(super) fn parse_pos_f32(value: &str, field: &str) -> Result<f32> {
     Ok(v)
 }
 
+/// Parse a float clamped to `[0.0, 1.0]` for a named field (the Custom-effect
+/// channel intensities and other unit-range config knobs).
+fn parse_unit_f32(value: &str, field: &str) -> Result<f32> {
+    let v: f32 = value
+        .parse()
+        .with_context(|| format!("{field}: invalid number '{value}'"))?;
+    if !(v.is_finite() && (0.0..=1.0).contains(&v)) {
+        bail!("{field} must be between 0.0 and 1.0, got {value}");
+    }
+    Ok(v)
+}
+
 /// Map a (validated) `show_tab_bar` token to the [`TabBarMode`] enum, defaulting
 /// to `Auto` when unset. The validation already happened in [`apply_kv`].
 pub(super) fn parse_tab_bar_mode(value: Option<&str>) -> crate::app::TabBarMode {
@@ -1020,6 +1726,18 @@ pub(super) fn parse_tab_bar_mode(value: Option<&str>) -> crate::app::TabBarMode 
         Some("always") => TabBarMode::Always,
         Some("never") => TabBarMode::Never,
         _ => TabBarMode::Auto,
+    }
+}
+
+/// Map a (validated) `command_blocks` token to the [`crate::app::CommandBlocksMode`]
+/// enum, defaulting to `Badges` (today's appearance) when unset. The validation
+/// already happened in [`apply_kv`].
+pub(super) fn parse_command_blocks_mode(value: Option<&str>) -> crate::app::CommandBlocksMode {
+    use crate::app::CommandBlocksMode;
+    match value {
+        Some("off") => CommandBlocksMode::Off,
+        Some("cards") => CommandBlocksMode::Cards,
+        _ => CommandBlocksMode::Badges,
     }
 }
 
@@ -1064,4 +1782,945 @@ pub(super) fn parse_shell(value: &str) -> Option<Shell> {
     let program = parts.next()?.to_string();
     let args = parts.map(str::to_string).collect();
     Some(Shell::new(program, args))
+}
+
+#[cfg(test)]
+mod merge_tests {
+    //! Exhaustive coverage for `merge_config` / `save_into_section`'s underlying
+    //! `merge_into_section`: a bug here silently corrupts a user's config file on
+    //! the next Save, so every boundary (empty file, no sections, mid-file
+    //! section, trailing section, duplicate headers, comments, trailing
+    //! newlines) gets its own focused test rather than one broad one.
+    use super::*;
+
+    fn upd<'a>(pairs: &[(&'a str, &str)]) -> Vec<(&'a str, String)> {
+        pairs.iter().map(|(k, v)| (*k, v.to_string())).collect()
+    }
+
+    // -----------------------------------------------------------------------
+    // merge_config (top-level scope)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn merge_config_empty_file_appends_all() {
+        let out = merge_config("", &upd(&[("theme", "dracula"), ("opacity", "0.9")]));
+        assert_eq!(out, "theme = dracula\nopacity = 0.9\n");
+    }
+
+    #[test]
+    fn merge_config_updates_in_place_preserves_position_and_comments() {
+        let existing = "\
+# my config
+theme = tokyo-night
+font_size = 14
+opacity = 0.80
+";
+        let out = merge_config(existing, &upd(&[("font_size", "20"), ("opacity", "0.95")]));
+        assert_eq!(
+            out,
+            "\
+# my config
+theme = tokyo-night
+font_size = 20
+opacity = 0.95
+"
+        );
+    }
+
+    #[test]
+    fn merge_config_appends_missing_key_when_no_sections_exist() {
+        let existing = "theme = dracula\nfont_size = 14\n";
+        let out = merge_config(existing, &upd(&[("scrollback", "5000")]));
+        assert_eq!(out, "theme = dracula\nfont_size = 14\nscrollback = 5000\n");
+    }
+
+    /// REGRESSION for the bug this branch fixes: `merge_config` used to append a
+    /// missing top-level key at the absolute END of the file with no regard for
+    /// section boundaries. When the file's last section was a `[profile.NAME]`
+    /// (or `[keybindings]`), the appended line landed INSIDE that section instead
+    /// of at the top level — e.g. saving `scrollback` when `[profile.work]` was
+    /// the last thing in the file silently turned it into a profile-only
+    /// override, invisible to the base config. The fix bounds the top-level
+    /// range to end at the first `[section]` header; a missing key is inserted
+    /// there instead.
+    #[test]
+    fn merge_config_top_level_append_lands_before_first_section_not_inside_it() {
+        let existing = "\
+theme = dracula
+
+[profile.work]
+font_size = 18
+";
+        let out = merge_config(existing, &upd(&[("scrollback", "5000")]));
+        assert_eq!(
+            out,
+            "\
+theme = dracula
+scrollback = 5000
+
+[profile.work]
+font_size = 18
+"
+        );
+        // The appended line must be BEFORE the section header, not after/inside it.
+        let section_line = out.lines().position(|l| l == "[profile.work]").unwrap();
+        let appended_line = out.lines().position(|l| l == "scrollback = 5000").unwrap();
+        assert!(
+            appended_line < section_line,
+            "top-level append must precede the first section header"
+        );
+    }
+
+    /// Same regression, but with `[keybindings]` as the last section — the same
+    /// unconditional end-of-file append bug would have corrupted a keybinding
+    /// override into a nonsense top-level-looking line inside `[keybindings]`.
+    #[test]
+    fn merge_config_top_level_append_lands_before_keybindings_section() {
+        let existing = "theme = dracula\n\n[keybindings]\nctrl+t = new_tab\n";
+        let out = merge_config(existing, &upd(&[("scrollback", "5000")]));
+        let section_line = out.lines().position(|l| l == "[keybindings]").unwrap();
+        let appended_line = out.lines().position(|l| l == "scrollback = 5000").unwrap();
+        assert!(appended_line < section_line);
+    }
+
+    /// A key with the same name that exists ONLY inside a `[profile.*]` section
+    /// must not be mistaken for an existing top-level key: saving it at the top
+    /// level appends a NEW top-level line, and the profile-scoped one is left
+    /// completely untouched.
+    #[test]
+    fn merge_config_key_inside_section_is_not_mistaken_for_top_level() {
+        let existing = "theme = dracula\n\n[profile.compact]\nfont_size = 10\n";
+        let out = merge_config(existing, &upd(&[("font_size", "16")]));
+        assert_eq!(
+            out,
+            "theme = dracula\nfont_size = 16\n\n[profile.compact]\nfont_size = 10\n"
+        );
+    }
+
+    #[test]
+    fn merge_config_no_trailing_newline_in_source_still_normalizes() {
+        let existing = "theme = dracula";
+        let out = merge_config(existing, &upd(&[("opacity", "0.9")]));
+        assert_eq!(out, "theme = dracula\nopacity = 0.9\n");
+        assert!(out.ends_with('\n') && !out.ends_with("\n\n"));
+    }
+
+    // -----------------------------------------------------------------------
+    // save_into_section (Some(name) — profile-scoped)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn section_creates_new_section_in_empty_file() {
+        let out = merge_into_section("", Some("work"), &upd(&[("theme", "nord")]));
+        assert_eq!(out, "[profile.work]\ntheme = nord\n");
+    }
+
+    #[test]
+    fn section_creates_new_section_with_only_top_level_keys_present() {
+        let existing = "theme = dracula\nfont_size = 14\n";
+        let out = merge_into_section(existing, Some("work"), &upd(&[("theme", "nord")]));
+        assert_eq!(
+            out,
+            "theme = dracula\nfont_size = 14\n\n[profile.work]\ntheme = nord\n"
+        );
+    }
+
+    #[test]
+    fn section_new_section_no_double_blank_line_when_file_already_ends_blank() {
+        let existing = "theme = dracula\n\n";
+        let out = merge_into_section(existing, Some("work"), &upd(&[("theme", "nord")]));
+        // Exactly one blank line separates the existing content from the new section.
+        assert_eq!(out, "theme = dracula\n\n[profile.work]\ntheme = nord\n");
+    }
+
+    #[test]
+    fn section_updates_existing_section_mid_file_followed_by_another_section() {
+        let existing = "\
+theme = dracula
+
+[profile.work]
+font_size = 18
+cwd = /tmp
+
+[profile.home]
+font_size = 12
+";
+        let out = merge_into_section(
+            existing,
+            Some("work"),
+            &upd(&[("font_size", "20"), ("scrollback", "5000")]),
+        );
+        assert_eq!(
+            out,
+            "\
+theme = dracula
+
+[profile.work]
+font_size = 20
+cwd = /tmp
+scrollback = 5000
+
+[profile.home]
+font_size = 12
+"
+        );
+    }
+
+    /// A key present at the TOP LEVEL (outside any section) but absent from the
+    /// target `[profile.NAME]` section must NOT be touched — updating the
+    /// profile must never leak into the base config.
+    #[test]
+    fn section_does_not_touch_top_level_key_of_same_name() {
+        let existing = "scrollback = 5000\n\n[profile.compact]\nfont_size = 10\n";
+        let out = merge_into_section(existing, Some("compact"), &upd(&[("scrollback", "999")]));
+        assert_eq!(
+            out,
+            "scrollback = 5000\n\n[profile.compact]\nfont_size = 10\nscrollback = 999\n"
+        );
+        // The top-level scrollback is unchanged.
+        assert!(out.lines().any(|l| l == "scrollback = 5000"));
+    }
+
+    /// A key present in a DIFFERENT profile section must not be touched either.
+    #[test]
+    fn section_does_not_touch_a_different_profiles_key() {
+        let existing = "[profile.work]\nfont_size = 18\n\n[profile.home]\nfont_size = 12\n";
+        let out = merge_into_section(existing, Some("home"), &upd(&[("font_size", "20")]));
+        assert!(out.contains("[profile.work]\nfont_size = 18"));
+        assert!(out.contains("[profile.home]\nfont_size = 20"));
+    }
+
+    /// When multiple `[profile.NAME]` headers exist in the file (a malformed or
+    /// hand-edited config), only the FIRST is updated — mirroring
+    /// `profile_names_from_text`'s first-seen identity. The second, duplicate
+    /// block is left completely untouched.
+    #[test]
+    fn section_duplicate_headers_first_wins() {
+        let existing = "\
+[profile.work]
+font_size = 16
+
+[profile.work]
+font_size = 99
+";
+        let out = merge_into_section(existing, Some("work"), &upd(&[("font_size", "20")]));
+        assert_eq!(
+            out,
+            "\
+[profile.work]
+font_size = 20
+
+[profile.work]
+font_size = 99
+"
+        );
+    }
+
+    #[test]
+    fn section_preserves_comments_and_unknown_lines_within_section() {
+        let existing = "\
+[profile.work]
+# a comment inside the profile
+font_size = 18
+; another comment style
+unknown_future_key = something
+";
+        let out = merge_into_section(existing, Some("work"), &upd(&[("font_size", "20")]));
+        assert_eq!(
+            out,
+            "\
+[profile.work]
+# a comment inside the profile
+font_size = 20
+; another comment style
+unknown_future_key = something
+"
+        );
+    }
+
+    #[test]
+    fn section_preserves_comments_and_other_sections_outside_target() {
+        let existing = "\
+# top comment
+theme = dracula
+
+[profile.work]
+font_size = 18
+";
+        let out = merge_into_section(existing, Some("work"), &upd(&[("cwd", "/home/me/work")]));
+        assert_eq!(
+            out,
+            "\
+# top comment
+theme = dracula
+
+[profile.work]
+font_size = 18
+cwd = /home/me/work
+"
+        );
+    }
+
+    #[test]
+    fn section_trailing_newline_always_exactly_one() {
+        let existing = "[profile.work]\nfont_size = 18";
+        let out = merge_into_section(existing, Some("work"), &upd(&[("scrollback", "5000")]));
+        assert!(out.ends_with('\n') && !out.ends_with("\n\n"));
+    }
+
+    #[test]
+    fn section_name_match_is_case_insensitive() {
+        let existing = "[profile.Work]\nfont_size = 18\n";
+        let out = merge_into_section(existing, Some("WORK"), &upd(&[("font_size", "20")]));
+        // The existing (differently-cased) header is matched and updated in place,
+        // not duplicated as a second section.
+        assert_eq!(out, "[profile.Work]\nfont_size = 20\n");
+        assert_eq!(out.matches("[profile.Work]").count(), 1);
+    }
+
+    #[test]
+    fn section_none_behaves_identically_to_merge_config() {
+        let existing = "theme = dracula\n\n[profile.work]\nfont_size = 18\n";
+        let updates = upd(&[("scrollback", "5000")]);
+        assert_eq!(
+            merge_into_section(existing, None, &updates),
+            merge_config(existing, &updates)
+        );
+    }
+
+    #[test]
+    fn section_appends_missing_keys_in_order_before_next_section() {
+        let existing = "[profile.work]\nfont_size = 18\n\n[profile.home]\nfont_size = 12\n";
+        let out = merge_into_section(
+            existing,
+            Some("work"),
+            &upd(&[("a_key", "1"), ("b_key", "2")]),
+        );
+        let a_idx = out.lines().position(|l| l == "a_key = 1").unwrap();
+        let b_idx = out.lines().position(|l| l == "b_key = 2").unwrap();
+        let home_idx = out.lines().position(|l| l == "[profile.home]").unwrap();
+        assert!(a_idx < b_idx, "insertion order must match `updates` order");
+        assert!(
+            b_idx < home_idx,
+            "insertions must land before the next section"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // remove_section_text (profile deletion)
+    // -----------------------------------------------------------------------
+
+    /// Deleting a MIDDLE profile splices out its header + body and the trailing
+    /// blank that separated it, leaving the surrounding top-level keys and the
+    /// following profile verbatim.
+    #[test]
+    fn remove_section_middle_preserves_neighbours_verbatim() {
+        let existing = "\
+# top comment
+theme = dracula
+
+[profile.work]
+font_size = 18
+cwd = /tmp
+
+[profile.home]
+font_size = 12
+";
+        let out = remove_section_text(existing, "work");
+        assert_eq!(
+            out,
+            "\
+# top comment
+theme = dracula
+
+[profile.home]
+font_size = 12
+"
+        );
+    }
+
+    /// Deleting the FIRST (top-level-adjacent) profile leaves the base config and
+    /// any later profile intact.
+    #[test]
+    fn remove_section_first_profile_keeps_base_and_rest() {
+        let existing =
+            "theme = dracula\n\n[profile.work]\nfont_size = 18\n\n[profile.home]\nfont_size = 12\n";
+        let out = remove_section_text(existing, "work");
+        assert_eq!(out, "theme = dracula\n\n[profile.home]\nfont_size = 12\n");
+    }
+
+    /// Deleting the LAST profile in the file removes its header + body; the base
+    /// config above it survives verbatim.
+    #[test]
+    fn remove_section_trailing_profile() {
+        let existing = "theme = dracula\n\n[profile.work]\nfont_size = 18\n";
+        let out = remove_section_text(existing, "work");
+        assert_eq!(out, "theme = dracula\n\n");
+    }
+
+    /// Removing the only content of the file yields an empty file (no spurious
+    /// trailing newline).
+    #[test]
+    fn remove_section_only_section_yields_empty() {
+        let existing = "[profile.work]\nfont_size = 18\n";
+        let out = remove_section_text(existing, "work");
+        assert_eq!(out, "");
+    }
+
+    /// A comment that lives INSIDE the removed section goes with it, but comments
+    /// and keys of OTHER sections are untouched.
+    #[test]
+    fn remove_section_takes_its_own_comments_only() {
+        let existing = "\
+[profile.work]
+# work-only note
+font_size = 18
+
+[profile.home]
+# home note
+font_size = 12
+";
+        let out = remove_section_text(existing, "home");
+        assert_eq!(
+            out,
+            "\
+[profile.work]
+# work-only note
+font_size = 18
+
+"
+        );
+    }
+
+    /// A missing section is a true no-op: the file is returned byte-for-byte,
+    /// including a source that lacks a trailing newline (nothing is normalized).
+    #[test]
+    fn remove_section_missing_is_verbatim_noop() {
+        let existing = "theme = dracula\n\n[profile.work]\nfont_size = 18";
+        let out = remove_section_text(existing, "nope");
+        assert_eq!(out, existing);
+    }
+
+    /// Section name match is case-insensitive on the name (case-sensitive on the
+    /// `profile.` prefix), mirroring the rest of the machinery.
+    #[test]
+    fn remove_section_name_match_case_insensitive() {
+        let existing = "[profile.Work]\nfont_size = 18\n";
+        let out = remove_section_text(existing, "WORK");
+        assert_eq!(out, "");
+    }
+
+    // -----------------------------------------------------------------------
+    // rename_section_text (profile rename)
+    // -----------------------------------------------------------------------
+
+    /// Renaming rewrites ONLY the header line; the body, other sections, and all
+    /// comments survive verbatim.
+    #[test]
+    fn rename_section_only_touches_header() {
+        let existing = "\
+# top comment
+theme = dracula
+
+[profile.work]
+# body comment
+font_size = 18
+cwd = /tmp
+
+[profile.home]
+font_size = 12
+";
+        let out = rename_section_text(existing, "work", "office");
+        assert_eq!(
+            out,
+            "\
+# top comment
+theme = dracula
+
+[profile.office]
+# body comment
+font_size = 18
+cwd = /tmp
+
+[profile.home]
+font_size = 12
+"
+        );
+    }
+
+    /// The new name is lower-cased to the canonical stored form.
+    #[test]
+    fn rename_section_lowercases_new_name() {
+        let existing = "[profile.work]\nfont_size = 18\n";
+        let out = rename_section_text(existing, "work", "Office");
+        assert_eq!(out, "[profile.office]\nfont_size = 18\n");
+    }
+
+    /// Old-name match is case-insensitive.
+    #[test]
+    fn rename_section_old_match_case_insensitive() {
+        let existing = "[profile.Work]\nfont_size = 18\n";
+        let out = rename_section_text(existing, "WORK", "home");
+        assert_eq!(out, "[profile.home]\nfont_size = 18\n");
+    }
+
+    /// A missing old section is a true no-op: the file is returned verbatim
+    /// (including a source without a trailing newline).
+    #[test]
+    fn rename_section_missing_is_verbatim_noop() {
+        let existing = "theme = dracula\n\n[profile.work]\nfont_size = 18";
+        let out = rename_section_text(existing, "nope", "whatever");
+        assert_eq!(out, existing);
+    }
+
+    // -----------------------------------------------------------------------
+    // Inline trailing comment preservation (apply_updates_in_range)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn merge_config_preserves_inline_hash_comment_on_rewritten_key() {
+        let existing = "opacity = 0.5  # my note\n";
+        let out = merge_config(existing, &upd(&[("opacity", "0.9")]));
+        assert_eq!(out, "opacity = 0.9  # my note\n");
+    }
+
+    #[test]
+    fn merge_config_preserves_inline_semicolon_comment_on_rewritten_key() {
+        let existing = "opacity = 0.5  ; my note\n";
+        let out = merge_config(existing, &upd(&[("opacity", "0.9")]));
+        assert_eq!(out, "opacity = 0.9  ; my note\n");
+    }
+
+    #[test]
+    fn merge_config_no_comment_present_behaves_identically_to_before() {
+        let existing = "opacity = 0.5\n";
+        let out = merge_config(existing, &upd(&[("opacity", "0.9")]));
+        assert_eq!(out, "opacity = 0.9\n");
+    }
+
+    #[test]
+    fn merge_config_hash_inside_single_quoted_value_is_not_a_comment() {
+        // The '#' is part of the quoted value (a literal separator string), not
+        // a trailing comment — nothing should be preserved/appended after the
+        // rewritten value.
+        let existing = "word_separator = '#separator#'\n";
+        let out = merge_config(existing, &upd(&[("word_separator", "/,")]));
+        assert_eq!(out, "word_separator = /,\n");
+    }
+
+    #[test]
+    fn merge_config_hash_inside_double_quoted_value_is_not_a_comment() {
+        let existing = "font_family = \"Comic # Sans\"\n";
+        let out = merge_config(existing, &upd(&[("font_family", "Fira Code")]));
+        assert_eq!(out, "font_family = Fira Code\n");
+    }
+
+    #[test]
+    fn merge_config_preserves_real_comment_after_a_quoted_value_containing_hash() {
+        // A '#' inside the quotes is part of the value; the SPACE-separated '#'
+        // after the closing quote is the real trailing comment and must survive.
+        let existing = "font_family = \"Comic # Sans\"  # actually use this one\n";
+        let out = merge_config(existing, &upd(&[("font_family", "Fira Code")]));
+        assert_eq!(out, "font_family = Fira Code  # actually use this one\n");
+    }
+
+    #[test]
+    fn merge_config_semicolon_inside_quotes_is_not_a_comment() {
+        let existing = "word_separator = ';sep;'\n";
+        let out = merge_config(existing, &upd(&[("word_separator", "/,")]));
+        assert_eq!(out, "word_separator = /,\n");
+    }
+
+    #[test]
+    fn merge_config_appended_missing_key_never_gets_a_comment() {
+        // A freshly-appended key has no prior line to read a comment from.
+        let existing = "theme = dracula\n";
+        let out = merge_config(existing, &upd(&[("opacity", "0.9")]));
+        assert_eq!(out, "theme = dracula\nopacity = 0.9\n");
+    }
+
+    #[test]
+    fn section_preserves_inline_comment_within_profile_section() {
+        let existing = "[profile.work]\nfont_size = 18  # laptop screen\n";
+        let out = merge_into_section(existing, Some("work"), &upd(&[("font_size", "22")]));
+        assert_eq!(out, "[profile.work]\nfont_size = 22  # laptop screen\n");
+    }
+
+    #[test]
+    fn merge_config_rewrites_bare_hex_color_value_without_treating_it_as_a_comment() {
+        // REGRESSION: color keys store a bare, unquoted hex value whose leading '#'
+        // must NOT be misread as a comment marker. If it were, rewriting the line
+        // would sandwich the old value in as a fake trailing comment
+        // (`color.ansi0 = #ff0000  #15161e`), which then fails to parse on the next
+        // load and the app refuses to start.
+        let existing = "color.ansi0 = #15161e\n";
+        let out = merge_config(existing, &upd(&[("color.ansi0", "#ff0000")]));
+        assert_eq!(out, "color.ansi0 = #ff0000\n");
+    }
+
+    #[test]
+    fn merge_config_preserves_real_trailing_comment_after_a_bare_hex_value() {
+        // The leading '#' is value; the space-separated '#' after it is the real
+        // trailing comment and must survive the rewrite.
+        let existing = "color.ansi0 = #15161e  # black\n";
+        let out = merge_config(existing, &upd(&[("color.ansi0", "#ff0000")]));
+        assert_eq!(out, "color.ansi0 = #ff0000  # black\n");
+    }
+
+    // -----------------------------------------------------------------------
+    // External-edit guard (protect_against_external_edit /
+    // filter_updates_against_baseline) — see that function's doc comment.
+    //
+    // `filter_updates_against_baseline` takes the "last loaded" baseline as a
+    // plain argument rather than reading the process-global snapshot recorded
+    // by `parse_config_file`, so these tests exercise the exact same filtering
+    // logic `save`/`save_into_section` use without contending over shared
+    // global state with other tests running in parallel — the same reason
+    // `save`/`save_into_section` themselves (env/fs-dependent) are untested
+    // directly elsewhere in this module, in favor of the pure `merge_config`/
+    // `merge_into_section` they wrap.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn filter_forwards_everything_when_file_unchanged_since_load() {
+        let baseline = "opacity = 0.5\nscrollback = 5000\n";
+        let updates = upd(&[("opacity", "0.5"), ("scrollback", "5000")]);
+        // `existing` (a fresh read right before save) is identical to the
+        // baseline: no external edit happened, so every update is forwarded
+        // even though none of them actually changed the value.
+        let out = filter_updates_against_baseline(baseline, baseline, None, &updates);
+        assert_eq!(out, updates);
+    }
+
+    #[test]
+    fn filter_drops_stale_key_that_would_clobber_an_external_edit() {
+        let baseline = "opacity = 0.5\n";
+        // External edit: opacity is now 0.6 on disk, but the in-memory Config
+        // (and therefore the settings-UI snapshot) still thinks it's 0.5.
+        let existing = "opacity = 0.6\n";
+        let updates = upd(&[("opacity", "0.5")]);
+        let out = filter_updates_against_baseline(baseline, existing, None, &updates);
+        assert!(
+            out.is_empty(),
+            "an update that only re-affirms the stale baseline value must be \
+             dropped so it doesn't stomp the external edit"
+        );
+    }
+
+    #[test]
+    fn filter_keeps_a_genuine_settings_ui_change_even_if_file_diverged() {
+        let baseline = "opacity = 0.5\n";
+        // Someone hand-edited a DIFFERENT setting in the meantime; opacity
+        // itself is untouched on disk...
+        let existing = "opacity = 0.5\nscrollback = 9000\n";
+        // ...but the settings UI genuinely changed opacity (0.5 -> 0.9): this
+        // is a real change and must still be forwarded (last-writer-wins for
+        // this narrow same-key case is acceptable).
+        let updates = upd(&[("opacity", "0.9")]);
+        let out = filter_updates_against_baseline(baseline, existing, None, &updates);
+        assert_eq!(out, updates);
+    }
+
+    /// The scenario the guard exists for: a settings-panel Save always writes
+    /// EVERY `SAVED_KEYS` value (see `App::save_settings`), not a diff. Prove
+    /// that a concurrent external edit to a key the UI did NOT touch survives
+    /// the save, while a key the UI DID touch is still written.
+    #[test]
+    fn concurrent_external_edit_to_a_different_key_survives_settings_save() {
+        // What the in-memory Config was last loaded from.
+        let baseline = "opacity = 0.5\nscrollback = 5000\n";
+        // The file right before Save: an external hand-edit bumped scrollback
+        // to 9000 inside the watcher's debounce window. opacity is untouched.
+        let existing = "opacity = 0.5\nscrollback = 9000\n";
+        // The settings UI's full live snapshot: opacity was actually changed
+        // (0.5 -> 0.9); scrollback was NOT touched by the user, so it's still
+        // the stale 5000 from the last load.
+        let updates = upd(&[("opacity", "0.9"), ("scrollback", "5000")]);
+
+        let filtered = filter_updates_against_baseline(baseline, existing, None, &updates);
+        let out = merge_config(existing, &filtered);
+
+        assert!(
+            out.contains("opacity = 0.9"),
+            "the genuine settings-UI change must still be written"
+        );
+        assert!(
+            out.contains("scrollback = 9000"),
+            "the external edit to a key the UI didn't touch must survive: {out}"
+        );
+        assert!(
+            !out.contains("scrollback = 5000"),
+            "the stale in-memory value must NOT clobber the external edit: {out}"
+        );
+    }
+
+    #[test]
+    fn filter_forwards_new_key_absent_from_baseline() {
+        let baseline = "opacity = 0.5\n";
+        let existing = "opacity = 0.5\n";
+        // `minimap` wasn't a SAVED_KEYS entry (or wasn't set) at the last load —
+        // nothing to compare against, so it's forwarded like any other update.
+        let updates = upd(&[("minimap", "true")]);
+        let out = filter_updates_against_baseline(baseline, existing, None, &updates);
+        assert_eq!(out, updates);
+    }
+
+    #[test]
+    fn filter_forwards_everything_when_target_section_absent_from_baseline() {
+        // The baseline predates the `[profile.work]` section entirely (e.g. it
+        // was just created via `create_profile_from_current`): there is nothing
+        // to guard, so every update goes through.
+        let baseline = "theme = dracula\n";
+        let existing = "theme = dracula\n\n[profile.work]\nfont_size = 18\n";
+        let updates = upd(&[("font_size", "20")]);
+        let out = filter_updates_against_baseline(baseline, existing, Some("work"), &updates);
+        assert_eq!(out, updates);
+    }
+
+    #[test]
+    fn filter_within_profile_section_only_compares_that_sections_key() {
+        let baseline = "scrollback = 5000\n\n[profile.work]\nfont_size = 18\n";
+        // External edit changed the TOP-LEVEL scrollback, not the profile's.
+        let existing = "scrollback = 9000\n\n[profile.work]\nfont_size = 18\n";
+        // Saving into [profile.work]'s font_size — unrelated to the top-level
+        // scrollback edit, so it must be forwarded regardless.
+        let updates = upd(&[("font_size", "22")]);
+        let out = filter_updates_against_baseline(baseline, existing, Some("work"), &updates);
+        assert_eq!(out, updates);
+    }
+
+    // -----------------------------------------------------------------------
+    // Helper unit tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn find_inline_comment_start_finds_unquoted_hash() {
+        assert_eq!(find_inline_comment_start(" 0.5  # note"), Some(6));
+        assert_eq!(find_inline_comment_start(" 0.5  ; note"), Some(6));
+        assert_eq!(find_inline_comment_start(" 0.5"), None);
+    }
+
+    #[test]
+    fn find_inline_comment_start_leading_marker_is_value_not_comment() {
+        // A bare hex color's leading '#' is the FIRST non-whitespace char of the
+        // value — it is value content, not a comment marker.
+        assert_eq!(find_inline_comment_start(" #15161e"), None);
+        assert_eq!(find_inline_comment_start("#15161e"), None);
+        // A real trailing comment after the bare value is still found (at the
+        // second, whitespace-separated marker).
+        assert_eq!(
+            find_inline_comment_start(" #15161e  # black"),
+            Some(" #15161e  ".len())
+        );
+        // A marker glued to preceding content (no whitespace gap) is value too.
+        assert_eq!(find_inline_comment_start(" foo#bar"), None);
+    }
+
+    #[test]
+    fn find_inline_comment_start_ignores_hash_inside_quotes() {
+        assert_eq!(find_inline_comment_start(" '#not a comment'"), None);
+        assert_eq!(find_inline_comment_start(" \"#not a comment\""), None);
+        // Real comment AFTER the closing quote is still found.
+        assert_eq!(
+            find_inline_comment_start(" \"a#b\" # real"),
+            Some(" \"a#b\" ".len())
+        );
+    }
+
+    #[test]
+    fn find_inline_comment_start_unterminated_quote_runs_to_end() {
+        // No closing quote: the rest of the line (including any '#') is
+        // treated as still inside the quote, so no comment is found.
+        assert_eq!(
+            find_inline_comment_start(" 'unterminated # not a comment"),
+            None
+        );
+    }
+
+    #[test]
+    fn split_value_and_comment_splits_on_unquoted_marker() {
+        assert_eq!(
+            split_value_and_comment(" 0.5  # note"),
+            (" 0.5  ", Some("# note"))
+        );
+        assert_eq!(split_value_and_comment(" 0.5"), (" 0.5", None));
+    }
+
+    #[test]
+    fn find_key_value_in_range_strips_inline_comment_and_whitespace() {
+        let lines: Vec<String> = "opacity = 0.5  # note\nfont_size = 14\n"
+            .lines()
+            .map(str::to_string)
+            .collect();
+        let range = (0, lines.len());
+        assert_eq!(
+            find_key_value_in_range(&lines, range, "opacity"),
+            Some("0.5".to_string())
+        );
+        assert_eq!(
+            find_key_value_in_range(&lines, range, "font_size"),
+            Some("14".to_string())
+        );
+        assert_eq!(find_key_value_in_range(&lines, range, "missing"), None);
+    }
+
+    #[test]
+    fn find_range_none_for_missing_section_some_for_top_level() {
+        let lines: Vec<String> = "theme = dracula\n".lines().map(str::to_string).collect();
+        assert_eq!(find_range(&lines, None), Some((0, 1)));
+        assert_eq!(find_range(&lines, Some("work")), None);
+    }
+
+    #[test]
+    fn profile_header_name_parses_only_the_profile_prefix() {
+        assert_eq!(profile_header_name("[profile.work]"), Some("work".into()));
+        assert_eq!(profile_header_name("[profile.Work]"), Some("work".into()));
+        assert_eq!(
+            profile_header_name("  [profile.work]  "),
+            Some("work".into())
+        );
+        // Case-sensitive "profile." prefix, matching `parse_config_file`.
+        assert_eq!(profile_header_name("[Profile.work]"), None);
+        assert_eq!(profile_header_name("[keybindings]"), None);
+        assert_eq!(profile_header_name("[profile.]"), None);
+        assert_eq!(profile_header_name("not a header"), None);
+    }
+
+    #[test]
+    fn is_section_header_detects_any_bracketed_line() {
+        assert!(is_section_header("[profile.work]"));
+        assert!(is_section_header("[keybindings]"));
+        assert!(is_section_header("  [foo]  "));
+        assert!(!is_section_header("theme = dracula"));
+        assert!(!is_section_header(""));
+        assert!(!is_section_header("[unterminated"));
+    }
+}
+
+// ---- w15: scrollback memory bounding (Phase 1) — config parsing ------------
+
+#[cfg(test)]
+mod scrollback_background_tests {
+    use super::*;
+
+    #[test]
+    fn scrollback_background_cap_defaults_to_disabled() {
+        let raw = RawConfig::default();
+        assert_eq!(raw.scrollback_background_cap, None);
+        assert_eq!(raw.scrollback_background_idle_secs, None);
+        // Unset in RawConfig resolves to the disabled policy (cap == 0) once
+        // `into_settings` builds it — see `into_settings_leaves_disabled_policy_by_default`.
+    }
+
+    #[test]
+    fn scrollback_background_cap_parses_and_clamps() {
+        let mut raw = RawConfig::default();
+        apply_kv("scrollback_background_cap", "5000", &mut raw).unwrap();
+        assert_eq!(raw.scrollback_background_cap, Some(5000));
+
+        // Clamped to SCROLLBACK_MAX, same ceiling as `scrollback` itself.
+        apply_kv("scrollback_background_cap", "999999999", &mut raw).unwrap();
+        assert_eq!(raw.scrollback_background_cap, Some(SCROLLBACK_MAX));
+    }
+
+    #[test]
+    fn scrollback_background_cap_rejects_non_integer() {
+        let mut raw = RawConfig::default();
+        assert!(apply_kv("scrollback_background_cap", "not-a-number", &mut raw).is_err());
+    }
+
+    #[test]
+    fn scrollback_background_idle_secs_parses_unclamped() {
+        let mut raw = RawConfig::default();
+        apply_kv("scrollback_background_idle_secs", "3600", &mut raw).unwrap();
+        assert_eq!(raw.scrollback_background_idle_secs, Some(3600));
+    }
+
+    #[test]
+    fn scrollback_max_clamp_lowered_from_legacy_one_million() {
+        // The w15 audit lowered `SCROLLBACK_MAX` from a prior 1,000,000; a value
+        // that would have survived the old clamp must now be capped lower, so a
+        // future change growing it back toward 1,000,000 does so deliberately.
+        let mut raw = RawConfig::default();
+        apply_kv("scrollback", "999999", &mut raw).unwrap();
+        assert_eq!(raw.scrollback, Some(SCROLLBACK_MAX));
+    }
+
+    #[test]
+    fn into_settings_leaves_disabled_policy_by_default() {
+        // `into_settings` resolves + logs the policy but does not (yet) surface
+        // it on `Config` — this test just guards that parsing an unset config
+        // doesn't panic or error, and implicitly exercises the default-cap path
+        // of `ScrollbackBackgroundPolicy::effective_cap` via `into_settings`.
+        let raw = RawConfig::default();
+        assert!(raw.into_settings().is_ok());
+    }
+}
+
+#[cfg(test)]
+mod segment_tests {
+    //! `parse_status_bar_segments` coverage for the w15 additions (TabCount,
+    //! Zoom, Profile, Busy, Hostname, Custom) plus their aliases. Pre-existing
+    //! segment tokens are covered by `config::mod`'s `status_bar_segments_*`
+    //! integration tests; these are unit tests scoped to this function.
+    use super::*;
+    use crate::app::StatusBarSegment;
+
+    #[test]
+    fn parses_w15_segment_tokens() {
+        let segs = parse_status_bar_segments("tab_count zoom profile busy hostname custom");
+        assert_eq!(
+            segs,
+            vec![
+                StatusBarSegment::TabCount,
+                StatusBarSegment::Zoom,
+                StatusBarSegment::Profile,
+                StatusBarSegment::Busy,
+                StatusBarSegment::Hostname,
+                StatusBarSegment::Custom,
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_w15_segment_aliases() {
+        assert_eq!(
+            parse_status_bar_segments("tabs"),
+            vec![StatusBarSegment::TabCount]
+        );
+        assert_eq!(
+            parse_status_bar_segments("host"),
+            vec![StatusBarSegment::Hostname]
+        );
+    }
+
+    #[test]
+    fn every_segment_token_round_trips_through_display() {
+        // Inverse-of-inverse: every canonical token this parser accepts must
+        // parse back to the exact segment `token()` reports for it, the
+        // invariant `status_bar_segments_display`/`settings_save::SAVED_KEYS`
+        // depend on for a clean round trip through the settings form.
+        for seg in [
+            StatusBarSegment::Cwd,
+            StatusBarSegment::GitBranch,
+            StatusBarSegment::Process,
+            StatusBarSegment::Time,
+            StatusBarSegment::Mode,
+            StatusBarSegment::Broadcast,
+            StatusBarSegment::Selection,
+            StatusBarSegment::Scroll,
+            StatusBarSegment::Encoding,
+            StatusBarSegment::Progress,
+            StatusBarSegment::ExitStatus,
+            StatusBarSegment::KeyHints,
+            StatusBarSegment::TabCount,
+            StatusBarSegment::Zoom,
+            StatusBarSegment::Profile,
+            StatusBarSegment::Busy,
+            StatusBarSegment::Hostname,
+            StatusBarSegment::Custom,
+        ] {
+            assert_eq!(parse_status_bar_segments(seg.token()), vec![seg]);
+        }
+    }
 }

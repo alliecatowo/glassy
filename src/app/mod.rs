@@ -25,7 +25,7 @@ use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Window, WindowId};
 
 use crate::bell::{self, AudioBell};
-use crate::color::{self, lighten};
+use crate::color;
 use crate::gui;
 use crate::input::{KittyFlags, ModifyOtherKeys, MouseReport, encode_key_parts, encode_mouse};
 use crate::pane;
@@ -34,6 +34,7 @@ use crate::renderer::{CursorOverlay, Decorations, LigatureCell, Renderer, Underl
 
 mod chrome;
 mod command_blocks;
+mod dragdrop;
 mod event_loop;
 mod headless_input;
 mod helpers;
@@ -43,14 +44,14 @@ mod input;
 mod keys;
 mod keyseq;
 #[cfg(target_os = "macos")]
-pub(crate) mod mac_menu;
+pub mod mac_menu;
 mod minimap;
 mod modhold;
 mod mouse;
 mod multipane;
 mod palette;
 mod pane_ops;
-mod panes;
+pub(crate) mod panes;
 pub(crate) mod peek;
 mod power;
 mod quake;
@@ -61,8 +62,11 @@ mod search;
 mod selection;
 mod settings;
 mod settings_fields;
+pub(crate) mod settings_save;
 mod settings_themes;
 mod strip;
+#[cfg(target_os = "linux")]
+pub mod system_theme;
 mod tab_paint;
 mod tabs;
 pub(crate) mod toast;
@@ -70,6 +74,12 @@ mod user_event;
 mod vi_mode;
 
 pub(crate) use helpers::*;
+// `collect_display_row` alone is re-exported crate-externally (`#[doc(hidden)]`,
+// not part of glassy's supported API) so `benches/hot_paths.rs` — a separate
+// crate — can reach it; every other `helpers` item stays `pub(crate)` via the
+// glob re-export above.
+#[doc(hidden)]
+pub use helpers::collect_display_row;
 pub(crate) use palette::PaletteState;
 pub(crate) use search::SearchState;
 pub(crate) use strip::*;
@@ -127,8 +137,19 @@ pub struct Config {
     /// Show per-pane title bars (with the close box / split menu) and the accent
     /// top-rail on each pane when the tab is split. Default false (off by
     /// default; enable via `pane_headers = true` in the config or the settings
-    /// toggle). When false, panes use their full height with no header chrome.
+    /// toggle). Headers are painted as an OVERLAY band on top of the grid's own
+    /// top row(s) (see `App::pane_header_h`) — turning this on never costs a
+    /// pane real terminal rows.
     pub pane_headers: bool,
+    /// Pane header information density: `full` (title+cwd+comm+grip+menu, the
+    /// original layout) or `compact` (focus dot + pane index + title only, at a
+    /// shorter strip height). Config key `pane_header_style`. Default `full`.
+    pub pane_header_style: panes::PaneHeaderStyle,
+    /// Show a lightweight header (title + focus dot, no grip/menu/annotation)
+    /// even for a single, unsplit pane, so `pane_headers` has an immediate
+    /// visible effect before the user ever splits. Config key
+    /// `pane_headers_single`. Default false.
+    pub pane_headers_single: bool,
     /// Word separator characters for text selection. Whitespace chars from this string
     /// (plus the default whitespace + punctuation) are used as word boundaries.
     /// Empty string means use defaults only.
@@ -219,6 +240,16 @@ pub struct Config {
     /// Quake slide animation duration in milliseconds (each direction). 0 disables
     /// the animation (instant show/hide). Default 180 ms.
     pub quake_animation_ms: u64,
+    /// Keep the native OS window frame (title bar + border + resize handles)
+    /// instead of glassy's own borderless client-side decorations. Default false:
+    /// glassy runs borderless everywhere and paints its own top chrome (tab bar +
+    /// window controls), so the OS never draws a system-themed title bar or a
+    /// hairline window border that ignores the glassy theme. Set `decorations =
+    /// true` to restore the native frame (an escape hatch for users/WMs that want
+    /// server-side decorations). Applied once at window creation — restart
+    /// required. On macOS `false` uses the fullsize-content-view path that keeps
+    /// the native traffic-light buttons floating over glassy's chrome.
+    pub decorations: bool,
     /// Number of recently-run shell commands to retain for the command palette's
     /// history source (captured from OSC 133 `B`..`C` zones). 0 disables capture.
     /// Default 200.
@@ -246,6 +277,18 @@ pub struct Config {
     /// `pane_headers` (the header always dims its own text regardless). Toggle via
     /// `dim_unfocused = false` in the config or the command palette.
     pub dim_unfocused: bool,
+    /// Strength of the unfocused-pane dim overlay in [0, 0.9]: the alpha of the
+    /// black quad composited over unfocused split tiles when `dim_unfocused` is
+    /// on. 0 makes the overlay invisible (equivalent to `dim_unfocused = false`);
+    /// the 0.9 ceiling keeps a misconfigured value from blacking a pane out.
+    /// Default [`crate::renderer::DEFAULT_PANE_DIM`] (0.28).
+    pub unfocused_dim: f32,
+    /// Whether window opacity also applies to terminal TEXT
+    /// (`opacity_scope = text`; the file key takes `background` | `text`).
+    /// Default false: glyphs composite opaque so text stays crisp over the
+    /// translucent backdrop; `text` makes the whole terminal — glyphs included —
+    /// inherit the glass look. Chrome/GUI text is never affected.
+    pub opacity_text: bool,
     /// Also place a rich-text (HTML) flavor on the clipboard alongside the plain
     /// text whenever a terminal selection is copied. Lets HTML-preferring apps
     /// paste a monospace-preserving block; plain text remains the fidelity-correct
@@ -303,14 +346,37 @@ pub struct Config {
     /// Power Mode effect strength in `[0, 1]` (particle count/size/speed + shake).
     /// Default 0.6. Config key `power_mode_intensity`.
     pub power_mode_intensity: f32,
+    /// Opt-in visual "chrome" level for OSC 133/633 command blocks, layered on
+    /// top of (not replacing) the existing `command_badges`/`command_fold`
+    /// affordances. Default [`CommandBlocksMode::Badges`] — today's appearance,
+    /// unchanged. Only `Cards` adds anything: a subtle glass band + accent rail
+    /// behind each finished command's row range. Config key `command_blocks`.
+    pub command_blocks: CommandBlocksMode,
+    /// Lines of scrollback kept for a backgrounded/idle pane once it has been
+    /// idle/backgrounded for [`scrollback_background_idle_secs`](Self::scrollback_background_idle_secs)
+    /// seconds; `0` disables the cap (default). Config key
+    /// `scrollback_background_cap`. Parsed + validated at config-load time
+    /// (see `crate::pty::ScrollbackBackgroundPolicy`); not yet wired to live
+    /// `Pty` sessions (settings-UI-editable and persisted here regardless, so
+    /// the wiring can land as a separate follow-up without another config-key
+    /// stream).
+    pub scrollback_background_cap: usize,
+    /// Seconds a pane must be idle/backgrounded before `scrollback_background_cap`
+    /// takes effect. Default 900 (15 min). Config key
+    /// `scrollback_background_idle_secs`.
+    pub scrollback_background_idle_secs: u64,
 }
 
 /// Configurable segments for the status bar (config key `status_bar_segments`).
 /// The default set (when `status_bar_segments` is `None`) is:
-///   cwd, git_branch, mode, broadcast, selection, scroll, encoding.
+///   cwd, git_branch, mode, broadcast, selection, scroll, encoding, progress.
 ///
 /// Config string accepted by `apply_kv`: a comma- or space-separated list of
-/// segment names, e.g. `"cwd git_branch mode time encoding"`.
+/// segment names, e.g. `"cwd git_branch mode time encoding"`. Rendering (the
+/// content/color/placement of each) is table-driven — see `SEGMENT_SPECS` in
+/// `chrome/status_bar.rs` — so this enum only names which segments exist; it carries no
+/// data itself (hence `Copy`, which a per-instance custom segment can't be —
+/// see `Custom` below and `CustomSegment`).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum StatusBarSegment {
     /// Last two path components of the current working directory.
@@ -337,6 +403,116 @@ pub enum StatusBarSegment {
     ExitStatus,
     /// Key-binding hint (shows the current mode's most useful bindings).
     KeyHints,
+    /// Total tab count (`N tabs`). w15.
+    TabCount,
+    /// `ZOOM` badge while the focused pane is zoomed. w15.
+    Zoom,
+    /// The active `[profile.NAME]` section, bracketed (e.g. `[work]`). `None`
+    /// (base config, no profile) renders nothing. w15.
+    Profile,
+    /// A running-command indicator: shows while the focused pane's most recent
+    /// OSC 133 command block has started (`C`) but not finished (`D`) yet.
+    /// w15.
+    Busy,
+    /// This machine's hostname (`uname` nodename, cached once at startup). w15.
+    Hostname,
+    /// Marker: renders every active custom segment pushed via `glassy @
+    /// set-segment` (see `CustomSegment`, `docs/plugins.md`) at this position
+    /// in the left-side order. If this marker isn't present in
+    /// `status_bar_segments` but a custom segment IS set, it's appended at the
+    /// end of the left side instead — see `App::paint_status_bar`. w15.
+    Custom,
+}
+
+impl StatusBarSegment {
+    /// The canonical config token for this segment (the first alias
+    /// `config::parse::parse_status_bar_segments` accepts for it). Used by
+    /// `settings_save::SAVED_KEYS` to serialize `status_bar_segments` back to a
+    /// string the parser round-trips exactly.
+    pub(crate) fn token(self) -> &'static str {
+        match self {
+            StatusBarSegment::Cwd => "cwd",
+            StatusBarSegment::GitBranch => "git_branch",
+            StatusBarSegment::Process => "process",
+            StatusBarSegment::Time => "time",
+            StatusBarSegment::Mode => "mode",
+            StatusBarSegment::Broadcast => "broadcast",
+            StatusBarSegment::Selection => "selection",
+            StatusBarSegment::Scroll => "scroll",
+            StatusBarSegment::Encoding => "encoding",
+            StatusBarSegment::Progress => "progress",
+            StatusBarSegment::ExitStatus => "exit_status",
+            StatusBarSegment::KeyHints => "key_hints",
+            StatusBarSegment::TabCount => "tab_count",
+            StatusBarSegment::Zoom => "zoom",
+            StatusBarSegment::Profile => "profile",
+            StatusBarSegment::Busy => "busy",
+            StatusBarSegment::Hostname => "hostname",
+            StatusBarSegment::Custom => "custom",
+        }
+    }
+}
+
+/// One custom status-bar segment pushed by an external script over the
+/// `glassy @` control socket (`set-segment <id> <text...>` / `clear-segment
+/// <id>`) — the Phase-1 plugin surface described in `docs/plugins.md`. Stored
+/// in `App::custom_segments`, a `Vec` (not a `HashMap`) so insertion order —
+/// and therefore render order — is stable and cheap to preserve at the small
+/// (`MAX_CUSTOM_SEGMENTS`-capped) sizes involved.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CustomSegment {
+    /// Caller-chosen identifier; case-lowered by the IPC parser. Re-setting an
+    /// existing id updates its text in place rather than adding a duplicate.
+    pub id: String,
+    /// Display text, already truncated to `CUSTOM_SEGMENT_TEXT_CAP` chars.
+    pub text: String,
+}
+
+/// Maximum number of distinct custom-segment ids `set-segment` will accept at
+/// once. Bounds an external script's footprint on the bar so a runaway/looping
+/// caller can't grow it without limit; a `set-segment` for a new id past the
+/// cap replies `ERR` and leaves the store unchanged.
+pub(crate) const MAX_CUSTOM_SEGMENTS: usize = 8;
+
+/// Maximum chars kept per custom-segment text. Longer text is silently
+/// truncated (not rejected) — nothing clips left-side segment text at paint
+/// time, so this is the only guard against a long string blowing out the
+/// bar's width.
+pub(crate) const CUSTOM_SEGMENT_TEXT_CAP: usize = 64;
+
+/// Insert or update `id`'s text in the bounded custom-segment store `segs`,
+/// truncating to `CUSTOM_SEGMENT_TEXT_CAP` chars. Updating an existing id
+/// always succeeds (no cap check); adding a new one past `MAX_CUSTOM_SEGMENTS`
+/// fails with `segs` left unchanged. A free function (not an `App` method) so
+/// the bounds/truncation behavior is unit-testable without a full `App` — see
+/// `tests.rs`.
+pub(crate) fn upsert_custom_segment(
+    segs: &mut Vec<CustomSegment>,
+    id: &str,
+    text: &str,
+) -> Result<(), String> {
+    let truncated: String = text.chars().take(CUSTOM_SEGMENT_TEXT_CAP).collect();
+    if let Some(existing) = segs.iter_mut().find(|s| s.id == id) {
+        existing.text = truncated;
+        return Ok(());
+    }
+    if segs.len() >= MAX_CUSTOM_SEGMENTS {
+        return Err(format!(
+            "too many custom segments (max {MAX_CUSTOM_SEGMENTS}); clear one first"
+        ));
+    }
+    segs.push(CustomSegment {
+        id: id.to_string(),
+        text: truncated,
+    });
+    Ok(())
+}
+
+/// Remove `id` from the custom-segment store, if present. A no-op (not an
+/// error) when `id` isn't currently set, matching `clear-segment`'s
+/// always-`OK` reply.
+pub(crate) fn remove_custom_segment(segs: &mut Vec<CustomSegment>, id: &str) {
+    segs.retain(|s| s.id != id);
 }
 
 /// The three user-facing default cursor shapes.
@@ -377,6 +553,42 @@ pub enum TabBarMode {
     Always,
     /// Never draw the strip (the grid uses the full window height).
     Never,
+}
+
+/// Opt-in visual chrome level for OSC 133/633 command blocks (config key
+/// `command_blocks`). Layers strictly on top of the pre-existing
+/// `command_badges` (exit-status chip) / `command_fold` (output folding)
+/// toggles rather than superseding them — `Off` and `Badges` both leave
+/// today's rendering untouched; only `Cards` draws anything new. See
+/// `app::command_blocks::build_chrome_bands`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum CommandBlocksMode {
+    /// No card chrome. Reserved for a future "hide command-block affordances
+    /// entirely" master switch; today identical to `Badges`.
+    Off,
+    /// Today's default appearance: the exit-status badge + fold caret (each
+    /// still independently gated by `command_badges`/`command_fold`), no card.
+    #[default]
+    Badges,
+    /// Additionally paint a subtle glass band + accent rail behind each
+    /// finished command's row range (prompt row through its `D` mark),
+    /// Warp-style. Presentation-only: draws no new invalidation, only what the
+    /// existing badge/fold overlay pass already repaints.
+    Cards,
+}
+
+impl CommandBlocksMode {
+    /// Round-trips a config-file value (`off` | `badges` | `cards`) back out —
+    /// the mirror of `config::parse::parse_command_blocks_mode`. Used by
+    /// `settings_save::SAVED_KEYS` to persist the settings-UI Effects → Command
+    /// blocks segmented row.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Badges => "badges",
+            Self::Cards => "cards",
+        }
+    }
 }
 
 /// A tab's split layout: the tiling tree (whose leaf ids are pty/pane ids) plus
@@ -444,11 +656,26 @@ struct Session {
     /// is `last_cwd`). Keyed by pane id; used for session persistence so each pane
     /// of a split restores in its own directory.
     pane_cwds: std::collections::HashMap<usize, std::path::PathBuf>,
+    /// True for a command-palette "run command" scratch tab (see
+    /// `App::spawn_scratch_run`). Its `custom_title` carries the raw command text
+    /// (`▸ <cmd>`) purely for the live tab label and MUST NOT be persisted — see
+    /// `build_session`, which drops the custom title for scratch tabs so the
+    /// command (possibly containing secrets) never reaches the on-disk session
+    /// state. Not itself serialized: a restored session has no scratch tabs.
+    scratch: bool,
 }
 
 pub struct App {
     proxy: EventLoopProxy<UserEvent>,
     config: Config,
+    /// The `[profile.NAME]` section currently active (lower-cased), or `None`
+    /// for the base (no-profile) config. Runtime-only — NOT part of `Config` /
+    /// never persisted itself (it names which config-file SECTION produced the
+    /// live `Config`). Set at startup from `--profile` (via `Settings::resolve`
+    /// / `App::new`) and updated on every live profile switch
+    /// (`switch_profile_by_name` / `switch_to_base_profile`). Drives the
+    /// active-profile indicator in the settings panel's Profiles section.
+    active_profile: Option<String>,
 
     // Created lazily in `resumed()` (winit requires the window there).
     window: Option<Arc<Window>>,
@@ -474,6 +701,10 @@ pub struct App {
     /// User-assigned custom title for the ACTIVE tab (double-click rename), which
     /// overrides `active_title` in the chip. `None` uses the OSC title.
     active_custom_title: Option<String>,
+    /// True when the ACTIVE tab is a "run command" scratch tab (see
+    /// `App::spawn_scratch_run` and `Session::scratch`). Carried through tab
+    /// park/swap so `build_session` never persists the scratch command text.
+    active_scratch: bool,
     /// Per-pane last cwd for the ACTIVE tab's non-focused panes (the focused pane's
     /// is `active_cwd`). Keyed by pane id; persisted so each split pane restores in
     /// its own directory.
@@ -700,6 +931,15 @@ pub struct App {
     /// rebuild (selections only change during interactive drags, which are rare
     /// relative to streaming output).
     prev_has_selection: bool,
+    /// Whether Power Mode's screen shake was offsetting the grid origin last
+    /// frame. Shake forces a full redraw every frame it moves the origin (see
+    /// `render.rs`), but the settle frame — where `shake_offset()` first snaps
+    /// back to exactly `(0, 0)` — computes `shaking == false` and would skip
+    /// that forced rebuild, leaving any row not independently re-dirtied that
+    /// frame baked in at the previous (still-shaking) origin. Latching the
+    /// prior frame's state lets that transition frame force one last full
+    /// redraw too.
+    was_shaking: bool,
 
     // --- Real-GUI chrome layer (immediate-mode; see src/gui.rs). ---
     /// The widget currently latched by a left-button press, carried across frames
@@ -881,6 +1121,11 @@ pub struct App {
     settings_section: usize,
     /// Vertical scroll offset (px) of the active settings section's right pane.
     settings_section_scroll: f32,
+    /// Vertical scroll offset (px) of the currently-open settings dropdown
+    /// popup (theme / font / light-theme / dark-theme / effect), if any. Reset
+    /// to 0 whenever `settings_drop` changes (see `App::set_settings_drop`) so
+    /// a newly-opened list always starts scrolled to the top.
+    settings_popup_scroll: f32,
     /// The working custom-theme palette being edited in the Themes section: the
     /// four specials (fg/bg/cursor/selection) followed by the 16 ANSI entries, all
     /// as `Rgb`. Seeded from the active theme when settings open; mutated by the
@@ -895,6 +1140,70 @@ pub struct App {
     /// Cached runtime profile names (`[profile.*]` sections), refreshed when the
     /// settings window opens. Empty when the config defines no profiles.
     settings_profiles: Vec<String>,
+    /// "Duplicate current settings as a new profile" name field model + its
+    /// mouse drag state (Profiles section). Cleared each time settings open and
+    /// after a successful create.
+    settings_profile_new: gui::TextEdit,
+    settings_profile_new_ms: gui::TextInputMouse,
+    /// Which cached-profile index is currently being renamed in place (Profiles
+    /// section), or `None` when no row is in rename mode. Drives the inline
+    /// rename [`gui::TextEdit`] below. Cleared on open, on commit/cancel, and
+    /// whenever a delete is armed.
+    settings_profile_rename_idx: Option<usize>,
+    /// Inline "rename this profile" field model + drag state (Profiles section),
+    /// seeded with the profile's current name when rename mode begins.
+    settings_profile_rename: gui::TextEdit,
+    settings_profile_rename_ms: gui::TextInputMouse,
+    /// Which cached-profile index has its Delete affordance armed (first click of
+    /// the two-click confirm), or `None`. Cleared on open, on the confirming
+    /// second click, and whenever a rename begins.
+    settings_profile_delete_armed: Option<usize>,
+
+    // --- settings-sections stream: Terminal / Effects / Quake / Notifications /
+    // Advanced text fields -----------------------------------------------------
+    /// Editable model + drag state for the Terminal section's "Hint chars"
+    /// field. Seeded from `config.hints_chars` on open; normalized on commit via
+    /// [`crate::config::parse::normalize_hints_chars`].
+    settings_hints_chars: gui::TextEdit,
+    settings_hints_chars_ms: gui::TextInputMouse,
+    /// Editable model + drag state for the Terminal section's "Bold font" field
+    /// (`config.font_bold`).
+    settings_font_bold: gui::TextEdit,
+    settings_font_bold_ms: gui::TextInputMouse,
+    /// Editable model + drag state for the Terminal section's "Italic font"
+    /// field (`config.font_italic`).
+    settings_font_italic: gui::TextEdit,
+    settings_font_italic_ms: gui::TextInputMouse,
+    /// Editable model + drag state for the Terminal section's "Bold-italic
+    /// font" field (`config.font_bold_italic`).
+    settings_font_bold_italic: gui::TextEdit,
+    settings_font_bold_italic_ms: gui::TextInputMouse,
+    /// Editable model + drag state for the Terminal section's "Symbol map"
+    /// field (`config.font_symbol_map`), displayed/parsed as `RANGE:Family`
+    /// entries via [`crate::config::parse::parse_symbol_map`].
+    settings_font_symbol_map: gui::TextEdit,
+    settings_font_symbol_map_ms: gui::TextInputMouse,
+    /// Editable model + drag state for the Terminal section's "Font variations"
+    /// field (`config.font_variations`), parsed via
+    /// [`crate::config::parse::parse_font_variations`].
+    settings_font_variations: gui::TextEdit,
+    settings_font_variations_ms: gui::TextInputMouse,
+    /// Editable model + drag state for the Advanced section's "Status bar
+    /// segments" field (`config.status_bar_segments`), parsed via
+    /// [`crate::config::parse::parse_status_bar_segments`].
+    settings_status_bar_segments: gui::TextEdit,
+    settings_status_bar_segments_ms: gui::TextInputMouse,
+    /// Editable model + drag state for the Advanced section's "Time format"
+    /// field (`config.status_bar_time_format`).
+    settings_status_bar_time_format: gui::TextEdit,
+    settings_status_bar_time_format_ms: gui::TextInputMouse,
+    /// Editable model + drag state for the Themes section's "Wallpaper theme"
+    /// path field (`config.wallpaper_theme`). Committing only updates the
+    /// config path; it does NOT re-run theme generation on every keystroke —
+    /// use the existing "Generate theme from wallpaper" palette action (or a
+    /// restart) to regenerate from the new path.
+    settings_wallpaper_theme: gui::TextEdit,
+    settings_wallpaper_theme_ms: gui::TextInputMouse,
 
     // --- Leader / multi-key chord sequences ----------------------------------
     /// Pending leader-sequence state: the chords typed so far that are a live
@@ -922,6 +1231,32 @@ pub struct App {
     /// TO 1.0. Used to restore transparency on the next toggle. `None` until the
     /// first toggle-to-opaque fires; initialised lazily from the config opacity.
     opacity_before_toggle: Option<f32>,
+
+    // --- File drag-and-drop ---------------------------------------------------
+    /// Paths queued from `WindowEvent::DroppedFile` since the last flush.
+    /// winit delivers one `DroppedFile` per file in a multi-file drop with no
+    /// batch-end marker, so each path is queued here and the whole batch is
+    /// flushed as a single paste in `about_to_wait` by `flush_dropped_files`
+    /// (see [`dragdrop`]). Always empty between drops.
+    pending_drop_files: Vec<std::path::PathBuf>,
+    /// True while a file is being dragged over the window (`HoveredFile`),
+    /// cleared on drop (`DroppedFile`) or a cancelled drag
+    /// (`HoveredFileCancelled`). Drives the drop-hover overlay painted over the
+    /// focused pane's content rect. See [`dragdrop`].
+    drop_hover: bool,
+
+    // --- Status bar: w15 additions --------------------------------------------
+    /// This machine's hostname (`uname(2)` nodename), read once at startup for
+    /// `StatusBarSegment::Hostname`. `None` if the kernel call fails or the
+    /// nodename isn't valid UTF-8 — the segment simply renders nothing then.
+    hostname: Option<String>,
+    /// Custom status-bar segments pushed via `glassy @ set-segment`/
+    /// `clear-segment` (Phase 1 plugin surface, see `docs/plugins.md`).
+    /// Bounded to [`MAX_CUSTOM_SEGMENTS`] entries by
+    /// [`upsert_custom_segment`]. Rendered by `App::paint_status_bar` wherever
+    /// `StatusBarSegment::Custom` appears in `status_bar_segments`, or
+    /// appended at the end of the left side if it doesn't.
+    custom_segments: Vec<CustomSegment>,
 }
 
 /// Direction + progress of the quake window's slide animation.

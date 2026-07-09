@@ -69,12 +69,26 @@ impl ApplicationHandler<UserEvent> for App {
             WindowAttributesExtWayland::with_name(attrs, "glassy", "glassy")
         };
 
+        // Own the window edge everywhere: go borderless so glassy's own top chrome
+        // (tab bar + window controls) is the only chrome, killing the OS/WM-drawn
+        // title bar and the hairline window border that ignore the glassy theme.
+        // The `decorations = true` escape hatch restores the native frame for users
+        // / WMs that want server-side decorations. macOS is handled separately below
+        // (the fullsize-content-view path is its borderless look, and keeps the
+        // native traffic-light buttons), so only toggle plain decorations off here.
+        #[cfg(not(target_os = "macos"))]
+        let attrs = attrs.with_decorations(self.config.decorations);
+
         // macOS: drop the separate OS title bar and let glassy's own content fill
         // the whole window (ghostty-style). The traffic-light buttons float over
         // the top-left; glassy's top chrome band insets past them (see
-        // TRAFFIC_LIGHT_INSET). title_hidden removes the centered title text.
+        // TRAFFIC_LIGHT_INSET). title_hidden removes the centered title text. When
+        // `decorations = true` the user opted back into the native frame, so leave
+        // the standard decorated NSWindow untouched.
         #[cfg(target_os = "macos")]
-        let attrs = {
+        let attrs = if self.config.decorations {
+            attrs
+        } else {
             use winit::platform::macos::WindowAttributesExtMacOS;
             attrs
                 .with_titlebar_transparent(true)
@@ -94,9 +108,22 @@ impl ApplicationHandler<UserEvent> for App {
         // macOS: with the title bar hidden and content fullsize, AppKit's titlebar
         // would auto-drag the window when the user drags our tab chips. Disable
         // OS-driven window moving so tab drags reach glassy; empty chrome areas
-        // move the window manually via `drag_window()` (see strip_click).
+        // move the window manually via `drag_window()` (see strip_click). Skip it
+        // when `decorations = true` (native frame): the real titlebar handles drags.
         #[cfg(target_os = "macos")]
-        Self::disable_macos_window_drag(&window);
+        if !self.config.decorations {
+            Self::disable_macos_window_drag(&window);
+        }
+
+        // macOS: set the Dock / Cmd-Tab icon now that the first window exists.
+        // This must happen here rather than before `event_loop.run_app()`: an
+        // unbundled `cargo run` binary only becomes a `.regular`
+        // activation-policy app — the state in which the Dock shows a per-app
+        // icon at all — once winit creates this first window, so an earlier
+        // `setApplicationIconImage:` is silently dropped. Setting it here makes
+        // the custom icon appear under `cargo run`, not just in the bundled .app.
+        #[cfg(target_os = "macos")]
+        Self::set_dock_icon();
 
         let ms = |t: Instant| t.elapsed().as_secs_f64() * 1000.0;
         log::info!("startup: window created at {:.1} ms", ms(self.started));
@@ -146,6 +173,8 @@ impl ApplicationHandler<UserEvent> for App {
             "startup: renderer+GPU+font ready at {:.1} ms",
             ms(self.started)
         );
+        renderer.set_pane_dim(self.config.unfocused_dim);
+        renderer.set_text_opacity(self.config.opacity_text);
         // Apply an explicit padding override (logical px scaled to physical). A
         // value of 0 means "use the cell-derived default" (matching the settings
         // form, where 0 is the default sentinel) — without this guard, a config
@@ -156,17 +185,32 @@ impl ApplicationHandler<UserEvent> for App {
         {
             renderer.set_pad(pad * scale);
         }
-        // Apply per-side padding overrides if configured.
-        if let Some(pad_top) = self.config.padding_top {
+        // Apply per-side padding overrides if configured. Mirrors the uniform
+        // `padding` guard just above: `0` is the "no override" sentinel (the
+        // settings-form per-side steppers, like the uniform one, always write an
+        // explicit numeric value once touched — see `App::adjust_padding_side` in
+        // settings.rs) — without this guard, a Save right after opening the
+        // Advanced section (before ever touching a per-side stepper) would pin
+        // every side at literal zero padding via `padding_top = 0` etc. in the
+        // saved config, instead of leaving them at the cell-derived default.
+        if let Some(pad_top) = self.config.padding_top
+            && pad_top > 0.0
+        {
             renderer.set_pad_top(pad_top * scale);
         }
-        if let Some(pad_bottom) = self.config.padding_bottom {
+        if let Some(pad_bottom) = self.config.padding_bottom
+            && pad_bottom > 0.0
+        {
             renderer.set_pad_bottom(pad_bottom * scale);
         }
-        if let Some(pad_left) = self.config.padding_left {
+        if let Some(pad_left) = self.config.padding_left
+            && pad_left > 0.0
+        {
             renderer.set_pad_left(pad_left * scale);
         }
-        if let Some(pad_right) = self.config.padding_right {
+        if let Some(pad_right) = self.config.padding_right
+            && pad_right > 0.0
+        {
             renderer.set_pad_right(pad_right * scale);
         }
         // Enable ligature run-shaping if the config requests it.
@@ -771,11 +815,48 @@ impl ApplicationHandler<UserEvent> for App {
                 self.mark_dirty(event_loop);
             }
 
+            // File drag-and-drop (see `dragdrop.rs`). A file is being dragged
+            // over the window: show the drop-hover overlay. winit does not
+            // report a pointer position with this event on every backend, so
+            // the overlay covers the whole focused-pane content rect rather
+            // than tracking the cursor.
+            WindowEvent::HoveredFile(_) => {
+                self.drop_hover = true;
+                self.mark_dirty(event_loop);
+            }
+            // The drag left the window (or was cancelled) without dropping.
+            WindowEvent::HoveredFileCancelled => {
+                self.drop_hover = false;
+                self.mark_dirty(event_loop);
+            }
+            // A file was dropped. winit fires one `DroppedFile` per file in a
+            // multi-file drop with no batch-end marker, so queue the path here;
+            // `about_to_wait` flushes the whole queued batch as a single paste
+            // once every event from this wakeup (including the rest of a
+            // multi-file drop) has been delivered.
+            WindowEvent::DroppedFile(path) => {
+                self.drop_hover = false;
+                self.pending_drop_files.push(path);
+                self.mark_dirty(event_loop);
+            }
+
             _ => {}
         }
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // File drag-and-drop: flush any paths queued by `WindowEvent::DroppedFile`
+        // this wakeup as a single paste (see `dragdrop.rs`). winit delivers one
+        // `DroppedFile` per file in a multi-file drop with no batch-end marker;
+        // `about_to_wait` runs once per wakeup, after every event queued for it
+        // (including the rest of a multi-file drop) has already reached
+        // `window_event`, so this coalesces the whole drop into one paste rather
+        // than one per file. `is_empty()` keeps this check O(1) on every idle
+        // wake, preserving the 0%-idle invariant.
+        if !self.pending_drop_files.is_empty() {
+            self.flush_dropped_files();
+        }
+
         // Periodically refresh /proc-based pane info (cwd + foreground process).
         // Only done for panes of the active tab; background tabs refresh on focus.
         // This is cheap (a few symlink reads) and keeps the header/status bar live.
@@ -1126,6 +1207,50 @@ impl App {
     /// reorder instead. glassy re-implements window dragging for *empty* chrome
     /// areas via `Window::drag_window()` (see `strip_click`), so the only behavior
     /// removed here is the auto-drag that was stealing tab-reorder gestures.
+    /// macOS: set the Dock + Cmd-Tab application icon from the bundled `.icns`,
+    /// but only for an **unbundled** run (`cargo run`). Called from `resumed`
+    /// once the first window exists: before then the process isn't a `.regular`
+    /// activation-policy app and the Dock ignores the icon, which is why it
+    /// never showed under `cargo run` before.
+    ///
+    /// A packaged `.app` is skipped on purpose — it already gets the identical
+    /// icon through the normal macOS path (its `Info.plist` `CFBundleIconFile`
+    /// is the same `assets/icons/glassy-pink.icns`, staged by `release.yml`), so
+    /// a runtime `setApplicationIconImage:` there would only redundantly re-set
+    /// the same image (and risk a brief launch swap). `NSImage::initWithData`
+    /// reads the multi-representation icns; on failure we leave the default.
+    #[cfg(target_os = "macos")]
+    fn set_dock_icon() {
+        use objc2::ClassType;
+        use objc2_app_kit::{NSApplication, NSImage};
+        use objc2_foundation::{MainThreadMarker, NSData};
+
+        // Bundled `.app`: rely on the Info.plist icon; don't override at runtime.
+        let bundled = std::env::current_exe()
+            .map(|p| p.to_string_lossy().contains(".app/Contents/MacOS/"))
+            .unwrap_or(false);
+        if bundled {
+            return;
+        }
+
+        let icon_bytes = include_bytes!("../../assets/icons/glassy-pink.icns");
+        // SAFETY: standard AppKit calls; `resumed` runs on the main thread, so a
+        // `MainThreadMarker` is obtainable and the shared app is valid there.
+        unsafe {
+            objc2::rc::autoreleasepool(|_| {
+                let Some(mtm) = MainThreadMarker::new() else {
+                    return;
+                };
+                let data = NSData::with_bytes(icon_bytes);
+                if let Some(image) = NSImage::initWithData(NSImage::alloc(), &data) {
+                    let app = NSApplication::sharedApplication(mtm);
+                    app.setApplicationIconImage(Some(&image));
+                }
+            });
+        }
+    }
+
+    #[cfg(target_os = "macos")]
     fn disable_macos_window_drag(window: &Window) {
         use objc2_app_kit::NSView;
         use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};

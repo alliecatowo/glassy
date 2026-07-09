@@ -1,54 +1,219 @@
 # Benchmarks
 
-These are rough, honest numbers for glassy. They were measured on a single
-developer machine and are meant to give a sense of scale, not to be a rigorous,
-reproducible benchmark suite. Treat them as ballpark figures: your hardware,
-GPU driver, compositor, and font stack will move them around.
+glassy has three tiers of benchmark now, replacing the old eyeballed-only
+methodology below:
+
+1. **Micro-benchmarks** (`cargo bench`, criterion) — hot, GPU-free functions
+   benched in isolation: display-row extraction, config parsing, theme
+   lookup, pane-damage tracking. Reproducible, statistically sound (criterion
+   runs many samples and reports variance), and trend-trackable via
+   `target/criterion/`'s saved baselines.
+2. **Macro throughput** (`scripts/bench.sh`, vtebench-style) — feeds a VT100
+   byte corpus through glassy/alacritty/ghostty over a real PTY and times how
+   fast each one drains it. Self-checking: missing comparison binaries are
+   reported clearly, not silently skipped.
+3. **Startup / RSS** (`scripts/bench.sh`, hyperfine + `/proc`) — `hyperfine`-
+   driven wall-clock startup and a sampled idle-RSS reading, replacing the old
+   two-manual-runs approach with an N-run average.
+
+Numbers below are still single-machine, single-developer-box figures — they
+are not a controlled multi-hardware benchmark suite — but the *methodology*
+is now scripted and rerunnable rather than eyeballed.
 
 ## Methodology
 
-- **Binary size** is the size of the stripped release artifact at
-  `target/release/glassy`, built with `cargo build --release`. The release
-  profile uses fat LTO, a single codegen unit, and `panic = "abort"`, and the
-  binary is stripped. Compared against a published ghostty release binary.
-- **Memory (RSS)** is the resident set size reported by `ps`
-  (`ps -o rss= -p <pid>`), sampled while the terminal sits idle at a shell
-  prompt with no output. RSS includes shared library pages, so it is an upper
-  bound on glassy's own footprint and varies with the GPU driver.
-- **Idle CPU** is observed in `top` / `ps` with the window visible but nothing
-  changing on screen.
-- **Startup** is approximate, eyeballed wall-clock from launch to an interactive
-  prompt; it is *not* a tight `hyperfine` figure. A more careful measurement
-  would wrap a no-op command run (`glassy -e true`) under `hyperfine`, but
-  spawning a GPU window skews that, so it is reported here as approximate only.
+### Micro-benchmarks (criterion)
 
-To reproduce locally:
+`benches/hot_paths.rs` targets four hot paths, reached through the `glassy`
+library crate (`src/lib.rs`) added in this change — previously glassy was a
+bin-only crate, so no external `benches/` target could import its internals
+at all:
+
+- **`collect_display_row`** (`src/app/helpers.rs`) — per-frame, per-row
+  extraction of display cells from the alacritty_terminal grid. Benched at
+  120×40 and 300×100 against a fixture `Term` populated with mixed
+  ASCII/full-width-CJK/combining-mark content, reusing one output buffer
+  across rows (matching the real per-frame call pattern).
+- **`parse_config_file`** (`src/config/parse.rs`) — the `glassy.conf`
+  parser, benched against a minimal config, a config exercising most
+  documented keys, and configs with 1/5/20 `[profile.*]` sections (to catch
+  profile-scan blowup). Reached via a `#[doc(hidden)]`
+  `glassy::config::parse_config_file_bench` shim that keeps the parser's
+  private `RawConfig` accumulator out of the public surface.
+- **`theme_by_name`** / `theme_entries` / `theme_names`
+  (`src/color/registry.rs`) — the 60-built-in-theme registry lookup, benched
+  for a hit, a miss, and the two Vec-allocating listing functions.
+- **`pane_damaged`** (`src/app/multipane.rs`, `App::pane_damaged`) — the thin
+  wrapper around alacritty_terminal's own damage tracker that `render_split`
+  uses to skip re-rebuilding unchanged panes. Benched against a real (but
+  otherwise idle — a `true` "shell" that exits immediately) `Pty`, since this
+  function's only argument is a live `Pty` and there's no lighter-weight
+  fixture for it.
+
+Run: `cargo bench --bench hot_paths` (add `-- --measurement-time 1` for a
+quick compile+smoke-test run rather than a full statistically-stable one;
+criterion's default measurement time is 5s per benchmark, of which there are
+14 across the four groups).
+
+### Macro throughput (vtebench)
+
+`scripts/bench.sh` checks for `alacritty`, `ghostty`, `hyperfine`, and
+`vtebench` on `$PATH` and reports exactly which are missing (with install
+instructions) rather than silently degrading — on a typical dev machine
+*none* of these four are preinstalled, so treat "missing" as the expected
+starting state, not an error condition. For each installed terminal, it feeds
+a VT100 corpus through `<terminal> -e sh -c 'cat corpus'` and times the wall
+clock (`hyperfine` when available, plain `time` otherwise). If `vtebench`
+itself isn't installed or fails to generate a corpus, the script falls back
+to a bespoke repeated-colored-text corpus so the throughput section still
+produces *a* number — clearly labeled as the fallback, not vtebench's real
+alt-screen/scrolling/unicode benches.
 
 ```sh
-cargo build --release
-ls -l target/release/glassy            # binary size (stripped)
-
-# idle RSS, while glassy sits at an idle prompt:
-ps -o rss= -p "$(pgrep -n glassy)"     # value in KiB
-
-# idle CPU:
-top -p "$(pgrep -n glassy)"
+scripts/bench.sh                 # best-effort: report whatever's installed
+scripts/bench.sh --require-all   # fail loudly if any comparison tool is missing
+scripts/bench.sh --write-docs    # also append the report to this file
 ```
 
-## Results
+### Startup / RSS
 
-Measured on this dev machine. Numbers rounded; startup is approximate.
+- **Startup**: `hyperfine --warmup 3 --runs 20 'glassy -e true'`, scripted in
+  `scripts/bench.sh`. Known gap: glassy has no IPC "ready" signal a wrapper
+  script could wait on (the IPC socket's `ls` verb answers once the control
+  server is listening, but that's before the GPU window has rendered its
+  first frame) — `-e true` exits after the shell runs `true`, which requires
+  the window to have opened and the shell to have execed, so it's a
+  reasonable proxy for "usable," not a precise first-frame timestamp. The
+  2026-06-25 TTFF comparison below used the `log::info!` first-present
+  timestamp instead, which *is* precise, but has no `hyperfine`-friendly exit
+  point (nothing to compare against, and it requires a debug log line to
+  exist, not a general-purpose flag).
+- **Idle RSS**: `/proc/<pid>/status`'s `VmRSS` field, sampled 2s after spawn
+  while sitting at an idle shell (`-e sh -c 'sleep 5'`). `scripts/bench.sh`
+  automates a single sample; averaging multiple samples is a documented
+  future improvement, not yet scripted.
+- **Input latency**: **not measured**. No hardware photodiode/typometer rig
+  exists for this repo. This remains an explicit known gap rather than an
+  eyeballed number — see "Known gaps" below.
 
-| Metric | glassy | Reference |
+## Micro-benchmark results (this run)
+
+Measured on this dev machine (AMD Ryzen 9 6900HX, Linux 7.0.14-201.fc44,
+`cargo bench` default profile — not the release LTO profile, since criterion
+needs debug-assertions-off but doesn't require fat LTO/1-codegen-unit to be
+representative of relative hot-path cost). `cargo bench --bench hot_paths --
+--measurement-time 1` (a short run, enough to prove the harness compiles and
+executes cleanly, not a final statistically-tight baseline — see the caveat
+below).
+
+| Benchmark | Time |
+| --- | --- |
+| `collect_display_row/120x40` (whole-frame: 40 row calls) | 4.76 µs (≈119 ns/row) |
+| `collect_display_row/300x100` (whole-frame: 100 row calls) | 28.18 µs (≈282 ns/row) |
+| `parse_config_file/minimal` (2 keys) | 150.4 ns |
+| `parse_config_file/full` (~50 keys + 1 profile + keybindings) | 3.66 µs |
+| `parse_config_file/profiles_1` | 399.8 ns |
+| `parse_config_file/profiles_5` | 1.50 µs |
+| `parse_config_file/profiles_20` | 7.88 µs |
+| `theme_by_name/hit` (`"tokyo-night"`) | 88.7 ns |
+| `theme_by_name/miss` (unknown name) | 2.42 µs |
+| `theme_entries` (60-entry Vec alloc) | 3.06 µs |
+| `theme_names` (60-entry Vec alloc) | 3.10 µs |
+| `pane_damaged/idle` (no new PTY output) | 16.2 ns |
+
+A few things worth calling out:
+
+- **`theme_by_name` hit vs. miss is a ~27× gap** (88.7 ns vs 2.42 µs): a hit
+  short-circuits on the first user-theme/builtin match, while a miss walks
+  the entire 60-entry table (both user themes — empty here — and
+  `BUILTIN_THEMES`) doing a normalized string compare per entry before
+  concluding nothing matched. Not a problem in practice (called once at
+  startup + on theme switch, not per-frame), but a real, measured cost.
+- **`parse_config_file` scales roughly linearly with `[profile.*]` count**
+  (400 ns → 1.5 µs → 7.9 µs for 1/5/20 profiles, ~380-400 ns/profile),
+  consistent with a single top-to-bottom line scan — no evidence of
+  quadratic blowup from profile count.
+- **`pane_damaged` is genuinely cheap** (16 ns) — confirms the recon
+  characterization of it as "a thin wrapper," dominated by the `FairMutex`
+  lock/unlock rather than any real damage computation.
+- **`collect_display_row` cost scales with area, not just row count**: 300×100
+  is ~2.5× the rows of 120×40 but ~5.9× the cells, and its measured time is
+  ~5.9× — consistent with the O(cols) per-row loop, no surprises.
+
+> These are from a single short (`--measurement-time 1`) run for the
+> purposes of proving the benchmarks build and execute correctly against the
+> new `[lib]` target, not a tuned baseline. A real regression-tracking
+> baseline should use criterion's default measurement time (or longer) and
+> `--save-baseline`, on a quiesced machine.
+
+## Binary size
+
+### `[lib]` target (this change, item 1)
+
+Splitting the crate into a `glassy` library (`src/lib.rs`) plus a thin
+`glassy` binary (`src/main.rs`) was expected to be size-neutral — same code
+reachable from `fn main`, just a different compilation-unit boundary.
+Measuring (both stripped, `cargo build --release`, isolated by toggling only
+`alacritty_terminal`'s `serde` feature back on so this row is lib-split-only,
+serde-drop-free):
+
+| Build | Size (bytes) | Δ vs. baseline |
 | --- | --- | --- |
-| Release binary (stripped) | **~10.4 MB** | ghostty ~123 MB |
-| Idle RSS (at a quiet prompt) | **~40-60 MB** | — |
-| Idle CPU (nothing on screen) | **0%** | — |
-| Startup to prompt | **~tens of ms (approx.)** | — |
+| Baseline (bin-only crate, pre-`[lib]`, pre-serde-drop) | 11,560,440 | — |
+| + `[lib]` target (this change, item 1) | 11,630,640 | **+70,200 (+0.61%)** |
 
-> Idle RSS is dominated by shared GPU-driver and font/atlas pages; it depends
-> heavily on the driver and on window size. The range above is what was observed
-> here, not a guaranteed figure.
+So: **not** byte-for-byte identical — there's a small, real regression. The
+most likely cause: the four hot-path functions bumped from `pub(crate)`/
+`pub(super)` to `pub` (`collect_display_row`, `App::pane_damaged`,
+`parse_config_file_bench`, plus the pre-existing `pub` `theme_by_name`) are
+now part of the *library's* external API surface, not just the final
+binary's internal call graph. Even under `lto = "fat"` + `codegen-units = 1`,
+a `pub` item in an rlib crate must be compiled with external linkage — the
+lib crate's own compilation can't prove nothing outside the final `glassy`
+bin will ever call it, so it can't be as aggressively deadcode-eliminated
+within the lib crate's own codegen unit as it could when everything lived in
+one bin-crate compilation unit. The final LTO link *does* still fold and
+prune where it can, hence a small (not large) delta, not something
+proportional to the whole four-function surface.
+
+This is a real, honestly-reported tradeoff of making these four functions
+externally reachable for `benches/hot_paths.rs` — 0.61% is a small price for
+gaining a criterion micro-benchmark suite, but it is not "no regression" as
+originally hoped, so it's recorded here rather than glossed over.
+
+### Dropping alacritty_terminal's default `serde` feature (item 5)
+
+`alacritty_terminal = "0.26.0"` pulled its own `serde` feature by default
+(Serialize/Deserialize derives on `Grid`/`Cell`/`Term`, plus the `bitflags/
+serde` and `vte/serde` features it enables in turn). glassy never
+(de)serializes an alacritty_terminal type directly — its own config/session
+serde (`src/config`, `src/session`) is independent — so this looked like dead
+weight. Changed to `alacritty_terminal = { version = "0.26.0",
+default-features = false }`:
+
+| Build | Size (bytes) | Δ |
+| --- | --- | --- |
+| `[lib]` split, serde still on (isolated) | 11,630,640 | — |
+| `[lib]` split, serde off (this change's final state) | 11,630,640 | **0** |
+
+**Measured release-binary-size delta: zero bytes.** `cargo tree -e features -p
+alacritty_terminal` confirms the toggle takes effect at the dependency-graph
+level (`serde`/`serde_core`/`serde_derive` disappear from the tree entirely
+when off — three fewer crates to compile), and the two resulting binaries
+have different SHA-256 hashes (so it's not a stale/cached artifact — genuinely
+different bytes were compiled), yet strip to the identical final size. The
+explanation: nothing in glassy ever calls the generated `Serialize`/
+`Deserialize` impls, so `lto = "fat"` + `strip = true` was *already* eliminating
+100% of that dead code from the stripped release binary before this change —
+the feature flag just stops it from being compiled into the intermediate
+rlib in the first place. The real benefit of dropping it is **not** release
+binary size but a smaller `cargo build`/`check`/`clippy` dependency graph
+(three fewer crates: `serde`, `serde_core`, `serde_derive`, the latter a
+proc-macro crate) and a marginally smaller **debug** build (debug builds have
+no LTO to eliminate the dead derive code, so `serde`'s codegen — including
+the `serde_derive` proc-macro's own compile cost — is pure overhead there).
+Kept anyway: it's strictly cheaper along every axis except release-binary
+bytes, where it's a wash.
 
 ## Why it stays quiet
 
@@ -59,11 +224,14 @@ Measured on this dev machine. Numbers rounded; startup is approximate.
   actually changed are re-rasterized and re-uploaded to the glyph atlas, rather
   than redrawing the whole grid every frame.
 - **Lean binary.** Fat LTO + one codegen unit + `panic = "abort"` + stripping
-  keep the release binary around 10 MB.
-- **Low input latency.** The swapchain uses Mailbox present mode with
-  `max_frames_in_flight = 1`, so a keystroke reaches the screen on the next
-  frame instead of queueing behind buffered ones. (Latency is not quantified
-  here; it is a design choice, noted for context.)
+  keep the release binary small (see the size table above).
+- **Lean swapchain.** The swapchain uses **Fifo** present mode (vsync,
+  guaranteed available on every backend) with `desired_maximum_frame_latency: 2`.
+  Fifo holds the minimum image count (2, vs. Mailbox's typical 3 — roughly
+  8 MB saved at 1080p `Bgra8`), never redraws an idle frame, and sidesteps the
+  tearing/latency tradeoffs Mailbox or Immediate exist for — tradeoffs that
+  don't matter for a glyph grid that only repaints on damage anyway. (Latency
+  is not quantified here; it is a design choice, noted for context.)
 
 ## w10/perf wave improvements
 
@@ -208,10 +376,28 @@ etc.).
 - kitty and alacritty were not installed on this machine and could not be
   measured.
 
+## Known gaps
+
+- **Input latency** is not measured empirically (no photodiode/typometer
+  rig). Pending: either a synthetic PTY-write → first-frame-present
+  round-trip timestamp (reusing the existing TTFF `log::info!` pattern), or
+  an explicit hardware rig.
+- **Macro throughput comparisons** (`scripts/bench.sh`) require alacritty,
+  ghostty, and vtebench installed; none are on this dev machine as of this
+  writing, so the vtebench-vs-alacritty-vs-ghostty table has not actually
+  been populated with real comparison data yet — only glassy-vs-itself
+  (or the bespoke fallback corpus) can run here. Rerun on a machine with
+  those tools installed for a real comparison.
+- **CI regression tracking**: `cargo bench` numbers are not yet wired into
+  CI (no `cargo bench --save-baseline` job) — out of scope for this change
+  per its spec; a future change could add one, gated to avoid blocking PRs
+  on noisy shared-runner CPU allocation.
+
 ## Caveats
 
 - Single machine, single run order; no warmup/averaging discipline beyond
-  casual repetition.
+  casual repetition for the narrative (non-criterion, non-hyperfine) numbers
+  above.
 - The ghostty comparison is binary size only, and against a specific published
   release; it is not a feature-for-feature comparison.
 - These numbers will change as glassy's hand-rolled internals replace the

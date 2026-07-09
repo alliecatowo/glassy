@@ -19,6 +19,40 @@ pub struct SettingsFields<'a> {
     /// Hex input for the currently-edited custom-theme color (Themes section).
     pub theme_hex: &'a mut TextEdit,
     pub theme_hex_ms: &'a mut TextInputMouse,
+    /// "New profile" name field model + its mouse drag state (Profiles section).
+    pub profile_name: &'a mut TextEdit,
+    pub profile_name_ms: &'a mut TextInputMouse,
+    /// Inline "rename this profile" field model + drag state (Profiles section),
+    /// active only for the row whose index matches `SettingsView::profile_rename_idx`.
+    pub profile_rename: &'a mut TextEdit,
+    pub profile_rename_ms: &'a mut TextInputMouse,
+    /// Terminal section: "Hint chars" field model + drag state.
+    pub hints_chars: &'a mut TextEdit,
+    pub hints_chars_ms: &'a mut TextInputMouse,
+    /// Terminal section: "Bold font" field model + drag state.
+    pub font_bold: &'a mut TextEdit,
+    pub font_bold_ms: &'a mut TextInputMouse,
+    /// Terminal section: "Italic font" field model + drag state.
+    pub font_italic: &'a mut TextEdit,
+    pub font_italic_ms: &'a mut TextInputMouse,
+    /// Terminal section: "Bold-italic font" field model + drag state.
+    pub font_bold_italic: &'a mut TextEdit,
+    pub font_bold_italic_ms: &'a mut TextInputMouse,
+    /// Terminal section: "Symbol map" field model + drag state.
+    pub font_symbol_map: &'a mut TextEdit,
+    pub font_symbol_map_ms: &'a mut TextInputMouse,
+    /// Terminal section: "Font variations" field model + drag state.
+    pub font_variations: &'a mut TextEdit,
+    pub font_variations_ms: &'a mut TextInputMouse,
+    /// Advanced section: "Status bar segments" field model + drag state.
+    pub status_bar_segments: &'a mut TextEdit,
+    pub status_bar_segments_ms: &'a mut TextInputMouse,
+    /// Advanced section: "Time format" field model + drag state.
+    pub status_bar_time_format: &'a mut TextEdit,
+    pub status_bar_time_format_ms: &'a mut TextInputMouse,
+    /// Themes section: "Wallpaper theme" path field model + drag state.
+    pub wallpaper_theme: &'a mut TextEdit,
+    pub wallpaper_theme_ms: &'a mut TextInputMouse,
 }
 
 impl<'r> Ui<'r> {
@@ -61,7 +95,10 @@ impl<'r> Ui<'r> {
         let fill = state_fill(fill_on(), hover_t, it.pressed);
         self.rrect(rect, self.m.radius, fill);
         if matches!(st, WState::Focus) {
-            self.focus_ring(rect, self.m.radius);
+            // Subtract the button's own accent fill, not the default grey panel
+            // fill, so the focus ring reads as a 1 px halo without overpainting
+            // the accent body.
+            self.focus_ring_over(rect, self.m.radius, fill);
         }
         let nudge = if it.pressed { 1.0 } else { 0.0 };
         let mut content = rect;
@@ -73,8 +110,21 @@ impl<'r> Ui<'r> {
     /// The floating popup list for a dropdown (E3 surface anchored just below
     /// `anchor`, or flipped above if it would overflow the bottom of the surface).
     /// Each row shows an optional swatch, the option name, and a `✓` on the
-    /// current selection. Returns the absolute index if a row was clicked.
-    /// Drawn after the form body so it composites above everything.
+    /// current selection. Drawn after the form body so it composites above
+    /// everything.
+    ///
+    /// The popup's own height is capped to what fits the surface (never fewer
+    /// than 4 rows), but ALL of `rows` remains reachable: when there are more
+    /// rows than fit, a scrollbar appears on the right edge and the visible
+    /// window scrolls by `scroll` (px, owned by the caller across frames — see
+    /// [`super::SettingsView::popup_scroll`]). A fixed visible cap with no
+    /// scroll would silently strand any row past it (the 60-theme dropdown is
+    /// the case that matters today, but this is generic to any long list).
+    ///
+    /// Returns `(picked, new_scroll)`: `picked` is the absolute row index if a
+    /// row was clicked this frame; `new_scroll` is `scroll` clamped to the
+    /// valid range, or moved if the scrollbar thumb was dragged.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn dropdown_popup(
         &mut self,
         wid: WidgetId,
@@ -83,16 +133,23 @@ impl<'r> Ui<'r> {
         sel: usize,
         swatches: Option<&[[f32; 4]]>,
         surface_h: f32,
-    ) -> Option<usize> {
+        scroll: f32,
+    ) -> (Option<usize>, f32) {
         let m = self.m;
         let row_h = m.row_h;
-        // Cap the popup to what actually fits the surface (leaving a small margin),
-        // never fewer than 4. A fixed cap of 8 silently hid the 9th effect
-        // ("Custom") and any theme past the 8th; sizing to the window shows them
-        // all (it flips above when anchored low, below).
+        // Visible row count: what actually fits the surface (leaving a small
+        // margin), never fewer than 4. A fixed cap of 8 used to silently hide
+        // the 9th effect ("Custom") and any theme past the 8th; sizing to the
+        // window instead shows as many as fit, with the rest reachable via scroll.
         let fit = ((surface_h - 4.0 * m.pad) / row_h).floor().max(4.0) as usize;
-        let max_rows = rows.len().min(fit);
-        let h = (max_rows as f32 * row_h + 2.0).round();
+        let visible_rows = rows.len().min(fit);
+        let scrollable = rows.len() > fit;
+        let scrollbar_w = if scrollable {
+            m.gap.max(6.0).round()
+        } else {
+            0.0
+        };
+        let h = (visible_rows as f32 * row_h + 2.0).round();
         // Anchor below by default; flip above when it would overflow the surface.
         let below_y = anchor.y + anchor.h + 2.0;
         let popup_y = if below_y + h > surface_h - m.pad {
@@ -104,10 +161,24 @@ impl<'r> Ui<'r> {
         let rect = Rect::new(anchor.x, popup_y, anchor.w, h);
         self.rrect(rect, m.radius, glass_float());
         self.edge_light(rect);
+
+        let content_h = rows.len() as f32 * row_h;
+        let view_h = h - 2.0;
+        let max_scroll = (content_h - view_h).max(0.0);
+        let scroll = scroll.clamp(0.0, max_scroll);
+        let row_area_w = rect.w - scrollbar_w;
+
+        let first = (scroll / row_h).floor().max(0.0) as usize;
+        // +1 so a row that's only partially scrolled into view still paints.
+        let take = visible_rows + 1;
         let mut picked = None;
-        for (i, name) in rows.iter().enumerate().take(max_rows) {
-            let ry = rect.y + 1.0 + i as f32 * row_h;
-            let rr = Rect::new(rect.x + 1.0, ry, rect.w - 2.0, row_h);
+        for (i, name) in rows.iter().enumerate().skip(first).take(take) {
+            let ry = rect.y + 1.0 + i as f32 * row_h - scroll;
+            // Cull rows fully outside the popup's viewport.
+            if ry + row_h <= rect.y || ry >= rect.y + rect.h {
+                continue;
+            }
+            let rr = Rect::new(rect.x + 1.0, ry, row_area_w - 2.0, row_h);
             let it = self.interact(id_combine(wid, i as u64), rr, true);
             if i == sel {
                 self.rrect(rr.inset(1.0), m.radius - 1.0, sel_bg());
@@ -139,7 +210,19 @@ impl<'r> Ui<'r> {
                 picked = Some(i);
             }
         }
-        picked
+
+        let new_scroll = if scrollable {
+            let track = Rect::new(
+                rect.x + rect.w - scrollbar_w,
+                rect.y + 1.0,
+                scrollbar_w,
+                view_h,
+            );
+            self.scrollbar(id_combine(wid, u64::MAX), track, content_h, view_h, scroll)
+        } else {
+            scroll
+        };
+        (picked, new_scroll)
     }
 }
 
@@ -218,7 +301,10 @@ pub fn menu(
         .iter()
         .filter_map(|e| {
             if let MenuEntry::Item { hint: Some(h), .. } = e {
-                Some(h.len())
+                // `.chars().count()`, not `.len()`: mac shortcut hints (`⌘T`)
+                // carry multi-byte UTF-8 symbols, so byte length overcounts
+                // versus the cell-based width actually drawn below.
+                Some(h.chars().count())
             } else {
                 None
             }
@@ -294,13 +380,24 @@ pub fn menu(
                 let text_col = if *enabled { fg() } else { fg_dim() };
                 let ty = (y + (row_h - cell_h) * 0.5).round();
 
-                // Left icon.
+                // Left icon — centered on its own ink box (not the shared
+                // text baseline) within the `icon_w` × `row_h` slot. The icon
+                // set spans several Unicode blocks (geometric shapes, misc
+                // technical/symbols, dingbats, ASCII) whose glyphs carry very
+                // different bearings/ink extents; baseline-anchoring them like
+                // body text left them inconsistently sized and off-center
+                // relative to each other (a hairline sliver next to a full
+                // block). Ink-box centering makes every icon occupy the same
+                // visual footprint regardless of source block.
                 let ix = ax + pad_x;
-                renderer.push_overlay_glyph_px(
-                    ix.round(),
-                    ty,
+                renderer.push_overlay_glyph_px_scaled(
+                    ix,
+                    y,
+                    icon_w,
+                    row_h,
                     *icon,
                     if *enabled { fg() } else { fg_dim() },
+                    1.0,
                 );
 
                 // Label — clipped to the space before the shortcut hint (or the

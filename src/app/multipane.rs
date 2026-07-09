@@ -29,27 +29,24 @@ impl App {
         // Whether the focused pane is zoomed (drives the small "ZOOM" indicator
         // badge below; the maximize itself already fell out of the zoom-aware rects).
         let zoomed = self.panes.as_ref().unwrap().zoom.is_on();
-        // Per-pane header chrome is runtime-configurable. When off, panes get their
-        // full height and no header is painted (hdr_h == 0 collapses the body inset).
+        // Per-pane header chrome is runtime-configurable. Headers are an OVERLAY
+        // band painted on top of the grid's own top row(s) (see `pane_header_h`),
+        // NOT a reserved region — enabling them never costs a pane real terminal
+        // rows, so the body rect below is simply the full tile.
         let pane_headers = self.config.pane_headers;
-        let hdr_h = if pane_headers { Self::PANE_HEADER_H } else { 0 };
+        let pane_header_style = self.config.pane_header_style;
+        let hdr_h = self.pane_header_h() as f32;
         // Dim unfocused pane CONTENT when enabled and the tab is actually split
         // (more than one tile). Zoom collapses to a single visible pane, so the
         // n_panes>1 guard naturally suppresses the dim there too.
         let dim_unfocused = self.config.dim_unfocused;
-        // Each pane_spec carries: (id, full_rect, body_rect, cols, rows).
-        // The body_rect is the full rect minus the PANE_HEADER_H header at the top;
-        // `pane_grid` and `begin_pane` receive the body rect so the cell grid
-        // starts below the header. `full_rect` is kept for header painting.
+        // Each pane_spec carries: (id, full_rect, body_rect, cols, rows). The
+        // body_rect equals the full_rect (the header overlay paints on top of it,
+        // it does not inset it); `full_rect` is also what header painting reads.
         let pane_specs: Vec<(usize, pane::Rect, pane::Rect, usize, usize)> = rects
             .iter()
             .map(|(id, r)| {
-                let body = pane::Rect {
-                    x: r.x,
-                    y: r.y + hdr_h,
-                    w: r.w,
-                    h: (r.h - hdr_h).max(0),
-                };
+                let body = Self::pane_body_rect(*r);
                 let (c, rw) = self.pane_grid(body);
                 (*id, *r, body, c, rw)
             })
@@ -64,53 +61,10 @@ impl App {
             None => (0, 0),
         };
 
-        // Status-bar snapshot: term mode, scroll position, selection count.
-        // All taken here under the immutable `&self` borrow.
-        let (sb_mode, sb_disp_off, sb_hist, sb_sel_len) = match self.pty.as_ref() {
-            Some(pty) => {
-                let t = pty.term.lock();
-                let mode = *t.mode();
-                let disp = t.grid().display_offset() as i32;
-                let hist = t.grid().history_size();
-                let sel = t
-                    .selection_to_string()
-                    .map(|s| s.chars().count())
-                    .unwrap_or(0);
-                (mode, disp, hist, sel)
-            }
-            None => (TermMode::empty(), 0, 0, 0),
-        };
-        let sb_focused = self.focused;
-        let sb_broadcast = self.broadcast_input;
-        let sb_surface_h = self
-            .renderer
-            .as_ref()
-            .map(|r| r.surface_size().1)
-            .unwrap_or(0);
-        // Status-bar cwd + git branch (same as single-pane path in render.rs).
-        let sb_cwd: Option<std::path::PathBuf> = self
-            .pty
-            .as_ref()
-            .and_then(|p| p.pane_info.cwd.clone())
-            .or_else(|| self.active_cwd.clone());
-        // Branch is precomputed in PaneInfo (refreshed on the 2 s proc poll).
-        let sb_git_branch: Option<String> = self
-            .pty
-            .as_ref()
-            .and_then(|p| p.pane_info.git_branch.clone());
-        let sb_fg_process: Option<String> = self
-            .pty
-            .as_ref()
-            .and_then(|p| p.pane_info.process_name(None).map(str::to_owned));
-        let sb_exit_status: Option<i32> = self.pty.as_ref().and_then(|p| {
-            p.prompts
-                .lock()
-                .ok()
-                .and_then(|g| g.blocks.iter().rev().find_map(|b| b.exit_code))
-        });
-        let sb_time_format = self.config.status_bar_time_format.clone();
-        let sb_segments = self.config.status_bar_segments.clone();
-        let sb_progress = self.active_progress;
+        // Status-bar snapshot: every value `paint_status_bar` needs, built once
+        // here under the immutable `&self` borrow (same as the single-pane path
+        // in render.rs) — see `App::status_bar_inputs` (chrome.rs).
+        let sb_inputs = self.status_bar_inputs();
 
         // Tab-bar state snapshot (owned data) for the pixel-overlay painter, taken
         // under the immutable `&self` borrow.
@@ -177,6 +131,17 @@ impl App {
                 })
                 .collect()
         };
+        // Pane-index number (1-based, DFS pane order) shown in the header next to
+        // the focus dot — a stable identifier independent of shell title churn.
+        let pane_header_index: Vec<(usize, usize)> = {
+            let g = self.panes.as_ref().unwrap();
+            g.layout
+                .leaves()
+                .into_iter()
+                .enumerate()
+                .map(|(i, id)| (id, i + 1))
+                .collect()
+        };
         let pane_menu_open = self.pane_menu_open;
         let pane_menu_sel = self.pane_menu_sel;
         let mouse_px_f = (self.mouse_px.0 as f32, self.mouse_px.1 as f32);
@@ -189,7 +154,11 @@ impl App {
                 .map(|(id, _)| id)
                 .filter(|&id| id != src)
         });
-        let divider = lighten(color::selection_bg(), 0.18);
+        // Theme-aware elevation instead of a bare `lighten`: on light themes an
+        // additive lighten of the (already pale) selection color clamps at white
+        // and the divider vanishes. glass_elevate darkens on light themes so the
+        // seam between tiles stays visible on every theme.
+        let divider = crate::gui::glass_elevate(color::selection_bg(), 0.18);
         // The gutter to draw transiently emphasised (drag wins over mere hover).
         let active_gutter = self
             .dragging_gutter
@@ -232,6 +201,10 @@ impl App {
                 self.custom_theme_swatches(),
                 self.settings_custom_editing,
                 self.settings_profiles.clone(),
+                self.active_profile.clone(),
+                self.settings_profile_rename_idx,
+                self.settings_profile_delete_armed,
+                self.settings_popup_scroll,
             ))
         } else {
             None
@@ -317,6 +290,7 @@ impl App {
         let tab_pane_counts = self.tab_pane_counts();
         let tab_active_pos = self.active_pos();
         let tab_left_inset = self.chrome_left_inset();
+        let tab_win_controls = self.show_window_controls();
         let tab_strip_visible = self.tab_bar_visible();
         let new_tab_key = Self::tab_bar_key(
             &tab_snapshot,
@@ -474,7 +448,13 @@ impl App {
             // icon cluster (Help/Settings/Menu) in the top-right corner — it's
             // window chrome, not per-pane, so a split must not make it vanish.
             renderer.begin_tab_overlay();
-            Self::paint_floating_icons(renderer, tab_hovered, tab_held, tab_focused);
+            Self::paint_floating_icons(
+                renderer,
+                tab_hovered,
+                tab_held,
+                tab_focused,
+                tab_win_controls,
+            );
             renderer.commit_tab_overlay();
         } else if tab_bar_rebuild {
             renderer.begin_tab_overlay();
@@ -493,6 +473,7 @@ impl App {
                 &tab_pane_counts,
                 tab_active_pos,
                 tab_left_inset,
+                tab_win_controls,
             );
             renderer.commit_tab_overlay();
         } else {
@@ -514,8 +495,11 @@ impl App {
                 &pane_specs,
                 &pane_header_titles,
                 &pane_header_proc,
+                &pane_header_index,
                 focused_pane,
                 win_focused,
+                pane_header_style,
+                hdr_h,
                 pane_menu_open,
                 pane_menu_sel,
                 mouse_px_f,
@@ -526,12 +510,21 @@ impl App {
 
         // Zoom indicator: a small accent badge in the top-right of the focused
         // pane's body, so it's visible whether or not pane headers are on. Cheap
-        // (a rounded quad + a glyph run) and only drawn while zoomed.
+        // (a rounded quad + a glyph run) and only drawn while zoomed. The header
+        // is an overlay on top of `body` now (it no longer insets it), so nudge
+        // the badge's placement rect below the header band to avoid colliding
+        // with the ⋮ button / annotation there.
         if zoomed
             && let Some((_, _full, body, _, _)) =
                 pane_specs.iter().find(|(id, ..)| *id == focused_pane)
         {
-            Self::paint_zoom_badge(renderer, *body);
+            let below_header = pane::Rect {
+                x: body.x,
+                y: body.y + hdr_h.round() as i32,
+                w: body.w,
+                h: (body.h - hdr_h.round() as i32).max(0),
+            };
+            Self::paint_zoom_badge(renderer, below_header);
         }
 
         // Inline file peek card (OSC 1337 Peek): drawn over the focused pane's
@@ -543,26 +536,19 @@ impl App {
             Self::paint_peek(renderer, peek, *body);
         }
 
+        // File drag-and-drop hover affordance: drawn over the focused pane's
+        // body rect, mirroring the single-pane path (see `dragdrop.rs`).
+        if self.drop_hover
+            && let Some((_, _full, body, _, _)) =
+                pane_specs.iter().find(|(id, ..)| *id == focused_pane)
+        {
+            Self::paint_drop_hover(renderer, *body);
+        }
+
         // Status bar (§3.4): same as the single-pane path.
         // Only painted when enabled in the config.
         if self.config.status_bar {
-            Self::paint_status_bar(
-                renderer,
-                sb_surface_h,
-                sb_mode,
-                sb_disp_off,
-                sb_hist,
-                sb_sel_len,
-                sb_focused,
-                sb_cwd.as_deref(),
-                sb_git_branch.as_deref(),
-                sb_progress,
-                sb_broadcast,
-                sb_fg_process.as_deref(),
-                &sb_time_format,
-                sb_exit_status,
-                sb_segments.as_deref(),
-            );
+            Self::paint_status_bar(renderer, &sb_inputs);
         }
 
         // Settings form (§3.5): drawn over the split via the overlay pipeline,
@@ -584,6 +570,10 @@ impl App {
             ref custom_swatches,
             custom_editing,
             ref profile_names,
+            ref active_profile,
+            profile_rename_idx,
+            profile_delete_armed,
+            popup_scroll,
         )) = settings_inputs
         {
             let font_px = renderer.font_px();
@@ -596,6 +586,28 @@ impl App {
                 double_click: self.gui_double_click,
                 theme_hex: &mut self.settings_theme_hex,
                 theme_hex_ms: &mut self.settings_theme_hex_ms,
+                profile_name: &mut self.settings_profile_new,
+                profile_name_ms: &mut self.settings_profile_new_ms,
+                profile_rename: &mut self.settings_profile_rename,
+                profile_rename_ms: &mut self.settings_profile_rename_ms,
+                hints_chars: &mut self.settings_hints_chars,
+                hints_chars_ms: &mut self.settings_hints_chars_ms,
+                font_bold: &mut self.settings_font_bold,
+                font_bold_ms: &mut self.settings_font_bold_ms,
+                font_italic: &mut self.settings_font_italic,
+                font_italic_ms: &mut self.settings_font_italic_ms,
+                font_bold_italic: &mut self.settings_font_bold_italic,
+                font_bold_italic_ms: &mut self.settings_font_bold_italic_ms,
+                font_symbol_map: &mut self.settings_font_symbol_map,
+                font_symbol_map_ms: &mut self.settings_font_symbol_map_ms,
+                font_variations: &mut self.settings_font_variations,
+                font_variations_ms: &mut self.settings_font_variations_ms,
+                status_bar_segments: &mut self.settings_status_bar_segments,
+                status_bar_segments_ms: &mut self.settings_status_bar_segments_ms,
+                status_bar_time_format: &mut self.settings_status_bar_time_format,
+                status_bar_time_format_ms: &mut self.settings_status_bar_time_format_ms,
+                wallpaper_theme: &mut self.settings_wallpaper_theme,
+                wallpaper_theme_ms: &mut self.settings_wallpaper_theme_ms,
             };
             settings_events = Some(Self::paint_settings(
                 renderer,
@@ -619,6 +631,10 @@ impl App {
                 custom_swatches,
                 custom_editing,
                 profile_names,
+                active_profile.as_deref(),
+                profile_rename_idx,
+                profile_delete_armed,
+                popup_scroll,
             ));
         } else if self.help_open {
             // Real GUI help panel (§3.7) in split mode.
@@ -782,11 +798,13 @@ impl App {
         renderer.push_overlay_glyph_px_str(tx.round(), ty, label, accent);
     }
 
-    /// Paint per-pane title bars for all leaves in split mode. Each header is
-    /// `PANE_HEADER_H` px tall at the top of the leaf rect and contains (L→R):
-    ///
-    ///   · focus dot (●/·)  · OSC title (ellipsized)  · [cwd slot, reserved]
-    ///   · ⋮ pane-menu button (opens a mini dropdown)
+    /// Paint per-pane title bars for all leaves in split mode. Painted as an
+    /// OVERLAY band on top of the leaf rect's own top row(s) — it does NOT inset
+    /// the cell grid (see `App::pane_header_h` / `App::resize_panes`) — so
+    /// turning headers on never costs a pane real terminal rows. `hdr_h` px tall,
+    /// containing (L→R): a drag grip, the focus dot (●/·), the pane index, the
+    /// OSC title (ellipsized), and (in [`PaneHeaderStyle::Full`] only) a right-
+    /// aligned cwd/comm annotation, then the ⋮ pane-menu button.
     ///
     /// The focused header is drawn with the E2 glass surface fill + a 2 px accent
     /// top rail (focus chrome). Unfocused headers use the E1 body + dimmed text.
@@ -801,8 +819,11 @@ impl App {
         pane_specs: &[(usize, pane::Rect, pane::Rect, usize, usize)],
         titles: &[(usize, String)],
         proc_info: &[(usize, Option<String>, Option<String>)],
+        indices: &[(usize, usize)],
         focused_pane: usize,
         win_focused: bool,
+        style: panes::PaneHeaderStyle,
+        hdr_h: f32,
         pane_menu_open: Option<usize>,
         pane_menu_sel: usize,
         mouse_px: (f32, f32),
@@ -810,8 +831,10 @@ impl App {
         drop_target: Option<usize>,
     ) {
         let m = renderer.cell_metrics();
-        let hdr_h = Self::PANE_HEADER_H as f32;
         let pad = Self::PANE_HEADER_PAD;
+        // Compact drops the cwd/comm annotation entirely (title + dot + index
+        // only, at a shorter strip height — see `App::pane_header_h`).
+        let compact = style == panes::PaneHeaderStyle::Compact;
 
         // Dim everything when window is unfocused (matches tab-bar behaviour).
         let fdim = if win_focused { 1.0 } else { 0.7 };
@@ -892,43 +915,55 @@ impl App {
             // Vertical centering: glyph top = (hdr_h - cell_h) / 2.
             let ty = (ry + (hdr_h - m.height) * 0.5).round();
 
-            // /proc cwd + foreground comm for this pane.
-            let (pi_cwd, pi_comm) = proc_info
+            // Pane index (1-based DFS order) — a stable identifier independent of
+            // shell title churn, shown in both header styles.
+            let index_str = indices
                 .iter()
-                .find(|(tid, _, _)| *tid == *id)
-                .map(|(_, c, k)| (c.as_deref(), k.as_deref()))
-                .unwrap_or((None, None));
-            // Build a compact right-side annotation: "cwd" or "cwd  comm" (dim).
-            // Reserve space for this annotation before computing the title width.
-            let annotation: Option<String> = match (pi_cwd, pi_comm) {
-                (Some(c), Some(k)) => Some(format!("{c}  {k}")),
-                (Some(c), None) => Some(c.to_string()),
-                (None, Some(k)) => Some(k.to_string()),
-                (None, None) => None,
+                .find(|(tid, _)| *tid == *id)
+                .map(|(_, i)| i.to_string())
+                .unwrap_or_default();
+
+            // /proc cwd + foreground comm annotation. Compact drops it entirely
+            // (title + dot + index only, per `PaneHeaderStyle::Compact`).
+            let annotation: Option<String> = if compact {
+                None
+            } else {
+                let (pi_cwd, pi_comm) = proc_info
+                    .iter()
+                    .find(|(tid, _, _)| *tid == *id)
+                    .map(|(_, c, k)| (c.as_deref(), k.as_deref()))
+                    .unwrap_or((None, None));
+                match (pi_cwd, pi_comm) {
+                    (Some(c), Some(k)) => Some(format!("{c}  {k}")),
+                    (Some(c), None) => Some(c.to_string()),
+                    (None, Some(k)) => Some(k.to_string()),
+                    (None, None) => None,
+                }
             };
-            // Annotation goes right-aligned, just left of the ⋮ button.
-            let annotation_w = annotation
-                .as_deref()
-                .map(|s| {
-                    let nchars = s.chars().count() as f32;
-                    nchars * m.width + pad
-                })
-                .unwrap_or(0.0);
 
             // Focus dot (starts after the grip handle).
             let mut tx = rx + grip_w;
             renderer.push_overlay_glyph_px(tx.round(), ty, dot, dot_fg);
             tx += m.width + 2.0;
 
-            // Title (fit to available width, leaving room for annotation + ⋮ button).
-            let avail = rw - (tx - rx) - annotation_w - menu_btn_w - pad;
-            let max_chars = (avail / m.width).floor() as usize;
-            let label = fit_label(title, max_chars.max(1));
+            // Pane index, dim, right after the dot.
+            if !index_str.is_empty() {
+                renderer.push_overlay_glyph_px_str(tx.round(), ty, &index_str, fg_dim);
+                tx += index_str.chars().count() as f32 * m.width + 4.0;
+            }
+
+            // Split the remaining width (before the ⋮ button) between the title
+            // and the annotation (title-priority — see `header_title_budget`).
+            let region_w = (rw - (tx - rx) - menu_btn_w - pad).max(0.0);
+            let region_chars = (region_w / m.width).floor().max(0.0) as usize;
+            let (title_chars, ann_label) = header_title_budget(region_chars, annotation.as_deref());
+            let label = fit_label(title, title_chars.max(1));
             renderer.push_overlay_glyph_px_str(tx.round(), ty, &label, text_fg);
 
             // Proc annotation (cwd + comm): dim, right-aligned before ⋮.
-            if let Some(ann) = &annotation {
-                let ann_x = rx + rw - menu_btn_w - annotation_w;
+            if let Some(ann) = &ann_label {
+                let ann_w = ann.chars().count() as f32 * m.width;
+                let ann_x = rx + rw - menu_btn_w - pad - ann_w;
                 renderer.push_overlay_glyph_px_str(ann_x.round(), ty, ann, fg_dim);
             }
 
@@ -971,6 +1006,57 @@ impl App {
                 Self::paint_pane_menu(renderer, btn_x, btn_y + hdr_h, pane_menu_sel, mouse_px, &m);
             }
         }
+    }
+
+    /// Paint a single lightweight header for an UNSPLIT tab (feature:
+    /// `pane_headers_single`), so `pane_headers` has an immediate visible effect
+    /// even before the user ever splits. Simpler than [`Self::paint_pane_headers`]:
+    /// just the fill + focus dot + pane index ("1") + OSC title — no drag grip
+    /// (nothing to rearrange with a single pane) and no ⋮ menu (already reachable
+    /// via the floating icon cluster / command palette). Always an overlay, same
+    /// as the split header — it never insets the grid.
+    pub(crate) fn paint_single_pane_header(
+        renderer: &mut Renderer,
+        area: pane::Rect,
+        hdr_h: f32,
+        title: &str,
+        win_focused: bool,
+    ) {
+        if hdr_h <= 0.0 {
+            return;
+        }
+        let m = renderer.cell_metrics();
+        let pad = Self::PANE_HEADER_PAD;
+        let fdim = if win_focused { 1.0 } else { 0.7 };
+        let mul = |c: [f32; 4]| [c[0] * fdim, c[1] * fdim, c[2] * fdim, c[3]];
+        let accent = mul(color::accent());
+        let fg = mul(gui::fg());
+        let fg_dim = mul(gui::fg_dim());
+        let body_e2 = mul(gui::glass_raised());
+        let hairline = mul(gui::hairline());
+
+        let rx = area.x as f32;
+        let ry = area.y as f32;
+        let rw = area.w as f32;
+
+        renderer.push_overlay_px(rx, ry, rw, hdr_h, body_e2);
+        let crown = [accent[0], accent[1], accent[2], accent[3] * 0.5];
+        renderer.push_overlay_px(rx, ry, rw, 2.0, crown);
+        renderer.push_overlay_px(rx, ry + hdr_h - 1.0, rw, 1.0, hairline);
+
+        let ty = (ry + (hdr_h - m.height) * 0.5).round();
+        let mut tx = rx + pad;
+        // A single pane is trivially "the focused one" (window focus aside), so
+        // the dot always reads as focused.
+        renderer.push_overlay_glyph_px(tx.round(), ty, '●', accent);
+        tx += m.width + 2.0;
+        renderer.push_overlay_glyph_px_str(tx.round(), ty, "1", fg_dim);
+        tx += m.width + 4.0;
+
+        let avail = (rw - (tx - rx) - pad).max(0.0);
+        let max_chars = ((avail / m.width).floor() as usize).max(1);
+        let label = fit_label(title, max_chars);
+        renderer.push_overlay_glyph_px_str(tx.round(), ty, &label, fg);
     }
 
     /// Draw the small pane ⋮ menu anchored at `(ax, ay)` (top-left of the dropdown).
@@ -1048,7 +1134,7 @@ impl App {
     /// The focused pane is always rebuilt (it owns the blinking cursor + selection,
     /// which are not part of alacritty's damage), so this is only consulted for the
     /// non-focused panes.
-    pub(crate) fn pane_damaged(pty: &Pty) -> bool {
+    pub fn pane_damaged(pty: &Pty) -> bool {
         let mut term = pty.term.lock();
         let damaged = match term.damage() {
             alacritty_terminal::term::TermDamage::Full => true,
@@ -1067,6 +1153,10 @@ impl App {
         blink_on: bool,
         hovered_link: Option<&str>,
     ) {
+        // Audited (w15 alacritty-surface, FairMutex item): every per-frame
+        // term-lock site in the render/UI path (here and in `render.rs`) keeps
+        // the fair `.lock()` intentionally rather than `lock_unfair()` — see the
+        // longer rationale on the equivalent lock in `render.rs::render`.
         let term = pty.term.lock();
         let content = term.renderable_content();
         let colors = content.colors;
@@ -1092,108 +1182,125 @@ impl App {
         // always treated as "containing" the cursor (focus is window-level here).
         let invert_block = cursor_shown && win_focused && cursor.shape == CursorShape::Block;
 
-        let cells: Vec<_> = content.display_iter.collect();
+        // Read cells straight from the grid one row at a time instead of
+        // materializing the whole pane viewport. A pane rebuild is always a full
+        // rebuild (no row-level damage here), so every row 0..rows is visited in
+        // order — the win is the smaller allocation + better cache behaviour, not
+        // fewer rows. Each display row is self-contained (see the single-pane path
+        // in `render.rs`), so per-row buffers preserve every grapheme/wide-char
+        // lookahead. `grid` shares `content`'s immutable term borrow.
+        let grid = term.grid();
+        // `row_started` is still needed by the cursor overlay below to decide
+        // begin_row vs set_cur_row for the cursor's row.
         let mut row_started = vec![false; rows];
-        let mut ci = 0;
-        while ci < cells.len() {
-            let indexed = &cells[ci];
-            let cell = indexed.cell;
-            if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
-                ci += 1;
+        // Per-row cell buffer, reused across rows via `.clear()`; borrows the lock.
+        let mut row_buf: Vec<Indexed<&Cell>> = Vec::new();
+        for row_u in 0..rows {
+            if !collect_display_row(grid, row_u, display_offset, &mut row_buf) {
                 continue;
             }
-            let row = indexed.point.line.0 + display_offset;
-            let col = indexed.point.column.0 as i32;
-            if row < 0 || row >= rows as i32 || col < 0 || col >= cols as i32 {
-                ci += 1;
-                continue;
-            }
-            let row_u = row as usize;
-            if !row_started[row_u] {
-                renderer.begin_row(row_u);
-                row_started[row_u] = true;
-            }
-
-            let mut fg = color::resolve(cell.fg, colors);
-            let mut bg = color::resolve(cell.bg, colors);
-            if cell.flags.contains(Flags::INVERSE) {
-                std::mem::swap(&mut fg, &mut bg);
-            }
-            if cell.flags.contains(Flags::DIM) {
-                fg = [fg[0] * 0.66, fg[1] * 0.66, fg[2] * 0.66, fg[3]];
-            }
-            if selection.is_some_and(|range| range.contains(indexed.point)) {
-                bg = color::selection_bg();
-            }
-            if invert_block && row == cursor_row && col == cursor_col {
-                std::mem::swap(&mut fg, &mut bg);
-            }
-            let hidden = cell.flags.contains(Flags::HIDDEN);
-            let bold = cell.flags.contains(Flags::BOLD) || cell.flags.contains(Flags::BOLD_ITALIC);
-            let italic =
-                cell.flags.contains(Flags::ITALIC) || cell.flags.contains(Flags::BOLD_ITALIC);
-            let wide = cell.flags.contains(Flags::WIDE_CHAR);
-
-            let mut decorations = if hidden {
-                Decorations::default()
-            } else {
-                let underline = if cell.flags.contains(Flags::UNDERCURL) {
-                    UnderlineStyle::Curl
-                } else if cell.flags.contains(Flags::DOTTED_UNDERLINE) {
-                    UnderlineStyle::Dotted
-                } else if cell.flags.contains(Flags::DASHED_UNDERLINE) {
-                    UnderlineStyle::Dashed
-                } else if cell.flags.contains(Flags::DOUBLE_UNDERLINE) {
-                    UnderlineStyle::Double
-                } else if cell.flags.contains(Flags::UNDERLINE) {
-                    UnderlineStyle::Single
-                } else {
-                    UnderlineStyle::None
-                };
-                let color = cell
-                    .underline_color()
-                    .map(|c| color::resolve(c, colors))
-                    .unwrap_or(fg);
-                Decorations {
-                    underline,
-                    strikeout: cell.flags.contains(Flags::STRIKEOUT),
-                    overline: !overline_cells.is_empty()
-                        && overline_cells.contains(&(row, col as usize)),
-                    color,
+            let mut ci = 0;
+            while ci < row_buf.len() {
+                let indexed = &row_buf[ci];
+                let cell = indexed.cell;
+                if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                    ci += 1;
+                    continue;
                 }
-            };
-            if !hidden
-                && matches!(decorations.underline, UnderlineStyle::None)
-                && let Some(hov) = hovered_link
-                && cell.hyperlink().is_some_and(|h| h.uri() == hov)
-            {
-                decorations.underline = UnderlineStyle::Single;
-            }
+                let row = indexed.point.line.0 + display_offset;
+                let col = indexed.point.column.0 as i32;
+                if row < 0 || row >= rows as i32 || col < 0 || col >= cols as i32 {
+                    ci += 1;
+                    continue;
+                }
+                let row_u = row as usize;
+                if !row_started[row_u] {
+                    renderer.begin_row(row_u);
+                    row_started[row_u] = true;
+                }
 
-            let ch = if hidden || cell.c == '\0' {
-                ' '
-            } else {
-                cell.c
-            };
-            let (combiners, consumed) = if hidden {
-                (Vec::new(), unit_len(&cells, ci))
-            } else {
-                build_grapheme(&cells, ci, indexed.point.line.0)
-            };
-            let wide = wide || consumed >= 2;
-            renderer.push_cell(
-                col as usize,
-                row_u,
-                ch,
-                &combiners,
-                fg,
-                bg,
-                bold,
-                italic,
-                wide,
-                decorations,
-            );
-            ci += consumed;
+                let mut fg = color::resolve(cell.fg, colors);
+                let mut bg = color::resolve(cell.bg, colors);
+                if cell.flags.contains(Flags::INVERSE) {
+                    std::mem::swap(&mut fg, &mut bg);
+                }
+                if cell.flags.contains(Flags::DIM) {
+                    fg = [fg[0] * 0.66, fg[1] * 0.66, fg[2] * 0.66, fg[3]];
+                }
+                if selection.is_some_and(|range| range.contains(indexed.point)) {
+                    bg = color::selection_bg();
+                }
+                if invert_block && row == cursor_row && col == cursor_col {
+                    std::mem::swap(&mut fg, &mut bg);
+                }
+                let hidden = cell.flags.contains(Flags::HIDDEN);
+                let bold =
+                    cell.flags.contains(Flags::BOLD) || cell.flags.contains(Flags::BOLD_ITALIC);
+                let italic =
+                    cell.flags.contains(Flags::ITALIC) || cell.flags.contains(Flags::BOLD_ITALIC);
+                let wide = cell.flags.contains(Flags::WIDE_CHAR);
+
+                let mut decorations = if hidden {
+                    Decorations::default()
+                } else {
+                    let underline = if cell.flags.contains(Flags::UNDERCURL) {
+                        UnderlineStyle::Curl
+                    } else if cell.flags.contains(Flags::DOTTED_UNDERLINE) {
+                        UnderlineStyle::Dotted
+                    } else if cell.flags.contains(Flags::DASHED_UNDERLINE) {
+                        UnderlineStyle::Dashed
+                    } else if cell.flags.contains(Flags::DOUBLE_UNDERLINE) {
+                        UnderlineStyle::Double
+                    } else if cell.flags.contains(Flags::UNDERLINE) {
+                        UnderlineStyle::Single
+                    } else {
+                        UnderlineStyle::None
+                    };
+                    let color = cell
+                        .underline_color()
+                        .map(|c| color::resolve(c, colors))
+                        .unwrap_or(fg);
+                    Decorations {
+                        underline,
+                        strikeout: cell.flags.contains(Flags::STRIKEOUT),
+                        overline: !overline_cells.is_empty()
+                            && overline_cells.contains(&(row, col as usize)),
+                        color,
+                    }
+                };
+                if !hidden
+                    && matches!(decorations.underline, UnderlineStyle::None)
+                    && let Some(hov) = hovered_link
+                    && cell.hyperlink().is_some_and(|h| h.uri() == hov)
+                {
+                    decorations.underline = UnderlineStyle::Single;
+                }
+
+                let ch = if hidden || cell.c == '\0' {
+                    ' '
+                } else {
+                    cell.c
+                };
+                let (combiners, consumed) = if hidden {
+                    (Vec::new(), unit_len(&row_buf, ci))
+                } else {
+                    build_grapheme(&row_buf, ci, indexed.point.line.0)
+                };
+                let wide = wide || consumed >= 2;
+                renderer.push_cell(
+                    col as usize,
+                    row_u,
+                    ch,
+                    &combiners,
+                    fg,
+                    bg,
+                    bold,
+                    italic,
+                    wide,
+                    decorations,
+                );
+                ci += consumed;
+            }
         }
 
         // Cursor overlay (same precedence as the single-pane path).
@@ -1223,11 +1330,94 @@ impl App {
                     if row_started[r] {
                         renderer.set_cur_row(r);
                     } else {
-                        renderer.begin_row(r);
+                        // Never wipe the row's cached cell content via
+                        // `begin_row` here; see the single-pane cursor overlay
+                        // fallback (src/app/render.rs) for the full rationale.
+                        renderer.resume_row(r);
                     }
                     renderer.push_cursor(cursor_col as usize, r, overlay, cursor_color);
                 }
             }
         }
+    }
+}
+
+/// Pure width-budgeting for a pane header's title + cwd/comm annotation, given
+/// `region_chars` (the whole-character width available after the grip/dot/
+/// index and before the ⋮ button). Title-priority: the annotation is clamped
+/// to whatever's left after reserving a minimum width for the title (plus
+/// one char for the gap between them), and dropped entirely — returning
+/// `None` — rather than letting it crush the title toward zero or (as it did
+/// before this budgeting existed) spill left past the grip/dot on a narrow
+/// pane. Returns `(title_chars, Some(already-fit annotation string))`.
+/// Split out of [`App::paint_pane_headers`] so the clamp math is unit-testable
+/// without a renderer.
+fn header_title_budget(region_chars: usize, annotation: Option<&str>) -> (usize, Option<String>) {
+    const MIN_TITLE_CHARS: usize = 6;
+    match annotation {
+        Some(ann) => {
+            let ann_budget = region_chars.saturating_sub(MIN_TITLE_CHARS + 1);
+            let ann_chars = ann.chars().count().min(ann_budget);
+            if ann_chars == 0 {
+                (region_chars, None)
+            } else {
+                (
+                    region_chars.saturating_sub(ann_chars + 1),
+                    Some(fit_label(ann, ann_chars)),
+                )
+            }
+        }
+        None => (region_chars, None),
+    }
+}
+
+#[cfg(test)]
+mod header_budget_tests {
+    use super::*;
+
+    #[test]
+    fn no_annotation_gives_title_the_whole_region() {
+        assert_eq!(header_title_budget(40, None), (40, None));
+    }
+
+    #[test]
+    fn short_annotation_fits_alongside_full_title() {
+        // "src" (3 chars) easily fits in a 40-char region alongside the title.
+        let (title_chars, ann) = header_title_budget(40, Some("src"));
+        assert_eq!(ann.as_deref(), Some("src"));
+        // Title gets everything except the annotation + 1 gap char.
+        assert_eq!(title_chars, 40 - 3 - 1);
+    }
+
+    #[test]
+    fn long_annotation_is_clamped_not_the_title() {
+        // A 30-char annotation in a 20-char region: the title keeps its
+        // MIN_TITLE_CHARS(6) floor, and the annotation is truncated (via
+        // fit_label's leading-ellipsis) to whatever's left, NOT the other way
+        // around, and NEVER wide enough to collide with the grip/dot.
+        let long_ann = "a".repeat(30);
+        let (title_chars, ann) = header_title_budget(20, Some(&long_ann));
+        assert_eq!(title_chars, 6);
+        let ann = ann.expect("annotation still shown, just truncated");
+        // 20 region chars - 6 title - 1 gap = 13 chars for the annotation.
+        assert_eq!(ann.chars().count(), 13);
+        assert!(ann.starts_with('…'));
+    }
+
+    #[test]
+    fn annotation_dropped_entirely_when_region_too_narrow() {
+        // A region too small to fit even MIN_TITLE_CHARS + 1 + 1 char of
+        // annotation: the annotation is dropped so the title gets it all,
+        // instead of both being squeezed into illegibility.
+        let (title_chars, ann) = header_title_budget(6, Some("src  zsh"));
+        assert_eq!(title_chars, 6);
+        assert_eq!(ann, None);
+    }
+
+    #[test]
+    fn zero_region_never_panics_and_drops_annotation() {
+        let (title_chars, ann) = header_title_budget(0, Some("src"));
+        assert_eq!(title_chars, 0);
+        assert_eq!(ann, None);
     }
 }

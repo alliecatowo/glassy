@@ -48,6 +48,27 @@ impl App {
         self.mark_dirty(event_loop);
     }
 
+    /// Rebuild the active tab's split tree into the next layout preset (rows /
+    /// columns / main-vertical / grid, in that fixed cycle order — see
+    /// [`pane::LayoutPreset`]), preserving the current pane order. A no-op when
+    /// not split. The "cycle layout" action (`cycle_layout` key/palette command).
+    pub(crate) fn cycle_layout(&mut self, event_loop: &ActiveEventLoop) {
+        if !self.is_split() {
+            return;
+        }
+        let Some(g) = self.panes.as_mut() else {
+            return;
+        };
+        g.zoom = g.zoom.cleared();
+        if g.layout.cycle_preset().is_none() {
+            return;
+        }
+        self.resize_panes();
+        self.reset_pointer_state();
+        self.force_full_redraw = true;
+        self.mark_dirty(event_loop);
+    }
+
     /// Reset every split ratio in the active tab to an even 50/50 partition. A no-op
     /// when not split. The "equalize panes" action.
     pub(crate) fn equalize_panes(&mut self, event_loop: &ActiveEventLoop) {
@@ -123,7 +144,7 @@ impl App {
         let g = self.panes.as_ref()?;
         let rects = g.rects(area, Self::PANE_GAP);
         let (xi, yi) = (x as f32, y as f32);
-        let hdr_h = Self::PANE_HEADER_H as f32;
+        let hdr_h = self.pane_header_h() as f32;
         for (id, r) in rects {
             let rx = r.x as f32;
             let ry = r.y as f32;

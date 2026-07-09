@@ -65,5 +65,19 @@ sourcing — they will then activate regardless of `TERM_PROGRAM`.
 - If you use a prompt framework (starship, powerlevel10k, oh-my-posh) that
   already emits OSC 133 marks, you do not need these — glassy reads whatever
   marks arrive.
+- glassy also recognizes **OSC 633** (the VS Code / iTerm2-flavored superset of
+  133, using the identical `A`/`B`/`C`/`D` mark set) as a second, equally valid
+  mark source. If you already have a `vscode-shell-integration` snippet
+  sourced — or a framework that emits 633 instead of 133 — you get command
+  blocks for free with no glassy-specific script installed. glassy also reads
+  633's `E` extension (`633;E;<cmdline>;<nonce>`), the literal command line the
+  shell is about to run, as a more reliable alternative to reading it back off
+  the grid. If a session somehow emits both 133 and 633, glassy honors
+  whichever protocol's mark arrives first for that session and ignores the
+  other, so commands are never double-counted.
+- Opt in to a Warp-style card look for finished command blocks with
+  `command_blocks = cards` in `glassy.conf` (default `badges`, today's
+  appearance; `off` is reserved for a future full-disable switch). See the
+  `[Configuration]` doc comment in `src/config/mod.rs` for the full key.
 
 [osc133]: https://gitlab.freedesktop.org/Per_Bothner/specifications/blob/master/proposals/semantic-prompts.md

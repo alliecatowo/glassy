@@ -23,7 +23,10 @@ impl App {
             ) = if is_active {
                 (
                     self.panes.as_ref(),
-                    self.active_custom_title.clone(),
+                    persisted_custom_title(
+                        self.active_scratch,
+                        self.active_custom_title.as_deref(),
+                    ),
                     self.active_cwd.clone(),
                     &self.active_pane_cwds,
                 )
@@ -31,7 +34,7 @@ impl App {
                 match self.background.iter().find(|s| s.id == tab_id) {
                     Some(s) => (
                         s.panes.as_ref(),
-                        s.custom_title.clone(),
+                        persisted_custom_title(s.scratch, s.custom_title.as_deref()),
                         s.last_cwd.clone(),
                         &s.pane_cwds,
                     ),
@@ -261,6 +264,9 @@ impl App {
                 last_cwd: focused_cwd,
                 custom_title: tab.custom_title.clone(),
                 pane_cwds,
+                // A restored tab is always an ordinary shell tab — scratch tabs are
+                // never persisted (see `build_session`).
+                scratch: false,
             };
             built.push((orig_idx, tab_id, session));
         }
@@ -288,6 +294,7 @@ impl App {
                 self.active_id = session.id;
                 self.active_title = session.title;
                 self.active_custom_title = session.custom_title;
+                self.active_scratch = session.scratch;
                 self.active_cwd = session.last_cwd;
                 self.active_pane_cwds = session.pane_cwds;
                 self.pty = Some(session.pty);
@@ -329,5 +336,45 @@ impl App {
             self.next_id += 1;
             self.pty = Some(pty);
         }
+    }
+}
+
+/// The custom title `build_session` should persist for a tab, given whether it
+/// is a "run command" scratch tab (see `App::spawn_scratch_run`) and its live
+/// custom title. A scratch tab's custom title is the raw run command (`▸ cmd`,
+/// possibly containing secrets) shown purely as a live tab label — it MUST NOT
+/// reach the on-disk session state, so this returns `None` for scratch tabs
+/// (the tab restores as a plain shell tab). Non-scratch tabs persist their
+/// custom title unchanged. Pulled out as a pure fn so the "never persist a
+/// scratch command" invariant is unit-testable without a renderer-backed `App`.
+fn persisted_custom_title(scratch: bool, custom_title: Option<&str>) -> Option<String> {
+    if scratch {
+        None
+    } else {
+        custom_title.map(str::to_string)
+    }
+}
+
+#[cfg(test)]
+mod scratch_persist_tests {
+    use super::persisted_custom_title;
+
+    #[test]
+    fn scratch_tab_command_is_never_persisted() {
+        // A scratch tab labels itself with the raw command; that text must not be
+        // written to the session snapshot (it may carry secrets).
+        let cmd = "▸ AWS_SECRET=hunter2 deploy --prod";
+        assert_eq!(persisted_custom_title(true, Some(cmd)), None);
+        // Not even a partial leak: the sensitive substring is gone entirely.
+        assert!(persisted_custom_title(true, Some(cmd)).is_none());
+    }
+
+    #[test]
+    fn ordinary_tab_custom_title_is_persisted_unchanged() {
+        assert_eq!(
+            persisted_custom_title(false, Some("My work tab")),
+            Some("My work tab".to_string())
+        );
+        assert_eq!(persisted_custom_title(false, None), None);
     }
 }

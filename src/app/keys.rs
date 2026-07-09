@@ -256,6 +256,20 @@ impl App {
             // terminal apps when this instance isn't in quake mode — there it is a
             // no-op, so let the keypress fall through to the child instead.
             let inert_quake = action == KeyAction::QuakeToggle && self.quake.is_none();
+            // …but a silent no-op leaves quake mode undiscoverable: a user who
+            // bound (or kept the default) `quake_toggle` and presses it while
+            // quake is off gets zero feedback. Surface a one-shot onboarding toast
+            // pointing at where to enable it (gated on the real press, not on
+            // key auto-repeat, so holding the key doesn't spam the stack). The
+            // keypress still falls through to the child below.
+            if inert_quake && !event.repeat {
+                self.push_toast(
+                    "Quake mode is off — enable in Settings > Quake (needs restart; \
+                     on Wayland also bind a compositor key to `glassy toggle`, \
+                     see docs/quake-mode.md)",
+                );
+                self.mark_dirty(event_loop);
+            }
             // Pane-focus chords (Cmd/Ctrl+arrow) are no-ops on a single-pane tab —
             // there they MUST fall through so the arrow reaches the child (e.g.
             // Ctrl+Left = word-jump in a shell). Only swallow them when split.
@@ -368,7 +382,7 @@ impl App {
                 && matches!(key, Key::Named(NamedKey::Escape))
                 && self.settings_drop != gui::SettingsDrop::None
             {
-                self.settings_drop = gui::SettingsDrop::None;
+                self.set_settings_drop(gui::SettingsDrop::None);
                 self.force_full_redraw = true;
                 self.mark_dirty(event_loop);
                 return;
@@ -376,7 +390,7 @@ impl App {
             if matches!(key, Key::Named(NamedKey::Escape | NamedKey::F1)) || toggle_settings {
                 self.help_open = false;
                 self.settings_open = false;
-                self.settings_drop = gui::SettingsDrop::None;
+                self.set_settings_drop(gui::SettingsDrop::None);
                 // Clear the opening-gesture guard on a keyboard close so a stale
                 // `true` (e.g. opened by cog, then closed by Esc before any click
                 // edge consumed it) cannot leak into the next overlay and swallow
@@ -499,6 +513,10 @@ impl App {
                 self.paste_clipboard();
                 self.mark_dirty(event_loop);
             }
+            SelectAll => {
+                self.select_all();
+                self.mark_dirty(event_loop);
+            }
             ToggleStatusBar => {
                 self.toggle_status_bar();
                 self.mark_dirty(event_loop);
@@ -578,6 +596,7 @@ impl App {
             }
             ToggleOpacity => self.toggle_opacity(event_loop),
             SaveScrollback => self.save_scrollback_to_file(event_loop),
+            CycleLayout => self.cycle_layout(event_loop),
         }
     }
 

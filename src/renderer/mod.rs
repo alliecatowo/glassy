@@ -108,9 +108,11 @@ fn load_pipeline_cache_data(adapter_info: &wgpu::AdapterInfo) -> Option<Vec<u8>>
 const ATLAS_SIZE: u32 = 1024;
 /// Color-atlas dimensions (square, RGBA8). Color emoji are rasterized at a font
 /// strike ≥ the cell height (≈64px on Retina) for crisp downscaling, so each one
-/// is larger than a text glyph; 512² (1 MB) holds ~50 emoji at 64px — ample for a
-/// session — while staying lean. On overflow the shared path clears + repacks.
-const COLOR_ATLAS_SIZE: u32 = 512;
+/// is larger than a text glyph; 1024² (4 MB) holds ~450 emoji at 64px — comfortably
+/// covers even emoji-dense sessions. On overflow, the overflowing glyph is
+/// skipped for one frame and the clear + repack is deferred to the next frame
+/// boundary (see `atlas_overflow_pending`) rather than happening mid-frame.
+const COLOR_ATLAS_SIZE: u32 = 1024;
 /// Image-atlas dimensions (square, RGBA8). Inline images (kitty graphics) are
 /// packed here, kept separate from the glyph atlases so a large image can't evict
 /// the font cache. On overflow the image cache is cleared and repacked.
@@ -132,6 +134,12 @@ const INITIAL_INSTANCES: usize = 512;
 /// crisply over the translucent backdrop. The effective value is configurable
 /// and stored per-`Renderer` (`opacity`).
 pub const DEFAULT_OPACITY: f32 = 0.92;
+
+/// Default strength of the unfocused-pane dim overlay (`unfocused_dim`): the
+/// alpha of a black quad composited over an unfocused split tile so the focused
+/// pane reads as foreground. Chosen so the tile clearly recedes while its
+/// content stays legible — 0.10 was too subtle to read as "dimmed".
+pub const DEFAULT_PANE_DIM: f32 = 0.28;
 
 /// Transient surface-acquisition outcomes for a frame.
 ///
@@ -392,11 +400,19 @@ pub struct Renderer {
     packer: Packer,
     /// Shelf packer for the RGBA8 color atlas.
     color_packer: Packer,
-    /// Set when a glyph atlas overflowed and was repacked mid-frame (which
-    /// invalidates every cached glyph's UVs). The app must then force a full
-    /// row rebuild so persisted rows don't keep stale UVs. Read via
+    /// Set when a glyph atlas overflowed and the deferred repack (see
+    /// `atlas_overflow_pending`) will invalidate every cached glyph's UVs at
+    /// the next frame boundary. The app must then force a full row rebuild so
+    /// persisted rows don't keep stale UVs. Read via
     /// [`Renderer::pull_atlas_reset`].
     atlas_reset: bool,
+    /// Set when a glyph atlas filled mid-frame. Unlike the old inline repack,
+    /// the actual cache-clear + packer reset is DEFERRED to the next
+    /// [`Renderer::begin_frame`] so no instance already emitted this frame keeps
+    /// a UV pointing into an atlas region we are about to rewind (that was the
+    /// scroll/emoji-density corruption). The overflowing glyph is skipped for one
+    /// frame; `atlas_reset` (set alongside) forces the full rebuild that repacks it.
+    atlas_overflow_pending: bool,
     glyph_cache: HashMap<(char, bool, bool), Vec<AtlasGlyph>>,
     /// Atlas entries for multi-codepoint grapheme clusters (combining/ZWJ).
     cluster_cache: HashMap<(String, bool, bool), Vec<AtlasGlyph>>,
@@ -410,6 +426,13 @@ pub struct Renderer {
     /// These glyphs are rendered in a 2-cell (WIDE) box even when alacritty did
     /// not flag them as wide — corrects Nerd-font icons that overflow their cell.
     wide_char_set: std::collections::HashSet<(char, bool, bool)>,
+    /// Cache for [`Renderer::primary_font_covers`] — whether the PRIMARY font
+    /// has its own glyph for `(char, bold, italic)`. Gates ligature-run
+    /// eligibility (see `src/text/presentation.rs`); invalidated on font
+    /// reload/resize alongside `glyph_cache` since coverage depends on which
+    /// face is loaded, not on atlas state (so it is NOT cleared on atlas
+    /// overflow repack).
+    primary_coverage_cache: HashMap<(char, bool, bool), bool>,
     /// Whether the active font was detected to have an OpenType GSUB `liga`
     /// feature.  When false, ligature-run shaping is skipped regardless of the
     /// user config flag (no point paying for run-level shaping on a non-liga font).
@@ -507,6 +530,16 @@ pub struct Renderer {
     /// clear color (premultiplied) when the surface is transparent.
     opacity: f32,
 
+    /// Alpha of the dark overlay laid over unfocused panes in a split, in
+    /// [0, 0.9]. 0 disables the overlay entirely. Configurable via
+    /// `unfocused_dim`; see [`Renderer::set_pane_dim`].
+    pane_dim: f32,
+
+    /// Whether window opacity also applies to terminal text
+    /// (`opacity_scope = text`). Default false: glyphs composite opaque so text
+    /// stays crisp over the translucent backdrop. See [`Renderer::set_text_opacity`].
+    text_opacity: bool,
+
     /// Whether the surface alpha mode actually composites alpha (a transparent
     /// window). When false we keep backgrounds fully opaque so a compositor that
     /// can't do translucency doesn't darken the window via premultiplied RGB.
@@ -546,6 +579,23 @@ pub struct Renderer {
     /// routes the grid through the shared CRT post pass with mode-specific params.
     /// See [`effect::WindowEffect`].
     window_effect: WindowEffect,
+
+    /// Set by the `wgpu::Device::set_device_lost_callback` registered in
+    /// [`Renderer::new_with_fonts`] (see `renderer/init.rs`) when the GPU
+    /// device is lost after startup (driver crash/reset, GPU hot-unplug) — an
+    /// event wgpu otherwise has no documented default behavior for on the next
+    /// `submit()`/`present()`. The render loop checks [`Renderer::device_lost`]
+    /// each frame and degrades gracefully (same clean-exit path as an init
+    /// failure) instead of relying on that undocumented default. `Arc` so the
+    /// callback closure (which may run on an arbitrary wgpu-internal thread)
+    /// can set it without borrowing the `Renderer`.
+    ///
+    /// `#[allow(dead_code)]`: wiring the render loop's per-frame check is a
+    /// separate app-level change outside this stream's scope (see
+    /// `Renderer::device_lost`'s doc comment) — this field and its accessor
+    /// are the additive, self-contained half.
+    #[allow(dead_code)]
+    device_lost: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// State for the multi-pane (split) render path. A flat instance list whose

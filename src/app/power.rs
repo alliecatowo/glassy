@@ -121,6 +121,14 @@ impl PowerState {
         self.enabled
     }
 
+    /// Set the effect strength live (settings-form "Power mode intensity"
+    /// slider). Clamped to `[0, 1]`, mirroring [`PowerState::new`]'s clamp.
+    /// Takes effect on the NEXT burst — the mutation is safe mid-effect since
+    /// `intensity` is only read at burst-spawn time.
+    pub(crate) fn set_intensity(&mut self, intensity: f32) {
+        self.intensity = intensity.clamp(0.0, 1.0);
+    }
+
     /// Flip the runtime enable flag; returns the new state. When turning OFF we
     /// clear any live particles + shake so the effect stops immediately and the
     /// loop can return to idle on the next frame.
@@ -401,8 +409,17 @@ impl App {
     /// Toggle Power Mode at runtime (command-palette entry). Flips the flag, shows
     /// a confirming toast, and repaints so a live effect stops instantly when
     /// turned off.
+    ///
+    /// Also mirrors the new state into `config.power_mode` — before the
+    /// settings-form "Power mode" toggle existed, `config.power_mode` was only
+    /// ever READ (to seed `self.power` at startup), so this runtime toggle
+    /// silently drifting from it was invisible. Now that the settings form
+    /// displays `config.power_mode` and `App::save_settings` persists it, the
+    /// two must stay in sync or the settings toggle would show a stale value
+    /// right after a palette toggle.
     pub(crate) fn toggle_power_mode(&mut self, event_loop: &ActiveEventLoop) {
         let on = self.power.toggle();
+        self.config.power_mode = on;
         self.push_toast(if on {
             "Power mode: ON — type to feel the power ✦"
         } else {

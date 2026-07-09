@@ -183,7 +183,7 @@ impl App {
     /// Set the system Light-mode theme (Themes section dropdown). Applies live if
     /// follow_system is on and the OS currently prefers Light.
     pub(crate) fn set_theme_light_by_idx(&mut self, idx: usize) {
-        if let Some(&name) = color::THEME_NAMES.get(idx) {
+        if let Some(&name) = color::theme_names().get(idx) {
             self.config.theme_light = name.to_string();
             self.settings_saved = false;
             if self.config.follow_system {
@@ -206,7 +206,7 @@ impl App {
     /// Set the system Dark-mode theme (Themes section dropdown). Applies live if
     /// follow_system is on and the OS currently prefers Dark.
     pub(crate) fn set_theme_dark_by_idx(&mut self, idx: usize) {
-        if let Some(&name) = color::THEME_NAMES.get(idx) {
+        if let Some(&name) = color::theme_names().get(idx) {
             self.config.theme_dark = name.to_string();
             self.settings_saved = false;
             if self.config.follow_system {
@@ -251,6 +251,7 @@ impl App {
                 self.apply_config_reload(&settings.config);
                 self.config.theme = settings.config.theme.clone();
                 color::set_theme(settings.theme);
+                self.active_profile = Some(name.to_ascii_lowercase());
                 self.force_full_redraw = true;
                 self.push_toast(format!(
                     "Switched to profile '{name}' (font/shell need relaunch)"
@@ -259,6 +260,204 @@ impl App {
             Err(e) => {
                 log::warn!("profile switch '{name}' failed: {e:#}");
                 self.push_toast(format!("Profile '{name}' switch failed"));
+            }
+        }
+    }
+
+    /// Switch back to the BASE (no-profile) config: re-resolves the on-disk file
+    /// with no profile activated and applies it live via the same
+    /// `apply_config_reload` path [`Self::switch_profile_by_name`] uses. This is
+    /// the settings panel's "(default)" row — the only way back to the base
+    /// config once a profile has been activated (there was previously no such
+    /// path at runtime; only a relaunch without `--profile` could clear it).
+    pub(crate) fn switch_to_base_profile(&mut self) {
+        match crate::config::Settings::resolve_base() {
+            Ok(settings) => {
+                self.apply_config_reload(&settings.config);
+                self.config.theme = settings.config.theme.clone();
+                color::set_theme(settings.theme);
+                self.active_profile = None;
+                self.force_full_redraw = true;
+                self.push_toast("Switched to default config (font/shell need relaunch)");
+            }
+            Err(e) => {
+                log::warn!("switch to default config failed: {e:#}");
+                self.push_toast("Switch to default config failed");
+            }
+        }
+    }
+
+    /// "Duplicate current settings as a new profile" (Profiles section): validate
+    /// the pending name in `settings_profile_new`, then write the CURRENT live
+    /// `Config` as a new `[profile.<name>]` section via
+    /// [`crate::config::parse::save_into_section`], using the same
+    /// `settings_save::SAVED_KEYS` table `App::save_settings` uses (so a profile
+    /// snapshot always covers exactly the keys the settings UI can live-mutate —
+    /// see that table's module doc for why it's the single source of truth).
+    /// Refreshes the cached profile list on success so the new row shows
+    /// immediately without reopening settings. Errors surface as a toast (never
+    /// a panic) — this must never corrupt or lose the user's config file.
+    pub(crate) fn create_profile_from_current(&mut self) {
+        let name = self.settings_profile_new.text().trim().to_ascii_lowercase();
+        if name.is_empty()
+            || !name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            self.push_toast("Profile name must be letters, numbers, - or _");
+            return;
+        }
+        // Re-read the profile list fresh (rather than trusting the cached
+        // `settings_profiles`, which could be stale if the file changed since
+        // settings opened) so the uniqueness check is against the real file.
+        let existing = crate::config::profile_names();
+        if existing.iter().any(|p| p.eq_ignore_ascii_case(&name)) {
+            self.push_toast(format!("Profile '{name}' already exists"));
+            return;
+        }
+        let updates: Vec<(&str, String)> = settings_save::SAVED_KEYS
+            .iter()
+            .map(|entry| (entry.key, (entry.get)(&self.config)))
+            .collect();
+        match crate::config::parse::save_into_section(Some(&name), &updates) {
+            Ok(()) => {
+                self.settings_profiles = crate::config::profile_names();
+                self.settings_profile_new = gui::TextEdit::default();
+                self.settings_profile_new_ms = gui::TextInputMouse::default();
+                self.settings_saved = false;
+                self.force_full_redraw = true;
+                self.push_toast(format!("Profile '{name}' created"));
+            }
+            Err(e) => {
+                log::error!("create profile '{name}' failed: {e:#}");
+                self.push_toast(format!("Create profile '{name}' failed"));
+            }
+        }
+    }
+
+    /// Begin renaming the cached profile at `idx` in place: seed the inline
+    /// rename field with its current name, focus it, and disarm any pending
+    /// delete (the two affordances are mutually exclusive on a row). A no-op for
+    /// an out-of-range index.
+    pub(crate) fn begin_profile_rename(&mut self, idx: usize) {
+        let Some(name) = self.settings_profiles.get(idx).cloned() else {
+            return;
+        };
+        self.settings_profile_rename = gui::TextEdit::new(&name);
+        self.settings_profile_rename_ms = gui::TextInputMouse::default();
+        self.settings_profile_rename_idx = Some(idx);
+        self.settings_profile_delete_armed = None;
+        self.gui_focused = Some(gui::id("settings/profile_rename"));
+        self.force_full_redraw = true;
+    }
+
+    /// Cancel an in-progress inline rename, dropping the row back to its normal
+    /// switch/rename/delete affordances.
+    pub(crate) fn cancel_profile_rename(&mut self) {
+        self.settings_profile_rename_idx = None;
+        self.settings_profile_rename = gui::TextEdit::default();
+        self.settings_profile_rename_ms = gui::TextInputMouse::default();
+        self.force_full_redraw = true;
+    }
+
+    /// Commit the in-progress inline rename: validate the new name (the same
+    /// rules as profile creation — ascii alphanumeric + `-`/`_`, lower-cased, no
+    /// case-insensitive collision), rewrite the `[profile.OLD]` header via
+    /// [`crate::config::parse::rename_section`], keep the active-profile pointer
+    /// in sync when the renamed profile is the live one, and refresh the cached
+    /// list. Errors surface as a toast and leave the config file untouched.
+    pub(crate) fn commit_profile_rename(&mut self) {
+        let Some(idx) = self.settings_profile_rename_idx else {
+            return;
+        };
+        let Some(old) = self.settings_profiles.get(idx).cloned() else {
+            self.cancel_profile_rename();
+            return;
+        };
+        let new = self
+            .settings_profile_rename
+            .text()
+            .trim()
+            .to_ascii_lowercase();
+        if new == old {
+            // No effective change — just close the editor without a rewrite.
+            self.cancel_profile_rename();
+            return;
+        }
+        if new.is_empty()
+            || !new
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            self.push_toast("Profile name must be letters, numbers, - or _");
+            return;
+        }
+        // Re-read fresh so the collision check is against the real file.
+        let existing = crate::config::profile_names();
+        if existing.iter().any(|p| p.eq_ignore_ascii_case(&new)) {
+            self.push_toast(format!("Profile '{new}' already exists"));
+            return;
+        }
+        match crate::config::parse::rename_section(&old, &new) {
+            Ok(()) => {
+                // Keep the live-active pointer valid across the rename.
+                if self.active_profile.as_deref() == Some(old.as_str()) {
+                    self.active_profile = Some(new.clone());
+                }
+                self.settings_profiles = crate::config::profile_names();
+                self.settings_saved = false;
+                self.force_full_redraw = true;
+                self.cancel_profile_rename();
+                self.push_toast(format!("Renamed profile '{old}' → '{new}'"));
+            }
+            Err(e) => {
+                log::error!("rename profile '{old}' -> '{new}' failed: {e:#}");
+                self.push_toast(format!("Rename profile '{old}' failed"));
+            }
+        }
+    }
+
+    /// Arm the two-click delete confirm for the cached profile at `idx` (first
+    /// click of the confirm). Cancels any in-progress rename so the two
+    /// affordances don't fight over the row. A no-op for an out-of-range index.
+    pub(crate) fn arm_profile_delete(&mut self, idx: usize) {
+        if idx >= self.settings_profiles.len() {
+            return;
+        }
+        self.settings_profile_delete_armed = Some(idx);
+        self.cancel_profile_rename();
+    }
+
+    /// Delete the cached profile at `idx` (the confirming second click): remove
+    /// its whole `[profile.NAME]` section from the config file via
+    /// [`crate::config::parse::remove_section`]. When the deleted profile is the
+    /// live-active one, fall back to the base config cleanly via
+    /// [`Self::switch_to_base_profile`] so the running settings don't reference a
+    /// section that no longer exists. Refreshes the cached list and disarms.
+    /// Errors surface as a toast and leave the config file untouched.
+    pub(crate) fn delete_profile(&mut self, idx: usize) {
+        let Some(name) = self.settings_profiles.get(idx).cloned() else {
+            self.settings_profile_delete_armed = None;
+            return;
+        };
+        match crate::config::parse::remove_section(&name) {
+            Ok(()) => {
+                let was_active = self.active_profile.as_deref() == Some(name.as_str());
+                self.settings_profiles = crate::config::profile_names();
+                self.settings_profile_delete_armed = None;
+                self.settings_saved = false;
+                self.force_full_redraw = true;
+                if was_active {
+                    // The active profile just vanished — revert to base config
+                    // (which pushes its own confirmation toast).
+                    self.switch_to_base_profile();
+                } else {
+                    self.push_toast(format!("Deleted profile '{name}'"));
+                }
+            }
+            Err(e) => {
+                log::error!("delete profile '{name}' failed: {e:#}");
+                self.push_toast(format!("Delete profile '{name}' failed"));
             }
         }
     }

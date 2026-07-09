@@ -100,11 +100,20 @@ impl App {
 
     /// Place the quake window at its current slide progress: at progress 1.0 the
     /// top edge sits at the monitor top; at 0.0 it is parked one full window-height
-    /// above (off-screen). Linear in between.
+    /// above (off-screen). `progress` advances linearly in time (see
+    /// [`Self::step_quake`]); the displayed position is cubic-eased so the drop
+    /// decelerates into its resting edge in BOTH directions — for a slide-in the
+    /// revealed fraction eases out toward fully-shown, and for a slide-out the
+    /// hidden fraction eases out toward fully-parked.
     fn position_quake(&self, window: &Window, st: &QuakeState) {
         let (ox, oy) = st.origin;
+        let revealed = if st.shown {
+            gui::ease_out_cubic(st.progress)
+        } else {
+            1.0 - gui::ease_out_cubic(1.0 - st.progress)
+        };
         // hidden_y = oy - window_h (fully above the top edge); shown_y = oy.
-        let y = oy - ((1.0 - st.progress) * st.window_h as f32).round() as i32;
+        let y = oy - ((1.0 - revealed) * st.window_h as f32).round() as i32;
         window.set_outer_position(winit::dpi::PhysicalPosition::new(ox, y));
     }
 

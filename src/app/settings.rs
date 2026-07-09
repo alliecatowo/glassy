@@ -59,12 +59,23 @@ impl App {
         ]
     }
 
+    /// Set which settings dropdown popup is open (or close all with `None`),
+    /// resetting its scroll offset — a freshly-opened list should always start
+    /// scrolled to the top, and a closed popup's scroll is stale until it's
+    /// reopened anyway. Every assignment to `settings_drop` goes through this
+    /// (rather than setting the field directly) so a new call site can't
+    /// forget the reset and leave a stale scroll bleeding into the next list.
+    pub(crate) fn set_settings_drop(&mut self, drop: gui::SettingsDrop) {
+        self.settings_drop = drop;
+        self.settings_popup_scroll = 0.0;
+    }
+
     /// Open the settings form: focus the first control and clear transient state.
     /// Forces a full rebuild so the glass panel composites over freshly-painted
     /// terminal rows (the `push_overlay_px` invariant).
     pub(crate) fn open_settings(&mut self) {
         self.settings_open = true;
-        self.settings_drop = gui::SettingsDrop::None;
+        self.set_settings_drop(gui::SettingsDrop::None);
         self.settings_saved = false;
         self.gui_focused = Some(Self::settings_focus_order()[0]);
         // Seed the editable text fields from the live config.
@@ -72,6 +83,39 @@ impl App {
         self.settings_word_sep_ms = gui::TextInputMouse::default();
         self.settings_font_feat = gui::TextEdit::new(&self.config.font_features.join(" "));
         self.settings_font_feat_ms = gui::TextInputMouse::default();
+        self.settings_hints_chars =
+            gui::TextEdit::new(self.config.hints_chars.as_deref().unwrap_or(""));
+        self.settings_hints_chars_ms = gui::TextInputMouse::default();
+        self.settings_font_bold =
+            gui::TextEdit::new(self.config.font_bold.as_deref().unwrap_or(""));
+        self.settings_font_bold_ms = gui::TextInputMouse::default();
+        self.settings_font_italic =
+            gui::TextEdit::new(self.config.font_italic.as_deref().unwrap_or(""));
+        self.settings_font_italic_ms = gui::TextInputMouse::default();
+        self.settings_font_bold_italic =
+            gui::TextEdit::new(self.config.font_bold_italic.as_deref().unwrap_or(""));
+        self.settings_font_bold_italic_ms = gui::TextInputMouse::default();
+        self.settings_font_symbol_map =
+            gui::TextEdit::new(&symbol_map_display(&self.config.font_symbol_map));
+        self.settings_font_symbol_map_ms = gui::TextInputMouse::default();
+        self.settings_font_variations = gui::TextEdit::new(&self.config.font_variations.join(" "));
+        self.settings_font_variations_ms = gui::TextInputMouse::default();
+        self.settings_status_bar_segments = gui::TextEdit::new(&status_bar_segments_display(
+            self.config.status_bar_segments.as_deref(),
+        ));
+        self.settings_status_bar_segments_ms = gui::TextInputMouse::default();
+        self.settings_status_bar_time_format =
+            gui::TextEdit::new(&self.config.status_bar_time_format);
+        self.settings_status_bar_time_format_ms = gui::TextInputMouse::default();
+        self.settings_wallpaper_theme = gui::TextEdit::new(
+            &self
+                .config
+                .wallpaper_theme
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default(),
+        );
+        self.settings_wallpaper_theme_ms = gui::TextInputMouse::default();
         // Seed the custom-theme working palette from the active theme + refresh the
         // runtime profile list, and reset the section + scroll + hex editor.
         self.seed_custom_theme();
@@ -82,6 +126,12 @@ impl App {
         self.settings_theme_hex = gui::TextEdit::default();
         self.settings_theme_hex_ms = gui::TextInputMouse::default();
         self.settings_profiles = crate::config::profile_names();
+        self.settings_profile_new = gui::TextEdit::default();
+        self.settings_profile_new_ms = gui::TextInputMouse::default();
+        self.settings_profile_rename_idx = None;
+        self.settings_profile_rename = gui::TextEdit::default();
+        self.settings_profile_rename_ms = gui::TextInputMouse::default();
+        self.settings_profile_delete_armed = None;
         self.settings_section_scroll = 0.0;
         // Seed the click-outside hit rect to the WHOLE surface so a stray press
         // landing in the same frame the form opens (before the first paint sets
@@ -169,9 +219,10 @@ impl App {
             let cur = self.cursor_style_index() as i32;
             self.set_cursor_style_index(((cur + dir).rem_euclid(3)) as usize);
         } else if f == Some(gui::id("settings/window_effect")) {
-            // 8 modes (None..Bloom); wrap with rem_euclid so Left at 0 lands on Bloom.
+            // 9 modes (None..Custom); wrap with rem_euclid so Left at 0 lands on
+            // Custom (off-by-one: there are 9 variants, index 0..=8, not 8).
             let cur = self.config.window_effect.index() as i32;
-            self.set_window_effect_index(((cur + dir).rem_euclid(8)) as usize);
+            self.set_window_effect_index(((cur + dir).rem_euclid(9)) as usize);
         }
     }
 
@@ -186,17 +237,17 @@ impl App {
         } else if f == Some(gui::id("settings/config")) {
             self.copy_config_path();
         } else if f == Some(gui::id("settings/theme")) {
-            self.settings_drop = if self.settings_drop == gui::SettingsDrop::Theme {
+            self.set_settings_drop(if self.settings_drop == gui::SettingsDrop::Theme {
                 gui::SettingsDrop::None
             } else {
                 gui::SettingsDrop::Theme
-            };
+            });
         } else if f == Some(gui::id("settings/font_family")) {
-            self.settings_drop = if self.settings_drop == gui::SettingsDrop::Font {
+            self.set_settings_drop(if self.settings_drop == gui::SettingsDrop::Font {
                 gui::SettingsDrop::None
             } else {
                 gui::SettingsDrop::Font
-            };
+            });
         } else if f == Some(gui::id("settings/bell")) {
             // Segmented control: Enter/Space advances to the next mode (wraps),
             // matching a click cycling Off → Visual → Audible → Off.
@@ -230,9 +281,18 @@ impl App {
             self.config.cursor_blink = !self.config.cursor_blink;
             self.settings_saved = false;
         } else if f == Some(gui::id("settings/window_effect")) {
-            // Segmented: Enter/Space advances to the next of the 8 effect modes.
+            // Segmented: Enter/Space advances to the next of the 9 effect modes.
             let cur = self.config.window_effect.index() as i32;
-            self.set_window_effect_index(((cur + 1).rem_euclid(8)) as usize);
+            self.set_window_effect_index(((cur + 1).rem_euclid(9)) as usize);
+        } else if f == Some(gui::id("settings/profile_new_name")) {
+            // Commit-on-enter: Enter in the "duplicate as profile" name field
+            // creates the profile, mirroring the custom-theme hex field's Enter
+            // behaviour of committing its pending value rather than falling
+            // through to the general Save.
+            self.create_profile_from_current();
+        } else if f == Some(gui::id("settings/profile_rename")) {
+            // Commit-on-enter for the inline rename field.
+            self.commit_profile_rename();
         } else {
             self.save_settings();
         }
@@ -514,11 +574,13 @@ impl App {
         self.set_font_family_index(next);
     }
 
-    /// Adjust scrollback by `dir` in 1000-line steps, clamped to a sane range.
+    /// Adjust scrollback by `dir` in 1000-line steps, clamped to the SAME upper
+    /// bound the config-file parser enforces ([`crate::config::parse::SCROLLBACK_MAX`])
+    /// so a UI/palette adjustment can't push the live `Term` past the memory cap.
     pub(crate) fn adjust_scrollback(&mut self, dir: i32) {
         let step = 1000i64;
         let cur = self.config.scrollback as i64;
-        let next = (cur + dir as i64 * step).clamp(0, 1_000_000);
+        let next = (cur + dir as i64 * step).clamp(0, crate::config::parse::SCROLLBACK_MAX as i64);
         self.config.scrollback = next as usize;
         self.settings_saved = false;
     }
@@ -532,17 +594,29 @@ impl App {
         let next = (cur + dir as f32 * step).clamp(0.0, 64.0);
         self.config.padding = Some(next);
         self.settings_saved = false;
-        let scale = self
-            .window
-            .as_ref()
-            .map(|w| w.scale_factor() as f32)
-            .unwrap_or(1.0)
-            .max(0.1);
+        let scale = self.dpi_scale();
         if let Some(r) = self.renderer.as_mut() {
             r.set_pad(next * scale);
         }
+        self.reflow_after_padding_change();
+    }
+
+    /// The window's current DPI scale factor, `1.0` before the window exists.
+    /// Shared by every padding adjuster to scale a logical-px step to physical.
+    fn dpi_scale(&self) -> f32 {
+        self.window
+            .as_ref()
+            .map(|w| w.scale_factor() as f32)
+            .unwrap_or(1.0)
+            .max(0.1)
+    }
+
+    /// Recompute the grid for the current (possibly changed) padding/inset and
+    /// inform the PTY / panes, then force a full redraw. Shared tail of every
+    /// padding adjuster (uniform + per-side) — the inset changed, so the grid
+    /// size must be recomputed exactly like a resize.
+    fn reflow_after_padding_change(&mut self) {
         let strip_h = self.effective_tab_bar_h();
-        // Reflow: the inset changed, so the grid size + PTY must be recomputed.
         if let (Some(window), Some(renderer)) = (self.window.as_ref(), self.renderer.as_ref()) {
             let size = window.inner_size();
             let m = renderer.cell_metrics();
@@ -564,6 +638,120 @@ impl App {
             }
         }
         self.force_full_redraw = true;
+    }
+
+    /// Adjust one per-side padding override (Advanced section steppers) by
+    /// `dir` (-1/+1) in 2-logical-px steps. UI-clamped to `[0, 64]` — the same
+    /// self-imposed bound [`Self::adjust_padding`] uses for the uniform
+    /// stepper; `apply_kv` itself only rejects a NEGATIVE per-side value (no
+    /// upper bound), so this stays a strict subset of what the config file
+    /// accepts. Always writes an explicit `Some(px)` override once touched
+    /// (mirrors the uniform stepper's sentinel: `0` reads back as "no override"
+    /// at startup — see the `> 0.0` guards in `event_loop.rs`'s per-side init).
+    fn adjust_padding_side(
+        &mut self,
+        dir: i32,
+        get: fn(&Config) -> Option<f32>,
+        set: fn(&mut Config, Option<f32>),
+        set_renderer: fn(&mut Renderer, f32),
+    ) {
+        let step = 2.0_f32;
+        let cur = get(&self.config).unwrap_or(0.0);
+        let next = (cur + dir as f32 * step).clamp(0.0, 64.0);
+        set(&mut self.config, Some(next));
+        self.settings_saved = false;
+        let scale = self.dpi_scale();
+        if let Some(r) = self.renderer.as_mut() {
+            set_renderer(r, next * scale);
+        }
+        self.reflow_after_padding_change();
+    }
+
+    pub(crate) fn adjust_padding_top(&mut self, dir: i32) {
+        self.adjust_padding_side(
+            dir,
+            |c| c.padding_top,
+            |c, v| c.padding_top = v,
+            |r, v| r.set_pad_top(v),
+        );
+    }
+
+    pub(crate) fn adjust_padding_bottom(&mut self, dir: i32) {
+        self.adjust_padding_side(
+            dir,
+            |c| c.padding_bottom,
+            |c, v| c.padding_bottom = v,
+            |r, v| r.set_pad_bottom(v),
+        );
+    }
+
+    pub(crate) fn adjust_padding_left(&mut self, dir: i32) {
+        self.adjust_padding_side(
+            dir,
+            |c| c.padding_left,
+            |c, v| c.padding_left = v,
+            |r, v| r.set_pad_left(v),
+        );
+    }
+
+    pub(crate) fn adjust_padding_right(&mut self, dir: i32) {
+        self.adjust_padding_side(
+            dir,
+            |c| c.padding_right,
+            |c, v| c.padding_right = v,
+            |r, v| r.set_pad_right(v),
+        );
+    }
+
+    /// Adjust the quake slide-animation duration (Quake section stepper) by
+    /// `dir` (-1/+1) in 20ms steps, clamped to
+    /// `[0, QUAKE_ANIMATION_MS_MAX]` (matching `apply_kv`'s clamp exactly).
+    pub(crate) fn adjust_quake_animation_ms(&mut self, dir: i32) {
+        let step = 20i64;
+        let cur = self.config.quake_animation_ms as i64;
+        let max = crate::config::parse::QUAKE_ANIMATION_MS_MAX as i64;
+        let next = (cur + dir as i64 * step).clamp(0, max);
+        self.config.quake_animation_ms = next as u64;
+        self.settings_saved = false;
+    }
+
+    /// Adjust the command-finish notification threshold (Notifications section
+    /// stepper) by `dir` (-1/+1) in 1000ms (1s) steps, clamped to
+    /// `[0, NOTIFY_COMMAND_THRESHOLD_MS_MAX]` (matching `apply_kv`'s clamp
+    /// exactly).
+    pub(crate) fn adjust_notify_threshold_ms(&mut self, dir: i32) {
+        let step = 1_000i64;
+        let cur = self.config.notify_command_threshold_ms as i64;
+        let max = crate::config::parse::NOTIFY_COMMAND_THRESHOLD_MS_MAX as i64;
+        let next = (cur + dir as i64 * step).clamp(0, max);
+        self.config.notify_command_threshold_ms = next as u64;
+        self.settings_saved = false;
+    }
+
+    /// Adjust the background-scrollback cap (Advanced section stepper) by `dir`
+    /// (-1/+1) in 1000-line steps, clamped to `[0, SCROLLBACK_MAX]` (matching
+    /// `apply_kv`'s clamp exactly — see `config::parse::apply_kv`'s
+    /// `scrollback_background_cap` arm). `0` disables the cap.
+    pub(crate) fn adjust_scrollback_background_cap(&mut self, dir: i32) {
+        let step = 1000i64;
+        let cur = self.config.scrollback_background_cap as i64;
+        let next = (cur + dir as i64 * step).clamp(0, crate::config::parse::SCROLLBACK_MAX as i64);
+        self.config.scrollback_background_cap = next as usize;
+        self.settings_saved = false;
+    }
+
+    /// Adjust the background-scrollback idle threshold (Advanced section
+    /// stepper) by `dir` (-1/+1) in 60-second steps. UI-clamped to a day
+    /// (`[0, 86_400]`) for sane stepper bounds — `apply_kv` itself accepts any
+    /// `u64` (see `config::parse::apply_kv`'s `scrollback_background_idle_secs`
+    /// arm), so this stays a strict subset of what the config file accepts,
+    /// same convention as `adjust_padding_side`.
+    pub(crate) fn adjust_scrollback_background_idle_secs(&mut self, dir: i32) {
+        let step = 60i64;
+        let cur = self.config.scrollback_background_idle_secs as i64;
+        let next = (cur + dir as i64 * step).clamp(0, 86_400);
+        self.config.scrollback_background_idle_secs = next as u64;
+        self.settings_saved = false;
     }
 
     /// Copy the config-file path to the OS clipboard (settings ⧉ button).
@@ -634,10 +822,10 @@ impl App {
         self.force_full_redraw = true;
     }
 
-    /// Cycle the active theme by `dir` through `color::THEME_NAMES`, applying it
-    /// live (swap the global theme + full redraw).
+    /// Cycle the active theme by `dir` through `color::theme_names()`, applying
+    /// it live (swap the global theme + full redraw).
     pub(crate) fn cycle_theme(&mut self, dir: i32) {
-        let names = color::THEME_NAMES;
+        let names = color::theme_names();
         let cur = names
             .iter()
             .position(|&n| n == self.config.theme)
@@ -653,10 +841,11 @@ impl App {
         }
     }
 
-    /// Install the theme at absolute index `idx` within `color::THEME_NAMES`,
+    /// Install the theme at absolute index `idx` within `color::theme_names()`,
     /// applying it live (settings theme-dropdown click). No-op if out of range.
     pub(crate) fn set_theme_by_idx(&mut self, idx: usize) {
-        let Some(&name) = color::THEME_NAMES.get(idx) else {
+        let names = color::theme_names();
+        let Some(&name) = names.get(idx) else {
             return;
         };
         if let Some(theme) = color::theme_by_name(name) {
@@ -749,10 +938,52 @@ impl App {
         }
     }
 
-    /// Persist the live-adjustable settings (font size in pt, opacity, bell,
-    /// theme, font family, scrollback, status_bar) to the config file, preserving every other
-    /// key/comment.
+    /// Persist every live-adjustable setting to the config file, preserving
+    /// every other key/comment. Driven by the [`settings_save::SAVED_KEYS`]
+    /// table (one `(key, Config -> String)` entry per settings-UI-mutable
+    /// field) so a new settings-form control can't silently ship without being
+    /// saved — see that module's doc comment for why this used to be a
+    /// hand-maintained list that drifted out of sync.
+    ///
+    /// `font_size` is the one exception: it is special-cased here rather than
+    /// in the table because the live, user-visible size lives in the
+    /// renderer's effective font px (Ctrl +/-/0 and the settings stepper both
+    /// drive it there directly), not in `Config::font_size`, which only
+    /// reflects the size at startup.
     pub(crate) fn save_settings(&mut self) {
+        let pt = self.live_font_size_pt();
+        let mut updates: Vec<(&str, String)> =
+            Vec::with_capacity(settings_save::SAVED_KEYS.len() + 1);
+        updates.push(("font_size", format!("{pt:.0}")));
+        for entry in settings_save::SAVED_KEYS {
+            updates.push((entry.key, (entry.get)(&self.config)));
+        }
+        match crate::config::save(&updates) {
+            Ok(()) => {
+                self.settings_saved = true;
+                log::info!("settings saved to config");
+            }
+            Err(e) => {
+                // `self.settings_saved` stays false here, identical to the
+                // pre-save "not yet saved" state — without a toast, a real
+                // failure (read-only file, HOME/XDG unset) is indistinguishable
+                // in the UI from "hasn't saved yet". Surface it explicitly.
+                log::error!("settings save failed: {e:#}");
+                self.push_toast(format!("Settings not saved: {e:#}"));
+            }
+        }
+    }
+
+    /// The current live font size in points, exactly the number
+    /// [`Self::save_settings`] writes for the `font_size` key: the renderer's
+    /// effective px (Ctrl +/-/0 and the settings stepper both drive it there
+    /// directly) converted back through the window's scale factor — NOT
+    /// `self.config.font_size`, which only reflects the size at startup (see
+    /// this module's `SAVED_KEYS` doc comment for why `font_size` is excluded
+    /// from that table). Shared with the `get-config`/`set-config`
+    /// remote-control verbs (`remote.rs`) so a script reads back the exact
+    /// same number the settings overlay shows.
+    pub(crate) fn live_font_size_pt(&self) -> f32 {
         let scale = self
             .window
             .as_ref()
@@ -764,48 +995,7 @@ impl App {
             .as_ref()
             .map(|r| r.font_px())
             .unwrap_or(self.config.font_size);
-        let pt = (px / scale).max(1.0);
-        let updates = [
-            ("font_size", format!("{pt:.0}")),
-            ("opacity", format!("{:.2}", self.config.opacity)),
-            ("bell_visual", self.config.bell_visual.to_string()),
-            ("bell_audible", self.config.bell_audible.to_string()),
-            ("theme", self.config.theme.clone()),
-            (
-                "font_family",
-                self.config.font_family.clone().unwrap_or_default(),
-            ),
-            ("scrollback", self.config.scrollback.to_string()),
-            ("status_bar", self.config.status_bar.to_string()),
-            ("pane_headers", self.config.pane_headers.to_string()),
-            (
-                "show_tab_bar",
-                tab_bar_mode_word(self.config.show_tab_bar).to_string(),
-            ),
-            ("follow_system", self.config.follow_system.to_string()),
-            ("ligatures", self.config.ligatures.to_string()),
-            ("restore_session", self.config.restore_session.to_string()),
-            (
-                "padding",
-                format!("{:.0}", self.config.padding.unwrap_or(0.0)),
-            ),
-            (
-                "cursor_style",
-                self.config.cursor_style.as_str().to_string(),
-            ),
-            ("cursor_blink", self.config.cursor_blink.to_string()),
-            (
-                "window_effect",
-                self.config.window_effect.as_str().to_string(),
-            ),
-        ];
-        match crate::config::save(&updates) {
-            Ok(()) => {
-                self.settings_saved = true;
-                log::info!("settings saved to config");
-            }
-            Err(e) => log::error!("settings save failed: {e:#}"),
-        }
+        (px / scale).max(1.0)
     }
 
     /// Apply a runtime font-size change (Ctrl +/-/0): reload the font in the

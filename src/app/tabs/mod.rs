@@ -8,12 +8,17 @@ mod rename;
 mod session;
 
 impl App {
-    pub fn new(proxy: EventLoopProxy<UserEvent>, config: Config) -> Self {
+    pub fn new(
+        proxy: EventLoopProxy<UserEvent>,
+        config: Config,
+        active_profile: Option<String>,
+    ) -> Self {
         // Seed Power Mode from the config before `config` is moved into the struct.
         let power = power::PowerState::new(config.power_mode, config.power_mode_intensity);
         Self {
             proxy,
             config,
+            active_profile,
             window: None,
             renderer: None,
             pty: None,
@@ -23,6 +28,7 @@ impl App {
             active_id: 0,
             active_title: String::new(),
             active_custom_title: None,
+            active_scratch: false,
             active_pane_cwds: std::collections::HashMap::new(),
             tab_rename: None,
             last_tab_click: None,
@@ -93,6 +99,7 @@ impl App {
             prev_cursor: None,
             prev_display_offset: 0,
             prev_has_selection: false,
+            was_shaking: false,
             gui_pressed: None,
             gui_focused: None,
             gui_anims: std::collections::HashMap::new(),
@@ -129,15 +136,50 @@ impl App {
             cwd_history: std::collections::VecDeque::new(),
             settings_section: 0,
             settings_section_scroll: 0.0,
+            settings_popup_scroll: 0.0,
             settings_custom: [alacritty_terminal::vte::ansi::Rgb { r: 0, g: 0, b: 0 }; 20],
             settings_custom_editing: usize::MAX,
             settings_theme_hex: gui::TextEdit::default(),
             settings_theme_hex_ms: gui::TextInputMouse::default(),
             settings_profiles: Vec::new(),
+            settings_profile_new: gui::TextEdit::default(),
+            settings_profile_new_ms: gui::TextInputMouse::default(),
+            settings_profile_rename_idx: None,
+            settings_profile_rename: gui::TextEdit::default(),
+            settings_profile_rename_ms: gui::TextInputMouse::default(),
+            settings_profile_delete_armed: None,
+            settings_hints_chars: gui::TextEdit::default(),
+            settings_hints_chars_ms: gui::TextInputMouse::default(),
+            settings_font_bold: gui::TextEdit::default(),
+            settings_font_bold_ms: gui::TextInputMouse::default(),
+            settings_font_italic: gui::TextEdit::default(),
+            settings_font_italic_ms: gui::TextInputMouse::default(),
+            settings_font_bold_italic: gui::TextEdit::default(),
+            settings_font_bold_italic_ms: gui::TextInputMouse::default(),
+            settings_font_symbol_map: gui::TextEdit::default(),
+            settings_font_symbol_map_ms: gui::TextInputMouse::default(),
+            settings_font_variations: gui::TextEdit::default(),
+            settings_font_variations_ms: gui::TextInputMouse::default(),
+            settings_status_bar_segments: gui::TextEdit::default(),
+            settings_status_bar_segments_ms: gui::TextInputMouse::default(),
+            settings_status_bar_time_format: gui::TextEdit::default(),
+            settings_status_bar_time_format_ms: gui::TextInputMouse::default(),
+            settings_wallpaper_theme: gui::TextEdit::default(),
+            settings_wallpaper_theme_ms: gui::TextInputMouse::default(),
             key_seq_pending: None,
             mod_hold_since: None,
             vi: Default::default(),
             opacity_before_toggle: None,
+            pending_drop_files: Vec::new(),
+            drop_hover: false,
+            // w15: cached once here (never re-read; a machine's hostname does
+            // not change at runtime) — see `StatusBarSegment::Hostname`.
+            hostname: rustix::system::uname()
+                .nodename()
+                .to_str()
+                .ok()
+                .map(str::to_string),
+            custom_segments: Vec::new(),
         }
     }
 
@@ -284,10 +326,12 @@ impl App {
         let m = r.cell_metrics();
         let (sw, _sh) = r.surface_size();
         let bar_h = tab_bar_h(m.height);
+        let win_controls = self.show_window_controls();
         if !self.tab_bar_visible() {
             // Bar hidden: still return the icon button segments so clicks on
-            // the floating Help/Settings/Menu buttons are correctly hit-tested.
-            return floating_icon_segs(sw as f32, bar_h);
+            // the floating Help/Settings/Menu (+ window control) buttons are
+            // correctly hit-tested.
+            return floating_icon_segs(sw as f32, bar_h, win_controls);
         }
         let descs = self.tab_descs();
         let refs: Vec<(&str, bool, bool)> =
@@ -301,6 +345,7 @@ impl App {
             tag_reserve,
             self.active_pos(),
             self.chrome_left_inset(),
+            win_controls,
         )
     }
 
@@ -416,6 +461,7 @@ impl App {
                 last_cwd: self.active_cwd.take(),
                 custom_title: self.active_custom_title.take(),
                 pane_cwds: std::mem::take(&mut self.active_pane_cwds),
+                scratch: self.active_scratch,
             });
         }
         self.tab_order.push(id);
@@ -423,6 +469,7 @@ impl App {
         self.active_id = id;
         self.active_title.clear();
         self.active_custom_title = None;
+        self.active_scratch = false;
         self.active_busy_until = None;
         // The new tab starts at the inherited cwd; OSC 7 updates it as the user cd's.
         self.active_cwd = cwd;
@@ -431,6 +478,117 @@ impl App {
         self.reset_pointer_state();
         // Opening the 2nd tab reveals the Auto-mode strip; reflow so the grid (and
         // the just-spawned tab) account for the strip's reclaimed height.
+        self.reflow_grid();
+        self.update_window_title();
+        self.force_full_redraw = true;
+        self.mark_dirty(event_loop);
+    }
+
+    /// Command-palette run-command scratchpad (`>`/`$`-prefixed query, see
+    /// `palette::parse_scratch_query`): spawn `cmdline` as a transient tab.
+    ///
+    /// Reuses `new_tab`'s exact spawn + splice-into-`tab_order` + focus flow
+    /// (so the tab bar, renderer, and grid all "just work" for free — no
+    /// separate overlay renderer, no new `Session`/`App` field), but overrides
+    /// the shell with a synthesized `<shell> -c "<cmd>; ...; press any key"`.
+    /// No new teardown path is needed either: the wrapper blocks on exactly one
+    /// keypress after `cmdline` exits, and `App::handle_child_exit`
+    /// (src/app/input.rs) already closes the active single-pane tab the moment
+    /// its shell process exits — so "press any key to close" falls straight out
+    /// of existing child-exit handling. Not persisted: a scratch tab restored
+    /// from a saved session would just be an ordinary shell tab (the wrapped
+    /// command itself is never written to disk).
+    pub(crate) fn spawn_scratch_run(&mut self, cmdline: &str, event_loop: &ActiveEventLoop) {
+        let Some(renderer) = self.renderer.as_ref() else {
+            return;
+        };
+        let cmdline = cmdline.trim();
+        if cmdline.is_empty() {
+            return;
+        }
+        // Guard against a pathological paste turning into a giant argv/script.
+        const MAX_LEN: usize = 4000;
+        if cmdline.len() > MAX_LEN {
+            self.push_toast("Command too long to run");
+            return;
+        }
+        let m = renderer.cell_metrics();
+        let (pad_x, pad_y) = (renderer.pad_x(), renderer.pad_y());
+        let id = self.next_id;
+        // Inherit the current tab's cwd, same as `new_tab`.
+        let cwd = self.active_cwd.clone();
+        let (spawn_cols, spawn_rows) = match self.window.as_ref().map(|w| w.inner_size()) {
+            Some(sz) if sz.width > 0 && sz.height > 0 => {
+                let strip_h = tab_bar_h(m.height).max(self.chrome_top_inset());
+                Self::grid_for(
+                    sz,
+                    m.width,
+                    m.height,
+                    pad_x,
+                    pad_y,
+                    self.config.status_bar,
+                    strip_h,
+                )
+            }
+            _ => (self.cols, self.rows),
+        };
+        // `config.shell`'s program/args are private to `alacritty_terminal` (not
+        // readable outside that crate), so a custom-shell override configured
+        // for ordinary tabs can't be reused here; fall back to $SHELL (the same
+        // env var alacritty_terminal itself resolves a `None` shell from) or
+        // `/bin/sh`.
+        let shell_program = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+        let (program, args) = scratch_shell_parts(shell_program, cmdline);
+        let shell = Shell::new(program, args);
+        let pty = match Pty::spawn(
+            self.proxy.clone(),
+            id,
+            spawn_cols,
+            spawn_rows,
+            m.width.round() as u16,
+            m.height.round() as u16,
+            Some(shell),
+            cwd.clone(),
+            self.config.scrollback,
+            &self.config.word_separator,
+            self.config.cursor_style.to_cursor_shape(),
+            self.config.cursor_blink,
+        ) {
+            Ok(p) => p,
+            Err(e) => {
+                log::error!("failed to spawn scratch run: {e:#}");
+                return;
+            }
+        };
+        self.next_id += 1;
+        if let Some(old) = self.pty.take() {
+            self.background.push(Session {
+                id: self.active_id,
+                pty: old,
+                panes: self.panes.take(),
+                title: std::mem::take(&mut self.active_title),
+                activity: false,
+                busy_until: self.active_busy_until.take(),
+                last_cwd: self.active_cwd.take(),
+                custom_title: self.active_custom_title.take(),
+                pane_cwds: std::mem::take(&mut self.active_pane_cwds),
+                scratch: self.active_scratch,
+            });
+        }
+        self.tab_order.push(id);
+        self.pty = Some(pty);
+        self.active_id = id;
+        self.active_title.clear();
+        // Label the tab with the command so it's identifiable while it runs. This
+        // custom title is LIVE-ONLY: `active_scratch` marks the tab so
+        // `build_session` never persists this text (it may contain secrets) to the
+        // on-disk session state — see `Session::scratch`.
+        self.active_custom_title = Some(format!("▸ {cmdline}"));
+        self.active_scratch = true;
+        self.active_busy_until = None;
+        self.active_cwd = cwd;
+        self.modify_other_keys = ModifyOtherKeys::default();
+        self.reset_pointer_state();
         self.reflow_grid();
         self.update_window_title();
         self.force_full_redraw = true;
@@ -511,6 +669,7 @@ impl App {
                 last_cwd: self.active_cwd.take(),
                 custom_title: self.active_custom_title.take(),
                 pane_cwds: std::mem::take(&mut self.active_pane_cwds),
+                scratch: self.active_scratch,
             });
         }
         let bi = self
@@ -524,6 +683,7 @@ impl App {
         self.active_id = target.id;
         self.active_title = target.title;
         self.active_custom_title = target.custom_title;
+        self.active_scratch = target.scratch;
         self.active_pane_cwds = target.pane_cwds;
         // Inherit the activated session's busy deadline (it streams in the fg now).
         self.active_busy_until = target.busy_until;
@@ -616,6 +776,7 @@ impl App {
             self.pty = None;
             self.active_title.clear();
             self.active_custom_title = None;
+            self.active_scratch = false;
             self.active_pane_cwds.clear();
             self.active_cwd = None; // the closed tab's cwd is gone
             if self.tab_order.is_empty() {
@@ -632,6 +793,7 @@ impl App {
                 self.active_id = next.id;
                 self.active_title = next.title;
                 self.active_custom_title = next.custom_title;
+                self.active_scratch = next.scratch;
                 self.active_pane_cwds = next.pane_cwds;
                 self.active_cwd = next.last_cwd;
                 // Mirror activate_tab: carry the promoted tab's busy-spinner state
@@ -689,6 +851,37 @@ impl App {
     /// Pixel distance the pointer must travel from the press point before a pane
     /// header drag is treated as a rearrange rather than a plain focus click.
     pub(crate) const PANE_DRAG_THRESHOLD: f64 = 6.0;
+}
+
+/// Build the `(program, args)` for `App::spawn_scratch_run`'s transient shell:
+/// `program` unchanged, plus a `-c <script>` invocation that runs `cmdline`,
+/// prints its exit status, then blocks for exactly one keypress via `dd` (a
+/// POSIX-portable read-one-byte, unlike bash's `read -n1 -s` extension, so this
+/// works whether `program` resolves to sh/dash/bash/zsh). `-c` (not `-lc`) is
+/// used deliberately: a login-shell flag is unnecessary here and not portable
+/// to every POSIX shell either. Pulled out as a pure fn (no `Pty`/`Shell`
+/// construction) so the exact wrapping is unit-testable.
+///
+/// `cmdline` is NOT interpolated into the wrapper script — it is passed as a
+/// SEPARATE argv element (`$1`) and run via `eval "$1"`. Interpolating it inline
+/// would let an unbalanced quote/paren in the user's command break the wrapper's
+/// own parse, so the `status=$?` / `printf` / `dd` tail (the exit-status readout
+/// and "press any key" hold) would never run. Keeping it in `$1` means the
+/// wrapper always parses regardless of what the user typed; only the `eval`'d
+/// command itself can fail (which is exactly what we report the exit status of).
+fn scratch_shell_parts(program: String, cmdline: &str) -> (String, Vec<String>) {
+    let script = "eval \"$1\"\nstatus=$?\nprintf '\\n[glassy] exit %d - press any key to close\\n' \"$status\"\ndd bs=1 count=1 2>/dev/null >/dev/null\n";
+    (
+        program,
+        vec![
+            "-c".to_string(),
+            script.to_string(),
+            // $0 for the -c script (a conventional placeholder), then $1 = the
+            // user command, referenced via `eval "$1"` above.
+            "glassy-run".to_string(),
+            cmdline.to_string(),
+        ],
+    )
 }
 
 /// Whether a `file://` URL's path (the part after the scheme, still possibly
@@ -820,5 +1013,65 @@ mod url_tests {
         assert_eq!(normalize_path_segments("/a/./b"), "/a/b");
         assert_eq!(normalize_path_segments("/a/../../b"), "/b"); // can't pop past root
         assert_eq!(normalize_path_segments("/proc/../proc"), "/proc");
+    }
+}
+
+#[cfg(test)]
+mod scratch_tests {
+    use super::scratch_shell_parts;
+
+    #[test]
+    fn wraps_command_with_c_flag() {
+        let (program, args) = scratch_shell_parts("/bin/bash".to_string(), "ls -la");
+        assert_eq!(program, "/bin/bash");
+        // -c <script> <$0-placeholder> <cmdline-as-$1>
+        assert_eq!(args.len(), 4);
+        assert_eq!(args[0], "-c");
+        // The command is a SEPARATE argv element ($1), not inlined into the script.
+        assert_eq!(args[3], "ls -la");
+        // The wrapper script runs the command via `eval "$1"`, never by
+        // interpolating it into the script text.
+        assert!(args[1].contains("eval \"$1\""));
+        assert!(!args[1].contains("ls -la"));
+    }
+
+    #[test]
+    fn script_prints_exit_status_and_waits_for_a_keypress() {
+        let (_, args) = scratch_shell_parts("/bin/sh".to_string(), "false");
+        let script = &args[1];
+        assert!(script.contains("status=$?"));
+        assert!(script.contains("press any key to close"));
+        // `dd`, not bash's `read -n1 -s`, so this also works under a POSIX-only
+        // /bin/sh or dash where `read -n` isn't supported.
+        assert!(script.contains("dd bs=1 count=1"));
+    }
+
+    #[test]
+    fn unbalanced_quote_in_cmdline_stays_isolated_from_the_wrapper() {
+        // REGRESSION: an unbalanced quote/paren in the user's command must not be
+        // able to break the wrapper's own parse. Because the command is a separate
+        // argv element ($1) rather than interpolated into the `-c` script, the
+        // wrapper's exit-status/keypress tail is always present and intact — only
+        // the eval'd `$1` can fail, which is exactly what we report the status of.
+        let evil = "echo \"unterminated";
+        let (_, args) = scratch_shell_parts("/bin/sh".to_string(), evil);
+        // The raw command lives verbatim in its own argv slot...
+        assert_eq!(args[3], evil);
+        // ...and does NOT appear anywhere inside the wrapper script.
+        assert!(!args[1].contains(evil));
+        assert!(!args[1].contains("unterminated"));
+        // The wrapper tail survives regardless of the command's contents.
+        assert!(args[1].contains("eval \"$1\""));
+        assert!(args[1].contains("status=$?"));
+        assert!(args[1].contains("press any key to close"));
+        assert!(args[1].contains("dd bs=1 count=1"));
+    }
+
+    #[test]
+    fn does_not_mutate_the_program_string() {
+        // The resolved shell program passes through untouched; only `args` carries
+        // the synthesized script.
+        let (program, _) = scratch_shell_parts("zsh".to_string(), "echo hi");
+        assert_eq!(program, "zsh");
     }
 }

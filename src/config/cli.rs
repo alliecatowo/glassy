@@ -2,7 +2,10 @@
 
 use anyhow::{Context, Result, bail};
 
-use super::parse::{RawConfig, parse_bool, parse_pos_f32};
+use super::parse::{
+    QUAKE_ANIMATION_MS_MAX, QUAKE_HEIGHT_MAX, QUAKE_HEIGHT_MIN, RawConfig, parse_bool,
+    parse_pos_f32,
+};
 use super::theme_import::import_theme_from_file;
 
 /// Parse CLI arguments, overriding fields in `raw`.
@@ -139,8 +142,10 @@ pub(super) fn parse_cli(args: impl Iterator<Item = String>, raw: &mut RawConfig)
                 let h: f32 = v
                     .parse()
                     .with_context(|| format!("--quake-height: invalid number '{v}'"))?;
-                if !(h.is_finite() && (0.1..=1.0).contains(&h)) {
-                    bail!("--quake-height must be between 0.1 and 1.0, got {h}");
+                if !(h.is_finite() && (QUAKE_HEIGHT_MIN..=QUAKE_HEIGHT_MAX).contains(&h)) {
+                    bail!(
+                        "--quake-height must be between {QUAKE_HEIGHT_MIN} and {QUAKE_HEIGHT_MAX}, got {h}"
+                    );
                 }
                 raw.quake_height = Some(h);
             }
@@ -149,7 +154,7 @@ pub(super) fn parse_cli(args: impl Iterator<Item = String>, raw: &mut RawConfig)
                 let ms: u64 = v
                     .parse()
                     .with_context(|| format!("--quake-animation-ms: invalid integer '{v}'"))?;
-                raw.quake_animation_ms = Some(ms.min(5_000));
+                raw.quake_animation_ms = Some(ms.min(QUAKE_ANIMATION_MS_MAX));
             }
             "--restore-session" => {
                 // Optional bool value; bare `--restore-session` means true.
@@ -234,12 +239,20 @@ fn print_help() {
 USAGE:
     glassy [OPTIONS] [-e COMMAND [ARGS...]]
     glassy toggle | show | hide        Signal a running instance (quake mode)
+    glassy @ <CMD> [ARGS...]           Remote-control a running instance
 
 CONTROL SUBCOMMANDS (for compositor hotkeys — see docs/quake-mode.md):
     toggle, show, hide     Slide the running quake window in/out. Bind one of
                            these to a key in YOUR compositor (Wayland has no
                            portable global hotkey). Also accepted as
                            --toggle / --show / --hide.
+
+REMOTE CONTROL (kitty-style; `glassy msg` is a synonym — see docs/plugins.md):
+    ls, open-tab, split [v|h], send-text <TEXT>, set-theme <NAME>,
+    focus-tab <N>, list-themes, reload-config, run-action <NAME>,
+    get-config <KEY>, set-config <KEY> <VALUE>
+                           Drive the running instance over its Unix socket and
+                           print the one-line OK/ERR reply (exit 0/1).
 
 OPTIONS:
     --font-size <PT>       Font size in points
@@ -254,7 +267,7 @@ OPTIONS:
     --theme-light <NAME>   Theme used in system Light mode (e.g. rose-pine-dawn)
     --theme-dark <NAME>    Theme used in system Dark mode (e.g. tokyo-night)
     --status-bar <BOOL>    Show status bar at the bottom (default false)
-    --pane-headers <BOOL>  Show per-pane title bars in splits (default true)
+    --pane-headers <BOOL>  Show per-pane title bars in splits (default false)
     --word-separator <STR> Extra word separators for text selection
     --font-features <LIST> OpenType feature tags, e.g. \"ss01,calt=0\" (comma/space separated)
     --import-theme <PATH>  Import Alacritty/base16 theme from TOML/YAML file
