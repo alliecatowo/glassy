@@ -259,6 +259,18 @@ jobs:
         with:
           key: ${{ matrix.arch }}
 
+      # `macos-latest` runners ship several Xcode versions but the *default*
+      # `xcode-select` symlink often lags behind — building against that stale
+      # default links the binary to an old SDK. macOS does linked-SDK
+      # compatibility checks for some AppKit chrome defaults (traffic-light
+      # button sizing among them): a binary linked against an old SDK renders
+      # legacy-sized window controls on newer macOS versions even though
+      # nothing in our code touches them. Pin to the newest Xcode actually
+      # installed on the runner instead of relying on the default.
+      - uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
       # macOS build deps via Homebrew.
       # fontconfig + pkg-config are needed by cosmic-text's fontdb.
       # No Wayland/X11/ALSA equivalents needed on macOS.
