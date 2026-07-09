@@ -487,7 +487,7 @@ impl RawConfig {
             title_show_cwd: self.title_show_cwd.unwrap_or(true),
             title_show_count: self.title_show_count.unwrap_or(false),
             hints_chars: self.hints_chars.and_then(|s| normalize_hints_chars(&s)),
-            command_badges: self.command_badges.unwrap_or(true),
+            command_badges: self.command_badges.unwrap_or(false),
             minimap: self.minimap.unwrap_or(false),
             quake: self.quake.unwrap_or(false),
             decorations: self.decorations.unwrap_or(false),
@@ -533,7 +533,7 @@ impl RawConfig {
             notify_command_threshold_ms: self
                 .notify_command_threshold_ms
                 .unwrap_or(DEFAULT_NOTIFY_COMMAND_THRESHOLD_MS),
-            command_fold: self.command_fold.unwrap_or(true),
+            command_fold: self.command_fold.unwrap_or(false),
             power_mode: self.power_mode.unwrap_or(false),
             power_mode_intensity: {
                 let i = self.power_mode_intensity.unwrap_or(0.6);

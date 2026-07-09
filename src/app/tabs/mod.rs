@@ -100,6 +100,7 @@ impl App {
             prev_display_offset: 0,
             prev_has_selection: false,
             was_shaking: false,
+            was_alt_screen: false,
             gui_pressed: None,
             gui_focused: None,
             gui_anims: std::collections::HashMap::new(),

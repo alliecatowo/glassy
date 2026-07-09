@@ -940,6 +940,11 @@ pub struct App {
     /// prior frame's state lets that transition frame force one last full
     /// redraw too.
     was_shaking: bool,
+    /// Previous frame's alternate-screen state. When it flips (an app enters or
+    /// leaves the alt screen) the whole grid swaps, so `render` forces one full
+    /// rebuild that frame — otherwise partial damage leaves the old screen's
+    /// rows behind. Mirrors `was_shaking`.
+    was_alt_screen: bool,
 
     // --- Real-GUI chrome layer (immediate-mode; see src/gui.rs). ---
     /// The widget currently latched by a left-button press, carried across frames

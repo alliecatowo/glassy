@@ -182,7 +182,20 @@ impl App {
                 self.pty
                     .as_ref()
                     .and_then(|p| {
-                        let disp = p.term.lock().grid().display_offset() as i32;
+                        let (disp, alt) = {
+                            let t = p.term.lock();
+                            (
+                                t.grid().display_offset() as i32,
+                                t.mode()
+                                    .contains(alacritty_terminal::term::TermMode::ALT_SCREEN),
+                            )
+                        };
+                        // Command-block chrome is a normal-screen affordance — never
+                        // draw it over a full-screen (alternate-screen) app such as
+                        // vim, less, or claude.
+                        if alt {
+                            return None;
+                        }
                         p.prompts.lock().ok().map(|g| {
                             let badges = if self.config.command_badges {
                                 command_blocks::build_badges(
@@ -399,6 +412,23 @@ impl App {
         let rows = self.rows;
         let mut dirty = vec![false; rows];
         let mut full = self.force_full_redraw;
+        // Entering or leaving the alternate screen swaps the entire grid; partial
+        // damage would leave the previous screen's rows behind, so force one full
+        // rebuild on the transition (mirrors the shake/settle handling above).
+        let alt_screen = term
+            .mode()
+            .contains(alacritty_terminal::term::TermMode::ALT_SCREEN);
+        if alt_screen != self.was_alt_screen {
+            full = true;
+        }
+        self.was_alt_screen = alt_screen;
+        // While a synchronized-output (?2026) bracket is open, the PTY thread is
+        // batching damage: read it for this frame but do NOT reset it below, so it
+        // keeps accumulating until the bracket closes and the final render flushes
+        // it. This stops an unrelated mid-bracket render (cursor blink, focus,
+        // cursor trail) from dropping the atomic update's rows and leaving ghosts.
+        // See `Pty::sync_active`.
+        let batching_sync = pty.sync_active.load(std::sync::atomic::Ordering::Relaxed);
         match term.damage() {
             alacritty_terminal::term::TermDamage::Full => full = true,
             alacritty_terminal::term::TermDamage::Partial(it) => {
@@ -409,7 +439,9 @@ impl App {
                 }
             }
         }
-        term.reset_damage();
+        if !batching_sync {
+            term.reset_damage();
+        }
 
         // The child's requested cursor style (shape is also mirrored in
         // `content.cursor.shape`); `blinking` decides whether the blink timer runs.

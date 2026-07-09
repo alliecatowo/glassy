@@ -17,7 +17,12 @@ shipped.
 
 ## [Unreleased]
 
+### Changed
+- **Command-block chrome is now OFF by default** — `command_badges` (the right-aligned `✓ 1.2s` / `✗ 1` exit chip) and `command_fold` (the `▾` output-fold triangle) both default to `false`. Because nushell and most modern shells enable OSC 133 shell integration by default, these lit up automatically and read as rendering artifacts rather than a feature — the fold triangle in particular is drawn in column 0 of each prompt row and overlaps the prompt's own indicator. Opt back in per key in the config or Settings. (`command_blocks = off | badges | cards` still gates the card *bands* independently.)
+
 ### Fixed
+- **Command-block chrome bled onto full-screen (alternate-screen) apps.** Badges and fold triangles derived from shell command blocks were painted over vim / less / claude, and entering or leaving the alternate screen didn't force a repaint, so the previous screen's rows lingered underneath. glassy now suppresses command-block chrome whenever the alternate screen is active, and forces one full rebuild on the alt-screen transition (mirroring the shake/settle handling).
+- **Ghost / stale rows left behind under nushell (and any app using synchronized output, DECSET 2026)** — most visibly reedline repainting its prompt each keystroke/submit and leaving the previous prompt's rows faintly on screen. During a `?2026h…?2026l` bracket glassy defers the UI wakeup while the VT parser still updates the grid eagerly; an unrelated mid-bracket render (cursor blink, focus change, cursor trail) would read `term.damage()` and `reset_damage()`, discarding the accumulated damage so the deferred end-of-bracket render missed those rows. glassy now **batches damage across the bracket**: a shared `Pty::sync_active` flag makes the render thread read damage *without* resetting it while a bracket is open, so the closing render flushes the complete set and repaints exactly the changed rows (no full-screen repaint). zsh/zle never hit this — they don't use mode 2026.
 - **Linux aarch64 release builds actually succeed now**, instead of silently failing best-effort on every release. The cross-compile container was missing `libdbus-1-dev` (needed by `notify-rust`'s `libdbus-sys`), and separately `pkg-config` refuses to run cross-compiled at all unless told to — both are now handled (`Cross.toml`, `PKG_CONFIG_ALLOW_CROSS`). Verified with a full local cross-build, not just inferred from the error message.
 
 ## [0.6.1] - 2026-07-08

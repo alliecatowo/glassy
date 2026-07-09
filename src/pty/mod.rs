@@ -904,6 +904,16 @@ pub struct Pty {
     /// overline flag); the render path reads it via `overline.lock()` to set the
     /// per-cell `Decorations::overline` bit. See [`overline::OverlineTracker`].
     pub overline: Arc<Mutex<overline::OverlineTracker>>,
+    /// `true` while a synchronized-output bracket (`?2026h…?2026l`) is open on
+    /// the PTY thread. While set, the render thread reads `term.damage()` but
+    /// does NOT `reset_damage()`, so damage ACCUMULATES across the whole atomic
+    /// update instead of being lost when an unrelated mid-bracket render (cursor
+    /// blink, focus change, cursor trail) consumes it. When the bracket closes,
+    /// the deferred end-of-bracket render sees the full batched damage and
+    /// repaints exactly the changed rows — no stale "ghost" glyphs, and no
+    /// full-screen repaint. Reproducible with reedline/nushell (which brackets
+    /// every prompt repaint); zle never does. See `pty::loop::run_loop`.
+    pub sync_active: Arc<std::sync::atomic::AtomicBool>,
     /// PID of the spawned shell process. Used to read `/proc/<shell_pid>/cwd`
     /// and the tty foreground pgid for the pane header and status bar.
     pub shell_pid: u32,
@@ -1034,12 +1044,14 @@ impl Pty {
         let images = Arc::new(FairMutex::new(ImageStore::new()));
         let prompts = Arc::new(Mutex::new(PromptTracker::new()));
         let overline = Arc::new(Mutex::new(overline::OverlineTracker::new()));
+        let sync_active = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
         let loop_term = term.clone();
         let loop_poller = poller.clone();
         let loop_images = images.clone();
         let loop_prompts = prompts.clone();
         let loop_overline = overline.clone();
+        let loop_sync_active = sync_active.clone();
         // 256 KiB stack: the PTY read/parse loop has no deep recursion (only a
         // fixed read buffer + a handful of local variables), so the default
         // 8 MiB OS stack is wasteful. See `r#loop::PTY_THREAD_STACK`.
@@ -1056,6 +1068,7 @@ impl Pty {
                     loop_images,
                     loop_prompts,
                     loop_overline,
+                    loop_sync_active,
                 );
             })?;
 
@@ -1070,6 +1083,7 @@ impl Pty {
             images,
             prompts,
             overline,
+            sync_active,
             shell_pid,
             shell_comm,
             pane_info,

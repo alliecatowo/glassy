@@ -70,6 +70,7 @@ pub(crate) fn run_loop(
     images: Arc<FairMutex<ImageStore>>,
     prompts: Arc<Mutex<PromptTracker>>,
     overline: Arc<Mutex<crate::pty::overline::OverlineTracker>>,
+    sync_active: Arc<std::sync::atomic::AtomicBool>,
 ) {
     const PTY_KEY: usize = 1;
     let mut processor: Processor = Processor::new();
@@ -153,6 +154,9 @@ pub(crate) fn run_loop(
         if sync_depth > 0 && sync_deadline.is_some_and(|d| Instant::now() >= d) {
             sync_depth = 0;
             sync_deadline = None;
+            // Force-closing the bracket (deadline hit): stop batching so the next
+            // render flushes + resets the accumulated damage. See `Pty::sync_active`.
+            sync_active.store(false, std::sync::atomic::Ordering::Relaxed);
             if sync_pending_wakeup {
                 sync_pending_wakeup = false;
                 EventListener::send_event(&proxy, Event::Wakeup);
@@ -244,11 +248,20 @@ pub(crate) fn run_loop(
                                         sync_deadline = Some(Instant::now() + SYNC_TIMEOUT);
                                     }
                                     sync_depth = sync_depth.saturating_add(begin_count);
+                                    // Start batching damage: the render thread stops
+                                    // resetting it so nothing is lost to a mid-bracket
+                                    // render. See `Pty::sync_active`.
+                                    sync_active.store(true, std::sync::atomic::Ordering::Relaxed);
                                 }
                                 if end_count > 0 {
                                     sync_depth = sync_depth.saturating_sub(end_count);
                                     if sync_depth == 0 {
                                         sync_deadline = None;
+                                        // Bracket closed: stop batching so the deferred
+                                        // end-of-bracket render flushes + resets the
+                                        // accumulated damage. See `Pty::sync_active`.
+                                        sync_active
+                                            .store(false, std::sync::atomic::Ordering::Relaxed);
                                     }
                                 }
 
