@@ -25,10 +25,10 @@
 
 glassy is small and quiet on purpose. It does the work the GPU is good at, and nothing else.
 
-- **Tiny footprint.** The stripped release binary is **~10 MB** — compare ~123 MB for ghostty. Fat LTO, a single codegen unit, and `panic = "abort"` keep it lean.
+- **Tiny footprint.** The stripped release binary measured **~11 MB**, against ~123 MB for ghostty's distro binary (a single manual measurement on one machine; see [docs/benchmarks.md](docs/benchmarks.md)). Fat LTO, a single codegen unit, and `panic = "abort"` keep it lean.
 - **0% idle CPU.** Rendering is **on-demand**: with nothing changing on screen, glassy issues no frames and burns no cycles. No background spin, no wakeups.
 - **Damage-based redraw.** When the screen *does* change, only the cells that actually changed are re-rasterized and re-uploaded — not the whole grid.
-- **Low input latency.** The swapchain uses **Mailbox** present mode with **`max_frames_in_flight = 1`**, so a keystroke reaches the glass on the very next frame instead of queueing behind buffered ones.
+- **Simple vsync'd swapchain.** The swapchain uses **Fifo** (vsync) present mode with `desired_maximum_frame_latency = 2`. That keeps the minimum number of swapchain images, and with damage-driven rendering there are no idle redraws. Input latency has not been measured yet.
 - **iGPU by default.** A 2-D glyph renderer never needs the discrete GPU — glassy defaults to the integrated/low-power adapter, saving power and avoiding context-switching overhead. Override with `GLASSY_GPU=high`.
 
 ---
@@ -48,11 +48,11 @@ Font, opacity, padding, bell, and more — every change previews instantly, `Ent
 </td>
 <td width="50%">
 
-**18 built-in themes, one editor**
+**60 built-in themes, one editor**
 
 Pick a preset or open the swatch editor and hand-tune fg/bg/cursor/ANSI colors — changes apply live before you save.
 
-<img src="docs/screenshots/theme-picker.png" width="100%" alt="glassy theme picker showing 18 built-in themes and a custom color swatch editor"/>
+<img src="docs/screenshots/theme-picker.png" width="100%" alt="glassy theme picker listing built-in themes and a custom color swatch editor"/>
 
 </td>
 </tr>
@@ -144,11 +144,11 @@ Every action — tabs, panes, themes, toggles — is reachable from the fuzzy-se
 - **Maximize** (`F10`) — window maximize toggle
 - **Power Mode** *(opt-in)* — cursor particle burst + streak shake while typing fast; `power_mode = true`
 
-### Themes (18 built-in, live-switchable)
+### Themes (60 built-in, live-switchable)
 
-Tokyo Night · Catppuccin Mocha · Catppuccin Macchiato · Catppuccin Latte *(light)* · Gruvbox Dark · Gruvbox Light *(light)* · Dracula · Nord · Solarized Dark · Rosé Pine · Rosé Pine Dawn *(light)* · Everforest Dark · Everforest Light *(light)* · Kanagawa · One Dark · One Light *(light)* · Ayu Dark · Ayu Light *(light)*
+Tokyo Night (default), Catppuccin, Gruvbox, Dracula, Nord, Solarized, Rosé Pine, Everforest, Kanagawa, One Dark/Light, Ayu, GitHub, Monokai, Night Owl, Nightfox and more. The full list is in [Themes](#themes) below.
 
-Switch live in the settings overlay, the command palette, or by editing the config. Six light themes are included. `follow_system = true` tracks the OS light/dark preference automatically.
+Switch live in the settings overlay, the command palette, or by editing the config. 18 light themes are included. `follow_system = true` tracks the OS light/dark preference automatically.
 
 **Custom colors** — override any theme color inline (`color.fg`, `color.bg`, `color.cursor`, `color.selection_bg`, `color.ansi0`–`color.ansi15`), or use the in-app swatch editor.
 
@@ -256,15 +256,6 @@ sudo dpkg -i glassy_*_amd64.deb && sudo apt-get install -f
 sudo dnf install ./glassy-*.rpm   # or: sudo rpm -i glassy-*.rpm
 ```
 
-**Arch Linux — AUR**
-
-```sh
-# Build from source (~5 min compile time):
-yay -S glassy
-# Pre-built binary (no Rust toolchain needed):
-yay -S glassy-bin
-```
-
 **Homebrew (Linuxbrew)**
 
 ```sh
@@ -360,21 +351,11 @@ restore_session = false                  # restore previous tabs/splits/cwds on 
 
 ### Themes
 
-18 built-in themes — 12 dark, 6 light:
+60 built-in themes — 42 dark, 18 light:
 
-| Name | Style | Name | Style |
-| --- | --- | --- | --- |
-| `tokyo-night` | dark (default) | `everforest-dark` | dark |
-| `catppuccin-mocha` | dark | `everforest-light` | light |
-| `catppuccin-macchiato` | dark | `kanagawa` | dark |
-| `catppuccin-latte` | light | `one-dark` | dark |
-| `gruvbox-dark` | dark | `one-light` | light |
-| `gruvbox-light` | light | `ayu-dark` | dark |
-| `dracula` | dark | `ayu-light` | light |
-| `nord` | dark | | |
-| `solarized-dark` | dark | | |
-| `rose-pine` | dark | | |
-| `rose-pine-dawn` | light | | |
+**Dark:** `tokyo-night` (default), `catppuccin-mocha`, `catppuccin-macchiato`, `gruvbox-dark`, `dracula`, `nord`, `solarized-dark`, `rose-pine`, `everforest-dark`, `kanagawa`, `one-dark`, `ayu-dark`, `github-dark`, `monokai`, `monokai-pro`, `material`, `material-darker`, `night-owl`, `snazzy`, `horizon-dark`, `oceanic-next`, `palenight`, `zenburn`, `iceberg-dark`, `nightfox`, `vitesse-dark`, `flexoki-dark`, `everblush`, `melange-dark`, `synthwave-84`, `catppuccin-frappe`, `tokyo-night-storm`, `gruvbox-material`, `one-half-dark`, `ayu-mirage`, `rose-pine-moon`, `kanagawa-dragon`, `solarized-osaka`, `poimandres`, `andromeda`, `aura`, `challenger-deep`
+
+**Light:** `rose-pine-dawn`, `catppuccin-latte`, `everforest-light`, `one-light`, `ayu-light`, `gruvbox-light`, `github-light`, `solarized-light`, `one-half-light`, `tokyo-night-day`, `kanagawa-lotus`, `papercolor-light`, `modus-operandi`, `flexoki-light`, `vitesse-light`, `dayfox`, `selenized-light`, `alabaster`
 
 ### Custom colors
 
@@ -564,7 +545,7 @@ src/
 
 ## Benchmarks
 
-Rough, honest numbers (binary size, idle RSS, idle CPU, startup) and methodology live in [docs/benchmarks.md](docs/benchmarks.md).
+Rough numbers (binary size, idle RSS, idle CPU, startup) and methodology live in [docs/benchmarks.md](docs/benchmarks.md). They are single-machine measurements taken by hand on one developer box, not a CI benchmark suite, so treat them as indicative.
 
 ---
 
