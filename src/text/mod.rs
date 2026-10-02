@@ -349,6 +349,12 @@ mod tests {
             eprintln!("real_emoji_still_renders_as_color: skipped (no font)");
             return;
         };
+        if !text.has_emoji_font() {
+            // No emoji font on this host (e.g. a bare CI image): the crab can
+            // only resolve to a flat fallback, so there is no color art to check.
+            eprintln!("real_emoji_still_renders_as_color: skipped (no emoji font)");
+            return;
+        }
         let glyphs = text.rasterize('\u{1F980}', false, false); // 🦀
         // Either the font stack has no crab glyph at all (empty, acceptable),
         // or every bitmap it does produce is color — never a flattened crab.

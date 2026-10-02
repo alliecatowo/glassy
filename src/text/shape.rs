@@ -344,6 +344,13 @@ pub struct FontConfig<'a> {
 }
 
 impl Text {
+    /// Whether the discovered font stack includes an emoji font (test-only probe
+    /// so emoji assertions can skip on hosts, like bare CI images, without one).
+    #[cfg(test)]
+    pub(super) fn has_emoji_font(&self) -> bool {
+        self.emoji_family.is_some()
+    }
+
     /// Discover a monospace font, load it, and measure the cell box for `font_px`.
     ///
     /// `family` is an optional preferred family name (from config/CLI). When set
