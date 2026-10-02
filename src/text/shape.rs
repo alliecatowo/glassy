@@ -1010,7 +1010,7 @@ impl Text {
             SwashContent::Mask => (img.data.clone(), false),
             SwashContent::SubpixelMask => {
                 let mut d = Vec::with_capacity(pixels);
-                for px in img.data.chunks_exact(3) {
+                for px in img.data.as_chunks::<3>().0 {
                     d.push(px[0].max(px[1]).max(px[2]));
                 }
                 (d, false)

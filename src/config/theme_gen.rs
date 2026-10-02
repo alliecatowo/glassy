@@ -60,7 +60,9 @@ pub fn from_rgba(width: u32, height: u32, rgba: &[u8]) -> Theme {
     let expected = (width as usize) * (height as usize) * 4;
     debug_assert_eq!(rgba.len(), expected, "RGBA buffer size mismatch");
     let samples: Vec<(u8, u8, u8)> = rgba
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .filter(|px| px[3] >= 128)
         .map(|px| (px[0], px[1], px[2]))
         .collect();
@@ -116,17 +118,23 @@ fn decode_image_to_samples(bytes: &[u8]) -> Result<Vec<(u8, u8, u8)>> {
     let data = &buf[..frame.buffer_size()];
     let samples: Vec<(u8, u8, u8)> = match frame.color_type {
         png::ColorType::Rgba => data
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .filter(|px| px[3] >= 128)
             .map(|px| (px[0], px[1], px[2]))
             .collect(),
         png::ColorType::Rgb => data
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .map(|px| (px[0], px[1], px[2]))
             .collect(),
         png::ColorType::Grayscale => data.iter().map(|&g| (g, g, g)).collect(),
         png::ColorType::GrayscaleAlpha => data
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .filter(|px| px[1] >= 128)
             .map(|px| (px[0], px[0], px[0]))
             .collect(),
