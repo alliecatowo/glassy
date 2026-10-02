@@ -25,7 +25,7 @@ cask "glassy" do
   desc "Fast, minimal GPU-accelerated terminal emulator written in Rust"
   homepage "https://github.com/alliecatowo/glassy"
 
-  depends_on macos: :big_sur
+  depends_on :macos
 
   app "Glassy.app"
   binary "#{appdir}/Glassy.app/Contents/MacOS/glassy"
