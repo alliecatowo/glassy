@@ -478,7 +478,7 @@ jobs:
 
       # Download all successfully-uploaded artifacts (pattern '*' catches
       # linux-x86_64, and linux-aarch64 / macos if they passed).
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: artifacts
 
@@ -602,13 +602,13 @@ jobs:
           fetch-depth: 0
 
       - name: Download linux-x86_64 artifacts for sha256
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: linux-x86_64
           path: artifacts/linux-x86_64
 
       - name: Download macOS per-arch binaries + dmgs for sha256
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: macos-*
           path: artifacts
@@ -699,7 +699,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Download linux-x86_64 artifacts for sha256
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: linux-x86_64
           path: artifacts/linux-x86_64
@@ -824,7 +824,7 @@ jobs:
 
       - name: Download linux-x86_64 artifact (.rpm)
         if: steps.guard.outputs.enabled == 'true'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: linux-x86_64
           path: artifacts/linux-x86_64
@@ -974,7 +974,7 @@ jobs:
 
       - name: Download linux-x86_64 artifact (.deb)
         if: steps.guard.outputs.enabled == 'true'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: linux-x86_64
           path: artifacts/linux-x86_64
