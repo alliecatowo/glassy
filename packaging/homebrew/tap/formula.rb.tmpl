@@ -23,7 +23,6 @@ class Glassy < Formula
   desc "Fast, minimal GPU-accelerated terminal emulator written in Rust"
   homepage "https://github.com/alliecatowo/glassy"
   url "https://github.com/alliecatowo/glassy/releases/download/GLASSY_VERSION/glassy-GLASSY_VERSION_PLAIN-src.tar.gz"
-  version "GLASSY_VERSION_PLAIN"
   sha256 "GLASSY_SHA256"
   license "MIT"
 
@@ -62,12 +61,6 @@ class Glassy < Formula
     else
       system "cargo", "install", *std_cargo_args
     end
-  end
-
-  # Install man page if present.
-  def post_install
-    man1.mkpath
-    man1.install "extra/glassy.1" if File.exist?("extra/glassy.1")
   end
 
   test do
