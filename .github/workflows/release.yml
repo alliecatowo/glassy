@@ -56,7 +56,7 @@ jobs:
       tag: ${{ steps.v.outputs.tag }}
       is_new: ${{ steps.v.outputs.is_new }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Compute version, tag, and is_new
         id: v
@@ -109,7 +109,7 @@ jobs:
     outputs:
       version: ${{ needs.resolve-version.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Extract version
         id: meta
@@ -185,7 +185,7 @@ jobs:
     needs: [resolve-version]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Extract version
         id: meta
@@ -254,7 +254,7 @@ jobs:
           - target: x86_64-apple-darwin
             arch: x86_64
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Extract version
         id: meta
@@ -467,7 +467,7 @@ jobs:
     if: always() && needs.build-linux-x86_64.result == 'success' && needs.build-macos.result == 'success' && needs.resolve-version.outputs.is_new == 'true' && (github.event_name != 'workflow_dispatch' || github.event.inputs.publish == 'true')
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Extract version
         id: meta
@@ -596,7 +596,7 @@ jobs:
     continue-on-error: true  # never let a formula-bump hiccup fail the release
     steps:
       # Check out the DEFAULT branch (not the tag) so the commit lands on main.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 0
@@ -696,7 +696,7 @@ jobs:
     runs-on: ubuntu-latest
     continue-on-error: true  # AUR SSH key may not be configured
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Download linux-x86_64 artifacts for sha256
         uses: actions/download-artifact@v4
@@ -798,7 +798,7 @@ jobs:
     permissions:
       contents: write  # peaceiris pushes to gh-pages
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # GitHub forbids `secrets.*` in a job-level `if`, so detect key presence
       # here and gate every subsequent step on this output. Absent key => the
@@ -951,7 +951,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Check for signing key
         id: guard
