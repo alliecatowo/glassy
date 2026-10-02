@@ -111,16 +111,19 @@ pub(crate) fn right_control_items(win_controls: bool) -> Vec<StripItem> {
 ///
 /// `tag_reserve` is the pixel width reserved to the LEFT of the right controls for
 /// the "N tabs" / scrollback-% readout, so the rightmost tab and the `+` never
-/// kiss the counter. Tab widths are clamped to `[TAB_MIN_W, TAB_MAX_W]`: shrink
-/// stops at `TAB_MIN_W` (no infinite squeeze) and the strip then SCROLLS
-/// horizontally so the active tab (`active_pos`) stays fully visible. Pure (pixel
-/// math only) so the painter and the click hit-test agree, and unit-testable.
+/// kiss the counter. Tab widths are clamped to `[tab_min_w, tab_max_w]`: shrink
+/// stops at `tab_min_w` (no infinite squeeze) and the strip then SCROLLS
+/// horizontally so the active tab (`active_pos`) stays fully visible. All
+/// metrics (button edge, gaps, pads, min/max chip width) derive from the cell
+/// size, so the whole strip scales with the font/DPI. Pure (pixel math only) so
+/// the painter and the click hit-test agree, and unit-testable.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn strip_layout_ex(
     tabs: &[TabDesc],
     bar_w: f32,
     bar_h: f32,
     cell_w: f32,
+    cell_h: f32,
     tag_reserve: f32,
     active_pos: usize,
     left_inset: f32,
@@ -130,32 +133,36 @@ pub(crate) fn strip_layout_ex(
     if bar_w <= 0.0 || bar_h <= 0.0 {
         return segs;
     }
+    let btn = ctrl_btn(cell_h);
+    let gap = tab_gap(cell_w);
+    let min_w = tab_min_w(cell_w);
+    let max_w = tab_max_w(cell_w);
     // Tab chips are inset vertically so the active chip's top accent rail and the
     // inactive chips' recess read clearly against the bar.
     let chip_y = ((bar_h - bar_h * 0.82) * 0.5).round();
     let chip_h = (bar_h - chip_y).max(1.0); // flush to the bar bottom (connector)
-    let ctrl_y = ((bar_h - CTRL_BTN) * 0.5).round().max(0.0);
+    let ctrl_y = ((bar_h - btn) * 0.5).round().max(0.0);
 
     // Right-aligned control buttons: help, settings, menu (in that visual order),
     // plus the window min/max/close controls when glassy owns the edge.
     let right_btns = right_control_items(win_controls);
-    let right_w = CTRL_BTN * right_btns.len() as f32;
+    let right_w = btn * right_btns.len() as f32;
     // Reserve the control cluster AND the tag readout so tabs/`+` never overlap it.
-    let right_start = (bar_w - right_w - TAB_GAP - tag_reserve.max(0.0)).max(0.0);
+    let right_start = (bar_w - right_w - gap - tag_reserve.max(0.0)).max(0.0);
 
     // Decorative mark on the far left (the " ◆ " brand), then the tabs. `left_inset`
     // clears the macOS traffic-light buttons (0 elsewhere).
     let mark_w = (cell_w * 3.0).round();
-    let tabs_left = left_inset + mark_w + TAB_GAP;
+    let tabs_left = left_inset + mark_w + gap;
     // The `+` button sits AFTER the last tab, so reserve its width on the right of
     // the tab band.
-    let plus_w = CTRL_BTN + TAB_GAP * 2.0;
-    let avail = (right_start - tabs_left - TAB_GAP).max(0.0);
+    let plus_w = btn + gap * 2.0;
+    let avail = (right_start - tabs_left - gap).max(0.0);
 
     if tabs.len() <= 1 {
         // Single tab: one wide chip spanning the available width minus the `+`
         // slot (no close box — closing it quits). It still reads as a connected tab.
-        let w = (avail - plus_w).clamp(0.0, TAB_MAX_W * 1.6);
+        let w = (avail - plus_w).clamp(0.0, max_w * 1.6);
         let mut next_x = tabs_left;
         if w > 0.0 {
             segs.push(StripSeg {
@@ -163,25 +170,25 @@ pub(crate) fn strip_layout_ex(
                 label: tabs.first().map(|t| t.0.to_string()).unwrap_or_default(),
                 rect: gui::Rect::new(tabs_left, chip_y, w, chip_h),
             });
-            next_x = tabs_left + w + TAB_GAP;
+            next_x = tabs_left + w + gap;
         }
-        push_new_tab(&mut segs, next_x, ctrl_y, right_start);
+        push_new_tab(&mut segs, next_x, ctrl_y, right_start, btn);
     } else {
         let n = tabs.len();
         // Equal-width chips that grow to fill the available band. Shrink stops at
-        // TAB_MIN_W (no infinite squeeze); the strip scrolls when the active tab
+        // tab_min_w (no infinite squeeze); the strip scrolls when the active tab
         // would otherwise be out of view. No upper cap so two tabs fill the whole
         // bar naturally.
         let tab_band = (avail - plus_w).max(0.0);
-        let per = (tab_band + TAB_GAP) / n as f32 - TAB_GAP;
-        let tw = per.max(TAB_MIN_W);
+        let per = (tab_band + gap) / n as f32 - gap;
+        let tw = per.max(min_w);
         // Total width all chips want at the clamped width.
-        let total = tw * n as f32 + TAB_GAP * (n as f32 - 1.0);
+        let total = tw * n as f32 + gap * (n as f32 - 1.0);
         // Horizontal scroll offset: 0 when everything fits, else shift so the
         // active chip is fully within [tabs_left, tabs_left + tab_band].
         let mut scroll = 0.0_f32;
         if total > tab_band {
-            let active_x = active_pos as f32 * (tw + TAB_GAP);
+            let active_x = active_pos as f32 * (tw + gap);
             // Keep the active chip's left and right edges inside the visible band.
             let lo = (active_x + tw - tab_band).max(0.0); // active right edge flush
             let hi = active_x; // active left edge flush
@@ -193,7 +200,7 @@ pub(crate) fn strip_layout_ex(
         let band_right = tabs_left + tab_band;
         let mut last_visible_right = tabs_left;
         for (i, (title, _a, _b)) in tabs.iter().enumerate() {
-            let tx = tabs_left + i as f32 * (tw + TAB_GAP) - scroll;
+            let tx = tabs_left + i as f32 * (tw + gap) - scroll;
             // Cull chips fully outside the visible band (scrolled away).
             if tx + tw <= tabs_left - 0.5 || tx >= band_right + 0.5 {
                 continue;
@@ -205,9 +212,9 @@ pub(crate) fn strip_layout_ex(
                 rect: body,
             });
             // Close box anchored to the chip's right edge, vertically centered.
-            let cb = CLOSE_BOX.min(tw * 0.5);
+            let cb = close_box(cell_h).min(tw * 0.5);
             let close = gui::Rect::new(
-                tx + tw - cb - TAB_PAD_X * 0.5,
+                tx + tw - cb - tab_pad_x(cell_w) * 0.5,
                 chip_y + (chip_h - cb) * 0.5,
                 cb,
                 cb,
@@ -220,19 +227,19 @@ pub(crate) fn strip_layout_ex(
             last_visible_right = (tx + tw).min(band_right);
         }
         // `+` immediately after the last visible tab (clamped into the band).
-        let plus_x = (last_visible_right + TAB_GAP * 2.0).min(band_right + TAB_GAP);
-        push_new_tab(&mut segs, plus_x, ctrl_y, right_start + plus_w);
+        let plus_x = (last_visible_right + gap * 2.0).min(band_right + gap);
+        push_new_tab(&mut segs, plus_x, ctrl_y, right_start + plus_w, btn);
     }
 
     // Right controls.
-    let mut rx = bar_w - right_w - TAB_GAP;
+    let mut rx = bar_w - right_w - gap;
     for item in &right_btns {
         segs.push(StripSeg {
             item: *item,
             label: String::new(),
-            rect: gui::Rect::new(rx, ctrl_y, CTRL_BTN, CTRL_BTN),
+            rect: gui::Rect::new(rx, ctrl_y, btn, btn),
         });
-        rx += CTRL_BTN;
+        rx += btn;
     }
     segs
 }

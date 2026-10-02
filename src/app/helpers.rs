@@ -20,19 +20,47 @@ pub(crate) fn tab_bar_h(cell_h: f32) -> f32 {
     (cell_h * 1.7).round().max(28.0)
 }
 
-/// Top-corner radius of a tab chip (px).
-pub(crate) const TAB_RADIUS: f32 = 5.0;
-/// Minimum / maximum tab width in px (multi-tab mode).
-pub(crate) const TAB_MIN_W: f32 = 120.0;
-pub(crate) const TAB_MAX_W: f32 = 220.0;
-/// Gap between adjacent tab chips (px).
-pub(crate) const TAB_GAP: f32 = 2.0;
-/// Horizontal inner padding of a tab chip (px).
-pub(crate) const TAB_PAD_X: f32 = 10.0;
-/// Close-button hit box inside a tab (px, square).
-pub(crate) const CLOSE_BOX: f32 = 16.0;
-/// Square icon-button size for +/#/?/* controls (px).
-pub(crate) const CTRL_BTN: f32 = 28.0;
+/// Top-corner radius of a tab chip (px): the design-system `r_md` token
+/// ([`gui::Metrics::r_md`], same formula as [`gui_radius`]) so every chrome
+/// radius derives from one cell-scaled scale instead of a scattered 5.0.
+pub(crate) fn tab_radius(cell_h: f32) -> f32 {
+    gui_radius(cell_h)
+}
+
+/// Minimum tab width (multi-tab mode), cell-derived so chips scale with the
+/// font/DPI like the rest of the chrome (was a fixed 120 px).
+pub(crate) fn tab_min_w(cell_w: f32) -> f32 {
+    (cell_w * 13.0).round()
+}
+
+/// Maximum tab width, cell-derived (was a fixed 220 px).
+pub(crate) fn tab_max_w(cell_w: f32) -> f32 {
+    (cell_w * 24.0).round()
+}
+
+/// Gap between adjacent tab chips / strip buttons, cell-derived with a 2 px
+/// floor (the design-system `sp_xs` stop; was a fixed 2 px).
+pub(crate) fn tab_gap(cell_w: f32) -> f32 {
+    (cell_w * 0.25).round().max(2.0)
+}
+
+/// Horizontal inner padding of a tab chip, cell-derived (was a fixed 10 px).
+pub(crate) fn tab_pad_x(cell_w: f32) -> f32 {
+    (cell_w * 1.1).round()
+}
+
+/// Close-button hit box inside a tab (square): the design-system `btn * 0.6`
+/// mapping ([`gui::Metrics::btn`]; was a fixed 16 px).
+pub(crate) fn close_box(cell_h: f32) -> f32 {
+    (ctrl_btn(cell_h) * 0.6).round()
+}
+
+/// Square icon-button edge for the +/≡/window controls: the design-system
+/// `btn` token ([`gui::Metrics::btn`] = `cell_h * 1.6`; was a fixed 28 px), so
+/// the control cluster scales with the font/DPI like the tab chips do.
+pub(crate) fn ctrl_btn(cell_h: f32) -> f32 {
+    (cell_h * 1.6).round()
+}
 
 /// Width of the borderless-window resize border zone (px). A left press within
 /// this many pixels of a window edge/corner starts an OS-driven resize drag
@@ -46,10 +74,14 @@ pub(crate) fn gui_radius(cell_h: f32) -> f32 {
     (cell_h * 0.28).round().clamp(4.0, 8.0)
 }
 
-/// Status-bar height in physical px. Fixed at 22 px (one cell-height equivalent
-/// at typical DPI). Drawn at the bottom of the window; `content_area()` and
-/// `grid_for()` subtract it so panes tile only between the tab bar and this bar.
-pub(crate) const STATUS_BAR_H: f32 = 22.0;
+/// Status-bar height in physical px: the design-system `bar_h` token
+/// ([`gui::Metrics::bar_h`] = `cell_h * 1.4`), so the bar scales with the
+/// font/DPI like the tab bar (was a fixed 22 px). Drawn at the bottom of the
+/// window; `content_area()` and `grid_for()` subtract it so panes tile only
+/// between the tab bar and this bar.
+pub(crate) fn status_bar_h(cell_h: f32) -> f32 {
+    (cell_h * 1.4).round()
+}
 
 /// What a wheel notch should do, given the terminal's current mode. Pure so it
 /// can be unit-tested without a window or PTY.
