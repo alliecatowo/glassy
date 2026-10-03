@@ -140,7 +140,7 @@ pub(crate) fn decode_payload(controls: &Controls, payload: &[u8]) -> Option<Deco
 
 /// Decode a PNG into tightly-packed RGBA8 via the `png` crate.
 pub(crate) fn decode_png(bytes: &[u8]) -> Option<DecodedImage> {
-    let mut decoder = png::Decoder::new(bytes);
+    let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
     // Normalize to 8-bit channels: expand palette/low-bit-depth and tRNS, and
     // strip 16-bit down to 8 so the color-type match below always sees 8bpp.
     decoder.set_transformations(png::Transformations::normalize_to_color8());
@@ -156,7 +156,7 @@ pub(crate) fn decode_png(bytes: &[u8]) -> Option<DecodedImage> {
             return None;
         }
     }
-    let mut buf = vec![0u8; reader.output_buffer_size()];
+    let mut buf = vec![0u8; reader.output_buffer_size()?];
     let info = reader.next_frame(&mut buf).ok()?;
     let (w, h) = (info.width, info.height);
     // Belt-and-suspenders: verify decoded dims even though we checked the header.

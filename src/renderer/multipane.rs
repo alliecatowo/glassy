@@ -328,7 +328,7 @@ impl Renderer {
             self.record_multi_passes(&view, &mut encoder);
         }
         self.queue.submit(std::iter::once(encoder.finish()));
-        frame.present();
+        self.queue.present(frame);
         Ok(())
     }
 

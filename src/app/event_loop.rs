@@ -15,7 +15,7 @@ fn load_window_icon() -> Option<winit::window::Icon> {
     const ICON_PNG: &[u8] = include_bytes!("../../assets/icons/glassy-256.png");
     let decoder = png::Decoder::new(std::io::Cursor::new(ICON_PNG));
     let mut reader = decoder.read_info().ok()?;
-    let mut buf = vec![0u8; reader.output_buffer_size()];
+    let mut buf = vec![0u8; reader.output_buffer_size()?];
     let info = reader.next_frame(&mut buf).ok()?;
     // Our asset is 8-bit; normalise RGB→RGBA so winit always gets 4 channels.
     let rgba = match info.color_type {
