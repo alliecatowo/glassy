@@ -37,9 +37,10 @@ cask "glassy" do
   # install of a plain Formula) deliberately quarantines installed apps.
   # Scoped to Glassy.app only — this has no effect on Gatekeeper's handling
   # of anything else on the system.
-  postflight do
-    system_command "/usr/bin/xattr",
-                   args: ["-dr", "com.apple.quarantine", "#{appdir}/Glassy.app"]
+  postflight_steps do
+    run "/usr/bin/xattr",
+        args:           ["-dr", "com.apple.quarantine", "{{appdir}}/Glassy.app"],
+        writable_paths: ["{{appdir}}/Glassy.app"]
   end
 
   zap trash: [
