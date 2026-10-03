@@ -145,8 +145,8 @@ opt-level = 3
 # links against (GUI/GPU/audio/text stack).
 # ---------------------------------------------------------------------------
 [package.metadata.deb]
-maintainer = "Allie <allisonemilycoleman@gmail.com>"
-copyright = "2026, Allie <allisonemilycoleman@gmail.com>"
+maintainer = "Allie <me@allisons.dev>"
+copyright = "2026, Allie <me@allisons.dev>"
 license-file = ["LICENSE", "0"]
 extended-description = """\
 glassy is a small, fast, GPU-accelerated terminal emulator written in Rust. \

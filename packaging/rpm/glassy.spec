@@ -76,5 +76,5 @@ install -Dm0644 LICENSE %{buildroot}%{_licensedir}/glassy/LICENSE
 %{_datadir}/icons/hicolor/*/apps/glassy.png
 
 %changelog
-* Wed Jun 25 2026 Allie <allisonemilycoleman@gmail.com> - 0.2.0-1
+* Wed Jun 25 2026 Allie <me@allisons.dev> - 0.2.0-1
 - Initial spec for the official-Fedora / Copr build path.

@@ -306,6 +306,11 @@ pub fn cleanup() {
 mod tests {
     use super::*;
 
+    /// The environment is process-global and the test harness runs tests on
+    /// parallel threads, so every test that mutates `XDG_RUNTIME_DIR`,
+    /// `TMPDIR` or `USER` must hold this lock for its whole body.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn command_roundtrips_through_verb() {
         for cmd in [IpcCommand::Toggle, IpcCommand::Show, IpcCommand::Hide] {
@@ -328,6 +333,7 @@ mod tests {
 
     #[test]
     fn socket_path_prefers_runtime_dir() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Save + restore the env so the test is hermetic.
         let prev_runtime = std::env::var_os("XDG_RUNTIME_DIR");
         // SAFETY: single-threaded test; we restore the var before returning.
@@ -346,6 +352,7 @@ mod tests {
 
     #[test]
     fn socket_path_falls_back_to_tmp() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let prev_runtime = std::env::var_os("XDG_RUNTIME_DIR");
         let prev_tmp = std::env::var_os("TMPDIR");
         let prev_user = std::env::var_os("USER");
@@ -374,6 +381,7 @@ mod tests {
 
     #[test]
     fn send_command_returns_false_when_no_server() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Point at a path that no server is listening on.
         let prev_runtime = std::env::var_os("XDG_RUNTIME_DIR");
         let prev_tmp = std::env::var_os("TMPDIR");

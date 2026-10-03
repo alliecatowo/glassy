@@ -1,4 +1,4 @@
-# Maintainer: Allie <allisonemilycoleman@gmail.com>
+# Maintainer: Allie <me@allisons.dev>
 # This is the -bin variant: installs the pre-built binary from the GitHub
 # Release rather than compiling from source. This is faster to install and
 # does not require Rust or the build-time system headers.

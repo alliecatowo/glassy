@@ -24,7 +24,9 @@ fn load_window_icon() -> Option<winit::window::Icon> {
             buf
         }
         png::ColorType::Rgb => buf[..info.buffer_size()]
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .flat_map(|p| [p[0], p[1], p[2], 255])
             .collect(),
         _ => return None,
