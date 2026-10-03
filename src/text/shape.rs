@@ -1416,7 +1416,9 @@ fn render_coretext(cluster: &str, render_px: f32) -> Option<RasterizedGlyph> {
     // back grayscale (R==G==B per pixel), a color emoji does not.
     let src = ctx.data();
     let is_color = src
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .any(|px| px[3] != 0 && (px[0] != px[1] || px[1] != px[2]));
 
     let left = bounds.origin.x.floor() as i32;
@@ -1427,7 +1429,12 @@ fn render_coretext(cluster: &str, render_px: f32) -> Option<RasterizedGlyph> {
     if is_color {
         // Un-premultiply BGRA → straight RGBA for the color atlas (Rgba8Unorm).
         let mut data = vec![0u8; w * h * 4];
-        for (dst, px) in data.chunks_exact_mut(4).zip(src.chunks_exact(4)) {
+        for (dst, px) in data
+            .as_chunks_mut::<4>()
+            .0
+            .iter_mut()
+            .zip(src.as_chunks::<4>().0.iter())
+        {
             let (b, g, r, a) = (px[0], px[1], px[2], px[3]);
             if a == 0 {
                 continue;
@@ -1451,7 +1458,7 @@ fn render_coretext(cluster: &str, render_px: f32) -> Option<RasterizedGlyph> {
     } else {
         // Monochrome: take the alpha channel as an R8 coverage mask so the renderer
         // tints it with the cell's foreground color.
-        let data: Vec<u8> = src.chunks_exact(4).map(|px| px[3]).collect();
+        let data: Vec<u8> = src.as_chunks::<4>().0.iter().map(|px| px[3]).collect();
         Some(RasterizedGlyph {
             width: w as u32,
             height: h as u32,
