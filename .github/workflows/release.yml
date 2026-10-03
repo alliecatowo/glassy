@@ -775,7 +775,7 @@ jobs:
   #      Site URL must resolve to https://alliecatowo.github.io/glassy/.
   #
   #   2. Generate a dedicated signing GPG key (do NOT reuse a personal key):
-  #        gpg --quick-generate-key "glassy releases <allisonemilycoleman@gmail.com>" rsa4096 sign 5y
+  #        gpg --quick-generate-key "glassy releases <me@allisons.dev>" rsa4096 sign 5y
   #        gpg --armor --export-secret-keys <KEYID> > glassy-signing.asc
   #      Add two repo secrets (Settings → Secrets and variables → Actions):
   #        RELEASE_GPG_PRIVATE_KEY = contents of glassy-signing.asc (ASCII-armored)
