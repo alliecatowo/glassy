@@ -602,6 +602,7 @@ jobs:
           SRC_FILE="artifacts/linux-x86_64/${{ env.BIN }}-${VERSION}-src.tar.gz"
           AARCH64_BIN="artifacts/${{ env.BIN }}-aarch64-macos"
           X86_64_BIN="artifacts/${{ env.BIN }}-x86_64-macos"
+          LINUX_X86_64_BIN="artifacts/linux-x86_64/${{ env.BIN }}-x86_64-linux"
           AARCH64_DMG="artifacts/${{ env.BIN }}-${VERSION}-macos-aarch64.dmg"
           X86_64_DMG="artifacts/${{ env.BIN }}-${VERSION}-macos-x86_64.dmg"
           {
@@ -609,6 +610,7 @@ jobs:
             echo "sha256=$(sha256sum "$SRC_FILE" | awk '{print $1}')"
             echo "sha256_aarch64=$(sha256sum "$AARCH64_BIN" | awk '{print $1}')"
             echo "sha256_x86_64=$(sha256sum "$X86_64_BIN" | awk '{print $1}')"
+            echo "sha256_linux_x86_64=$(sha256sum "$LINUX_X86_64_BIN" | awk '{print $1}')"
             echo "sha256_dmg_aarch64=$(sha256sum "$AARCH64_DMG" | awk '{print $1}')"
             echo "sha256_dmg_x86_64=$(sha256sum "$X86_64_DMG" | awk '{print $1}')"
           } >> "$GITHUB_OUTPUT"
@@ -619,6 +621,7 @@ jobs:
           SHA="${{ steps.sha.outputs.sha256 }}"
           SHA_AARCH64="${{ steps.sha.outputs.sha256_aarch64 }}"
           SHA_X86_64="${{ steps.sha.outputs.sha256_x86_64 }}"
+          SHA_LINUX_X86_64="${{ steps.sha.outputs.sha256_linux_x86_64 }}"
           SHA_DMG_AARCH64="${{ steps.sha.outputs.sha256_dmg_aarch64 }}"
           SHA_DMG_X86_64="${{ steps.sha.outputs.sha256_dmg_x86_64 }}"
           # Order matters: replace the longer GLASSY_VERSION_PLAIN sentinel
@@ -637,6 +640,7 @@ jobs:
               -e "s|GLASSY_VERSION|v${VERSION}|g" \
               -e "s|GLASSY_SHA256_DMG_AARCH64|${SHA_DMG_AARCH64}|g" \
               -e "s|GLASSY_SHA256_DMG_X86_64|${SHA_DMG_X86_64}|g" \
+              -e "s|GLASSY_SHA256_LINUX_X86_64|${SHA_LINUX_X86_64}|g" \
               -e "s|GLASSY_SHA256_AARCH64|${SHA_AARCH64}|g" \
               -e "s|GLASSY_SHA256_X86_64|${SHA_X86_64}|g" \
               -e "s|GLASSY_SHA256|${SHA}|g" \
