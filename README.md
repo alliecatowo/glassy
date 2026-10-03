@@ -10,7 +10,7 @@
 [![Latest release](https://img.shields.io/github/v/release/alliecatowo/glassy?label=release&color=success)](https://github.com/alliecatowo/glassy/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-yellow.svg)](LICENSE)
 [![Made with Rust](https://img.shields.io/badge/made%20with-Rust-dea584?logo=rust&logoColor=white)](https://www.rust-lang.org)
-[![Homebrew tap](https://img.shields.io/badge/homebrew-tap-fbb040?logo=homebrew&logoColor=white)](https://github.com/alliecatowo/glassy)
+[![Homebrew tap](https://img.shields.io/badge/homebrew-tap-fbb040?logo=homebrew&logoColor=white)](https://github.com/alliecatowo/homebrew-tap)
 [![Platforms](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-blue)](#install)
 
 <br/>
@@ -185,12 +185,13 @@ Switch live in the settings overlay, the command palette, or by editing the conf
 <summary><strong>macOS</strong></summary>
 <br/>
 
-**Homebrew Cask (recommended)** — this repo is its own tap (no separate `homebrew-*` repo needed):
+**Homebrew Cask (recommended)**:
 
 ```sh
-brew tap alliecatowo/glassy https://github.com/alliecatowo/glassy
-brew install --cask glassy
+brew install --cask alliecatowo/tap/glassy
 ```
+
+> Previously tapped `alliecatowo/glassy`? That tap is retired: `brew untap alliecatowo/glassy && brew tap alliecatowo/tap`.
 
 This installs **glassy.app** into `/Applications` and symlinks the CLI binary embedded in the bundle onto `PATH`, so one install gets you both the GUI app (Spotlight/Launchpad/Dock) and the `glassy` command in a terminal — no separate Formula install needed. glassy isn't notarized (no paid Apple Developer account behind this project), so the cask clears the quarantine flag on install to skip Gatekeeper's warning; see the printed caveat for the manual `.dmg` alternative if you'd rather review that yourself.
 
@@ -201,10 +202,9 @@ Download `glassy-<version>-macos-aarch64.dmg` (Apple Silicon) or `glassy-<versio
 **Homebrew Formula** *(CLI-only, no GUI app)*
 
 ```sh
-brew tap alliecatowo/glassy https://github.com/alliecatowo/glassy
-brew install glassy          # the latest tagged release (prebuilt binary, no local build)
+brew install alliecatowo/tap/glassy          # the latest tagged release (prebuilt binary, no local build)
 # or:
-brew install --HEAD glassy   # bleeding edge: build from main (requires Rust)
+brew install --HEAD alliecatowo/tap/glassy   # bleeding edge: build from main (requires Rust)
 ```
 
 </details>
@@ -259,8 +259,7 @@ sudo dnf install ./glassy-*.rpm   # or: sudo rpm -i glassy-*.rpm
 **Homebrew (Linuxbrew)**
 
 ```sh
-brew tap alliecatowo/glassy https://github.com/alliecatowo/glassy
-brew install glassy          # builds from source
+brew install alliecatowo/tap/glassy          # builds from source
 ```
 
 **Flatpak** *(not yet on Flathub; local build from the manifest)*

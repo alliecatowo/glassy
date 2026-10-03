@@ -551,42 +551,23 @@ jobs:
           prerelease: ${{ contains(steps.meta.outputs.tag, '-') }}
 
   # -------------------------------------------------------------------------
-  # Homebrew formula/cask bump (this repo IS its own tap — Formula/glassy.rb,
-  # Casks/glassy.rb).
+  # Homebrew formula/cask bump. The shared tap is alliecatowo/homebrew-tap
+  # (users run `brew install alliecatowo/tap/glassy`). This job renders
+  # packaging/homebrew/tap/{formula,cask}.rb.tmpl with the real version and
+  # sha256s, and pushes Formula/glassy.rb + Casks/glassy.rb to the tap over SSH
+  # using a write deploy key stored as the HOMEBREW_TAP_DEPLOY_KEY secret (no PAT).
+  # packaging/homebrew/glassy.rb (build-from-source, for a future homebrew-core
+  # submission) is still rendered and committed back to this repo's default
+  # branch with the built-in GITHUB_TOKEN.
   #
-  # After the release publishes, render Formula/glassy.rb, Casks/glassy.rb,
-  # and packaging/homebrew/glassy.rb from their .tmpl siblings with the real
-  # version + sha256s, then commit the rendered files straight back to the
-  # default branch with [skip ci]. That makes a plain `brew install glassy`
-  # / `brew install --cask glassy` (after `brew tap alliecatowo/glassy
-  # https://github.com/alliecatowo/glassy`) install the just-released version.
+  # IMPORTANT: this renders from the .tmpl files every time and does NOT
+  # sed-patch previously rendered output in place. The original job did, which
+  # worked once and then silently stopped (the sentinels were already consumed),
+  # leaving packaging/homebrew/glassy.rb stuck on v0.2.0-rc2 for three releases.
   #
-  # IMPORTANT: this renders from the .tmpl files every time — it does NOT
-  # sed-patch the previously-rendered Formula/glassy.rb etc. in place. The
-  # original version of this job did exactly that, sed-replacing literal
-  # GLASSY_* sentinel tokens directly in the committed file: it worked once,
-  # then silently stopped, because after the tokens are replaced with real
-  # values they no longer exist for the next release's sed to find. That's
-  # exactly how packaging/homebrew/glassy.rb ended up permanently stuck on
-  # v0.2.0-rc2 through three subsequent releases before anyone noticed
-  # (continue-on-error below swallowed the no-op). Rendering fresh from an
-  # untouched .tmpl on every run avoids that trap for good.
-  #
-  # Casks/glassy.rb installs Glassy.app into /Applications AND symlinks the
-  # CLI binary embedded in the bundle onto PATH (see Casks/glassy.rb.tmpl) —
-  # the recommended macOS install path. Formula/glassy.rb's stable path
-  # downloads the same prebuilt per-arch binary instead of running
-  # `cargo install` — that used to mean a multi-minute local compile
-  # (lto=fat + codegen-units=1) on every `brew install`; a straight binary
-  # download is seconds. `--HEAD` installs still build from source since
-  # there's no prebuilt asset for an arbitrary main commit.
-  # packaging/homebrew/glassy.rb is intentionally left as a
-  # build-from-source-only formula (for a future homebrew-core submission,
-  # which requires building from source) and keeps using the source-tarball
-  # sha computed below.
-  #
-  # No external tap repo or HOMEBREW_TAP_TOKEN is needed — the commit uses the
-  # workflow's built-in GITHUB_TOKEN (permissions: contents: write, set above).
+  # Casks/glassy.rb installs Glassy.app and links the embedded CLI onto PATH
+  # (the recommended macOS path). Formula/glassy.rb downloads the prebuilt
+  # per-arch binary on macOS and builds from source on Linux and with --HEAD.
   # -------------------------------------------------------------------------
   update-homebrew:
     name: Update Homebrew formula + cask
@@ -632,7 +613,7 @@ jobs:
             echo "sha256_dmg_x86_64=$(sha256sum "$X86_64_DMG" | awk '{print $1}')"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Render Formula/glassy.rb, Casks/glassy.rb, packaging/homebrew/glassy.rb from their .tmpl
+      - name: Render formula, cask and packaging formula from their .tmpl
         run: |
           VERSION="${{ steps.sha.outputs.version }}"
           SHA="${{ steps.sha.outputs.sha256 }}"
@@ -644,10 +625,10 @@ jobs:
           # BEFORE GLASSY_VERSION (which is a prefix of it) so we don't corrupt
           # the longer token. GLASSY_VERSION becomes the tag (v-prefixed).
           # Each sed runs against ALL three templates; a sentinel absent from
-          # a given template is simply a no-op there (e.g. only Casks/glassy.rb.tmpl
-          # has GLASSY_SHA256_DMG_*, only Formula/glassy.rb.tmpl has
+          # a given template is simply a no-op there (e.g. only the cask template
+          # has GLASSY_SHA256_DMG_*, only the formula template has
           # GLASSY_SHA256_AARCH64/_X86_64, and GLASSY_SHA256 — the source
-          # tarball hash — appears in both Formula/glassy.rb.tmpl's top-level
+          # tarball hash — appears in both the formula template's top-level
           # Linux stanza and packaging/homebrew/glassy.rb.tmpl).
           render() {
             local tmpl="$1" out="$2"
@@ -661,29 +642,58 @@ jobs:
               -e "s|GLASSY_SHA256|${SHA}|g" \
               "$tmpl" > "$out"
           }
-          render Formula/glassy.rb.tmpl Formula/glassy.rb
-          render Casks/glassy.rb.tmpl Casks/glassy.rb
+          mkdir -p tap-out/Formula tap-out/Casks
+          render packaging/homebrew/tap/formula.rb.tmpl tap-out/Formula/glassy.rb
+          render packaging/homebrew/tap/cask.rb.tmpl tap-out/Casks/glassy.rb
           render packaging/homebrew/glassy.rb.tmpl packaging/homebrew/glassy.rb
 
       - name: Show rendered formula + cask (debug)
-        run: cat Formula/glassy.rb Casks/glassy.rb
+        run: cat tap-out/Formula/glassy.rb tap-out/Casks/glassy.rb
 
-      - name: Commit bumped formula + cask back to the default branch
+      - name: Push formula + cask to alliecatowo/homebrew-tap
         env:
-          GH_TOKEN: ${{ github.token }}
+          HOMEBREW_TAP_DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
         run: |
           set -euo pipefail
-          # If nothing changed (re-run on an already-bumped version), this is
-          # a no-op and we exit cleanly.
-          if git diff --quiet -- Formula/glassy.rb Casks/glassy.rb packaging/homebrew/glassy.rb; then
-            echo "Formula/cask already up to date; nothing to commit."
+          VERSION="${{ steps.sha.outputs.version }}"
+          if [ -z "${HOMEBREW_TAP_DEPLOY_KEY:-}" ]; then
+            echo "::error::HOMEBREW_TAP_DEPLOY_KEY secret is not set; cannot update the tap"
+            exit 1
+          fi
+          install -d -m 700 ~/.ssh
+          keyfile="$(mktemp)"
+          trap 'rm -f "$keyfile"' EXIT
+          printf '%s\n' "$HOMEBREW_TAP_DEPLOY_KEY" > "$keyfile"
+          chmod 600 "$keyfile"
+          ssh-keyscan -t ed25519,rsa github.com >> ~/.ssh/known_hosts 2>/dev/null
+          export GIT_SSH_COMMAND="ssh -i $keyfile -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes"
+          git clone --depth 1 git@github.com:alliecatowo/homebrew-tap.git tap
+          mkdir -p tap/Formula tap/Casks
+          cp tap-out/Formula/glassy.rb tap/Formula/glassy.rb
+          cp tap-out/Casks/glassy.rb tap/Casks/glassy.rb
+          cd tap
+          if git diff --quiet && [ -z "$(git status --porcelain)" ]; then
+            echo "Tap already up to date; nothing to push."
             exit 0
           fi
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add Formula/glassy.rb Casks/glassy.rb packaging/homebrew/glassy.rb
+          git add Formula/glassy.rb Casks/glassy.rb
+          git commit -m "glassy ${VERSION}"
+          git push origin HEAD:main
+
+      - name: Commit bumped packaging formula back to the default branch
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- packaging/homebrew/glassy.rb; then
+            echo "packaging/homebrew/glassy.rb already up to date; nothing to commit."
+            exit 0
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add packaging/homebrew/glassy.rb
           # [skip ci] keeps this commit from re-triggering the main-push release.
-          git commit -m "chore(release): bump Homebrew formula + cask to ${{ steps.sha.outputs.version }} [skip ci]"
+          git commit -m "chore(release): bump packaging formula to ${{ steps.sha.outputs.version }} [skip ci]"
           git push origin "HEAD:${{ github.event.repository.default_branch }}"
 
   # -------------------------------------------------------------------------
@@ -765,7 +775,7 @@ jobs:
   #      Site URL must resolve to https://alliecatowo.github.io/glassy/.
   #
   #   2. Generate a dedicated signing GPG key (do NOT reuse a personal key):
-  #        gpg --quick-generate-key "glassy releases <allisonemilycoleman@gmail.com>" rsa4096 sign 5y
+  #        gpg --quick-generate-key "glassy releases <me@allisons.dev>" rsa4096 sign 5y
   #        gpg --armor --export-secret-keys <KEYID> > glassy-signing.asc
   #      Add two repo secrets (Settings → Secrets and variables → Actions):
   #        RELEASE_GPG_PRIVATE_KEY = contents of glassy-signing.asc (ASCII-armored)

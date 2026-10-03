@@ -406,7 +406,13 @@ mod tests {
         assert_eq!((img.width, img.height), (1, 6));
         assert_eq!(&img.rgba[0..4], &[255, 0, 0, 255]);
         // All six rows are red.
-        assert!(img.rgba.chunks_exact(4).all(|p| p == [255, 0, 0, 255]));
+        assert!(
+            img.rgba
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .all(|p| *p == [255, 0, 0, 255])
+        );
     }
 
     #[test]
