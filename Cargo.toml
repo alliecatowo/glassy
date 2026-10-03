@@ -17,7 +17,7 @@ path = "src/main.rs"
 
 [dependencies]
 polling = "3.11"
-png = "0.17"
+png = "0.18"
 # default-features=false drops alacritty_terminal's "serde" feature (Serialize/
 # Deserialize derives on its Grid/Cell/Term types, plus the bitflags/serde and
 # vte/serde propagation it enables): glassy never (de)serializes an
@@ -36,8 +36,8 @@ cosmic-text = "0.19.0"
 # and regex RUST_LOG filters) — module-path level filtering still works.
 env_logger = { version = "0.11.10", default-features = false }
 log = "0.4.32"
-notify = "6.1"
-pollster = "0.4.0"
+notify = "8"
+pollster = "1"
 rustix = { version = "1.1.4", features = ["system"] }
 winit = "0.30.13"
 # wgpu is NOT listed here — see per-platform sections below. Default features
@@ -70,12 +70,12 @@ arboard = { version = "3.6.1", default-features = false, features = ["wayland-da
 # promoted to a direct dependency since glassy now calls it directly too —
 # zero new dependency, zero Cargo.lock churn.
 dbus = "0.9.11"
-wgpu = { version = "29.0.3", default-features = false, features = ["vulkan", "wgsl", "std", "parking_lot"] }
+wgpu = { version = "30.0.1", default-features = false, features = ["vulkan", "wgsl", "std", "parking_lot"] }
 
 # macOS: Metal backend only — no Vulkan/DX12/OpenGL/WebGPU needed.
 [target.'cfg(target_os = "macos")'.dependencies]
 arboard = { version = "3.6.1", default-features = false }
-wgpu = { version = "29.0.3", default-features = false, features = ["metal", "wgsl", "std", "parking_lot"] }
+wgpu = { version = "30.0.1", default-features = false, features = ["metal", "wgsl", "std", "parking_lot"] }
 # CoreText for ZWJ compound emoji (🏳️‍⚧️ etc.) — rustybuzz doesn't apply Apple's
 # GSUB ZWJ lookup chain; CoreText does (same as ghostty). 20.1.0 is the version
 # that resolves against core-foundation 0.9 / core-graphics 0.23 that winit pins.
@@ -98,18 +98,18 @@ objc2-app-kit = { version = "0.2.2", features = [
 # Windows: DX12 primary + Vulkan fallback for older drivers.
 [target.'cfg(target_os = "windows")'.dependencies]
 arboard = { version = "3.6.1", default-features = false }
-wgpu = { version = "29.0.3", default-features = false, features = ["dx12", "vulkan", "wgsl", "std", "parking_lot"] }
+wgpu = { version = "30.0.1", default-features = false, features = ["dx12", "vulkan", "wgsl", "std", "parking_lot"] }
 
 # Everything else (BSD, etc.): GLES fallback so the build doesn't fail.
 [target.'cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))'.dependencies]
 arboard = { version = "3.6.1", default-features = false }
-wgpu = { version = "29.0.3", default-features = false, features = ["gles", "wgsl", "std", "parking_lot"] }
+wgpu = { version = "30.0.1", default-features = false, features = ["gles", "wgsl", "std", "parking_lot"] }
 
 [dev-dependencies]
 # Micro-benchmarks for the hot paths listed in docs/benchmarks.md. `html_reports`
 # gives a browsable target/criterion/report/index.html on top of the defaults
 # (cargo_bench_support + plotters).
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion = { version = "0.8", features = ["html_reports"] }
 
 [[bench]]
 name = "hot_paths"

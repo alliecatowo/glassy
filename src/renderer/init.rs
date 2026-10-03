@@ -112,6 +112,7 @@ impl Renderer {
                         power_preference,
                         force_fallback_adapter: false,
                         compatible_surface: Some(surface_arc_thread.as_ref()),
+                        apply_limit_buckets: false,
                     }))
                     .context("requesting GPU adapter")?;
                 // Request PIPELINE_CACHE if the adapter supports it (Vulkan only today).
@@ -285,6 +286,7 @@ impl Renderer {
             desired_maximum_frame_latency: 2,
             alpha_mode,
             view_formats: vec![],
+            color_space: wgpu::SurfaceColorSpace::Auto,
         };
 
         // --- Static unit quad: triangle-strip order (0,0)(1,0)(0,1)(1,1). ---
@@ -491,7 +493,7 @@ impl Renderer {
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: Some("vs_bg"),
-                buffers: &[quad_layout.clone(), bg_instance_layout],
+                buffers: &[Some(quad_layout.clone()), Some(bg_instance_layout)],
                 compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {
@@ -530,7 +532,7 @@ impl Renderer {
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: Some("vs_fg"),
-                buffers: &[quad_layout, fg_instance_layout],
+                buffers: &[Some(quad_layout), Some(fg_instance_layout)],
                 compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {
@@ -609,7 +611,7 @@ impl Renderer {
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: Some("vs_bg"),
-                buffers: &[overlay_quad_layout, overlay_instance_layout],
+                buffers: &[Some(overlay_quad_layout), Some(overlay_instance_layout)],
                 compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {

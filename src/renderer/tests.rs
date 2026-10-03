@@ -456,6 +456,7 @@ fn headless_device() -> Option<(wgpu::Device, wgpu::Queue)> {
         power_preference: wgpu::PowerPreference::None,
         force_fallback_adapter: false,
         compatible_surface: None,
+        apply_limit_buckets: false,
     }))
     .ok()?;
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
@@ -479,6 +480,7 @@ fn headless_wgpu_device_init_succeeds() {
         power_preference: wgpu::PowerPreference::None,
         force_fallback_adapter: false,
         compatible_surface: None,
+        apply_limit_buckets: false,
     }));
     let Ok(adapter) = adapter else {
         // No GPU in this environment; skip.
@@ -1073,7 +1075,7 @@ fn run_writemask_alpha_probe(
     });
     device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
     rx.recv().unwrap().unwrap();
-    let data = slice.get_mapped_range();
+    let data = slice.get_mapped_range().unwrap();
     let alpha = data[3] as f32 / 255.0;
     drop(data);
     readback.unmap();

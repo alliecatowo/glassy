@@ -133,7 +133,7 @@ impl Renderer {
             other => anyhow::bail!("buffer map failed: {other:?}"),
         }
 
-        let data = slice.get_mapped_range();
+        let data = slice.get_mapped_range().expect("readback buffer is mapped");
         let bgra = matches!(
             self.config.format,
             wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb

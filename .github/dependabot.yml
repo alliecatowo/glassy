@@ -4,3 +4,28 @@ updates:
     directory: /
     schedule:
       interval: weekly
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      minor-and-patch:
+        update-types:
+          - minor
+          - patch
+    ignore:
+      # macOS native crates are pinned to the versions winit 0.30 resolves
+      # against; bumping them alone would duplicate the native crates.
+      # Revisit when winit moves to objc2 0.6 / core-foundation 0.10.
+      - dependency-name: objc2
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      - dependency-name: objc2-foundation
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      - dependency-name: objc2-app-kit
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      - dependency-name: core-foundation
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      - dependency-name: core-graphics
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      - dependency-name: core-text
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]

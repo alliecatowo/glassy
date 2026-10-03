@@ -96,7 +96,7 @@ pub fn from_rgb_samples(samples: &[(u8, u8, u8)]) -> Theme {
 // ---------------------------------------------------------------------------
 
 fn decode_image_to_samples(bytes: &[u8]) -> Result<Vec<(u8, u8, u8)>> {
-    let mut decoder = png::Decoder::new(bytes);
+    let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
     decoder.set_transformations(png::Transformations::normalize_to_color8());
     // Keep the same 64 MB cap used by the kitty image renderer.
     decoder.set_limits(png::Limits {
@@ -111,7 +111,12 @@ fn decode_image_to_samples(bytes: &[u8]) -> Result<Vec<(u8, u8, u8)>> {
     if w > 8192 || h > 8192 {
         bail!("image too large ({w}×{h}); max 8192×8192 for theme generation");
     }
-    let mut buf = vec![0u8; reader.output_buffer_size()];
+    let mut buf = vec![
+        0u8;
+        reader
+            .output_buffer_size()
+            .context("PNG output buffer too large")?
+    ];
     let frame = reader
         .next_frame(&mut buf)
         .context("PNG frame decode failed")?;
