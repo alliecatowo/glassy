@@ -123,9 +123,9 @@ main() {
     local bin_url="${base_url}/${asset}"
 
     # Download to a temp dir.
-    local tmpdir
+    # Global (not local): the EXIT trap runs after this function has returned.
     tmpdir="$(mktemp -d)"
-    trap 'rm -rf "$tmpdir"' EXIT
+    trap 'rm -rf "${tmpdir:-}"' EXIT
 
     info "Downloading binary: $bin_url"
     curl -fSL --progress-bar -o "$tmpdir/$asset" "$bin_url" \
