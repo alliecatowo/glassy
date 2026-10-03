@@ -1,17 +1,7 @@
-mod app;
-mod bell;
-mod color;
-mod config;
-mod gui;
-mod image;
-mod input;
-mod ipc;
-mod pane;
-mod pty;
-mod renderer;
-mod session;
-mod text;
-
+// Thin binary: all modules live in `src/lib.rs` (the `glassy` library crate) so
+// that `benches/*.rs` can `use glassy::...` against the same internals. This
+// file only wires up the actual process entry point.
+use glassy::{app, color, config, ipc, pty};
 use winit::event_loop::{ControlFlow, EventLoop};
 
 fn main() -> anyhow::Result<()> {

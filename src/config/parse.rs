@@ -199,8 +199,15 @@ pub(crate) fn normalize_hints_chars(s: &str) -> Option<String> {
 
 /// Accumulated raw configuration before validation/finalization. Every field is
 /// optional so the file and CLI layers can each set a subset.
+///
+/// `pub` (not `pub(super)`) only so it can appear in `parse_config_file`'s
+/// signature, which `benches/hot_paths.rs` calls as `glassy::config::parse::
+/// parse_config_file`; an external bench crate can't otherwise name a type used
+/// in a `pub fn`'s parameters. `#[doc(hidden)]` since it's not a supported public
+/// API — construct one via `RawConfig::default()`, same as internal callers do.
+#[doc(hidden)]
 #[derive(Default)]
-pub(super) struct RawConfig {
+pub struct RawConfig {
     pub font_family: Option<String>,
     pub font_size: Option<f32>,
     pub theme: Option<String>,
@@ -745,7 +752,10 @@ enum Section {
 /// are ignored; surrounding whitespace and a single layer of matching quotes are
 /// stripped from values. An unknown key is warned about but not fatal; a value
 /// that fails to parse for a known key is a hard error (with the line number).
-pub(super) fn parse_config_file(text: &str, raw: &mut RawConfig) -> Result<()> {
+///
+/// `pub` (not `pub(super)`) so `benches/hot_paths.rs` can reach it as
+/// `glassy::config::parse::parse_config_file`.
+pub fn parse_config_file(text: &str, raw: &mut RawConfig) -> Result<()> {
     let mut section = Section::Global;
     for (i, line) in text.lines().enumerate() {
         let line = line.trim();

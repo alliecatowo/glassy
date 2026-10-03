@@ -506,7 +506,7 @@ pub(crate) fn build_grapheme(
 /// Mapping (verified against alacritty_terminal 0.26 `Grid::display_iter`, which
 /// walks `Line(-display_offset)..=Line(screen_lines - 1 - display_offset)` over
 /// columns `0..columns`): display row `row_u` ⇔ `Line(row_u - display_offset)`.
-pub(crate) fn collect_display_row<'a>(
+pub fn collect_display_row<'a>(
     grid: &'a alacritty_terminal::grid::Grid<Cell>,
     row_u: usize,
     display_offset: i32,

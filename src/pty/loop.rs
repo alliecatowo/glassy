@@ -55,8 +55,14 @@ pub(crate) const PTY_THREAD_STACK: usize = 256 * 1024; // 256 KiB
 /// whichever comes first. This avoids waking the renderer mid-frame and tearing
 /// complex full-screen redraws. The VT parser still receives all bytes eagerly
 /// (so terminal state stays up to date) — we only delay the `Wakeup` event.
+// `pub(crate)` (not `pub`): only called from `Pty::spawn` in `pty/mod.rs`. It
+// was previously `pub` with no external effect since `pty` was a private
+// module of a bin-only crate; now that `pty` is `pub mod pty` (for
+// `benches/hot_paths.rs` to reach `Pty`/`UserEvent`), that stale `pub` tripped
+// `private_interfaces` on its `pub(crate) LoopMsg` parameter — narrowing back
+// down is the correct fix, not widening `LoopMsg`.
 #[allow(clippy::too_many_arguments)]
-pub fn run_loop(
+pub(crate) fn run_loop(
     mut pty: tty::Pty,
     term: Arc<FairMutex<Term<EventProxy>>>,
     proxy: EventProxy,

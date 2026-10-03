@@ -76,6 +76,14 @@ pub(crate) use palette::PaletteState;
 pub(crate) use search::SearchState;
 pub(crate) use strip::*;
 
+// `helpers` is a private submodule (its other contents stay pub(crate) above);
+// this single re-export makes `collect_display_row` reachable as
+// `glassy::app::collect_display_row` from `benches/hot_paths.rs`, which is a
+// separate crate and can't see through `mod helpers` even though the function
+// itself is `pub`. Hidden from docs since it's not a supported public API.
+#[doc(hidden)]
+pub use helpers::collect_display_row;
+
 /// A runtime font-size adjustment requested via Ctrl +/-/0.
 #[derive(Clone, Copy)]
 pub(crate) enum FontStep {
