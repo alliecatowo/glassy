@@ -62,7 +62,7 @@ impl Session {
             return;
         }
         let json = self.to_json();
-        if let Err(e) = std::fs::write(&path, json) {
+        if let Err(e) = crate::fsutil::atomic_write(&path, json) {
             log::warn!("session: could not write {}: {e}", path.display());
         }
     }

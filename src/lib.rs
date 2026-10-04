@@ -16,6 +16,7 @@ pub mod app;
 pub mod bell;
 pub mod color;
 pub mod config;
+pub(crate) mod fsutil;
 pub mod gui;
 pub mod image;
 pub mod input;
