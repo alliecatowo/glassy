@@ -17,6 +17,11 @@ shipped.
 
 ## [Unreleased]
 
+### Changed
+
+- Project home page at alliecatowo.github.io/glassy with screenshots and install commands (the package repos stay at `/deb/` and `/rpm/`).
+- Release workflow no longer commits `packaging/homebrew/glassy.rb` back to `main`; the Homebrew tap is the single source of truth. `cargo-deb` and `cross` are pinned.
+
 ## [0.6.2] - 2026-10-03
 
 Security and robustness fixes from the 2026-10 release audit.

@@ -1,0 +1,30 @@
+name: Pages landing page
+
+# Publishes landing/ (the project home page) to the gh-pages branch root.
+# keep_files: true leaves the signed deb/ and rpm/ package repos untouched.
+on:
+  push:
+    branches: [main]
+    paths: ['landing/**', '.github/workflows/pages-landing.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gh-pages-publish
+  cancel-in-progress: false
+
+jobs:
+  landing:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # peaceiris pushes to gh-pages
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+      - uses: peaceiris/actions-gh-pages@84c30a85c19949d7eee79c4ff27748b70285e453  # v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: landing
+          keep_files: true
+          commit_message: "site: landing page"
