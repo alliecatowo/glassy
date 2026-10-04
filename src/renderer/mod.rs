@@ -360,8 +360,8 @@ pub struct Renderer {
     image_atlas_bind_group_layout: wgpu::BindGroupLayout,
     image_atlas_sampler: wgpu::Sampler,
     image_packer: Packer,
-    /// Image id -> packed location in the image atlas (uploaded once per id).
-    image_cache: HashMap<u32, AtlasGlyph>,
+    /// Image stamp (`ImageStore::image_stamp`) -> packed location in the image atlas.
+    image_cache: HashMap<u64, AtlasGlyph>,
     /// This frame's image quads, rebuilt every frame from live placements and
     /// drawn as an overlay after the damage-tracked grid passes.
     image_overlay: Vec<FgInstance>,

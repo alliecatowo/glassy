@@ -65,7 +65,7 @@ impl Renderer {
     #[allow(clippy::too_many_arguments)]
     pub fn draw_image(
         &mut self,
-        id: u32,
+        stamp: u64,
         rgba: &[u8],
         img_w: u32,
         img_h: u32,
@@ -81,7 +81,7 @@ impl Renderer {
         // Lazy allocation: create the image atlas + bind group on first use.
         self.ensure_image_atlas();
 
-        let glyph = match self.image_cache.get(&id).copied() {
+        let glyph = match self.image_cache.get(&stamp).copied() {
             Some(g) => g,
             None => {
                 let (px, py) = match self.image_packer.alloc(img_w, img_h) {
@@ -127,7 +127,7 @@ impl Renderer {
                     top: 0,
                     is_color: true,
                 };
-                self.image_cache.insert(id, g);
+                self.image_cache.insert(stamp, g);
                 g
             }
         };

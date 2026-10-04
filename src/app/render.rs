@@ -928,7 +928,8 @@ impl App {
                 let m = renderer.cell_metrics();
                 let pad = renderer.pad();
                 for p in store.placements() {
-                    let Some(img) = store.image(p.id) else {
+                    let (Some(img), Some(stamp)) = (store.image(p.id), store.image_stamp(p.id))
+                    else {
                         continue;
                     };
                     let screen_vp = p.row - display_offset;
@@ -944,7 +945,8 @@ impl App {
                     // at the image's native pixel size.
                     let (dst_w, dst_h) =
                         image_dst_size(p.cols, p.rows, img.width, img.height, m.width, m.height);
-                    renderer.draw_image(p.id, &img.rgba, img.width, img.height, x, y, dst_w, dst_h);
+                    renderer
+                        .draw_image(stamp, &img.rgba, img.width, img.height, x, y, dst_w, dst_h);
                 }
             }
         }

@@ -577,6 +577,34 @@ mod tests {
         assert!(store.image(7).is_some());
     }
 
+    /// Regression: the GPU cache must not be keyed by the per-tab image id. Two
+    /// stores that both hold id N, and a store whose id N is re-transmitted, must
+    /// each yield a distinct stamp so the renderer uploads the right pixels.
+    #[test]
+    fn image_stamps_are_unique_across_stores_and_retransmits() {
+        let img = |v: u8| DecodedImage {
+            width: 1,
+            height: 1,
+            rgba: vec![v; 4],
+        };
+        let mut a = ImageStore::new();
+        let mut b = ImageStore::new();
+        a.insert_pixels(SIXEL_ID_BASE, img(1));
+        b.insert_pixels(SIXEL_ID_BASE, img(2));
+        let (sa, sb) = (
+            a.image_stamp(SIXEL_ID_BASE).unwrap(),
+            b.image_stamp(SIXEL_ID_BASE).unwrap(),
+        );
+        assert_ne!(sa, sb, "tabs sharing an id must not share a cache key");
+        a.insert_pixels(SIXEL_ID_BASE, img(3));
+        assert_ne!(
+            a.image_stamp(SIXEL_ID_BASE).unwrap(),
+            sa,
+            "re-sent id is stale"
+        );
+        assert_eq!(a.image_stamp(999), None);
+    }
+
     #[test]
     fn delete_removes_placements_keeps_pixels() {
         let mut store = ImageStore::new();
