@@ -43,7 +43,7 @@ __glassy_osc7() {
 		ch="${path:$i:1}"
 		case "$ch" in
 			[a-zA-Z0-9/._~-]) enc+="$ch" ;;
-			*) enc+=$(printf '%%%02X' "'$ch") ;;
+			*) enc+=$(printf '%%%02X' $(( $(printf '%d' "'$ch") & 255 ))) ;;
 		esac
 	done
 	__glassy_esc "7;file://${HOSTNAME}${enc}"
