@@ -919,8 +919,8 @@ impl App {
 
         // Inline images (kitty graphics). Drawn as an overlay every frame from the
         // live placement list, anchored to the cell they were displayed at. The
-        // stored row is viewport-relative at display time; translate by the current
-        // scroll offset so images move with the buffer as the user scrolls.
+        // stored row is a grid line (negative = scrollback) that the PTY loop shifts
+        // as text scrolls; add the view's scroll offset to get the viewport row.
         // Suppressed while a modal or dropdown is up so images don't punch through it.
         if !self.help_open && !self.settings_open && !self.menu_open && self.palette.is_none() {
             let store = pty.images.lock();
@@ -932,7 +932,7 @@ impl App {
                     else {
                         continue;
                     };
-                    let screen_vp = p.row - display_offset;
+                    let screen_vp = p.row + display_offset;
                     if screen_vp < 0 || screen_vp >= rows as i32 || p.col >= self.cols {
                         continue;
                     }
