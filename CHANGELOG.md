@@ -17,7 +17,31 @@ shipped.
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-10-03
+
+Security and robustness fixes from the 2026-10 release audit.
+
+### Security
+- **OSC 1337 `Peek=<path>` removed.** Any program that could write to the terminal (a remote host, `cat file`) could make glassy open an arbitrary local file and paint its first lines on screen; a FIFO or tty path could also hang the UI. The sequence is now passed through unhandled.
+- **`file://` links no longer launch executables.** Targets with executable bundle/installer/shortcut extensions (`.command`, `.app`, `.terminal`, `.jar`, ...) or any execute bit are refused; Windows `start` arguments are encoded so a URL cannot break out of the command.
+- **IPC socket hardening.** The `/tmp` fallback socket now lives in a private, ownership-checked `0700` directory (`<tmp>/glassy-<user>/glassy.sock`); clients get a 2 s read timeout and a 64 KiB line cap and are served on their own threads, so one idle connection can no longer wedge `toggle`/remote control.
+- **`install.sh` fails closed.** A missing `SHA256SUMS`, missing entry or missing hash tool aborts the install (override with `GLASSY_INSECURE=1`), and the binary is replaced atomically so upgrading over a running glassy no longer fails with "Text file busy". The latest tag is resolved through the `releases/latest` redirect instead of the rate-limited API.
+- **`color::set_theme` is sound**: superseded themes are no longer freed under live `&'static` references.
+
 ### Fixed
+- **Large pastes could deadlock a tab.** PTY input is now queued and written non-blocking, interleaved with reading the child's output.
+- **Inline images drew each other's pixels across tabs and stayed stale when re-sent.** The GPU image cache is keyed by a process-unique stamp instead of the per-tab image id.
+- **`cat binary` could freeze all terminal output.** An unterminated DCS/APC sequence is now aborted by CAN/SUB or a new ESC sequence and given up on after a bound.
+- **Inline images now scroll with the text** they were printed beside (anchored to grid lines; see the known limitation once scrollback is full).
+- **Image memory is bounded**: 256 MiB per tab and 768 MiB overall with least-recently-used eviction, and 128 MiB for unfinished chunked transfers.
+- **Non-ASCII working directories lost tab/split cwd inheritance** in bash and zsh: OSC 7 is now percent-encoded byte-wise (zsh also stopped shadowing its tied `$path`).
+- **`glassy.conf` and `session.json` are written atomically** (temp file + fsync + rename), so a crash or the config watcher can no longer observe a truncated file.
+- **A deeply nested `session.json` no longer overflows the stack at startup.**
+- **Moving the window between monitors keeps the runtime font zoom.**
+- `glassy @ msgfoo` is no longer parsed as `msg foo`.
+
+### CI / release
+- The release workflow now requires the CI workflow to pass before publishing, runs one release at a time, defaults to a read-only token (write only on the jobs that publish), pins third-party actions to commit SHAs, and its macOS `.dmg` signing step can actually run when Apple secrets are configured.
 - **Linux aarch64 release builds actually succeed now**, instead of silently failing best-effort on every release. The cross-compile container was missing `libdbus-1-dev` (needed by `notify-rust`'s `libdbus-sys`), and separately `pkg-config` refuses to run cross-compiled at all unless told to — both are now handled (`Cross.toml`, `PKG_CONFIG_ALLOW_CROSS`). Verified with a full local cross-build, not just inferred from the error message.
 
 ## [0.6.1] - 2026-07-08
