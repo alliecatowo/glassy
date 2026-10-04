@@ -668,7 +668,8 @@ pub fn save(updates: &[(&str, String)]) -> Result<()> {
     let existing = std::fs::read_to_string(&path).unwrap_or_default();
     let protected = protect_against_external_edit(&existing, None, updates);
     let out = merge_config(&existing, &protected);
-    std::fs::write(&path, &out).with_context(|| format!("writing config {}", path.display()))?;
+    crate::fsutil::atomic_write(&path, &out)
+        .with_context(|| format!("writing config {}", path.display()))?;
     record_loaded_snapshot(&out);
     Ok(())
 }
@@ -702,7 +703,8 @@ pub fn save_into_section(section: Option<&str>, updates: &[(&str, String)]) -> R
     let existing = std::fs::read_to_string(&path).unwrap_or_default();
     let protected = protect_against_external_edit(&existing, section, updates);
     let out = merge_into_section(&existing, section, &protected);
-    std::fs::write(&path, &out).with_context(|| format!("writing config {}", path.display()))?;
+    crate::fsutil::atomic_write(&path, &out)
+        .with_context(|| format!("writing config {}", path.display()))?;
     record_loaded_snapshot(&out);
     Ok(())
 }
@@ -718,7 +720,8 @@ pub fn remove_section(name: &str) -> Result<()> {
     let path = config_path().context("no config path (HOME/XDG unset)")?;
     let existing = std::fs::read_to_string(&path).unwrap_or_default();
     let out = remove_section_text(&existing, name);
-    std::fs::write(&path, &out).with_context(|| format!("writing config {}", path.display()))?;
+    crate::fsutil::atomic_write(&path, &out)
+        .with_context(|| format!("writing config {}", path.display()))?;
     record_loaded_snapshot(&out);
     Ok(())
 }
@@ -732,7 +735,8 @@ pub fn rename_section(old: &str, new: &str) -> Result<()> {
     let path = config_path().context("no config path (HOME/XDG unset)")?;
     let existing = std::fs::read_to_string(&path).unwrap_or_default();
     let out = rename_section_text(&existing, old, new);
-    std::fs::write(&path, &out).with_context(|| format!("writing config {}", path.display()))?;
+    crate::fsutil::atomic_write(&path, &out)
+        .with_context(|| format!("writing config {}", path.display()))?;
     record_loaded_snapshot(&out);
     Ok(())
 }
