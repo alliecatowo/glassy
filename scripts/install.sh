@@ -11,6 +11,8 @@
 #   INSTALL_DIR   — absolute path for the binary (default: auto-detect)
 #   GLASSY_TAG    — specific release tag, e.g. v0.2.0 (default: latest)
 #   NO_MODIFY_PATH=1 — skip the PATH export hint
+#   GLASSY_INSECURE=1 — allow installing when the SHA-256 cannot be verified
+#                       (missing SHA256SUMS / entry / hashing tool). Not recommended.
 #
 set -euo pipefail
 
@@ -22,7 +24,15 @@ BINARY_NAME="glassy"
 # ---------------------------------------------------------------------------
 info()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 ok()    { printf '\033[1;32m  ok\033[0m %s\n' "$*"; }
-die()   { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
+die()   { printf '\033[1;31merror:\033[0m %b\n' "$*" >&2; exit 1; }
+# Unverifiable download: fatal unless the user explicitly opts out.
+unverified() {
+    if [ "${GLASSY_INSECURE:-}" = "1" ]; then
+        printf '\033[1;33mwarn:\033[0m %s; continuing because GLASSY_INSECURE=1\n' "$1" >&2
+    else
+        die "$1.\nRefusing to install an unverified binary (set GLASSY_INSECURE=1 to override)."
+    fi
+}
 
 need() {
     command -v "$1" >/dev/null 2>&1 || die "required tool not found: $1 — please install it and retry"
@@ -66,8 +76,7 @@ verify_sha256() {
     elif command -v shasum >/dev/null 2>&1; then
         actual="$(shasum -a 256 "$file" | awk '{print $1}')"
     else
-        # No checksum tool available — warn but continue.
-        printf '\033[1;33mwarn:\033[0m sha256sum / shasum not found; skipping checksum verification\n' >&2
+        unverified "sha256sum / shasum not found, cannot verify the download"
         return 0
     fi
     [ "$actual" = "$expected" ] || die "checksum mismatch!\n  expected: $expected\n  got:      $actual\nAbort."
@@ -111,8 +120,10 @@ main() {
     local tag="${GLASSY_TAG:-}"
     if [ -z "$tag" ]; then
         info "Fetching latest release tag from GitHub…"
-        tag="$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" \
-            | grep '"tag_name"' | head -1 | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')"
+        # Follow the /releases/latest redirect (…/releases/tag/<tag>) instead of the
+        # rate-limited JSON API.
+        tag="$(curl -fsSL -o /dev/null -w '%{url_effective}' "https://github.com/$REPO/releases/latest" \
+            | sed -n 's#.*/releases/tag/\([^/?]*\)$#\1#p')"
         [ -n "$tag" ] || die "could not determine latest release tag — set GLASSY_TAG manually"
     fi
     info "Installing glassy $tag"
@@ -129,9 +140,9 @@ main() {
 
     info "Downloading binary: $bin_url"
     curl -fSL --progress-bar -o "$tmpdir/$asset" "$bin_url" \
-        || die "download failed — does release $tag exist? Check: https://github.com/$REPO/releases"
+        || die "download of $asset failed. Release $tag may not exist or may not ship a $target build.\nCheck: https://github.com/$REPO/releases"
 
-    # Verify checksum if SHA256SUMS is present.
+    # Verify the checksum. A missing SHA256SUMS or entry is fatal (fail closed).
     info "Downloading SHA256SUMS…"
     if curl -fsSL -o "$tmpdir/SHA256SUMS" "$sums_url" 2>/dev/null; then
         local expected
@@ -141,10 +152,10 @@ main() {
             verify_sha256 "$tmpdir/$asset" "$expected"
             ok "checksum verified"
         else
-            printf '\033[1;33mwarn:\033[0m %s not found in SHA256SUMS; skipping verification\n' "$asset" >&2
+            unverified "$asset not found in SHA256SUMS"
         fi
     else
-        printf '\033[1;33mwarn:\033[0m SHA256SUMS not available for this release; skipping verification\n' >&2
+        unverified "SHA256SUMS not available for release $tag"
     fi
 
     # Install.
@@ -152,7 +163,10 @@ main() {
     install_dir="$(resolve_install_dir)"
     mkdir -p "$install_dir"
     chmod 755 "$tmpdir/$asset"
-    cp "$tmpdir/$asset" "$install_dir/$BINARY_NAME"
+    # Atomic replace: copy beside the target, then rename over it. A plain `cp`
+    # onto a running binary fails with "Text file busy"; rename does not.
+    install -m 755 "$tmpdir/$asset" "$install_dir/$BINARY_NAME.new.$$"
+    mv -f "$install_dir/$BINARY_NAME.new.$$" "$install_dir/$BINARY_NAME"
     ok "installed to $install_dir/$BINARY_NAME"
 
     # PATH hint.
