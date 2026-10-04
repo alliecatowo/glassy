@@ -669,7 +669,7 @@ mod tests {
         assert_eq!(store.placements()[0].row, -14);
         store.scrolled(20, 30); // now older than the 30 retained lines
         assert!(store.placements().is_empty());
-||||||| e4ac17e
+    }
 
     /// Regression: the bash/zsh integrations must percent-encode a non-ASCII cwd
     /// as UTF-8 BYTES (not code points) so `parse_osc7_cwd` accepts it.
