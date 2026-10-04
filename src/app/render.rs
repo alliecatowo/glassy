@@ -1255,7 +1255,7 @@ impl App {
             );
         }
 
-        // Inline file peek card (OSC 1337 Peek): a static frosted preview anchored
+        // Inline file peek card (GLASSY_PEEK dev hook): a static frosted preview anchored
         // to the bottom of the content area, painted under the toasts/modals. Only
         // present until the next keystroke/click dismisses it, so this is rare.
         if let Some(peek) = self.peek.as_ref() {

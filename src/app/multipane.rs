@@ -527,7 +527,7 @@ impl App {
             Self::paint_zoom_badge(renderer, below_header);
         }
 
-        // Inline file peek card (OSC 1337 Peek): drawn over the focused pane's
+        // Inline file peek card (GLASSY_PEEK dev hook): drawn over the focused pane's
         // body rect, mirroring the single-pane path. Present only until dismissed.
         if let Some(peek) = self.peek.as_ref()
             && let Some((_, _full, body, _, _)) =

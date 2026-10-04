@@ -1,6 +1,7 @@
 //! Inline file peek: a small frosted "preview card" the shell can summon for a
-//! markdown / text / source file via an OSC 1337 `Peek=<path>` request (e.g. a
-//! `glassy-peek <file>` helper). The card shows the file's name plus a capped
+//! markdown / text / source file. It is NOT reachable from terminal output (an
+//! OSC 1337 `Peek=` request was removed: it let any program that can write to
+//! the terminal read local files); only the `GLASSY_PEEK` dev hook opens it. The card shows the file's name plus a capped
 //! head of its lines anchored to the bottom of the focused pane, and is
 //! dismissed by the next keystroke / Esc / click.
 //!
@@ -162,6 +163,11 @@ impl Peek {
 /// giant or unbounded (FIFO/device) file from stalling the UI thread.
 fn read_head(path: &std::path::Path, cap: usize) -> Option<Vec<u8>> {
     use std::io::Read;
+    // stat first (never blocks) and refuse anything but a regular file, so a FIFO
+    // or tty can't hang the UI thread in open()/read().
+    if !std::fs::metadata(path).ok()?.is_file() {
+        return None;
+    }
     let mut f = std::fs::File::open(path).ok()?;
     let mut buf = vec![0u8; cap];
     let mut n = 0;
@@ -330,6 +336,13 @@ mod tests {
         assert!(peek.title.ends_with(".md"));
         assert_eq!(peek.lines[0], "# Title");
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn from_path_rejects_non_regular_files() {
+        // A directory (and /dev/zero) must be refused without reading.
+        assert!(Peek::from_path(std::path::Path::new("/")).is_none());
+        assert!(Peek::from_path(std::path::Path::new("/dev/zero")).is_none());
     }
 
     #[test]

@@ -1037,9 +1037,8 @@ pub struct App {
     power: power::PowerState,
 
     // --- Inline file peek ----------------------------------------------------
-    /// Active inline-preview card, if any. Set when the shell emits an
-    /// OSC 1337 `Peek=<path>` request (e.g. via a `glassy-peek <file>` helper);
-    /// holds the file's title + a small head of its lines. Painted as a glass
+    /// Active inline-preview card, if any. Set only by the `GLASSY_PEEK`
+    /// dev hook (terminal output cannot request it); holds the file's title + a small head of its lines. Painted as a glass
     /// card near the bottom of the focused pane and dismissed by the next
     /// keystroke / Esc / click. See [`peek`](crate::app::peek).
     peek: Option<crate::app::peek::Peek>,
