@@ -788,7 +788,13 @@ impl ApplicationHandler<UserEvent> for App {
                 let scale = scale_factor as f32;
                 let font_px = self.config.font_size * scale;
                 if let Some(r) = self.renderer.as_mut() {
-                    r.set_font_size(font_px);
+                    // Keep any runtime zoom (Ctrl +/-): carry over the ratio of the
+                    // live size to the un-zoomed base instead of resetting to it.
+                    let zoom = match self.base_font_px {
+                        Some(base) if base > 0.0 => (r.font_px() / base).clamp(0.1, 10.0),
+                        _ => 1.0,
+                    };
+                    r.set_font_size(font_px * zoom);
                     self.base_font_px = Some(font_px);
                 }
                 if let Some(w) = &self.window {

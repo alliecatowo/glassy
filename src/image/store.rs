@@ -192,10 +192,10 @@ impl ImageStore {
 }
 
 /// Maximum bytes buffered per APC/DCS/OSC accumulation buffer in [`StreamTap`].
-/// A single kitty or sixel payload should never exceed one decoded image worth of
-/// base64 (≈ 87 MB at 4096² but almost always far smaller); we cap at 1 MB which
-/// is generous for all realistic sequences. Bytes beyond the cap are simply
-/// dropped — the sequence will fail to decode cleanly rather than OOM the process.
+/// Chunked kitty transfers (4 KiB per APC) and typical sixels fit easily; a
+/// SINGLE-SHOT payload over roughly 750 KB of raw data (1 MiB of base64) does not
+/// and silently fails to decode, rather than OOMing the process. Bytes beyond the
+/// cap are dropped (see `TAP_SKIP_CAP` for how long the tap keeps waiting).
 const TAP_BUF_CAP: usize = 1 << 20; // 1 MiB
 
 /// Extra bytes of an over-cap APC/DCS body that are dropped (waiting for its

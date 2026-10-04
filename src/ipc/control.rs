@@ -190,7 +190,12 @@ pub fn parse_request(line: &str) -> Result<ControlCommand, String> {
     let line = line
         .strip_prefix('@')
         .map(str::trim_start)
-        .or_else(|| line.strip_prefix("msg").map(str::trim_start))
+        .or_else(|| {
+            // `msg` only as a whole word: `msgfoo` is not `msg foo`.
+            line.strip_prefix("msg")
+                .filter(|r| r.is_empty() || r.starts_with(char::is_whitespace))
+                .map(str::trim_start)
+        })
         .unwrap_or(line);
 
     let (verb, rest) = match line.split_once(char::is_whitespace) {
@@ -375,6 +380,14 @@ mod tests {
             Ok(ControlCommand::SendText("echo  spaced".to_string()))
         );
         assert!(parse_request("send-text").is_err());
+    }
+
+    #[test]
+    fn msg_prefix_requires_a_word_boundary() {
+        // `msg` is a verb prefix only as a whole word.
+        assert_eq!(parse_request("msg list-tabs"), parse_request("list-tabs"));
+        assert!(parse_request("msgsend-text hi").is_err());
+        assert!(parse_request("msglist-tabs").is_err());
     }
 
     #[test]

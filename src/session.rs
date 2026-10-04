@@ -200,6 +200,7 @@ fn parse(text: &str) -> Result<Session, String> {
     let mut p = Parser {
         b: text.as_bytes(),
         i: 0,
+        depth: 0,
     };
     p.ws();
     let v = p.value()?;
@@ -310,9 +311,14 @@ fn field<'a>(obj: &'a [(String, Json)], key: &str) -> Option<&'a Json> {
     obj.iter().find(|(k, _)| k == key).map(|(_, v)| v)
 }
 
+/// Deepest `{`/`[` nesting accepted. `to_json` emits well under 10 levels; the
+/// cap stops a corrupt or hostile session file from overflowing the stack.
+const MAX_DEPTH: usize = 64;
+
 struct Parser<'a> {
     b: &'a [u8],
     i: usize,
+    depth: usize,
 }
 
 impl Parser<'_> {
@@ -328,9 +334,20 @@ impl Parser<'_> {
 
     fn value(&mut self) -> Result<Json, String> {
         self.ws();
+        if matches!(self.peek(), Some(b'{') | Some(b'[')) {
+            if self.depth >= MAX_DEPTH {
+                return Err(format!("nesting deeper than {MAX_DEPTH} at {}", self.i));
+            }
+            self.depth += 1;
+            let r = if self.peek() == Some(b'{') {
+                self.object()
+            } else {
+                self.array()
+            };
+            self.depth -= 1;
+            return r;
+        }
         match self.peek() {
-            Some(b'{') => self.object(),
-            Some(b'[') => self.array(),
             Some(b'"') => Ok(Json::Str(self.string()?)),
             Some(b't') | Some(b'f') => self.boolean(),
             Some(b'n') => self.null(),
@@ -569,6 +586,15 @@ mod tests {
         let json = s.to_json();
         let back = parse(&json).expect("parse");
         assert_eq!(s, back);
+    }
+
+    /// A deeply nested file must be rejected cleanly, not overflow the stack.
+    #[test]
+    fn deeply_nested_json_is_rejected_not_a_stack_overflow() {
+        let deep = format!("{}{}", "[".repeat(100_000), "]".repeat(100_000));
+        assert!(parse(&deep).is_err());
+        let deep_obj = format!("{}1{}", "{\"a\":".repeat(10_000), "}".repeat(10_000));
+        assert!(parse(&deep_obj).is_err());
     }
 
     #[test]
