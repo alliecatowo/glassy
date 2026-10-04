@@ -1,15 +1,223 @@
-<!doctype html><meta charset=utf-8><title>glassy package repos</title>
-<style>body{font:16px/1.6 system-ui,sans-serif;max-width:640px;margin:3rem auto;padding:0 1rem;background:#1a1b26;color:#c0caf5}code{background:#24283b;padding:.15em .4em;border-radius:4px}a{color:#7aa2f7}h1{font-weight:700}</style>
-<h1>glassy 🦄 — package repositories</h1>
-<p>GPU-accelerated terminal. Source: <a href="https://github.com/alliecatowo/glassy">github.com/alliecatowo/glassy</a></p>
-<h2>Fedora / RHEL (dnf)</h2>
-<pre><code>sudo dnf config-manager addrepo --from-repofile=https://alliecatowo.github.io/glassy/rpm/glassy.repo
-sudo dnf install glassy</code></pre>
-<h2>Debian / Ubuntu (apt)</h2>
-<pre><code>sudo install -d -m 0755 /etc/apt/keyrings
-curl -fsSL https://alliecatowo.github.io/glassy/deb/glassy-archive-keyring.asc | sudo tee /etc/apt/keyrings/glassy.asc >/dev/null
-echo "deb [signed-by=/etc/apt/keyrings/glassy.asc] https://alliecatowo.github.io/glassy/deb/ ./" | sudo tee /etc/apt/sources.list.d/glassy.list >/dev/null
-sudo apt update && sudo apt install glassy</code></pre>
-<h2>macOS / Linux (Homebrew)</h2>
-<pre><code>brew tap alliecatowo/glassy https://github.com/alliecatowo/glassy
-brew install glassy</code></pre>
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>glassy</title>
+<meta name="description" content="A small, GPU-accelerated terminal emulator in Rust. 0% idle CPU, damage-based redraw, kitty graphics and sixel, 60 themes.">
+<meta property="og:title" content="glassy">
+<meta property="og:description" content="A small, GPU-accelerated terminal emulator in Rust.">
+<meta property="og:image" content="https://alliecatowo.github.io/glassy/img/hero.png">
+<link rel="icon" href="img/icon.png">
+<style>
+:root{
+  /* Rose Pine (dark) */
+  --base:#191724; --surface:#1f1d2e; --overlay:#26233a; --line:#403d52;
+  --text:#e0def4; --muted:#908caa; --iris:#c4a7e7; --rose:#ebbcba; --foam:#9ccfd8; --pine:#31748f;
+  --mono:ui-monospace,"JetBrains Mono","Fira Code","SF Mono",Menlo,Consolas,monospace;
+  --sans:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+}
+@media (prefers-color-scheme:light){
+  :root:not([data-theme="dark"]){ /* Rose Pine Dawn */
+    --base:#faf4ed; --surface:#fffaf3; --overlay:#f2e9e1; --line:#dfdad9;
+    --text:#575279; --muted:#797593; --iris:#907aa9; --rose:#b4637a; --foam:#56949f; --pine:#286983;
+  }
+}
+:root[data-theme="light"]{
+  --base:#faf4ed; --surface:#fffaf3; --overlay:#f2e9e1; --line:#dfdad9;
+  --text:#575279; --muted:#797593; --iris:#907aa9; --rose:#b4637a; --foam:#56949f; --pine:#286983;
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;background:var(--base);color:var(--text);font:16px/1.65 var(--sans)}
+a{color:var(--iris);text-underline-offset:3px}
+a:hover{color:var(--rose)}
+code,pre,.mono{font-family:var(--mono)}
+.wrap{max-width:980px;margin:0 auto;padding:0 16px}
+header.top{display:flex;align-items:center;gap:20px;padding:20px 0;font:14px var(--mono);color:var(--muted)}
+header.top .brand{color:var(--text);font-weight:700;display:flex;align-items:center;gap:10px;margin-right:auto;text-decoration:none}
+header.top .brand img{width:26px;height:26px}
+header.top a{color:var(--muted);text-decoration:none}
+header.top a:hover{color:var(--iris)}
+.hide-sm{display:inline}
+@media(max-width:560px){.hide-sm{display:none}}
+
+.hero{padding:44px 0 28px}
+.hero h1{font:700 clamp(2rem,6vw,3.4rem)/1.1 var(--mono);margin:0 0 18px;letter-spacing:-.02em}
+.hero h1 .p{color:var(--iris)}
+.cursor{display:inline-block;width:.55em;height:1em;background:var(--rose);vertical-align:-.12em;animation:blink 1.1s steps(1) infinite}
+@keyframes blink{50%{opacity:0}}
+@media(prefers-reduced-motion:reduce){.cursor{animation:none}}
+.hero p.lede{font-size:1.15rem;max-width:40em;margin:0 0 22px;color:var(--text)}
+.hero p.lede em{color:var(--muted);font-style:normal}
+.cta{display:flex;flex-wrap:wrap;gap:12px;font:14px var(--mono)}
+.cta a{padding:8px 14px;border:1px solid var(--line);border-radius:4px;text-decoration:none;color:var(--text);background:var(--surface)}
+.cta a.primary{border-color:var(--iris);color:var(--iris)}
+.cta a:hover{border-color:var(--rose);color:var(--rose)}
+
+.shot{margin:36px 0 0}
+.shot img{display:block;width:100%;height:auto}
+.shot figcaption,.fig figcaption{font:13px var(--mono);color:var(--muted);margin-top:8px}
+
+section{padding:48px 0 8px}
+h2{font:700 1.15rem var(--mono);margin:0 0 20px;color:var(--text)}
+h2::before{content:"$ ";color:var(--iris)}
+
+dl.facts{display:grid;grid-template-columns:max-content 1fr;gap:6px 24px;margin:0;font-size:.98rem}
+dl.facts dt{font:600 14px/1.9 var(--mono);color:var(--foam)}
+dl.facts dd{margin:0}
+@media(max-width:560px){dl.facts{grid-template-columns:1fr}dl.facts dd{margin-bottom:10px}}
+
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:28px}
+@media(max-width:760px){.grid2{grid-template-columns:1fr}}
+.fig{margin:0}
+.fig img{width:100%;height:auto;display:block;border:1px solid var(--line);border-radius:6px;background:var(--surface)}
+
+.tabs{display:flex;flex-wrap:wrap;gap:0;border-bottom:1px solid var(--line);margin-bottom:0}
+.tabs button{font:13px var(--mono);background:none;border:0;border-bottom:2px solid transparent;color:var(--muted);padding:8px 14px;cursor:pointer}
+.tabs button[aria-selected="true"]{color:var(--text);border-bottom-color:var(--iris)}
+.tabs button:hover{color:var(--rose)}
+.panel{background:var(--surface);border:1px solid var(--line);border-top:0;padding:16px 18px}
+.panel[hidden]{display:none}
+.nojs .panel[hidden]{display:block}
+.panel h3{font:600 13px var(--mono);color:var(--muted);margin:0 0 8px;text-transform:none}
+.panel p{margin:0 0 10px;font-size:.92rem;color:var(--muted)}
+pre{margin:0 0 12px;padding:12px 14px;background:var(--base);border:1px solid var(--line);border-radius:4px;overflow-x:auto;font-size:13px;line-height:1.55;position:relative}
+pre:last-child{margin-bottom:0}
+pre .c{color:var(--muted)}
+pre .k{color:var(--iris)}
+.copy{position:absolute;top:6px;right:6px;font:11px var(--mono);background:var(--overlay);color:var(--muted);border:1px solid var(--line);border-radius:3px;padding:2px 8px;cursor:pointer}
+.copy:hover{color:var(--rose)}
+
+ul.links{list-style:none;padding:0;margin:0;font:14px/2 var(--mono)}
+ul.links li::before{content:"-> ";color:var(--muted)}
+footer{margin-top:64px;padding:24px 0 48px;border-top:1px solid var(--line);font:13px var(--mono);color:var(--muted)}
+</style>
+</head>
+<body class="nojs">
+<div class="wrap">
+  <header class="top">
+    <a class="brand" href="./"><img src="img/icon.png" alt="" width="26" height="26">glassy</a>
+    <a href="#install">install</a>
+    <a href="#look">screenshots</a>
+    <a class="hide-sm" href="https://github.com/alliecatowo/glassy/releases">releases</a>
+    <a href="https://github.com/alliecatowo/glassy">github</a>
+  </header>
+
+  <div class="hero">
+    <h1><span class="p">$</span> glassy<span class="cursor" aria-hidden="true"></span></h1>
+    <p class="lede">A small terminal emulator that draws on the GPU and otherwise stays out of the way.
+      Written in Rust on <code>wgpu</code> and <code>alacritty_terminal</code>. <em>macOS and Linux.</em></p>
+    <div class="cta">
+      <a class="primary" href="#install">install</a>
+      <a href="https://github.com/alliecatowo/glassy#readme">read the README</a>
+      <a href="https://github.com/alliecatowo/glassy/releases/latest">latest release</a>
+    </div>
+    <figure class="shot">
+      <img src="img/hero.png" width="1600" height="1042" alt="glassy showing a Rust source file with syntax highlighting and a shell prompt">
+    </figure>
+  </div>
+
+  <section id="why">
+    <h2>why</h2>
+    <dl class="facts">
+      <dt>idle</dt><dd>On-demand rendering. With nothing changing on screen, glassy issues no frames and uses no CPU.</dd>
+      <dt>redraw</dt><dd>Damage-based. Only cells that changed are rasterised and uploaded.</dd>
+      <dt>size</dt><dd>About 11 MB for the stripped release binary (one manual measurement; see <a href="https://github.com/alliecatowo/glassy/blob/main/docs/benchmarks.md">benchmarks</a>).</dd>
+      <dt>power</dt><dd>Picks the integrated GPU by default. <code>GLASSY_GPU=high</code> overrides it.</dd>
+      <dt>graphics</dt><dd>Inline images through the kitty graphics protocol and sixel.</dd>
+      <dt>text</dt><dd>Truecolor, colour emoji, CJK fallback, opt-in ligatures, curly and coloured underlines.</dd>
+      <dt>chrome</dt><dd>Tabs, split panes, command palette, regex search, a live settings overlay and 60 built-in themes.</dd>
+    </dl>
+  </section>
+
+  <section id="look">
+    <h2>look</h2>
+    <div class="grid2">
+      <figure class="fig"><img src="img/settings.png" width="1600" height="1042" loading="lazy" alt="glassy settings overlay"><figcaption>settings overlay, changes preview live</figcaption></figure>
+      <figure class="fig"><img src="img/theme-picker.png" width="1600" height="1042" loading="lazy" alt="glassy theme picker"><figcaption>theme picker and swatch editor</figcaption></figure>
+      <figure class="fig"><img src="img/split-panes.png" width="1600" height="1063" loading="lazy" alt="glassy split panes"><figcaption>split panes</figcaption></figure>
+      <figure class="fig"><img src="img/effect-crt.png" width="1600" height="1042" loading="lazy" alt="glassy with the CRT window effect"><figcaption>CRT window effect</figcaption></figure>
+    </div>
+  </section>
+
+  <section id="install">
+    <h2>install</h2>
+    <div class="tabs" role="tablist" aria-label="Install method">
+      <button role="tab" aria-selected="true" data-p="brew">homebrew</button>
+      <button role="tab" aria-selected="false" data-p="script">script</button>
+      <button role="tab" aria-selected="false" data-p="apt">apt</button>
+      <button role="tab" aria-selected="false" data-p="dnf">dnf</button>
+      <button role="tab" aria-selected="false" data-p="dl">download</button>
+    </div>
+
+    <div class="panel" id="p-brew" role="tabpanel">
+      <h3>macOS app + CLI</h3>
+<pre>brew install --cask alliecatowo/tap/glassy</pre>
+      <h3>CLI only (macOS, Linux)</h3>
+<pre>brew install alliecatowo/tap/glassy</pre>
+      <p>The macOS app is ad-hoc signed, not notarized. The cask clears the quarantine flag for you.</p>
+    </div>
+
+    <div class="panel" id="p-script" role="tabpanel" hidden>
+      <h3>any Linux or macOS, no sudo</h3>
+<pre>curl -fsSL https://raw.githubusercontent.com/alliecatowo/glassy/main/scripts/install.sh | bash</pre>
+      <p>Downloads the latest release binary, verifies its SHA-256 checksum and installs to <code>~/.local/bin</code>.</p>
+    </div>
+
+    <div class="panel" id="p-apt" role="tabpanel" hidden>
+      <h3>Debian, Ubuntu (signed repo)</h3>
+<pre>sudo install -d -m 0755 /etc/apt/keyrings
+curl -fsSL https://alliecatowo.github.io/glassy/deb/glassy-archive-keyring.asc | sudo tee /etc/apt/keyrings/glassy.asc &gt;/dev/null
+echo "deb [signed-by=/etc/apt/keyrings/glassy.asc] https://alliecatowo.github.io/glassy/deb/ ./" | sudo tee /etc/apt/sources.list.d/glassy.list &gt;/dev/null
+sudo apt update &amp;&amp; sudo apt install glassy</pre>
+    </div>
+
+    <div class="panel" id="p-dnf" role="tabpanel" hidden>
+      <h3>Fedora 41+, RHEL (signed repo)</h3>
+<pre>sudo dnf config-manager addrepo --from-repofile=https://alliecatowo.github.io/glassy/rpm/glassy.repo
+sudo dnf install glassy</pre>
+      <p>Older dnf4: <code>sudo dnf config-manager --add-repo https://alliecatowo.github.io/glassy/rpm/glassy.repo</code>. openSUSE: <code>zypper addrepo</code> with the same URL.</p>
+    </div>
+
+    <div class="panel" id="p-dl" role="tabpanel" hidden>
+      <h3>release assets</h3>
+      <p>Each <a href="https://github.com/alliecatowo/glassy/releases/latest">release</a> carries <code>.dmg</code> (Apple Silicon and Intel), <code>.deb</code>, <code>.rpm</code> and bare binaries, with a <code>SHA256SUMS</code> file.</p>
+      <p>Building from source is covered in the <a href="https://github.com/alliecatowo/glassy#install">README</a>.</p>
+    </div>
+  </section>
+
+  <section id="links">
+    <h2>links</h2>
+    <ul class="links">
+      <li><a href="https://github.com/alliecatowo/glassy">source on GitHub</a></li>
+      <li><a href="https://github.com/alliecatowo/glassy/releases">releases and changelog</a></li>
+      <li><a href="https://github.com/alliecatowo/glassy#keybindings">keybindings</a></li>
+      <li><a href="https://github.com/alliecatowo/homebrew-tap">homebrew tap</a></li>
+      <li><a href="https://github.com/alliecatowo/glassy/issues">issues</a></li>
+    </ul>
+  </section>
+
+  <footer>MIT licensed. Package repositories live at <a href="deb/">/deb/</a> and <a href="rpm/">/rpm/</a>.</footer>
+</div>
+<script>
+(function(){
+  document.body.classList.remove('nojs');
+  var tabs=document.querySelectorAll('.tabs button');
+  function show(id){
+    tabs.forEach(function(b){b.setAttribute('aria-selected',String(b.dataset.p===id))});
+    document.querySelectorAll('.panel').forEach(function(p){p.hidden=(p.id!=='p-'+id)});
+  }
+  tabs.forEach(function(b){b.addEventListener('click',function(){show(b.dataset.p)})});
+  document.querySelectorAll('.panel pre').forEach(function(pre){
+    var b=document.createElement('button');b.className='copy';b.textContent='copy';
+    b.addEventListener('click',function(){
+      var t=pre.firstChild.textContent;
+      if(navigator.clipboard){navigator.clipboard.writeText(t).then(function(){b.textContent='copied';setTimeout(function(){b.textContent='copy'},1200)})}
+    });
+    pre.appendChild(b);
+  });
+})();
+</script>
+</body>
+</html>
