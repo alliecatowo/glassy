@@ -153,7 +153,7 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2
 
       - name: Install cargo-deb
-        run: cargo install cargo-deb --locked
+        run: cargo install cargo-deb --version 3.8.0 --locked
 
       - name: Install cargo-generate-rpm
         run: cargo install cargo-generate-rpm --locked
@@ -210,7 +210,7 @@ jobs:
         run: echo "version=${{ needs.resolve-version.outputs.version }}" >> "$GITHUB_OUTPUT"
 
       - name: Install cross
-        run: cargo install cross --locked
+        run: cargo install cross --version 0.2.5 --locked
 
       - name: Install system dependencies (host tools only)
         run: |
@@ -591,9 +591,8 @@ jobs:
   # packaging/homebrew/tap/{formula,cask}.rb.tmpl with the real version and
   # sha256s, and pushes Formula/glassy.rb + Casks/glassy.rb to the tap over SSH
   # using a write deploy key stored as the HOMEBREW_TAP_DEPLOY_KEY secret (no PAT).
-  # packaging/homebrew/glassy.rb (build-from-source, for a future homebrew-core
-  # submission) is still rendered and committed back to this repo's default
-  # branch with the built-in GITHUB_TOKEN.
+  # The tap is the single source of truth for the formula; nothing is committed
+  # back to this repo (main's branch rules reject direct pushes anyway).
   #
   # IMPORTANT: this renders from the .tmpl files every time and does NOT
   # sed-patch previously rendered output in place. The original job did, which
@@ -611,7 +610,7 @@ jobs:
     runs-on: ubuntu-latest
     continue-on-error: true  # never let a formula-bump hiccup fail the release
     permissions:
-      contents: write  # commits the rendered formula back to the default branch
+      contents: read  # the tap push uses a deploy key; nothing is written to this repo
     steps:
       # Check out the DEFAULT branch (not the tag) so the commit lands on main.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
@@ -652,7 +651,7 @@ jobs:
             echo "sha256_dmg_x86_64=$(sha256sum "$X86_64_DMG" | awk '{print $1}')"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Render formula, cask and packaging formula from their .tmpl
+      - name: Render formula and cask from their .tmpl
         run: |
           VERSION="${{ steps.sha.outputs.version }}"
           SHA="${{ steps.sha.outputs.sha256 }}"
@@ -664,12 +663,10 @@ jobs:
           # Order matters: replace the longer GLASSY_VERSION_PLAIN sentinel
           # BEFORE GLASSY_VERSION (which is a prefix of it) so we don't corrupt
           # the longer token. GLASSY_VERSION becomes the tag (v-prefixed).
-          # Each sed runs against ALL three templates; a sentinel absent from
-          # a given template is simply a no-op there (e.g. only the cask template
-          # has GLASSY_SHA256_DMG_*, only the formula template has
-          # GLASSY_SHA256_AARCH64/_X86_64, and GLASSY_SHA256 — the source
-          # tarball hash — appears in both the formula template's top-level
-          # Linux stanza and packaging/homebrew/glassy.rb.tmpl).
+          # Each sed runs against BOTH templates; a sentinel absent from a
+          # given template is simply a no-op there (only the cask template has
+          # GLASSY_SHA256_DMG_*, only the formula template has the per-arch
+          # binary and source-tarball hashes).
           render() {
             local tmpl="$1" out="$2"
             sed \
@@ -686,7 +683,6 @@ jobs:
           mkdir -p tap-out/Formula tap-out/Casks
           render packaging/homebrew/tap/formula.rb.tmpl tap-out/Formula/glassy.rb
           render packaging/homebrew/tap/cask.rb.tmpl tap-out/Casks/glassy.rb
-          render packaging/homebrew/glassy.rb.tmpl packaging/homebrew/glassy.rb
 
       - name: Show rendered formula + cask (debug)
         run: cat tap-out/Formula/glassy.rb tap-out/Casks/glassy.rb
@@ -722,20 +718,6 @@ jobs:
           git add Formula/glassy.rb Casks/glassy.rb
           git commit -m "glassy ${VERSION}"
           git push origin HEAD:main
-
-      - name: Commit bumped packaging formula back to the default branch
-        run: |
-          set -euo pipefail
-          if git diff --quiet -- packaging/homebrew/glassy.rb; then
-            echo "packaging/homebrew/glassy.rb already up to date; nothing to commit."
-            exit 0
-          fi
-          git config user.name  "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add packaging/homebrew/glassy.rb
-          # [skip ci] keeps this commit from re-triggering the main-push release.
-          git commit -m "chore(release): bump packaging formula to ${{ steps.sha.outputs.version }} [skip ci]"
-          git push origin "HEAD:${{ github.event.repository.default_branch }}"
 
   # -------------------------------------------------------------------------
   # AUR update (best-effort)

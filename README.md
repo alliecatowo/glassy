@@ -259,7 +259,7 @@ sudo dnf install ./glassy-*.rpm   # or: sudo rpm -i glassy-*.rpm
 **Homebrew (Linuxbrew)**
 
 ```sh
-brew install alliecatowo/tap/glassy          # builds from source
+brew install alliecatowo/tap/glassy          # prebuilt x86_64 binary (aarch64 builds from source)
 ```
 
 **Flatpak** *(not yet on Flathub; local build from the manifest)*
