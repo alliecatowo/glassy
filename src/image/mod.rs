@@ -202,6 +202,19 @@ const MAX_SIXEL_IMAGES: usize = 64;
 /// the numerically-lowest id (oldest assigned) is evicted plus its placements.
 const MAX_KITTY_IMAGES: usize = 256;
 
+/// Total decoded-pixel budget per tab's [`ImageStore`]. Each image is capped at
+/// 64 MB but the count caps alone allow ~20 GB; when the sum exceeds this the
+/// least-recently-used images (and their placements) are evicted.
+const MAX_STORE_BYTES: usize = 256 << 20; // 256 MiB
+
+/// Process-wide pixel budget across every tab's store, so opening many tabs
+/// cannot multiply the per-store budget without bound.
+const MAX_TOTAL_IMAGE_BYTES: usize = 768 << 20; // 768 MiB
+
+/// Aggregate cap on bytes buffered in unfinished chunked kitty streams (the
+/// per-stream cap alone allows 64 streams x 64 MB).
+const MAX_PENDING_TOTAL_BYTES: usize = 128 << 20; // 128 MiB
+
 /// Max number of placements recorded at once. When exceeded the oldest (index 0)
 /// is dropped before the new one is appended, keeping the list bounded.
 const MAX_PLACEMENTS: usize = 1024;
@@ -709,6 +722,54 @@ mod tests {
             );
         }
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Regression: aggregate image memory is bounded (256 MiB per store), with
+    /// least-recently-used eviction that never drops the image just inserted.
+    #[test]
+    fn store_bytes_are_budgeted_with_lru_eviction() {
+        let big = || DecodedImage {
+            width: 4096,
+            height: 4096,
+            rgba: vec![0u8; 4096 * 4096 * 4], // 64 MiB (lazily zeroed pages)
+        };
+        let mut store = ImageStore::new();
+        for id in 1..=4u32 {
+            store.insert_pixels(id, big());
+        }
+        assert_eq!(store.bytes(), MAX_STORE_BYTES); // exactly at budget
+        store.place(1, 0, 0, 0, 0); // touch id 1 so id 2 is now the LRU
+        store.insert_pixels(5, big());
+        assert!(store.bytes() <= MAX_STORE_BYTES);
+        assert!(store.image(5).is_some(), "newest must survive");
+        assert!(store.image(1).is_some(), "recently used must survive");
+        assert!(store.image(2).is_none(), "LRU must be evicted");
+        assert_eq!(store.placements().len(), 1);
+        // Evicting a placed image removes its placement too.
+        store.place(3, 1, 0, 0, 0);
+        store.insert_pixels(6, big());
+        store.insert_pixels(7, big());
+        assert!(store.bytes() <= MAX_STORE_BYTES);
+        assert!(
+            store
+                .placements()
+                .iter()
+                .all(|p| store.image(p.id).is_some())
+        );
+    }
+
+    /// Unfinished chunked streams share one aggregate budget.
+    #[test]
+    fn pending_streams_share_an_aggregate_budget() {
+        let mut p = KittyParser::new();
+        let chunk = "A".repeat(4 << 20); // 4 MiB of base64 per chunk (decodes to 3 MiB)
+        for id in 1..=60u32 {
+            // m=1: more chunks follow, so the stream stays pending.
+            let body = format!("a=t,f=32,s=1,v=1,i={id},m=1;{chunk}");
+            let _ = p.feed(body.as_bytes());
+        }
+        let total: usize = p.pending.values().map(|x| x.payload.len()).sum();
+        assert!(total <= MAX_PENDING_TOTAL_BYTES, "pending total {total}");
     }
 
     #[test]
