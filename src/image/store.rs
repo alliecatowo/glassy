@@ -2,6 +2,15 @@
 
 use super::*;
 
+/// Process-wide source of image stamps. Every pixel upload into any store takes
+/// a fresh value, so a stamp names one specific set of pixels regardless of which
+/// tab owns the store or what id the program chose.
+static NEXT_STAMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn fresh_stamp() -> u64 {
+    NEXT_STAMP.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 /// An image placed on the grid: which stored image, at which screen cell.
 #[derive(Clone)]
 pub struct Placement {
@@ -20,6 +29,11 @@ pub struct Placement {
 #[derive(Default)]
 pub struct ImageStore {
     pub(crate) by_id: HashMap<u32, DecodedImage>,
+    /// Globally unique stamp per stored image, replaced whenever the pixels under
+    /// an id are replaced. The renderer's GPU cache is keyed by this (not by the
+    /// per-tab, program-chosen id) so tabs never share textures and a re-sent id
+    /// is re-uploaded.
+    stamps: HashMap<u32, u64>,
     placements: Vec<Placement>,
     /// Monotonic counter so the renderer can tell when the image set changed.
     pub revision: u64,
@@ -46,6 +60,7 @@ impl ImageStore {
     pub fn apply(&mut self, cmd: GraphicsCommand) -> Option<TapEvent> {
         if let Some(image) = cmd.image {
             self.by_id.insert(cmd.id, image);
+            self.stamps.insert(cmd.id, fresh_stamp());
             // Cap kitty images (below SIXEL_ID_BASE) at MAX_KITTY_IMAGES. Evict
             // numerically-lowest id (oldest) plus any placements that reference it.
             let kitty_count = self.by_id.keys().filter(|&&k| k < SIXEL_ID_BASE).count();
@@ -53,6 +68,7 @@ impl ImageStore {
                 && let Some(&oldest) = self.by_id.keys().filter(|&&k| k < SIXEL_ID_BASE).min()
             {
                 self.by_id.remove(&oldest);
+                self.stamps.remove(&oldest);
                 self.placements.retain(|p| p.id != oldest);
             }
             self.revision += 1;
@@ -82,6 +98,7 @@ impl ImageStore {
     /// never the one evicted.
     pub fn insert_pixels(&mut self, id: u32, image: DecodedImage) {
         self.by_id.insert(id, image);
+        self.stamps.insert(id, fresh_stamp());
         let mut sixel_ids: Vec<u32> = self
             .by_id
             .keys()
@@ -93,6 +110,7 @@ impl ImageStore {
             let evict = sixel_ids.len() - MAX_SIXEL_IMAGES;
             for &old in &sixel_ids[..evict] {
                 self.by_id.remove(&old);
+                self.stamps.remove(&old);
                 self.placements.retain(|p| p.id != old);
             }
         }
@@ -132,6 +150,13 @@ impl ImageStore {
 
     pub fn placements(&self) -> &[Placement] {
         &self.placements
+    }
+
+    /// Globally unique stamp of the pixels currently stored under `id`; changes
+    /// when the id is re-transmitted and never repeats across stores. Use as the
+    /// GPU texture cache key.
+    pub fn image_stamp(&self, id: u32) -> Option<u64> {
+        self.stamps.get(&id).copied()
     }
 
     pub fn image(&self, id: u32) -> Option<&DecodedImage> {
