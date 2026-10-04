@@ -29,8 +29,16 @@ env:
   # Shared binary name.
   BIN: glassy
 
+# Least privilege: every job gets a read-only token; the few that push (release
+# publish, packaging commits, gh-pages) re-grant `contents: write` themselves.
 permissions:
-  contents: write
+  contents: read
+
+# One release run at a time: a tag push and a main push for the same version
+# must not both see is_new=true and double-publish.
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 # ---------------------------------------------------------------------------
 # Build matrix — Linux x86_64 and macOS (both arches) are required and gate
@@ -41,6 +49,14 @@ permissions:
 # sitting as a permanently-red TODO job.
 # ---------------------------------------------------------------------------
 jobs:
+  # -------------------------------------------------------------------------
+  # CI gate: the full lint/test matrix must pass before anything is published.
+  # `publish` (and so the whole release chain) needs this job.
+  # -------------------------------------------------------------------------
+  ci:
+    name: CI gate
+    uses: ./.github/workflows/ci.yml
+
   # -------------------------------------------------------------------------
   # Resolve the version + whether it is new — the single source of truth all
   # other jobs read. On a tag push the version comes from the tag; otherwise
@@ -56,7 +72,7 @@ jobs:
       tag: ${{ steps.v.outputs.tag }}
       is_new: ${{ steps.v.outputs.is_new }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
 
       - name: Compute version, tag, and is_new
         id: v
@@ -109,7 +125,7 @@ jobs:
     outputs:
       version: ${{ needs.resolve-version.outputs.version }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
 
       - name: Extract version
         id: meta
@@ -130,9 +146,11 @@ jobs:
             libdbus-1-dev \
             pkg-config
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d  # stable
+        with:
+          toolchain: stable
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2
 
       - name: Install cargo-deb
         run: cargo install cargo-deb --locked
@@ -169,7 +187,7 @@ jobs:
         working-directory: dist
         run: sha256sum * > SHA256SUMS
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7
         with:
           name: linux-x86_64
           path: dist/
@@ -185,7 +203,7 @@ jobs:
     needs: [resolve-version]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
 
       - name: Extract version
         id: meta
@@ -199,11 +217,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends pkg-config
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d  # stable
         with:
+          toolchain: stable
           targets: aarch64-unknown-linux-gnu
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2
 
       - name: Cross-build aarch64
         env:
@@ -218,7 +237,7 @@ jobs:
           cp target/aarch64-unknown-linux-gnu/release/${{ env.BIN }} \
              dist/${{ env.BIN }}-aarch64-linux
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7
         with:
           name: linux-aarch64
           path: dist/
@@ -254,17 +273,18 @@ jobs:
           - target: x86_64-apple-darwin
             arch: x86_64
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
 
       - name: Extract version
         id: meta
         run: echo "version=${{ needs.resolve-version.outputs.version }}" >> "$GITHUB_OUTPUT"
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d  # stable
         with:
+          toolchain: stable
           targets: ${{ matrix.target }}
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2
         with:
           key: ${{ matrix.arch }}
 
@@ -276,7 +296,7 @@ jobs:
       # legacy-sized window controls on newer macOS versions even though
       # nothing in our code touches them. Pin to the newest Xcode actually
       # installed on the runner instead of relying on the default.
-      - uses: maxim-lobanov/setup-xcode@v1
+      - uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90  # v1
         with:
           xcode-version: latest-stable
 
@@ -407,8 +427,21 @@ jobs:
       # Set APPLE_CERTIFICATE (base64 .p12) + APPLE_CERTIFICATE_PASSWORD
       # + APPLE_IDENTITY ("Developer ID Application: ...") secrets to
       # enable signing; the step is skipped if they are absent.
+      # A step's own `env:` is not visible to its `if:`, so test the secret in a
+      # guard step and gate on its output.
+      - name: Check for Apple signing credentials
+        id: apple
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+        run: |
+          if [ -n "$APPLE_CERTIFICATE" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Sign .dmg (if credentials present)
-        if: ${{ env.APPLE_CERTIFICATE != '' }}
+        if: steps.apple.outputs.enabled == 'true'
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -436,7 +469,7 @@ jobs:
           # Apple ID secrets (APPLE_TEAM_ID, APPLE_ID, APPLE_APP_PASSWORD)
           # are configured.
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7
         with:
           name: macos-${{ matrix.arch }}
           path: |
@@ -452,7 +485,7 @@ jobs:
   # -------------------------------------------------------------------------
   publish:
     name: Publish GitHub Release
-    needs: [resolve-version, build-linux-x86_64, build-macos]
+    needs: [resolve-version, ci, build-linux-x86_64, build-macos]
     # Publish only when (a) Linux x86_64 built, (b) macOS built (both arches —
     # a matrix job's result is 'failure' if any leg failed), and (c) this
     # version is NEW — i.e. no tag/release already exists for it. The is_new
@@ -464,10 +497,12 @@ jobs:
     # skips this job — which gates the whole publish chain (homebrew/aur/dnf/apt
     # all `needs: publish`). Tag/main pushes always publish; a dispatch publishes
     # only when explicitly requested with publish=true.
-    if: always() && needs.build-linux-x86_64.result == 'success' && needs.build-macos.result == 'success' && needs.resolve-version.outputs.is_new == 'true' && (github.event_name != 'workflow_dispatch' || github.event.inputs.publish == 'true')
+    if: always() && needs.ci.result == 'success' && needs.build-linux-x86_64.result == 'success' && needs.build-macos.result == 'success' && needs.resolve-version.outputs.is_new == 'true' && (github.event_name != 'workflow_dispatch' || github.event.inputs.publish == 'true')
     runs-on: ubuntu-latest
+    permissions:
+      contents: write  # create the GitHub Release and upload assets
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
 
       - name: Extract version
         id: meta
@@ -478,7 +513,7 @@ jobs:
 
       # Download all successfully-uploaded artifacts (pattern '*' catches
       # linux-x86_64, and linux-aarch64 / macos if they passed).
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8
         with:
           path: artifacts
 
@@ -538,7 +573,7 @@ jobs:
           } > /tmp/release-notes.md
 
       - name: Create / update GitHub Release
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64  # v3
         with:
           tag_name: ${{ steps.meta.outputs.tag }}
           name: glassy ${{ steps.meta.outputs.tag }}
@@ -575,21 +610,23 @@ jobs:
     if: always() && needs.publish.result == 'success'
     runs-on: ubuntu-latest
     continue-on-error: true  # never let a formula-bump hiccup fail the release
+    permissions:
+      contents: write  # commits the rendered formula back to the default branch
     steps:
       # Check out the DEFAULT branch (not the tag) so the commit lands on main.
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
         with:
           ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 0
 
       - name: Download linux-x86_64 artifacts for sha256
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8
         with:
           name: linux-x86_64
           path: artifacts/linux-x86_64
 
       - name: Download macOS per-arch binaries + dmgs for sha256
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8
         with:
           pattern: macos-*
           path: artifacts
@@ -710,10 +747,10 @@ jobs:
     runs-on: ubuntu-latest
     continue-on-error: true  # AUR SSH key may not be configured
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
 
       - name: Download linux-x86_64 artifacts for sha256
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8
         with:
           name: linux-x86_64
           path: artifacts/linux-x86_64
@@ -812,7 +849,7 @@ jobs:
     permissions:
       contents: write  # peaceiris pushes to gh-pages
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
 
       # GitHub forbids `secrets.*` in a job-level `if`, so detect key presence
       # here and gate every subsequent step on this output. Absent key => the
@@ -838,7 +875,7 @@ jobs:
 
       - name: Download linux-x86_64 artifact (.rpm)
         if: steps.guard.outputs.enabled == 'true'
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8
         with:
           name: linux-x86_64
           path: artifacts/linux-x86_64
@@ -944,7 +981,7 @@ jobs:
 
       - name: Publish rpm/ to GitHub Pages (accumulate)
         if: steps.guard.outputs.enabled == 'true'
-        uses: peaceiris/actions-gh-pages@v4
+        uses: peaceiris/actions-gh-pages@84c30a85c19949d7eee79c4ff27748b70285e453  # v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: site
@@ -965,7 +1002,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
 
       - name: Check for signing key
         id: guard
@@ -988,7 +1025,7 @@ jobs:
 
       - name: Download linux-x86_64 artifact (.deb)
         if: steps.guard.outputs.enabled == 'true'
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8
         with:
           name: linux-x86_64
           path: artifacts/linux-x86_64
@@ -1051,7 +1088,7 @@ jobs:
 
       - name: Publish deb/ to GitHub Pages (accumulate)
         if: steps.guard.outputs.enabled == 'true'
-        uses: peaceiris/actions-gh-pages@v4
+        uses: peaceiris/actions-gh-pages@84c30a85c19949d7eee79c4ff27748b70285e453  # v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: site
