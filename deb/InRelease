@@ -4,39 +4,39 @@ Hash: SHA512
 Architectures: amd64
 Codename: stable
 Components: main
-Date: Thu, 09 Jul 2026 02:23:25 +0000
+Date: Sun, 04 Oct 2026 03:09:54 +0000
 Label: glassy
 Origin: glassy
 Suite: stable
 MD5Sum:
- a162800e698ccc6631ed84704c9f4ec8             7818 Packages
- e01f0bcb27b37a62a4a982e1b2a6f1b7             1364 Packages.gz
- d081f2864fadcc1ae5681f96b789aedc              136 Release
+ 343753ea7fb41cbbb03d77165f34be17             8784 Packages
+ e83a506991984a75e69c157bcf89424c             1493 Packages.gz
+ bfc739eb23b231d203d6cf2ef813de54              136 Release
 SHA1:
- 2f14da057bf3c1b12779d99d55a2258bcc3275e4             7818 Packages
- 033e4847d07ab43a09a771e359f5df5a8238796d             1364 Packages.gz
- 66ad552513610dec824e16d3bb8d26845fe9a401              136 Release
+ 947c2d1eed521fad5d228781a1a97ea1e6170833             8784 Packages
+ bd85392e8341e5552d0445c008adbcef33d9cdcc             1493 Packages.gz
+ 5f7cbce93304eb73d321fa606a3654f784fcbb91              136 Release
 SHA256:
- ad7617bcb2a0cd239273f75f7c24a45e0bd82bd105204b8425e6e285330d9eb0             7818 Packages
- d009015ddaf44613d62d96983614f81d4175803c75e39ce8413d4d261b70a94c             1364 Packages.gz
- 344af36816c13c204a63c38eb57285b143da74b22dd89e477ed79a8e78e4e607              136 Release
+ a16c377ba239efc4517ac1eacfb4ec053539a9decb31132dab1dbd6fa4a3de67             8784 Packages
+ 44d3906b1d3f87602a00043ecd942926de2ca4e73ca54850c13e6d81e041e392             1493 Packages.gz
+ 0bfbaef9c382a56c40c5a6865e346b51524e0e918133ea8c61cfb8dfc697fa07              136 Release
 SHA512:
- d680ec148c79cc0868411aa8f720251df7bcf55bce7532ee250a399c3346ef037c4f5efe1489ce9e1c6104915185dfe4a84ac297c515fb533d001ae7b09d864c             7818 Packages
- 06ebdf9248669afa1556d2d7c1a4e9f704fcad8f3cd6f2afbc562cb40590c2ed3c394b1cbe87f8a254fb323b54f207827029b0be477ab09dc86504356676cca4             1364 Packages.gz
- 9dc09dde4da464000e686238913f5eb0f24327e7259e66c109484f2cc105359a56a482ba3d875c4b0faa0a04e9f0a88ec733c359569d2ab835bce9df11760ca7              136 Release
+ c7b0245993996b8fff4553b01dae81e9a20b85695c1acc7fbb6c900c132666d91f2cd510209589c28bcbb173e519d51bf6d427011d7fced10a4861d9b03e77a8             8784 Packages
+ 691e7f02db526eb7d609a557d82ff149d8800c0d626a9a59d0b45906bd771b278f1bc58df682b378a94137287b53b5b16b2091fc05c78a7a8ecb89273887b3a0             1493 Packages.gz
+ afeefdee706873bc3108e34d08554d1933b12cd6a13a9d95dea76496a77eb273cb10c01bf9451cf3f4911fa5a363a1538ffca8bc977c6042fabe3fdef7ba6964              136 Release
 -----BEGIN PGP SIGNATURE-----
 
-iQIzBAEBCgAdFiEE1pG34daHv+/Exa228s3Ua/tDOg4FAmpPBh0ACgkQ8s3Ua/tD
-Og6KXRAAu3T05CTk7fFzYx82T0xfihZNnxUwulgbaZSrprg4FA+IYuMAFs4lb/Ld
-DHmEB8f3vxS50YA/rn/QhXvsbTkSTwgSbM/RTcXVqefYLOQSK0Lk2+lFOAh+pQTc
-h2OKTEX/ZOLdHsFxSQlx0VbGCABU3zMzfkbtkUY6jP/JWPVIigpVEG7P9ARiquHL
-srpBvtJ6VMNcu/27Ly9ga+tDIRh5rJKLYWWTDCagP2Qhr7+klqGg1duZ6o6mFwlA
-H8DT7gSvWRT0lElHzFUcr1VWE4A20DYkT7ls3sG68rrO8l9RGg7QvvrxpTsMiySh
-xgSPBTEMonYWZUbK6i4HBYKRi+uHDSnsa45DNndx9iLSSxHdPzsEJ4EHUpCRtuRP
-iBitwqlbPCBSo3WdRC/LbjpCJhKVS6wmHp0Wg1NxApxekgfvEAD3AMH5NrjBljVL
-EeHAwbJ7vR8j/abquHro734jbnD9CejwPdeID5NVLpIKtZNJE17MvGVPCKRC9r5u
-G3JnsBntYTT+w44GRkYbFC3ywR5zk8lF+eMl5fClKn3smGze7TPvuLePrjFQx7q1
-fvVnQUch140niOfoS4Ny5GSEhXf6d4dLlJXYWn9rQydaUzVKu2dPsNs2jpgWnp6G
-O25HTyfPkJK9Nk2GD10og9lpLQOKMnZwFhJXVrpgPiCa4a+65lQ=
-=QGCl
+iQIzBAEBCgAdFiEE1pG34daHv+/Exa228s3Ua/tDOg4FAmrBw4IACgkQ8s3Ua/tD
+Og5vRxAAnuerzugtoDdiLmwrFDdQs9TpaKtEK+XetVhLAdc/iLo4mSYiYXGE+ppl
+zv4q11H/BbsECWAq6T6gi+ojYWEk8qj6A4tr77BGC+ugj8DkajcYmbOIJYrzUTHk
+3cEfFkml0u3zFmfK+EV1IPd9jgmonfJHXk4Gs60XUS9WueUrM87vM+a4/e1JkgoA
+mism9Td8FI6tWLVK6H/uhYc4uvfK2y4KB3Zi7aq14atmMeTso+8Ph0Vs7WYZCOZg
+nxccIB4lFqkH+RvEwnFzoxICcgasnn8mJ4TOO/1rge4LxRQh64BLaNeVy8J18c05
+yYD1DK70WbEzcWEkwvPAfcpsBihcmgQ+SKQcuMCjatnPx8hi7AazNdr+5H7dkSyL
+Lh2nV7/aXOaKzIDCt34jJUK5SAn2svY+01s8GIK2UY43z0bz/mSmqNmm5Dtu4/BX
+K8HrEKLsvWmUAz5t2ZvK+7IKbD7PBCe+BL45WvlV/32yDmtv6otxHvCtKm2qd9jn
+bM5rzWrnfmhViVreBTEcustJBtiCNIVF90mw+jv5vCz7bDOfE509mMNY91ef47lf
+0YrfBoKZ/hLfczsUeBJQMAqZHYxmYJ6USWP05sHSKECgOiMAR27qxM8VQMP0uYNh
+sGAF6b0W8HYQCjQspJZR1YUSvK1SfTT8bUefSX8ZISyuM15oFTU=
+=bAx6
 -----END PGP SIGNATURE-----
