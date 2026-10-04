@@ -48,22 +48,22 @@ pub struct Theme {
     pub ansi16: [Rgb; 16],
 }
 
-/// The process-wide active theme. An `AtomicPtr` to a leaked `Theme` so reads
-/// (per cell, on the UI thread) are a single relaxed load + deref — no lock —
-/// while `set_theme` can swap it live (settings overlay). Null means "default".
+/// The process-wide active theme. An `AtomicPtr` to a LEAKED `Theme` so reads
+/// (per cell) are a single load + deref with no lock, while `set_theme` can swap
+/// it live (settings overlay). Null means "default".
+///
+/// Superseded themes are intentionally never freed: `active()` hands out
+/// `&'static Theme`, and freeing the old box while any such reference (on any
+/// thread) is still live would be a use-after-free. A `Theme` is ~80 bytes and is
+/// only replaced by user actions (picking/editing a theme), so the leak is
+/// negligible and keeps `set_theme` sound from any thread.
 static ACTIVE: AtomicPtr<Theme> = AtomicPtr::new(std::ptr::null_mut());
 
-/// Install the active theme. Safe to call repeatedly (startup + live changes).
-/// Frees the previous theme instead of leaking it.
+/// Install the active theme. Safe to call repeatedly and from any thread
+/// (startup + live changes). Previous themes are leaked, see [`ACTIVE`].
 pub fn set_theme(theme: Theme) {
     let ptr = Box::into_raw(Box::new(theme));
-    let old_ptr = ACTIVE.swap(ptr, Ordering::AcqRel);
-    // Free the previous theme if it was set (not null and not the static defaults).
-    if !old_ptr.is_null() {
-        // SAFETY: `old_ptr` is a pointer produced by `Box::into_raw` in a prior
-        // `set_theme` call, so it is valid and safe to drop.
-        let _ = unsafe { Box::from_raw(old_ptr) };
-    }
+    ACTIVE.store(ptr, Ordering::Release);
 }
 
 /// The active theme, defaulting to Tokyo Night before `set_theme` is called.
@@ -73,8 +73,8 @@ fn active() -> &'static Theme {
         &builtin::TOKYO_NIGHT
     } else {
         // SAFETY: `ptr` is either null (handled above) or a pointer produced by
-        // `Box::into_raw` in `set_theme` and never freed, so it is valid for the
-        // life of the process.
+        // `Box::into_raw` in `set_theme`. Themes are never freed (see [`ACTIVE`]),
+        // so it is valid for the life of the process.
         unsafe { &*ptr }
     }
 }
@@ -296,5 +296,37 @@ mod query_index_tests {
         assert_eq!((red.r, red.g, red.b), (0xF7, 0x76, 0x8E));
         let cube = query_index(196); // pure red in 6x6x6 cube
         assert_eq!((cube.r, cube.g, cube.b), (255, 0, 0));
+    }
+}
+
+#[cfg(test)]
+mod theme_global_tests {
+    use super::*;
+
+    /// A `&'static Theme` from `active()` must stay valid and unchanged while
+    /// other threads keep replacing the theme (regression: `set_theme` used to
+    /// free the previous box, a use-after-free for any live reference). Re-installs
+    /// the current value so concurrent tests see no change.
+    #[test]
+    fn active_reference_survives_concurrent_set_theme() {
+        let held = active();
+        let snapshot = *held;
+        let handles: Vec<_> = (0..4)
+            .map(|_| {
+                std::thread::spawn(move || {
+                    for _ in 0..2000 {
+                        set_theme(snapshot);
+                    }
+                })
+            })
+            .collect();
+        for _ in 0..2000 {
+            assert_eq!(held.fg, snapshot.fg);
+            assert_eq!(held.ansi16[3], snapshot.ansi16[3]);
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+        assert_eq!(held.bg, snapshot.bg);
     }
 }
