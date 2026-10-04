@@ -298,6 +298,51 @@ mod tests {
             .count()
     }
 
+    /// Regression: an unterminated DCS/APC (e.g. `cat /bin/ls`) must not swallow
+    /// the rest of the stream; CAN/SUB and ESC + non-`\\` abort it.
+    #[test]
+    fn tap_aborts_unterminated_dcs_and_apc() {
+        for intro in [&b"\x1bP"[..], &b"\x1b_"[..]] {
+            // CAN aborts.
+            let store = FairMutex::new(ImageStore::new());
+            let mut tap = StreamTap::new();
+            let mut input = b"a".to_vec();
+            input.extend_from_slice(intro);
+            input.extend_from_slice(b"junk\x18after");
+            assert_eq!(vt_bytes(&tap.process(&input, &store)), b"aafter");
+            // SUB aborts.
+            let mut tap = StreamTap::new();
+            let mut input = intro.to_vec();
+            input.extend_from_slice(b"junk\x1aok");
+            assert_eq!(vt_bytes(&tap.process(&input, &store)), b"ok");
+            // ESC + non-backslash aborts and re-dispatches (here: RIS `ESC c`).
+            let mut tap = StreamTap::new();
+            let mut input = intro.to_vec();
+            input.extend_from_slice(b"junk\x1bcprompt$ ");
+            assert_eq!(vt_bytes(&tap.process(&input, &store)), b"\x1bcprompt$ ");
+            // ... across read boundaries too.
+            let mut tap = StreamTap::new();
+            let mut first = intro.to_vec();
+            first.extend_from_slice(b"junk\x1b");
+            let mut out = vt_bytes(&tap.process(&first, &store));
+            out.extend(vt_bytes(&tap.process(b"[2Jhi", &store)));
+            assert_eq!(out, b"\x1b[2Jhi");
+        }
+    }
+
+    /// An over-cap body with no terminator is eventually given up on.
+    #[test]
+    fn tap_gives_up_on_endless_sequence() {
+        let store = FairMutex::new(ImageStore::new());
+        let mut tap = StreamTap::new();
+        tap.process(b"\x1b_", &store);
+        let chunk = vec![b'x'; 1 << 20];
+        for _ in 0..40 {
+            tap.process(&chunk, &store);
+        }
+        assert_eq!(vt_bytes(&tap.process(b"visible", &store)), b"visible");
+    }
+
     #[test]
     fn tap_strips_image_passes_text() {
         let store = FairMutex::new(ImageStore::new());

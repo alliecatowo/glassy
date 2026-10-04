@@ -154,6 +154,10 @@ impl ImageStore {
 /// dropped — the sequence will fail to decode cleanly rather than OOM the process.
 const TAP_BUF_CAP: usize = 1 << 20; // 1 MiB
 
+/// Extra bytes of an over-cap APC/DCS body that are dropped (waiting for its
+/// terminator) before the tap gives up and returns to normal parsing.
+const TAP_SKIP_CAP: usize = 32 << 20; // 32 MiB
+
 /// Extracts kitty-graphics APC sequences from a PTY byte stream, feeding them to
 /// a [`KittyParser`] (and an [`ImageStore`]) while returning the remaining bytes
 /// for the VT parser. State persists across reads, so a sequence split across
@@ -167,6 +171,8 @@ pub struct StreamTap {
     apc: Vec<u8>,
     kitty: KittyParser,
     dcs: Vec<u8>,
+    /// Body bytes dropped so far in the current over-cap APC/DCS.
+    skipped: usize,
     /// OSC body accumulated for cwd (OSC 7) detection. OSC bytes are *also* passed
     /// through to the VT parser unchanged; this buffer only observes them.
     osc: Vec<u8>,
@@ -313,6 +319,7 @@ impl StreamTap {
             apc: Vec::new(),
             kitty: KittyParser::new(),
             dcs: Vec::new(),
+            skipped: 0,
             osc: Vec::new(),
             next_sixel_id: SIXEL_ID_BASE,
         }
@@ -336,7 +343,10 @@ impl StreamTap {
                 }
             };
         }
-        for &b in input {
+        let mut i = 0;
+        while i < input.len() {
+            let b = input[i];
+            i += 1;
             match self.state {
                 TapState::Normal => {
                     if b == 0x1b {
@@ -348,9 +358,11 @@ impl StreamTap {
                 TapState::Escape => {
                     if b == b'_' {
                         self.apc.clear();
+                        self.skipped = 0;
                         self.state = TapState::Apc; // APC introducer; drop it
                     } else if b == b'P' {
                         self.dcs.clear();
+                        self.skipped = 0;
                         self.state = TapState::Dcs; // DCS introducer; buffer (sixel?)
                     } else if b == b']' {
                         // OSC introducer. We only *observe* OSC (for OSC 7 cwd); the
@@ -371,33 +383,58 @@ impl StreamTap {
                 TapState::Apc => {
                     if b == 0x1b {
                         self.state = TapState::ApcEscape;
+                    } else if b == 0x18 || b == 0x1a {
+                        // CAN / SUB cancel the sequence (xterm/vte state machine).
+                        self.apc.clear();
+                        self.skipped = 0;
+                        self.state = TapState::Normal;
                     } else if b == 0x07 {
                         finish!(); // BEL terminator
                         self.state = TapState::Normal;
                     } else if self.apc.len() < TAP_BUF_CAP {
                         self.apc.push(b);
+                    } else {
+                        // Over the cap the sequence can no longer decode: drop the
+                        // body, but only up to TAP_SKIP_CAP so a never-terminated
+                        // sequence cannot swallow the stream forever.
+                        self.skipped += 1;
+                        if self.skipped > TAP_SKIP_CAP {
+                            self.apc.clear();
+                            self.skipped = 0;
+                            self.state = TapState::Normal;
+                        }
                     }
-                    // Bytes beyond cap are silently dropped; the sequence will fail
-                    // to decode but the process won't OOM.
                 }
                 TapState::ApcEscape => {
                     if b == b'\\' {
                         finish!(); // ST terminator (ESC \)
                         self.state = TapState::Normal;
                     } else {
-                        // ESC was body, not terminator — push both if room.
-                        if self.apc.len() + 1 < TAP_BUF_CAP {
-                            self.apc.push(0x1b);
-                            self.apc.push(b);
-                        }
-                        self.state = TapState::Apc;
+                        // ESC + anything but `\` starts a new sequence: abort the
+                        // APC and re-dispatch `b` as the byte after that ESC.
+                        self.apc.clear();
+                        self.skipped = 0;
+                        self.state = TapState::Escape;
+                        i -= 1;
                     }
                 }
                 TapState::Dcs => {
                     if b == 0x1b {
                         self.state = TapState::DcsEscape;
+                    } else if b == 0x18 || b == 0x1a {
+                        // CAN / SUB cancel the sequence.
+                        self.dcs.clear();
+                        self.skipped = 0;
+                        self.state = TapState::Normal;
                     } else if self.dcs.len() < TAP_BUF_CAP {
                         self.dcs.push(b);
+                    } else {
+                        self.skipped += 1;
+                        if self.skipped > TAP_SKIP_CAP {
+                            self.dcs.clear();
+                            self.skipped = 0;
+                            self.state = TapState::Normal;
+                        }
                     }
                 }
                 TapState::DcsEscape => {
@@ -422,12 +459,12 @@ impl StreamTap {
                         }
                         self.state = TapState::Normal;
                     } else {
-                        // ESC was body, not terminator — push both if room.
-                        if self.dcs.len() + 1 < TAP_BUF_CAP {
-                            self.dcs.push(0x1b);
-                            self.dcs.push(b);
-                        }
-                        self.state = TapState::Dcs;
+                        // ESC + anything but `\` starts a new sequence: abort the
+                        // DCS and re-dispatch `b` as the byte after that ESC.
+                        self.dcs.clear();
+                        self.skipped = 0;
+                        self.state = TapState::Escape;
+                        i -= 1;
                     }
                 }
                 TapState::Osc => {
