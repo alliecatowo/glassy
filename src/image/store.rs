@@ -5,6 +5,10 @@ use super::*;
 /// Process-wide source of image stamps. Every pixel upload into any store takes
 /// a fresh value, so a stamp names one specific set of pixels regardless of which
 /// tab owns the store or what id the program chose.
+/// Decoded-pixel bytes currently held by all live stores (see
+/// `MAX_TOTAL_IMAGE_BYTES`).
+static TOTAL_BYTES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 static NEXT_STAMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 fn fresh_stamp() -> u64 {
@@ -37,6 +41,10 @@ pub struct ImageStore {
     /// per-tab, program-chosen id) so tabs never share textures and a re-sent id
     /// is re-uploaded.
     stamps: HashMap<u32, u64>,
+    /// Last-use stamp per image id (insert or place); smallest = evicted first.
+    used: HashMap<u32, u64>,
+    /// Decoded bytes this store accounts for in `TOTAL_BYTES`.
+    bytes: usize,
     placements: Vec<Placement>,
     /// Monotonic counter so the renderer can tell when the image set changed.
     pub revision: u64,
@@ -51,6 +59,12 @@ pub struct PendingDisplay {
     pub rows: u32,
 }
 
+impl Drop for ImageStore {
+    fn drop(&mut self) {
+        TOTAL_BYTES.fetch_sub(self.bytes, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 impl ImageStore {
     pub fn new() -> Self {
         Self::default()
@@ -62,17 +76,14 @@ impl ImageStore {
     /// for transmit-only commands.
     pub fn apply(&mut self, cmd: GraphicsCommand) -> Option<TapEvent> {
         if let Some(image) = cmd.image {
-            self.by_id.insert(cmd.id, image);
-            self.stamps.insert(cmd.id, fresh_stamp());
+            self.store_image(cmd.id, image);
             // Cap kitty images (below SIXEL_ID_BASE) at MAX_KITTY_IMAGES. Evict
             // numerically-lowest id (oldest) plus any placements that reference it.
             let kitty_count = self.by_id.keys().filter(|&&k| k < SIXEL_ID_BASE).count();
             if kitty_count > MAX_KITTY_IMAGES
                 && let Some(&oldest) = self.by_id.keys().filter(|&&k| k < SIXEL_ID_BASE).min()
             {
-                self.by_id.remove(&oldest);
-                self.stamps.remove(&oldest);
-                self.placements.retain(|p| p.id != oldest);
+                self.remove_image(oldest);
             }
             self.revision += 1;
         }
@@ -89,6 +100,57 @@ impl ImageStore {
         }
     }
 
+    /// Insert pixels under `id`, replacing any previous image, and enforce the
+    /// byte budgets by evicting least-recently-used images (never the one just
+    /// inserted) together with their placements.
+    fn store_image(&mut self, id: u32, image: DecodedImage) {
+        let len = image.rgba.len();
+        if let Some(old) = self.by_id.insert(id, image) {
+            self.release(old.rgba.len());
+        }
+        self.bytes += len;
+        TOTAL_BYTES.fetch_add(len, std::sync::atomic::Ordering::Relaxed);
+        let stamp = fresh_stamp();
+        self.stamps.insert(id, stamp);
+        self.used.insert(id, stamp);
+        loop {
+            let total = TOTAL_BYTES.load(std::sync::atomic::Ordering::Relaxed);
+            if self.bytes <= MAX_STORE_BYTES && total <= MAX_TOTAL_IMAGE_BYTES {
+                break;
+            }
+            let victim = self
+                .used
+                .iter()
+                .filter(|&(&k, _)| k != id)
+                .min_by_key(|&(_, &u)| u)
+                .map(|(&k, _)| k);
+            match victim {
+                Some(v) => self.remove_image(v),
+                None => break, // only the new image is left
+            }
+        }
+    }
+
+    fn release(&mut self, len: usize) {
+        self.bytes = self.bytes.saturating_sub(len);
+        TOTAL_BYTES.fetch_sub(len, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Drop an image's pixels, bookkeeping and placements.
+    fn remove_image(&mut self, id: u32) {
+        if let Some(img) = self.by_id.remove(&id) {
+            self.release(img.rgba.len());
+        }
+        self.stamps.remove(&id);
+        self.used.remove(&id);
+        self.placements.retain(|p| p.id != id);
+    }
+
+    /// Total decoded bytes held by this store.
+    pub fn bytes(&self) -> usize {
+        self.bytes
+    }
+
     /// Store decoded pixels under `id` without queuing a placement (used by the
     /// sixel path, which displays at the cursor via a separate Display event).
     ///
@@ -100,8 +162,7 @@ impl ImageStore {
     /// `a=p`) are untouched. The just-inserted image has the highest id, so it is
     /// never the one evicted.
     pub fn insert_pixels(&mut self, id: u32, image: DecodedImage) {
-        self.by_id.insert(id, image);
-        self.stamps.insert(id, fresh_stamp());
+        self.store_image(id, image);
         let mut sixel_ids: Vec<u32> = self
             .by_id
             .keys()
@@ -112,9 +173,7 @@ impl ImageStore {
             sixel_ids.sort_unstable();
             let evict = sixel_ids.len() - MAX_SIXEL_IMAGES;
             for &old in &sixel_ids[..evict] {
-                self.by_id.remove(&old);
-                self.stamps.remove(&old);
-                self.placements.retain(|p| p.id != old);
+                self.remove_image(old);
             }
         }
         self.revision += 1;
@@ -157,6 +216,7 @@ impl ImageStore {
         if self.placements.len() >= MAX_PLACEMENTS {
             self.placements.remove(0);
         }
+        self.touch(id);
         self.placements.push(Placement {
             id,
             row,
@@ -165,6 +225,12 @@ impl ImageStore {
             rows,
         });
         self.revision += 1;
+    }
+
+    fn touch(&mut self, id: u32) {
+        if let Some(u) = self.used.get_mut(&id) {
+            *u = fresh_stamp();
+        }
     }
 
     pub fn placements(&self) -> &[Placement] {

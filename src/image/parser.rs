@@ -70,6 +70,20 @@ impl KittyParser {
             self.pending.remove(&oldest);
         }
 
+        // Aggregate budget: drop the oldest other streams until this chunk fits.
+        loop {
+            let total: usize = self.pending.values().map(|p| p.payload.len()).sum();
+            if total + chunk.len() <= MAX_PENDING_TOTAL_BYTES {
+                break;
+            }
+            match self.pending.keys().copied().filter(|&k| k != id).min() {
+                Some(oldest) => {
+                    self.pending.remove(&oldest);
+                }
+                None => break, // only this stream is left; its own cap applies
+            }
+        }
+
         // Append to (or start) the pending buffer for this id.
         let entry = self.pending.entry(id).or_insert_with(|| Pending {
             controls: controls.clone(),
