@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use alacritty_terminal::event::{Event, EventListener, OnResize};
+use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::Term;
 use alacritty_terminal::tty::{self, EventedReadWrite};
@@ -147,6 +148,10 @@ pub(crate) fn run_loop(
 
     let mut events = Events::with_capacity(NonZeroUsize::new(PTY_POLL_EVENTS_CAP).unwrap());
     let mut buf = vec![0u8; PTY_READ_BUF];
+    // Scrollback length after the last processed run: growth means the text
+    // scrolled, so inline-image placements must move up with it.
+    let mut last_history: usize = 0;
+    let mut last_alt = false;
     // Set true only on the paths that actually mean the child is gone (EOF / read
     // error). A transient poller error or a UI-initiated shutdown must NOT report
     // a child exit, which would wrongly close the session.
@@ -217,7 +222,11 @@ pub(crate) fn run_loop(
         loop {
             match rx.try_recv() {
                 Ok(LoopMsg::Input(b)) => pending_input.push(b),
-                Ok(LoopMsg::Resize(ws)) => pty.on_resize(ws),
+                Ok(LoopMsg::Resize(ws)) => {
+                    pty.on_resize(ws);
+                    // Reflow changes the scrollback length without scrolling text.
+                    last_history = term.lock().grid().history_size();
+                }
                 Ok(LoopMsg::Shutdown) => {
                     child_exited = false;
                     break 'main;
@@ -346,15 +355,28 @@ pub(crate) fn run_loop(
                                 } else {
                                     processor.advance(&mut *term, &bytes);
                                 }
+                                // Text that scrolled into history carries its
+                                // inline images with it.
+                                // (Entering/leaving the alt screen swaps in a grid
+                                // with a different history; that is not a scroll.)
+                                let alt = term
+                                    .mode()
+                                    .contains(alacritty_terminal::term::TermMode::ALT_SCREEN);
+                                let hist = term.grid().history_size();
+                                if alt != last_alt {
+                                    last_alt = alt;
+                                } else if hist > last_history {
+                                    images.lock().scrolled(hist - last_history, hist);
+                                }
+                                last_history = hist;
                                 did_process = true;
                             }
                             crate::image::TapEvent::Display(p) => {
+                                // Anchor at the cursor's grid line (stable under
+                                // viewport scrolling, unlike a viewport row).
                                 let (row, col) = {
-                                    let c = term.renderable_content();
-                                    (
-                                        c.cursor.point.line.0 + c.display_offset as i32,
-                                        c.cursor.point.column.0,
-                                    )
+                                    let cur = term.grid().cursor.point;
+                                    (cur.line.0, cur.column.0)
                                 };
                                 images.lock().place(p.id, row, col, p.cols, p.rows);
                                 did_process = true;

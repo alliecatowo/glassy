@@ -650,6 +650,28 @@ mod tests {
         assert_eq!(a.image_stamp(999), None);
     }
 
+    /// Regression: placements are grid lines and must move up with scrolled
+    /// text (and be dropped once they leave the retained history).
+    #[test]
+    fn placements_scroll_with_text() {
+        let mut store = ImageStore::new();
+        store.by_id.insert(
+            3,
+            DecodedImage {
+                width: 1,
+                height: 1,
+                rgba: vec![0; 4],
+            },
+        );
+        store.place(3, 10, 0, 0, 0);
+        store.scrolled(4, 4); // `seq`-style output scrolled the grid by 4 lines
+        assert_eq!(store.placements()[0].row, 6);
+        store.scrolled(20, 24); // well into history, still retained
+        assert_eq!(store.placements()[0].row, -14);
+        store.scrolled(20, 30); // now older than the 30 retained lines
+        assert!(store.placements().is_empty());
+    }
+
     #[test]
     fn delete_removes_placements_keeps_pixels() {
         let mut store = ImageStore::new();

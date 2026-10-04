@@ -11,10 +11,13 @@ fn fresh_stamp() -> u64 {
     NEXT_STAMP.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
-/// An image placed on the grid: which stored image, at which screen cell.
+/// An image placed on the grid: which stored image, at which cell.
 #[derive(Clone)]
 pub struct Placement {
     pub id: u32,
+    /// Grid line of the anchor cell: `0..rows` on the live screen, negative into
+    /// scrollback. Unlike a viewport row it is stable while the user scrolls the
+    /// view, and [`ImageStore::scrolled`] shifts it when the text scrolls.
     pub row: i32,
     pub col: usize,
     /// Display size in grid cells (`c=`/`r=`); 0 means draw at native pixels.
@@ -128,7 +131,23 @@ impl ImageStore {
         self.revision += 1;
     }
 
-    /// Anchor an image at a screen cell with its requested cell size. Ignored if
+    /// The grid scrolled up by `lines` (history grew from `history - lines` to
+    /// `history`): move every placement up with its text and drop those that
+    /// have scrolled out of the retained history.
+    pub fn scrolled(&mut self, lines: usize, history: usize) {
+        if lines == 0 || self.placements.is_empty() {
+            return;
+        }
+        let lines = lines.min(i32::MAX as usize) as i32;
+        let oldest = -(history.min(i32::MAX as usize) as i32);
+        for p in &mut self.placements {
+            p.row = p.row.saturating_sub(lines);
+        }
+        self.placements.retain(|p| p.row >= oldest);
+        self.revision += 1;
+    }
+
+    /// Anchor an image at a cell with its requested cell size. Ignored if
     /// the id has no stored pixels (e.g. a display of a never-transmitted id).
     /// Caps the placement list at [`MAX_PLACEMENTS`] by dropping the oldest entry.
     pub fn place(&mut self, id: u32, row: i32, col: usize, cols: u32, rows: u32) {
