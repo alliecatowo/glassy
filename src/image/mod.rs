@@ -411,7 +411,6 @@ mod tests {
                 TapEvent::CommandLine(_) => "cmdline",
                 TapEvent::Notify(_) => "notification",
                 TapEvent::Progress(_) => "progress",
-                TapEvent::Peek(_) => "peek",
             })
             .collect();
         assert_eq!(kinds, vec!["display", "delete"]);
@@ -806,23 +805,16 @@ mod tests {
         assert!(super::parse_osc777(b"9;hello").is_none());
     }
 
+    /// Security: terminal output must never be able to request a local file
+    /// preview. `OSC 1337;Peek=<path>` is plain pass-through, with no tap event.
     #[test]
-    fn osc1337_peek_parsed() {
-        use super::store::parse_osc1337_peek;
-        // The glassy Peek extension carries the requested file path.
-        match parse_osc1337_peek(b"1337;Peek=/tmp/notes.md") {
-            Some(TapEvent::Peek(p)) => assert_eq!(p, std::path::PathBuf::from("/tmp/notes.md")),
-            other => panic!("expected Peek, got {other:?}"),
-        }
-        // Surrounding whitespace is trimmed.
-        match parse_osc1337_peek(b"1337;Peek=  README.md  ") {
-            Some(TapEvent::Peek(p)) => assert_eq!(p, std::path::PathBuf::from("README.md")),
-            other => panic!("expected Peek, got {other:?}"),
-        }
-        // Empty path and other OSC 1337 keys are rejected.
-        assert!(parse_osc1337_peek(b"1337;Peek=").is_none());
-        assert!(parse_osc1337_peek(b"1337;SetMark").is_none());
-        assert!(parse_osc1337_peek(b"9;hello").is_none());
+    fn osc1337_peek_is_not_an_event() {
+        let store = FairMutex::new(ImageStore::new());
+        let mut tap = StreamTap::new();
+        let input = b"\x1b]1337;Peek=/etc/passwd\x07";
+        let events = tap.process(input, &store);
+        assert!(events.iter().all(|e| matches!(e, TapEvent::Vt(_))));
+        assert_eq!(vt_bytes(&events), input);
     }
 
     /// Minimal standard-base64 encoder for the OSC 1337 File= test (no dependency).
