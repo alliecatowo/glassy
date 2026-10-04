@@ -255,7 +255,9 @@ impl App {
             // `start` is a cmd builtin; the empty "" is the window-title arg so a
             // quoted URL isn't mistaken for the title.
             let mut c = std::process::Command::new("cmd");
-            c.args(["/C", "start", "", url]);
+            // cmd.exe re-parses the line, so `&`, `^`, quotes etc. in the URL could
+            // break out into a second command; percent-encode them first.
+            c.args(["/C", "start", "", &windows_safe_url(url)]);
             c
         };
         #[cfg(not(any(target_os = "macos", target_os = "windows")))]
@@ -884,6 +886,31 @@ fn scratch_shell_parts(program: String, cmdline: &str) -> (String, Vec<String>) 
     )
 }
 
+/// Percent-encode the characters `cmd.exe` treats as metacharacters so a URL
+/// handed to `cmd /C start` cannot terminate the command and run another.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn windows_safe_url(url: &str) -> String {
+    let mut out = String::with_capacity(url.len());
+    for ch in url.chars() {
+        match ch {
+            '&' | '^' | '"' | '<' | '>' | '|' | '%' | '`' | '\'' | '(' | ')' => {
+                out.push_str(&format!("%{:02X}", ch as u32))
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Extensions (lowercase, no dot) whose handlers EXECUTE the target on open
+/// (macOS bundles/scripts, jars, installers, shortcuts). Plain scripts are
+/// covered by the execute-bit check instead, so `file.py` links still open.
+const EXEC_EXTENSIONS: &[&str] = &[
+    "desktop", "command", "app", "terminal", "tool", "workflow", "action", "scpt", "scptd", "jar",
+    "pkg", "mpkg", "dmg", "bat", "cmd", "com", "exe", "msi", "ps1", "vbs", "lnk", "webloc",
+    "inetloc", "appimage",
+];
+
 /// Whether a `file://` URL's path (the part after the scheme, still possibly
 /// percent-encoded) is safe to hand to the system opener. Terminal output is
 /// untrusted, so we percent-decode and normalize FIRST, then reject `.desktop`
@@ -898,8 +925,23 @@ fn file_url_path_allowed(raw_path: &str) -> bool {
     // resolve into a blocked tree after the textual prefix check.
     let normalized = normalize_path_segments(&decoded);
     let lower = normalized.to_ascii_lowercase();
-    !(lower.ends_with(".desktop")
-        || lower == "/proc"
+    // Anything the platform opener would execute rather than display.
+    let ext = std::path::Path::new(&lower)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("");
+    if EXEC_EXTENSIONS.contains(&ext) {
+        return false;
+    }
+    // An existing file with any execute bit set is a program, not a document.
+    #[cfg(unix)]
+    if let Ok(md) = std::fs::metadata(&normalized) {
+        use std::os::unix::fs::PermissionsExt;
+        if md.is_file() && md.permissions().mode() & 0o111 != 0 {
+            return false;
+        }
+    }
+    !(lower == "/proc"
         || lower.starts_with("/proc/")
         || lower == "/dev"
         || lower.starts_with("/dev/")
@@ -952,7 +994,9 @@ fn normalize_path_segments(path: &str) -> String {
 
 #[cfg(test)]
 mod url_tests {
-    use super::{decode_percent_lossy, file_url_path_allowed, normalize_path_segments};
+    use super::{
+        decode_percent_lossy, file_url_path_allowed, normalize_path_segments, windows_safe_url,
+    };
 
     #[test]
     fn allows_ordinary_local_files() {
@@ -988,6 +1032,48 @@ mod url_tests {
         assert!(!file_url_path_allowed("/var/../proc"));
         // Encoded `..` (%2e%2e) combined with traversal.
         assert!(!file_url_path_allowed("/home/%2e%2e/%2e%2e/proc/cpuinfo"));
+    }
+
+    #[test]
+    fn executable_targets_are_refused() {
+        for p in [
+            "/Users/a/x.command",
+            "/Applications/Evil.app",
+            "/a/b/Run.TERMINAL",
+            "/a/b/x.jar",
+            "/a/b/x.app%2F",
+            "/a/b/y%2Ecommand",
+        ] {
+            // `.app/` with a trailing slash is a directory-style bundle path.
+            let p = p.trim_end_matches("%2F");
+            assert!(!file_url_path_allowed(p), "{p} should be refused");
+        }
+        // Plain documents/sources still open.
+        assert!(file_url_path_allowed("/a/b/main.py"));
+        assert!(file_url_path_allowed("/a/b/notes.md"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn execute_bit_files_are_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("glassy-openurl-test-{}.txt", std::process::id()));
+        std::fs::write(&path, b"#!/bin/sh\n").unwrap();
+        let p = path.to_str().unwrap();
+        assert!(file_url_path_allowed(p));
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(!file_url_path_allowed(p));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn windows_urls_have_cmd_metacharacters_encoded() {
+        assert_eq!(
+            windows_safe_url("https://a.test/?x=1&y=2^3\"|<>"),
+            "https://a.test/?x=1%26y=2%5E3%22%7C%3C%3E"
+        );
+        assert_eq!(windows_safe_url("https://a.test/p"), "https://a.test/p");
     }
 
     #[test]
