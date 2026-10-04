@@ -12,12 +12,12 @@
 //! GNOME, KDE, …), which is the only layer that can own a true global hotkey on
 //! Wayland. See `docs/quake-mode.md` for the per-compositor bind recipes.
 //!
-//! The socket path is `$XDG_RUNTIME_DIR/glassy-<uid>.sock` when the runtime dir is
+//! The socket path is `$XDG_RUNTIME_DIR/glassy.sock` when the runtime dir is
 //! available (the correct, auto-cleaned location on modern Linux), falling back to
-//! `$TMPDIR`/`/tmp` keyed by username. Commands are newline-terminated ASCII verbs
+//! `$TMPDIR/glassy-<user>/glassy.sock` inside a private 0700 directory. Commands are newline-terminated ASCII verbs
 //! (`toggle`, `show`, `hide`) so the wire format stays trivial and forward-compatible.
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -95,7 +95,51 @@ pub fn socket_path() -> Option<PathBuf> {
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
         .collect();
-    Some(tmp.join(format!("glassy-{user}.sock")))
+    // A private per-user DIRECTORY (created 0700 and ownership-checked by
+    // `prepare_socket_dir`), not a bare file in the world-writable temp dir where
+    // another local user could pre-create or squat the predictable path.
+    Some(tmp.join(format!("glassy-{user}")).join("glassy.sock"))
+}
+
+/// Make sure the socket's parent directory is private to us before binding.
+///
+/// Creates a missing parent as 0700, then refuses (returns `Err`) unless it is a
+/// real directory (not a symlink) owned by the current user with no group/other
+/// access. This is what stops another local user from squatting the `/tmp`
+/// fallback path. `$XDG_RUNTIME_DIR` parents are already 0700 and pass trivially.
+#[cfg(unix)]
+fn prepare_socket_dir(socket: &std::path::Path) -> std::io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+    let Some(dir) = socket.parent() else {
+        return Ok(());
+    };
+    match std::fs::symlink_metadata(dir) {
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::DirBuilder::new()
+                .mode(0o700)
+                .recursive(true)
+                .create(dir)?;
+        }
+        Err(e) => return Err(e),
+    }
+    let md = std::fs::symlink_metadata(dir)?;
+    let err = |m: &str| {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            m.to_string(),
+        ))
+    };
+    if !md.file_type().is_dir() {
+        return err("socket directory is not a real directory");
+    }
+    if md.uid() != rustix::process::getuid().as_raw() {
+        return err("socket directory is not owned by the current user");
+    }
+    if md.permissions().mode() & 0o077 != 0 {
+        return err("socket directory is accessible by other users");
+    }
+    Ok(())
 }
 
 /// CLIENT: connect to a running instance's socket and send `cmd`. Returns
@@ -183,6 +227,13 @@ pub fn send_control(request_line: &str) -> std::io::Result<Option<ControlReply>>
     }
 }
 
+/// Longest request line accepted from a client (bytes).
+const MAX_LINE_BYTES: u64 = 64 * 1024;
+/// How long a client may take to send its request line (and to accept a reply).
+const CLIENT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+/// Cap on simultaneously handled clients.
+const MAX_CLIENTS: usize = 16;
+
 /// SERVER: bind the single-instance socket and spawn a listener thread that turns
 /// each received verb into a [`UserEvent::Ipc`] delivered to the winit loop.
 ///
@@ -196,6 +247,12 @@ pub fn start_server(proxy: EventLoopProxy<UserEvent>) -> std::io::Result<bool> {
     let Some(path) = socket_path() else {
         return Ok(false);
     };
+
+    #[cfg(unix)]
+    if let Err(e) = prepare_socket_dir(&path) {
+        log::warn!("ipc: refusing to listen on {}: {e}", path.display());
+        return Ok(false);
+    }
 
     // If a socket file already exists, probe it: a successful connect means a live
     // instance owns it (we're a secondary — don't steal it); a refused connect
@@ -229,9 +286,32 @@ pub fn start_server(proxy: EventLoopProxy<UserEvent>) -> std::io::Result<bool> {
     std::thread::Builder::new()
         .name("glassy-ipc".into())
         .spawn(move || {
+            let active = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
             for stream in listener.incoming() {
                 match stream {
-                    Ok(stream) => handle_client(stream, &proxy),
+                    Ok(stream) => {
+                        // One thread per client so an idle or slow connection can't
+                        // wedge toggle/remote control for everyone else. Bounded.
+                        use std::sync::atomic::Ordering;
+                        if active.fetch_add(1, Ordering::SeqCst) >= MAX_CLIENTS {
+                            active.fetch_sub(1, Ordering::SeqCst);
+                            continue; // drop the connection
+                        }
+                        let proxy = proxy.clone();
+                        let active = active.clone();
+                        let spawned = std::thread::Builder::new()
+                            .name("glassy-ipc-client".into())
+                            .spawn({
+                                let active = active.clone();
+                                move || {
+                                    handle_client(stream, &proxy);
+                                    active.fetch_sub(1, Ordering::SeqCst);
+                                }
+                            });
+                        if spawned.is_err() {
+                            active.fetch_sub(1, Ordering::SeqCst);
+                        }
+                    }
                     Err(e) => {
                         log::debug!("ipc: accept error: {e}");
                         // A transient accept error shouldn't kill the listener.
@@ -251,9 +331,13 @@ pub fn start_server(proxy: EventLoopProxy<UserEvent>) -> std::io::Result<bool> {
 /// dispatched as a [`UserEvent::Control`] carrying a one-shot reply channel, and
 /// the UI thread's [`ControlReply`] is written back to the client.
 fn handle_client(mut stream: UnixStream, proxy: &EventLoopProxy<UserEvent>) {
+    // A client that connects and never sends a newline must not hold a thread
+    // forever, and an endless line must not grow memory without bound.
+    let _ = stream.set_read_timeout(Some(CLIENT_READ_TIMEOUT));
+    let _ = stream.set_write_timeout(Some(CLIENT_READ_TIMEOUT));
     let mut line = String::new();
     {
-        let mut reader = BufReader::new(&mut stream);
+        let mut reader = BufReader::new((&mut stream).take(MAX_LINE_BYTES));
         match reader.read_line(&mut line) {
             Ok(0) => return, // client closed without sending
             Ok(_) => {}
@@ -362,7 +446,10 @@ mod tests {
             std::env::set_var("USER", "alice");
         }
         let p = socket_path().unwrap();
-        assert_eq!(p, PathBuf::from("/tmp/glassy-test/glassy-alice.sock"));
+        assert_eq!(
+            p,
+            PathBuf::from("/tmp/glassy-test/glassy-alice/glassy.sock")
+        );
         unsafe {
             match prev_runtime {
                 Some(v) => std::env::set_var("XDG_RUNTIME_DIR", v),
@@ -377,6 +464,35 @@ mod tests {
                 None => std::env::remove_var("USER"),
             }
         }
+    }
+
+    /// The socket directory must be private: a missing one is created 0700, and
+    /// one that is open to group/other (or not ours) is refused.
+    #[cfg(unix)]
+    #[test]
+    fn prepare_socket_dir_enforces_private_dir() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = std::env::temp_dir().join(format!("glassy-ipc-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let sock = base.join("sub").join("glassy.sock");
+        prepare_socket_dir(&sock).unwrap();
+        let mode = std::fs::metadata(sock.parent().unwrap())
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o700);
+        // Loosen it: now refused.
+        std::fs::set_permissions(
+            sock.parent().unwrap(),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        assert!(prepare_socket_dir(&sock).is_err());
+        // A symlink in place of the directory is refused.
+        let link = base.join("link");
+        std::os::unix::fs::symlink(sock.parent().unwrap(), &link).unwrap();
+        assert!(prepare_socket_dir(&link.join("glassy.sock")).is_err());
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
