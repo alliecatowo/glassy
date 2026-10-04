@@ -39,6 +39,56 @@ pub(crate) const PTY_POLL_EVENTS_CAP: usize = 64;
 /// local variables. 256 KiB is ample and cuts the per-session RSS footprint.
 pub(crate) const PTY_THREAD_STACK: usize = 256 * 1024; // 256 KiB
 
+/// Input bound for the child that the kernel has not accepted yet.
+///
+/// The master fd is non-blocking, so `write` may take only part of a buffer or
+/// fail with `WouldBlock`; whatever is left stays queued here until the poller
+/// reports the fd writable again.
+#[derive(Default)]
+pub(crate) struct PendingInput {
+    queue: std::collections::VecDeque<std::borrow::Cow<'static, [u8]>>,
+    /// Bytes of the front chunk already written.
+    offset: usize,
+}
+
+impl PendingInput {
+    pub(crate) fn push(&mut self, bytes: std::borrow::Cow<'static, [u8]>) {
+        if !bytes.is_empty() {
+            self.queue.push_back(bytes);
+        }
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.queue.is_empty()
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.queue.clear();
+        self.offset = 0;
+    }
+
+    /// Write as much as `w` accepts. `Ok(())` means drained or would-block
+    /// (check `is_empty`); `Err` is a hard error.
+    pub(crate) fn flush<W: Write>(&mut self, w: &mut W) -> std::io::Result<()> {
+        while let Some(front) = self.queue.front() {
+            match w.write(&front[self.offset..]) {
+                Ok(0) => return Err(std::io::ErrorKind::WriteZero.into()),
+                Ok(n) => {
+                    self.offset += n;
+                    if self.offset >= front.len() {
+                        self.queue.pop_front();
+                        self.offset = 0;
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => return Ok(()),
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(())
+    }
+}
+
 /// PTY read/parse loop: waits on the master fd, drains control messages, reads
 /// available bytes, taps image/OSC sequences, and feeds the rest to the VT parser.
 ///
@@ -76,10 +126,14 @@ pub(crate) fn run_loop(
     let mut tap = crate::image::StreamTap::new();
 
     let fd = pty.reader().as_raw_fd();
-    // alacritty opens the master non-blocking; since we only read after a poll
-    // readiness event (so reads never block) and want writes to never drop input
-    // on EAGAIN, switch the fd to blocking mode for reliable write_all.
-    let _ = rustix::io::ioctl_fionbio(unsafe { BorrowedFd::borrow_raw(fd) }, false);
+    // Keep the master NON-blocking. Input is queued in `pending_input` and drained
+    // opportunistically (see `PendingInput`); a blocking `write_all` here would
+    // stop us reading the child's output, and a child blocked writing output
+    // stops reading our input: a deadlock on large pastes.
+    let _ = rustix::io::ioctl_fionbio(unsafe { BorrowedFd::borrow_raw(fd) }, true);
+    let mut pending_input = PendingInput::default();
+    // Whether writable interest is currently registered with the poller.
+    let mut want_write = false;
     let mode = if poller.supports_level() {
         PollMode::Level
     } else {
@@ -162,9 +216,7 @@ pub(crate) fn run_loop(
         // Drain control messages (input/resize/shutdown).
         loop {
             match rx.try_recv() {
-                Ok(LoopMsg::Input(b)) => {
-                    let _ = pty.writer().write_all(&b);
-                }
+                Ok(LoopMsg::Input(b)) => pending_input.push(b),
                 Ok(LoopMsg::Resize(ws)) => pty.on_resize(ws),
                 Ok(LoopMsg::Shutdown) => {
                     child_exited = false;
@@ -178,8 +230,15 @@ pub(crate) fn run_loop(
             }
         }
 
+        // Flush queued input as far as the kernel accepts it, without blocking.
+        if !pending_input.is_empty() && pending_input.flush(pty.writer()).is_err() {
+            // A hard write error (EIO once the child is gone) is surfaced by the
+            // read side as EOF/error; drop the queue so we don't spin on it.
+            pending_input.clear();
+        }
+
         // Read pending output if the fd signalled readable.
-        if events.iter().any(|ev| ev.key == PTY_KEY) {
+        if events.iter().any(|ev| ev.key == PTY_KEY && ev.readable) {
             match pty.reader().read(&mut buf) {
                 Ok(0) => {
                     child_exited = true; // EOF: child gone
@@ -472,12 +531,17 @@ pub(crate) fn run_loop(
             }
         }
 
-        if mode == PollMode::Oneshot {
-            let _ = poller.modify_with_mode(
-                unsafe { BorrowedFd::borrow_raw(fd) },
-                PollEvent::readable(PTY_KEY),
-                PollMode::Oneshot,
-            );
+        // Ask for writability only while input is queued (otherwise a writable
+        // pty would wake us constantly). Oneshot mode must re-arm every pass.
+        let need_write = !pending_input.is_empty();
+        if mode == PollMode::Oneshot || need_write != want_write {
+            want_write = need_write;
+            let interest = if need_write {
+                PollEvent::all(PTY_KEY)
+            } else {
+                PollEvent::readable(PTY_KEY)
+            };
+            let _ = poller.modify_with_mode(unsafe { BorrowedFd::borrow_raw(fd) }, interest, mode);
         }
     }
 
@@ -490,6 +554,55 @@ pub(crate) fn run_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Writer that accepts `cap` bytes per "kernel buffer fill", then WouldBlocks
+    /// until `drain()`ed, like a full pty input queue.
+    struct Choked {
+        cap: usize,
+        room: usize,
+        out: Vec<u8>,
+    }
+    impl Write for Choked {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            if self.room == 0 {
+                return Err(std::io::ErrorKind::WouldBlock.into());
+            }
+            let n = b.len().min(self.room);
+            self.room -= n;
+            self.out.extend_from_slice(&b[..n]);
+            Ok(n)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A paste far larger than the pty input queue must never block the loop: a
+    /// flush returns on WouldBlock with the remainder queued, and later flushes
+    /// deliver every byte in order (regression: blocking write_all deadlock).
+    #[test]
+    fn pending_input_never_blocks_and_preserves_order() {
+        let payload: Vec<u8> = (0..200_000u32).map(|i| (i % 251) as u8).collect();
+        let mut pending = PendingInput::default();
+        for chunk in payload.chunks(7919) {
+            pending.push(chunk.to_vec().into());
+        }
+        let mut w = Choked {
+            cap: 4096,
+            room: 4096,
+            out: Vec::new(),
+        };
+        let mut rounds = 0;
+        while !pending.is_empty() {
+            pending.flush(&mut w).unwrap();
+            assert!(w.out.len() <= payload.len());
+            w.room = w.cap; // reader (the child) consumed the queue
+            rounds += 1;
+            assert!(rounds < 10_000);
+        }
+        assert_eq!(w.out, payload);
+        assert!(rounds > 40, "should have needed many partial flushes");
+    }
 
     /// PTY_READ_BUF must equal the Linux kernel pipe buffer (64 KiB) so a single
     /// read can drain it in one syscall. Any smaller value means high-throughput
