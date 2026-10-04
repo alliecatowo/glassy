@@ -31,10 +31,13 @@ __glassy_esc() {
 }
 
 __glassy_osc7() {
-	# zsh's ${(j::)...} + character loop percent-encodes the cwd path.
-	local path="${PWD}" enc='' i ch
-	for (( i = 1; i <= ${#path}; i++ )); do
-		ch="${path[i]}"
+	# Percent-encode the cwd BYTE-wise: under LC_ALL=C each UTF-8 byte is its own
+	# "character" (a UTF-8 locale would encode code points, e.g. %E9 for é, which
+	# is invalid UTF-8). NB: don't name the local `path` -- zsh ties it to $PATH.
+	local LC_ALL=C
+	local p="${PWD}" enc='' i ch
+	for (( i = 1; i <= ${#p}; i++ )); do
+		ch="${p[i]}"
 		case "$ch" in
 			([a-zA-Z0-9/._~-]) enc+="$ch" ;;
 			(*) enc+=$(printf '%%%02X' "'$ch") ;;

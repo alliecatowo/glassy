@@ -650,6 +650,46 @@ mod tests {
         assert_eq!(a.image_stamp(999), None);
     }
 
+    /// Regression: the bash/zsh integrations must percent-encode a non-ASCII cwd
+    /// as UTF-8 BYTES (not code points) so `parse_osc7_cwd` accepts it.
+    #[test]
+    fn shell_integration_osc7_encodes_non_ascii_cwd_bytewise() {
+        let root = std::env::temp_dir().join(format!("glassy-osc7-{}", std::process::id()));
+        let dir = root.join("h\u{e9}llo \u{4e2d}\u{6587}");
+        std::fs::create_dir_all(&dir).unwrap();
+        let manifest = env!("CARGO_MANIFEST_DIR");
+        for (shell, script) in [("bash", "glassy.bash"), ("zsh", "glassy.zsh")] {
+            let src = format!("{manifest}/shell-integration/{script}");
+            let out = match std::process::Command::new(shell)
+                .arg("-c")
+                .arg(format!("source '{src}'; __glassy_osc7"))
+                .current_dir(&dir)
+                .env("GLASSY_FORCE_INTEGRATION", "1")
+                .env("LC_ALL", "C.UTF-8")
+                .env_remove("GLASSY_SHELL_INTEGRATION")
+                .output()
+            {
+                Ok(o) => o,
+                Err(_) => continue, // shell not installed
+            };
+            let text = String::from_utf8_lossy(&out.stdout).into_owned();
+            // The DEBUG trap may emit a 133;C first; the cwd is the last OSC.
+            let body = text
+                .rsplit("\x1b]")
+                .next()
+                .and_then(|t| t.strip_suffix("\x1b\\"))
+                .unwrap_or_else(|| panic!("{shell}: unexpected OSC output {text:?}"));
+            let got = store::parse_osc7_cwd(body.as_bytes())
+                .unwrap_or_else(|| panic!("{shell}: cwd rejected: {body:?}"));
+            assert_eq!(
+                got.canonicalize().unwrap(),
+                dir.canonicalize().unwrap(),
+                "{shell}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn delete_removes_placements_keeps_pixels() {
         let mut store = ImageStore::new();

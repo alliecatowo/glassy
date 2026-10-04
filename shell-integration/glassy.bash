@@ -32,6 +32,10 @@ __glassy_esc() {
 
 # OSC 7: report the cwd as a file:// URL so glassy can inherit it.
 __glassy_osc7() {
+	# Byte-wise: under LC_ALL=C each UTF-8 byte is its own "character", so the
+	# loop emits %C3%A9 for é. In a UTF-8 locale printf "'é" yields the code
+	# point (%E9), which is invalid UTF-8 and made glassy drop the cwd.
+	local LC_ALL=C
 	local path="${PWD}"
 	# Percent-encode everything but the safe unreserved set + '/'.
 	local enc='' i ch
