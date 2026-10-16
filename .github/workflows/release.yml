@@ -513,7 +513,7 @@ jobs:
 
       # Download all successfully-uploaded artifacts (pattern '*' catches
       # linux-x86_64, and linux-aarch64 / macos if they passed).
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8
         with:
           path: artifacts
 
@@ -619,13 +619,13 @@ jobs:
           fetch-depth: 0
 
       - name: Download linux-x86_64 artifacts for sha256
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8
         with:
           name: linux-x86_64
           path: artifacts/linux-x86_64
 
       - name: Download macOS per-arch binaries + dmgs for sha256
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8
         with:
           pattern: macos-*
           path: artifacts
@@ -732,7 +732,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
 
       - name: Download linux-x86_64 artifacts for sha256
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8
         with:
           name: linux-x86_64
           path: artifacts/linux-x86_64
@@ -857,7 +857,7 @@ jobs:
 
       - name: Download linux-x86_64 artifact (.rpm)
         if: steps.guard.outputs.enabled == 'true'
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8
         with:
           name: linux-x86_64
           path: artifacts/linux-x86_64
@@ -1007,7 +1007,7 @@ jobs:
 
       - name: Download linux-x86_64 artifact (.deb)
         if: steps.guard.outputs.enabled == 'true'
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8
         with:
           name: linux-x86_64
           path: artifacts/linux-x86_64
