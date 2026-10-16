@@ -51,7 +51,7 @@ winit = "0.30.13"
 # rather than imposing that on every build. When the feature is not compiled in,
 # the audible bell is a no-op (logged once). `bell_audible` still parses from the
 # config regardless; it only takes effect in a `--features bell-audio` build.
-rodio = { version = "0.22.2", default-features = false, features = ["playback"], optional = true }
+rodio = { version = "0.23.0", default-features = false, features = ["playback"], optional = true }
 
 # Desktop notifications (OSC 9 / OSC 777 shell-integration). default-features=false
 # drops the optional zbus/dbus system dependency on Linux; the `d` feature enables
